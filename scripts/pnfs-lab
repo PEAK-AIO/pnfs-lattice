@@ -1,0 +1,1704 @@
+#!/usr/bin/env bash
+#
+# pnfs-lab — Canonical staged lab orchestrator for the RonDB-backed pNFS lab.
+#
+# Safe defaults:
+#   - defaults to "validate"
+#   - supports --dry-run for every command
+#   - keeps passwords out of the committed inventory
+#   - requires --confirm-reset before destructive reset actions
+#
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+INVENTORY="${SCRIPT_DIR}/pnfs-lab.env"
+DRY_RUN=0
+PROFILE=""
+CONFIRM_RESET=0
+TEST_SUITE_MODE="smoke"
+COMMANDS=()
+
+LAB_SSH_PASSWORD_ENV="PNFS_LAB_SSH_PASSWORD"
+
+declare -a ACTIVE_MDS_HOSTS=()
+declare -a ACTIVE_MDS_IPS=()
+declare -a ACTIVE_MDS_IDS=()
+declare -a ACTIVE_RONDB_DATA_HOSTS=()
+declare -a ACTIVE_RONDB_DATA_IPS=()
+declare -a ACTIVE_RONDB_DATA_NODE_IDS=()
+declare -a KNOWN_MDS_HOSTS=()
+declare -a KNOWN_RONDB_DATA_HOSTS=()
+declare -a KNOWN_RUNTIME_HOSTS=()
+declare -a KNOWN_HOSTS=()
+
+ACTIVE_PROFILE_NAME=""
+ACTIVE_RONDB_NUM_REPLICAS=""
+ACTIVE_RONDB_FREE_API_SLOTS=""
+ACTIVE_MDS_WORKER_THREADS=""
+ACTIVE_MDS_PREALLOC_POOL_SIZE=""
+ACTIVE_TRANSIENT_STATE_CACHE="true"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [options] [command ...]
+
+Options:
+  --inventory PATH         Inventory shell file to source
+                           (default: ${INVENTORY})
+  --profile NAME           Profile to use with profile-aware commands
+                           (single-mds | multi-mds)
+  --dry-run                Print actions without executing them
+  --confirm-reset          Allow the reset command to clear generated lab state
+  --test-suite-mode MODE   Client suite mode for test-suite
+                           (default: ${TEST_SUITE_MODE})
+  -h, --help               Show this help
+
+Commands:
+  validate       Verify local tools, inventory consistency, and SSH reachability
+  deps           Install prerequisite packages on lab hosts
+  ds             Configure DS exports
+  rondb          Install or refresh RonDB and start the RonDB cluster
+  build          Build pnfs-mds locally with RonDB enabled
+  deploy         Deploy pnfs-mds for the selected profile
+  single-mds     Deploy the single-MDS profile
+  multi-mds      Deploy the multi-MDS RonDB profile
+  client         Mount the namespace on the client
+  smoke          Run scripts/pnfs-smoke.sh on the client
+  test-suite     Run scripts/pnfs-test-suite.sh on the client
+  hpc-prewarm    Run scripts/pnfs-hpc-prewarm.sh on the client
+                 (Phase C / Step 5 wide-stripe HPC pre-warm test)
+  ssh-mesh       Build a passwordless SSH mesh between every lab host
+                 (per-host ed25519 keypairs, idempotent, additive)
+  stop           Stop services and unmount client/MDS lab mounts
+  reset          Clear generated lab state after stop (requires --confirm-reset)
+  full-single    Run validate, deps, ds, rondb, build, single-mds, client, smoke
+  full-multi     Run validate, deps, ds, rondb, build, multi-mds, client, smoke
+  menu           Interactive menu over the same commands
+
+Password authentication:
+  Export ${LAB_SSH_PASSWORD_ENV} for SSH password auth (requires sshpass).
+  The target user must have passwordless sudo on every lab host.
+
+Examples:
+  ./scripts/pnfs-lab validate
+  ./scripts/pnfs-lab --profile single-mds rondb single-mds client smoke
+  ./scripts/pnfs-lab full-multi
+  ./scripts/pnfs-lab menu
+EOF
+}
+
+STAGE_INDEX=0
+STAGE_TOTAL=0
+HEARTBEAT_PID=""
+
+timestamp() {
+    date -u '+%H:%M:%S'
+}
+
+log() {
+    printf '>>> [%s] %s\n' "$(timestamp)" "$*"
+}
+
+warn() {
+    printf 'WARN: [%s] %s\n' "$(timestamp)" "$*" >&2
+}
+
+fail() {
+    heartbeat_stop
+    printf 'ERROR: [%s] %s\n' "$(timestamp)" "$*" >&2
+    exit 1
+}
+
+stage_banner() {
+    local name="$1"
+    if [ "${STAGE_TOTAL}" -gt 0 ]; then
+        STAGE_INDEX=$((STAGE_INDEX + 1))
+        printf '\n================================================================\n'
+        printf '=== [%s] Stage %d/%d: %s\n' \
+            "$(timestamp)" "${STAGE_INDEX}" "${STAGE_TOTAL}" "${name}"
+        printf '================================================================\n'
+    fi
+}
+
+heartbeat_start() {
+    # Start a background heartbeat that prints every 15s so the user
+    # always sees forward motion during long operations.
+    local description="$1"
+    heartbeat_stop
+    (
+        local elapsed=0
+        while :; do
+            sleep 15
+            elapsed=$((elapsed + 15))
+            printf '... [%s] still running: %s (%ds elapsed)\n' \
+                "$(timestamp)" "${description}" "${elapsed}"
+        done
+    ) &
+    HEARTBEAT_PID=$!
+    # Do not leak the background job in shell traps.
+    disown "${HEARTBEAT_PID}" 2>/dev/null || true
+}
+
+heartbeat_stop() {
+    if [ -n "${HEARTBEAT_PID}" ]; then
+        kill "${HEARTBEAT_PID}" >/dev/null 2>&1 || true
+        wait "${HEARTBEAT_PID}" 2>/dev/null || true
+        HEARTBEAT_PID=""
+    fi
+}
+
+trap heartbeat_stop EXIT
+
+ssh_target() {
+    printf '%s@%s' "${LAB_USER}" "$1"
+}
+
+get_env_value() {
+    local name="$1"
+
+    printf '%s' "${!name-}"
+}
+
+ssh_password() {
+    get_env_value "${LAB_SSH_PASSWORD_ENV}"
+}
+
+# sudo_password is intentionally not used by run_remote_root_script.
+# The lab orchestrator requires passwordless sudo on every target host.
+
+append_unique() {
+    local -n ref="$1"
+    local item="$2"
+    local existing
+
+    for existing in "${ref[@]:-}"; do
+        if [ "${existing}" = "${item}" ]; then
+            return 0
+        fi
+    done
+    ref+=("${item}")
+}
+
+join_by() {
+    local sep="$1"
+    local out=""
+    local item
+
+    shift
+    for item in "$@"; do
+        if [ -n "${out}" ]; then
+            out+="${sep}"
+        fi
+        out+="${item}"
+    done
+    printf '%s' "${out}"
+}
+
+prepare_ssh_cmd() {
+    local password
+
+    password="$(ssh_password)"
+    SSH_CMD=(ssh)
+    if [ -n "${password}" ]; then
+        command -v sshpass >/dev/null 2>&1 || \
+            fail "sshpass is required when ${LAB_SSH_PASSWORD_ENV} is set"
+        SSH_CMD=(env "SSHPASS=${password}" sshpass -e ssh)
+    fi
+}
+
+prepare_scp_cmd() {
+    local password
+
+    password="$(ssh_password)"
+    SCP_CMD=(scp)
+    if [ -n "${password}" ]; then
+        command -v sshpass >/dev/null 2>&1 || \
+            fail "sshpass is required when ${LAB_SSH_PASSWORD_ENV} is set"
+        SCP_CMD=(env "SSHPASS=${password}" sshpass -e scp)
+    fi
+}
+
+run_local() {
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        printf '[dry-run][local]'
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+
+    "$@"
+}
+
+run_remote_cmd() {
+    local host="$1"
+    local cmd="$2"
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        printf '[dry-run][%s] %s\n' "${host}" "${cmd}"
+        return 0
+    fi
+
+    prepare_ssh_cmd
+    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" "$(ssh_target "${host}")" "${cmd}"
+}
+
+capture_remote_cmd() {
+    local host="$1"
+    local cmd="$2"
+
+    prepare_ssh_cmd
+    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" "$(ssh_target "${host}")" "${cmd}"
+}
+
+run_remote_root_script() {
+    local host="$1"
+    local script_body="$2"
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        printf '[dry-run][%s][root]\n%s\n' "${host}" "${script_body}"
+        return 0
+    fi
+
+    prepare_ssh_cmd
+    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" \
+        "$(ssh_target "${host}")" "sudo -n bash -se" <<EOF
+set -euo pipefail
+${script_body}
+EOF
+}
+
+copy_to_host() {
+    local src="$1"
+    local host="$2"
+    local dst="$3"
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        printf '[dry-run][scp] %s -> %s:%s\n' "${src}" "${host}" "${dst}"
+        return 0
+    fi
+
+    prepare_scp_cmd
+    "${SCP_CMD[@]}" "${LAB_SSH_OPTS[@]}" "${src}" \
+        "$(ssh_target "${host}"):${dst}"
+}
+
+ensure_equal_lengths() {
+    local lhs_name="$1"
+    local lhs_len="$2"
+    local rhs_name="$3"
+    local rhs_len="$4"
+
+    if [ "${lhs_len}" -ne "${rhs_len}" ]; then
+        fail "${lhs_name} and ${rhs_name} length mismatch"
+    fi
+}
+
+build_known_hosts() {
+    local host
+
+    KNOWN_MDS_HOSTS=()
+    for host in "${LAB_PROFILE_SINGLE_MDS_HOSTS[@]}" \
+        "${LAB_PROFILE_MULTI_MDS_HOSTS[@]}"; do
+        append_unique KNOWN_MDS_HOSTS "${host}"
+    done
+
+    KNOWN_RONDB_DATA_HOSTS=()
+    for host in "${LAB_PROFILE_SINGLE_RONDB_DATA_HOSTS[@]}" \
+        "${LAB_PROFILE_MULTI_RONDB_DATA_HOSTS[@]}"; do
+        append_unique KNOWN_RONDB_DATA_HOSTS "${host}"
+    done
+
+    KNOWN_RUNTIME_HOSTS=()
+    for host in "${KNOWN_MDS_HOSTS[@]}" "${KNOWN_RONDB_DATA_HOSTS[@]}" \
+        "${LAB_RONDB_MGM_HOST}"; do
+        if [ -n "${host}" ]; then
+            append_unique KNOWN_RUNTIME_HOSTS "${host}"
+        fi
+    done
+
+    KNOWN_HOSTS=()
+    for host in "${KNOWN_RUNTIME_HOSTS[@]}" "${LAB_DS_HOSTS[@]}" \
+        "${LAB_CLIENT_HOST}"; do
+        if [ -n "${host}" ]; then
+            append_unique KNOWN_HOSTS "${host}"
+        fi
+    done
+}
+
+apply_profile() {
+    case "${PROFILE}" in
+        single-mds)
+            ACTIVE_PROFILE_NAME="single-mds"
+            ACTIVE_MDS_HOSTS=("${LAB_PROFILE_SINGLE_MDS_HOSTS[@]}")
+            ACTIVE_MDS_IPS=("${LAB_PROFILE_SINGLE_MDS_IPS[@]}")
+            ACTIVE_MDS_IDS=("${LAB_PROFILE_SINGLE_MDS_IDS[@]}")
+            ACTIVE_RONDB_DATA_HOSTS=("${LAB_PROFILE_SINGLE_RONDB_DATA_HOSTS[@]}")
+            ACTIVE_RONDB_DATA_IPS=("${LAB_PROFILE_SINGLE_RONDB_DATA_IPS[@]}")
+            ACTIVE_RONDB_DATA_NODE_IDS=(
+                "${LAB_PROFILE_SINGLE_RONDB_DATA_NODE_IDS[@]}"
+            )
+            ACTIVE_RONDB_NUM_REPLICAS="${LAB_PROFILE_SINGLE_RONDB_NUM_REPLICAS}"
+            ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_SINGLE_RONDB_FREE_API_SLOTS}"
+            ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_SINGLE_MDS_WORKER_THREADS}"
+            ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_SINGLE_MDS_PREALLOC_POOL_SIZE}"
+            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_SINGLE_TRANSIENT_STATE_CACHE:-true}"
+            ;;
+        multi-mds)
+            ACTIVE_PROFILE_NAME="multi-mds"
+            ACTIVE_MDS_HOSTS=("${LAB_PROFILE_MULTI_MDS_HOSTS[@]}")
+            ACTIVE_MDS_IPS=("${LAB_PROFILE_MULTI_MDS_IPS[@]}")
+            ACTIVE_MDS_IDS=("${LAB_PROFILE_MULTI_MDS_IDS[@]}")
+            ACTIVE_RONDB_DATA_HOSTS=("${LAB_PROFILE_MULTI_RONDB_DATA_HOSTS[@]}")
+            ACTIVE_RONDB_DATA_IPS=("${LAB_PROFILE_MULTI_RONDB_DATA_IPS[@]}")
+            ACTIVE_RONDB_DATA_NODE_IDS=(
+                "${LAB_PROFILE_MULTI_RONDB_DATA_NODE_IDS[@]}"
+            )
+            ACTIVE_RONDB_NUM_REPLICAS="${LAB_PROFILE_MULTI_RONDB_NUM_REPLICAS}"
+            ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_MULTI_RONDB_FREE_API_SLOTS}"
+            ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_MULTI_MDS_WORKER_THREADS}"
+            ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_MULTI_MDS_PREALLOC_POOL_SIZE}"
+            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE:-true}"
+            ;;
+        *)
+            fail "Unknown profile: ${PROFILE}"
+            ;;
+    esac
+}
+
+load_inventory() {
+    [ -f "${INVENTORY}" ] || fail "Inventory file not found: ${INVENTORY}"
+
+    # shellcheck source=/dev/null
+    source "${INVENTORY}"
+
+    LAB_SOURCE_DIR="${LAB_SOURCE_DIR:-${REPO_ROOT}}"
+    LAB_BUILD_DIR="${LAB_BUILD_DIR:-${REPO_ROOT}/build}"
+    LAB_BUILD_TYPE="${LAB_BUILD_TYPE:-Release}"
+    LAB_PROFILE_DEFAULT="${LAB_PROFILE_DEFAULT:-single-mds}"
+    LAB_RONDB_DATA_DIR="${LAB_RONDB_DATA_DIR:-/var/lib/rondb}"
+    LAB_RONDB_DATA_MEMORY="${LAB_RONDB_DATA_MEMORY:-2G}"
+    LAB_MDS_NFS_PORT="${LAB_MDS_NFS_PORT:-2049}"
+    LAB_MDS_GRPC_PORT="${LAB_MDS_GRPC_PORT:-50051}"
+    LAB_MDS_CONF_DIR="${LAB_MDS_CONF_DIR:-/etc/pnfs-mds}"
+    LAB_MDS_RUN_DIR="${LAB_MDS_RUN_DIR:-/var/lib/pnfs-mds}"
+    LAB_MDS_DS_MOUNT_FMT="${LAB_MDS_DS_MOUNT_FMT:-/mnt/ds%u}"
+    LAB_CLIENT_MOUNT="${LAB_CLIENT_MOUNT:-/mnt/pnfs}"
+    LAB_CLIENT_NCONNECT="${LAB_CLIENT_NCONNECT:-1}"
+
+    : "${LAB_USER:?LAB_USER is required}"
+    : "${LAB_BUILD_HOST_RONDB_BASE:?LAB_BUILD_HOST_RONDB_BASE is required}"
+    : "${LAB_BUILD_HOST_RONDB_LINK:?LAB_BUILD_HOST_RONDB_LINK is required}"
+    : "${LAB_REMOTE_RONDB_VERSION:?LAB_REMOTE_RONDB_VERSION is required}"
+    : "${LAB_REMOTE_RONDB_TARBALL_URL:?LAB_REMOTE_RONDB_TARBALL_URL is required}"
+    : "${LAB_REMOTE_RONDB_BASE:?LAB_REMOTE_RONDB_BASE is required}"
+    : "${LAB_REMOTE_RONDB_LINK:?LAB_REMOTE_RONDB_LINK is required}"
+    : "${LAB_RONDB_SCHEMA_NAME:?LAB_RONDB_SCHEMA_NAME is required}"
+    : "${LAB_RONDB_MGM_HOST:?LAB_RONDB_MGM_HOST is required}"
+    : "${LAB_RONDB_MGM_IP:?LAB_RONDB_MGM_IP is required}"
+    : "${LAB_RONDB_MGM_NODE_ID:?LAB_RONDB_MGM_NODE_ID is required}"
+    : "${LAB_RONDB_MGM_PORT:?LAB_RONDB_MGM_PORT is required}"
+    : "${LAB_CLIENT_HOST:?LAB_CLIENT_HOST is required}"
+    : "${LAB_CLIENT_IP:?LAB_CLIENT_IP is required}"
+
+    if [ -z "${PROFILE}" ]; then
+        PROFILE="${LAB_PROFILE_DEFAULT}"
+    fi
+
+    build_known_hosts
+    apply_profile
+
+    ensure_equal_lengths "LAB_DS_HOSTS" "${#LAB_DS_HOSTS[@]}" \
+        "LAB_DS_IPS" "${#LAB_DS_IPS[@]}"
+    ensure_equal_lengths "LAB_DS_HOSTS" "${#LAB_DS_HOSTS[@]}" \
+        "LAB_DS_IDS" "${#LAB_DS_IDS[@]}"
+    ensure_equal_lengths "LAB_DS_HOSTS" "${#LAB_DS_HOSTS[@]}" \
+        "LAB_DS_EXPORTS" "${#LAB_DS_EXPORTS[@]}"
+    ensure_equal_lengths "ACTIVE_MDS_HOSTS" "${#ACTIVE_MDS_HOSTS[@]}" \
+        "ACTIVE_MDS_IPS" "${#ACTIVE_MDS_IPS[@]}"
+    ensure_equal_lengths "ACTIVE_MDS_HOSTS" "${#ACTIVE_MDS_HOSTS[@]}" \
+        "ACTIVE_MDS_IDS" "${#ACTIVE_MDS_IDS[@]}"
+    ensure_equal_lengths "ACTIVE_RONDB_DATA_HOSTS" \
+        "${#ACTIVE_RONDB_DATA_HOSTS[@]}" \
+        "ACTIVE_RONDB_DATA_IPS" "${#ACTIVE_RONDB_DATA_IPS[@]}"
+    ensure_equal_lengths "ACTIVE_RONDB_DATA_HOSTS" \
+        "${#ACTIVE_RONDB_DATA_HOSTS[@]}" \
+        "ACTIVE_RONDB_DATA_NODE_IDS" "${#ACTIVE_RONDB_DATA_NODE_IDS[@]}"
+
+    [ "${#ACTIVE_MDS_HOSTS[@]}" -gt 0 ] || \
+        fail "Profile ${PROFILE} has no MDS hosts"
+    [ "${#ACTIVE_RONDB_DATA_HOSTS[@]}" -gt 0 ] || \
+        fail "Profile ${PROFILE} has no RonDB data hosts"
+}
+
+render_bounded_mount_function() {
+    cat <<'EOF'
+bounded_mount() {
+    local mount_source="$1"
+    local mount_target="$2"
+    local mount_fstype="$3"
+    local mount_opts="$4"
+    local mount_attempts=3
+    local mount_timeout_sec=20
+    local umount_timeout_sec=10
+    local current_source
+    local attempt=1
+
+    command -v timeout >/dev/null 2>&1 || {
+        echo "timeout is required for bounded mount operations" >&2
+        return 1
+    }
+    command -v findmnt >/dev/null 2>&1 || {
+        echo "findmnt is required for mount verification" >&2
+        return 1
+    }
+    command -v mountpoint >/dev/null 2>&1 || {
+        echo "mountpoint is required for bounded mount operations" >&2
+        return 1
+    }
+
+    mkdir -p "${mount_target}"
+
+    if mountpoint -q "${mount_target}"; then
+        current_source=$(findmnt -n -o SOURCE --target "${mount_target}" || true)
+        if [ "${current_source}" = "${mount_source}" ]; then
+            return 0
+        fi
+        if ! timeout -k 5 "${umount_timeout_sec}" umount "${mount_target}"; then
+            echo "Failed to unmount existing mount at ${mount_target}" >&2
+            return 1
+        fi
+    fi
+
+    while [ "${attempt}" -le "${mount_attempts}" ]; do
+        if timeout -k 5 "${mount_timeout_sec}" \
+            mount -t "${mount_fstype}" -o "${mount_opts}" \
+            "${mount_source}" "${mount_target}"; then
+            current_source=$(findmnt -n -o SOURCE --target "${mount_target}" || true)
+            if [ "${current_source}" = "${mount_source}" ]; then
+                return 0
+            fi
+            timeout -k 5 "${umount_timeout_sec}" \
+                umount "${mount_target}" >/dev/null 2>&1 || true
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+
+    echo "Failed to mount ${mount_source} on ${mount_target}" >&2
+    return 1
+}
+EOF
+}
+
+render_rondb_config() {
+    local api_node_id=101
+    local idx
+    local free_slots
+    local mds_ip
+
+    cat <<EOF
+[ndb_mgmd]
+NodeId=${LAB_RONDB_MGM_NODE_ID}
+HostName=${LAB_RONDB_MGM_IP}
+PortNumber=${LAB_RONDB_MGM_PORT}
+DataDir=${LAB_RONDB_DATA_DIR}/mgm
+
+[ndbd default]
+NoOfReplicas=${ACTIVE_RONDB_NUM_REPLICAS}
+DataDir=${LAB_RONDB_DATA_DIR}/data
+FileSystemPath=${LAB_RONDB_DATA_DIR}/data
+DataMemory=${LAB_RONDB_DATA_MEMORY}
+SharedGlobalMemory=256M
+RedoBuffer=64M
+TransactionMemory=128M
+IndexMemory=64M
+
+EOF
+
+    for idx in "${!ACTIVE_RONDB_DATA_NODE_IDS[@]}"; do
+        cat <<EOF
+[ndbd]
+NodeId=${ACTIVE_RONDB_DATA_NODE_IDS[$idx]}
+HostName=${ACTIVE_RONDB_DATA_IPS[$idx]}
+
+EOF
+    done
+
+    for idx in "${!ACTIVE_MDS_IPS[@]}"; do
+        mds_ip="${ACTIVE_MDS_IPS[$idx]}"
+        cat <<EOF
+[api]
+NodeId=${api_node_id}
+HostName=${mds_ip}
+
+EOF
+        api_node_id=$((api_node_id + 1))
+        cat <<EOF
+[api]
+NodeId=${api_node_id}
+HostName=${mds_ip}
+
+EOF
+        api_node_id=$((api_node_id + 1))
+    done
+
+    free_slots="${ACTIVE_RONDB_FREE_API_SLOTS}"
+    for ((idx = 0; idx < free_slots; idx++)); do
+        cat <<EOF
+[api]
+NodeId=${api_node_id}
+
+EOF
+        api_node_id=$((api_node_id + 1))
+    done
+}
+
+render_cluster_peers() {
+    local idx
+
+    for idx in "${!ACTIVE_MDS_IPS[@]}"; do
+        printf 'cluster_peer[%s] = %s\n' "${idx}" "${ACTIVE_MDS_IPS[$idx]}"
+    done
+}
+
+render_ds_specs() {
+    local idx
+
+    for idx in "${!LAB_DS_IPS[@]}"; do
+        printf 'ds[%s] = %s:%s\n' \
+            "${idx}" "${LAB_DS_IPS[$idx]}" "${LAB_DS_EXPORTS[$idx]}"
+    done
+}
+
+render_ds_mount_script() {
+    local idx
+    local target
+    local ds_nconnect="${LAB_DS_NCONNECT:-1}"
+    local ds_opts="vers=3"
+
+    # nconnect fans kernel RPCs across multiple TCP sockets per DS.
+    # Skip the option when value <= 1 so we don't feed the kernel a
+    # no-op token that some older nfs-utils warn about.
+    if [[ "${ds_nconnect}" -gt 1 ]]; then
+        ds_opts="${ds_opts},nconnect=${ds_nconnect}"
+    fi
+
+    printf '%s\n' "$(render_bounded_mount_function)"
+    for idx in "${!LAB_DS_IPS[@]}"; do
+        target="$(printf "${LAB_MDS_DS_MOUNT_FMT}" "${LAB_DS_IDS[$idx]}")"
+        printf 'bounded_mount "%s:%s" "%s" "nfs" "%s"\n' \
+            "${LAB_DS_IPS[$idx]}" "${LAB_DS_EXPORTS[$idx]}" "${target}" "${ds_opts}"
+    done
+}
+
+render_mds_config() {
+    local idx="$1"
+
+    cat <<EOF
+mds_id = ${ACTIVE_MDS_IDS[$idx]}
+hostname = ${ACTIVE_MDS_IPS[$idx]}
+nfs_port = ${LAB_MDS_NFS_PORT}
+grpc_port = ${LAB_MDS_GRPC_PORT}
+catalogue_backend = rondb
+catalogue_backend_conf = ${LAB_MDS_CONF_DIR}/rondb.conf
+worker_threads = ${ACTIVE_MDS_WORKER_THREADS}
+inline_enabled = false
+lease_time_sec = 90
+grace_period_sec = 0
+ds_heartbeat_ms = 5000
+cluster_size = ${#ACTIVE_MDS_HOSTS[@]}
+cluster_bind_addr = ${ACTIVE_MDS_IPS[$idx]}
+prealloc_pool_size = ${ACTIVE_MDS_PREALLOC_POOL_SIZE}
+inode_cache_size = 32768
+transient_state_cache = ${ACTIVE_TRANSIENT_STATE_CACHE}
+$(render_cluster_peers)
+ds_count = ${#LAB_DS_IPS[@]}
+$(render_ds_specs)
+ds_mount_path_fmt = ${LAB_MDS_DS_MOUNT_FMT}
+EOF
+}
+
+render_rondb_mgmd_start_script() {
+    cat <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=()
+if [ "\${PNFS_LAB_RONDB_FORCE_INITIAL:-0}" = "1" ] || \
+    [ ! -e "${LAB_RONDB_DATA_DIR}/mgm/ndb_${LAB_RONDB_MGM_NODE_ID}_config.bin.1" ]; then
+    args+=(--initial)
+fi
+
+exec "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgmd" \
+    -f /etc/rondb/config.ini \
+    --configdir="${LAB_RONDB_DATA_DIR}/mgm" \
+    "\${args[@]}" \
+    --nodaemon
+EOF
+}
+
+render_rondb_data_start_script() {
+    local node_id="$1"
+
+    cat <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=()
+if [ "\${PNFS_LAB_RONDB_FORCE_INITIAL:-0}" = "1" ]; then
+    args+=(--initial)
+elif [ ! -d "${LAB_RONDB_DATA_DIR}/data" ]; then
+    args+=(--initial)
+elif [ -z "\$(find "${LAB_RONDB_DATA_DIR}/data" -mindepth 1 -maxdepth 1 \
+    -print -quit 2>/dev/null)" ]; then
+    args+=(--initial)
+fi
+
+exec "${LAB_REMOTE_RONDB_LINK}/bin/ndbmtd" \
+    --ndb-connectstring="${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT}" \
+    --ndb-nodeid="${node_id}" \
+    "\${args[@]}" \
+    --nodaemon
+EOF
+}
+
+ensure_build_host_tarball() {
+    # Ensure the RonDB tarball exists in the build-host cache.
+    # Populates BUILD_HOST_TARBALL.
+    BUILD_HOST_TARBALL="${LAB_BUILD_HOST_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        run_local mkdir -p "${LAB_BUILD_HOST_RONDB_BASE}"
+        run_local wget -O "${BUILD_HOST_TARBALL}" "${LAB_REMOTE_RONDB_TARBALL_URL}"
+        return 0
+    fi
+
+    run_local mkdir -p "${LAB_BUILD_HOST_RONDB_BASE}"
+    if [ ! -f "${BUILD_HOST_TARBALL}" ]; then
+        log "  [local] downloading RonDB ${LAB_REMOTE_RONDB_VERSION} to ${BUILD_HOST_TARBALL}"
+        heartbeat_start "wget ${LAB_REMOTE_RONDB_TARBALL_URL}"
+        run_local wget --tries=3 --timeout=60 \
+            -O "${BUILD_HOST_TARBALL}" \
+            "${LAB_REMOTE_RONDB_TARBALL_URL}"
+        heartbeat_stop
+    fi
+}
+
+stage_rondb_tarball_on_host() {
+    # Copy the cached RonDB tarball to a lab host so
+    # remote_install_rondb_runtime can skip its own wget.
+    local host="$1"
+    local remote_tarball="${LAB_REMOTE_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
+    local tmp_remote="/tmp/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
+    local expected_size
+    local remote_size
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        log "  [${host}] stage RonDB tarball -> ${remote_tarball}"
+        copy_to_host "${BUILD_HOST_TARBALL}" "${host}" "${tmp_remote}"
+        run_remote_root_script "${host}" \
+            "install -d -m 0755 '${LAB_REMOTE_RONDB_BASE}' && mv '${tmp_remote}' '${remote_tarball}'"
+        return 0
+    fi
+
+    [ -f "${BUILD_HOST_TARBALL}" ] || \
+        fail "RonDB tarball missing on build host: ${BUILD_HOST_TARBALL}"
+
+    expected_size=$(stat -c%s "${BUILD_HOST_TARBALL}" 2>/dev/null)
+    remote_size=$(capture_remote_cmd "${host}" \
+        "stat -c%s '${remote_tarball}' 2>/dev/null || echo 0" 2>/dev/null || echo 0)
+    remote_size="${remote_size//[^0-9]/}"
+    [ -n "${remote_size}" ] || remote_size=0
+
+    if [ "${remote_size}" = "${expected_size}" ]; then
+        log "  [${host}] RonDB tarball already staged (${expected_size} bytes)"
+        return 0
+    fi
+
+    log "  [${host}] staging RonDB tarball (${expected_size} bytes)"
+    heartbeat_start "scp RonDB tarball to ${host}"
+    copy_to_host "${BUILD_HOST_TARBALL}" "${host}" "${tmp_remote}"
+    heartbeat_stop
+    run_remote_root_script "${host}" \
+        "install -d -m 0755 '${LAB_REMOTE_RONDB_BASE}' && mv '${tmp_remote}' '${remote_tarball}'"
+}
+
+download_and_extract_local() {
+    local tarball_url="$1"
+    local base_dir="$2"
+    local version="$3"
+    local link_path="$4"
+    local version_dir="${base_dir}/rondb-${version}"
+    local tarball="${base_dir}/rondb-${version}.tar.gz"
+    local tmp_dir
+    local extracted_dir
+
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        run_local mkdir -p "${base_dir}"
+        run_local wget -O "${tarball}" "${tarball_url}"
+        run_local tar -C "<temporary-dir>" -xzf "${tarball}"
+        run_local mv "<extracted-rondb-dir>" "${version_dir}"
+        run_local ln -sfn "${version_dir}" "${link_path}"
+        return 0
+    fi
+
+    run_local mkdir -p "${base_dir}"
+    if [ ! -d "${version_dir}" ]; then
+        if [ ! -f "${tarball}" ]; then
+            log "Downloading RonDB ${version} SDK on the build host"
+            run_local wget -O "${tarball}" "${tarball_url}"
+        fi
+
+        tmp_dir="$(mktemp -d)"
+        run_local tar -C "${tmp_dir}" -xzf "${tarball}"
+        extracted_dir="$(
+            find "${tmp_dir}" -mindepth 1 -maxdepth 1 -type d | head -n 1
+        )"
+        [ -n "${extracted_dir}" ] || \
+            fail "Failed to locate extracted RonDB directory"
+        run_local mv "${extracted_dir}" "${version_dir}"
+        run_local rmdir "${tmp_dir}"
+    fi
+
+    run_local ln -sfn "${version_dir}" "${link_path}"
+}
+
+remote_install_rondb_runtime() {
+    local host="$1"
+    local remote_script
+
+    remote_script="$(cat <<EOF
+$(render_ensure_packages)
+version_dir="${LAB_REMOTE_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}"
+tarball="${LAB_REMOTE_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
+if [ -x "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm" ] && \
+    [ -d "\${version_dir}" ] && \
+    [ "\$(readlink -f "${LAB_REMOTE_RONDB_LINK}")" = "\${version_dir}" ] && \
+    [ -f /etc/ld.so.conf.d/pnfs-mds-rondb.conf ]; then
+    printf 'rondb runtime already installed (%s)\n' "\${version_dir}"
+    exit 0
+fi
+ensure_packages wget tar libncurses6
+if apt-cache show libaio1t64 >/dev/null 2>&1; then
+    ensure_packages libaio1t64
+else
+    ensure_packages libaio1
+fi
+install -d -m 0755 "${LAB_REMOTE_RONDB_BASE}"
+tmp_dir=\$(mktemp -d)
+trap 'rm -rf "\${tmp_dir}"' EXIT
+if [ ! -d "\${version_dir}" ]; then
+    if [ ! -f "\${tarball}" ]; then
+        wget --tries=3 --timeout=60 -O "\${tarball}" "${LAB_REMOTE_RONDB_TARBALL_URL}"
+    fi
+    tar -C "\${tmp_dir}" -xzf "\${tarball}"
+    extracted_dir=\$(find "\${tmp_dir}" -mindepth 1 -maxdepth 1 -type d \
+        | head -n 1)
+    [ -n "\${extracted_dir}" ] || exit 1
+    mv "\${extracted_dir}" "\${version_dir}"
+fi
+ln -sfn "\${version_dir}" "${LAB_REMOTE_RONDB_LINK}"
+cat > /etc/ld.so.conf.d/pnfs-mds-rondb.conf <<'EOC'
+${LAB_REMOTE_RONDB_LINK}/lib
+${LAB_REMOTE_RONDB_LINK}/lib/mysql
+EOC
+ldconfig
+EOF
+)"
+
+    run_remote_root_script "${host}" "${remote_script}"
+}
+
+run_sequence() {
+    local command
+    local -a seq=("$@")
+
+    STAGE_INDEX=0
+    STAGE_TOTAL="${#seq[@]}"
+    for command in "${seq[@]}"; do
+        stage_banner "${command}"
+        run_command "${command}"
+    done
+    STAGE_TOTAL=0
+    STAGE_INDEX=0
+}
+
+phase_validate() {
+    local host
+
+    log "Command: validate (profile: ${ACTIVE_PROFILE_NAME})"
+
+    command -v ssh >/dev/null 2>&1 || fail "ssh is required"
+    command -v scp >/dev/null 2>&1 || fail "scp is required"
+    command -v cmake >/dev/null 2>&1 || fail "cmake is required"
+    command -v wget >/dev/null 2>&1 || fail "wget is required"
+    command -v tar >/dev/null 2>&1 || fail "tar is required"
+
+    if [ -n "$(ssh_password)" ]; then
+        command -v sshpass >/dev/null 2>&1 || \
+            fail "sshpass is required when ${LAB_SSH_PASSWORD_ENV} is set"
+    fi
+
+    for host in "${KNOWN_HOSTS[@]}"; do
+        run_remote_cmd "${host}" "hostname >/dev/null"
+    done
+}
+
+render_ensure_packages() {
+    # Print a remote shell snippet that installs the given packages
+    # only if at least one is missing.  Runs apt-get update only when
+    # needed, and retries with backoff on transient Ubuntu mirror
+    # errors ("File has unexpected size", 5xx, etc).
+    cat <<'EOF'
+ensure_packages() {
+    local missing=()
+    local pkg
+    local attempt
+    local max_attempts=5
+    local backoff
+
+    for pkg in "$@"; do
+        if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+            missing+=("${pkg}")
+        fi
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+        printf 'ensure_packages: already installed: %s\n' "$*"
+        return 0
+    fi
+    printf 'ensure_packages: installing: %s\n' "${missing[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+
+    for attempt in $(seq 1 "${max_attempts}"); do
+        if apt-get update -o Acquire::Retries=3 && \
+            apt-get install -y -o Acquire::Retries=3 "${missing[@]}"; then
+            return 0
+        fi
+        backoff=$((attempt * 10))
+        printf 'ensure_packages: attempt %d/%d failed, retrying in %ds\n' \
+            "${attempt}" "${max_attempts}" "${backoff}" >&2
+        rm -rf /var/lib/apt/lists/partial/* 2>/dev/null || true
+        sleep "${backoff}"
+    done
+
+    printf 'ensure_packages: all %d attempts failed for %s\n' \
+        "${max_attempts}" "${missing[*]}" >&2
+    return 1
+}
+EOF
+}
+
+phase_deps() {
+    local host
+
+    log "Command: deps (profile: ${ACTIVE_PROFILE_NAME})"
+
+    for host in "${LAB_DS_HOSTS[@]}"; do
+        log "  [${host}] ensure nfs-kernel-server, nfs-common"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages nfs-kernel-server nfs-common
+EOF
+)"
+    done
+
+    for host in "${ACTIVE_MDS_HOSTS[@]}" "${LAB_CLIENT_HOST}"; do
+        log "  [${host}] ensure nfs-common, attr"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages nfs-common attr
+EOF
+)"
+    done
+
+    # tshark on the client only.  The hpc-prewarm wire-form spot-check
+    # captures NFS replies on the client interface; pulling the rest
+    # of wireshark-common onto the MDS / DS hosts would just bloat
+    # them.  Installed via the same retrying ensure_packages helper.
+    log "  [${LAB_CLIENT_HOST}] ensure tshark"
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages tshark
+EOF
+)"
+
+    for host in "${KNOWN_RUNTIME_HOSTS[@]}"; do
+        log "  [${host}] ensure RonDB runtime prereqs"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages wget tar libncurses6
+if apt-cache show libaio1t64 >/dev/null 2>&1; then
+    ensure_packages libaio1t64
+else
+    ensure_packages libaio1
+fi
+EOF
+)"
+    done
+}
+
+phase_ds() {
+    local idx
+    local host
+    local export_path
+    local nfsd_threads="${LAB_DS_NFSD_THREADS:-8}"
+
+    log "Command: ds"
+    for idx in "${!LAB_DS_HOSTS[@]}"; do
+        host="${LAB_DS_HOSTS[$idx]}"
+        export_path="${LAB_DS_EXPORTS[$idx]}"
+        log "  [${host}] configure export ${export_path} (threads=${nfsd_threads})"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages nfs-kernel-server nfs-common
+install -d -m 0777 "${export_path}"
+install -d -m 0777 "${export_path}/data"
+install -d -m 0755 /etc/exports.d
+cat > /etc/exports.d/pnfs-ds.exports <<'EOC'
+${export_path} ${LAB_DS_EXPORT_SUBNET}(${LAB_DS_EXPORT_OPTIONS})
+EOC
+systemctl enable --now nfs-kernel-server
+exportfs -ra
+exportfs -v
+# Raise knfsd thread pool.  Default is 8 which serialises any
+# cluster of MDSes fanning out with nconnect > 1.  /proc write
+# reconfigures the running kernel threads; reboots revert, but
+# every pnfs-lab deploy re-applies this.
+if [ -w /proc/fs/nfsd/threads ]; then
+    echo "${nfsd_threads}" > /proc/fs/nfsd/threads
+fi
+EOF
+)"
+    done
+}
+
+phase_rondb() {
+    local host
+    local idx
+    local mgm_script
+    local data_script
+
+    log "Command: rondb (profile: ${ACTIVE_PROFILE_NAME})"
+
+    for host in "${ACTIVE_MDS_HOSTS[@]}" "${LAB_RONDB_MGM_HOST}" \
+        "${ACTIVE_RONDB_DATA_HOSTS[@]}"; do
+        append_unique KNOWN_RUNTIME_HOSTS "${host}"
+    done
+    ensure_build_host_tarball
+    for host in "${KNOWN_RUNTIME_HOSTS[@]}"; do
+        log "  [${host}] ensure RonDB runtime ${LAB_REMOTE_RONDB_VERSION}"
+        stage_rondb_tarball_on_host "${host}"
+        remote_install_rondb_runtime "${host}"
+    done
+
+    log "  [${LAB_RONDB_MGM_HOST}] configure mgmd"
+    mgm_script="$(render_rondb_mgmd_start_script)"
+    run_remote_root_script "${LAB_RONDB_MGM_HOST}" "$(cat <<EOF
+install -d -m 0755 /etc/rondb
+install -d -m 0755 "${LAB_RONDB_DATA_DIR}/mgm"
+install -d -m 0755 /usr/local/lib/pnfs-lab
+cat > /etc/rondb/config.ini <<'EOC'
+$(render_rondb_config)
+EOC
+cat > /usr/local/lib/pnfs-lab/rondb-mgmd-start.sh <<'EOC'
+${mgm_script}
+EOC
+chmod 0755 /usr/local/lib/pnfs-lab/rondb-mgmd-start.sh
+cat > /etc/systemd/system/rondb-mgmd.service <<'EOC'
+[Unit]
+Description=RonDB management server for pnfs lab
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=${LAB_REMOTE_RONDB_LINK}/lib:${LAB_REMOTE_RONDB_LINK}/lib/mysql
+ExecStart=/usr/local/lib/pnfs-lab/rondb-mgmd-start.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOC
+systemctl daemon-reload
+systemctl enable --now rondb-mgmd.service
+EOF
+)"
+
+    for idx in "${!ACTIVE_RONDB_DATA_HOSTS[@]}"; do
+        host="${ACTIVE_RONDB_DATA_HOSTS[$idx]}"
+        log "  [${host}] configure ndbmtd (node id ${ACTIVE_RONDB_DATA_NODE_IDS[$idx]})"
+        data_script="$(render_rondb_data_start_script \
+            "${ACTIVE_RONDB_DATA_NODE_IDS[$idx]}")"
+        run_remote_root_script "${host}" "$(cat <<EOF
+install -d -m 0755 "${LAB_RONDB_DATA_DIR}/data"
+install -d -m 0755 /usr/local/lib/pnfs-lab
+cat > /usr/local/lib/pnfs-lab/rondb-ndbmtd-start.sh <<'EOC'
+${data_script}
+EOC
+chmod 0755 /usr/local/lib/pnfs-lab/rondb-ndbmtd-start.sh
+cat > /etc/systemd/system/rondb-ndbmtd.service <<'EOC'
+[Unit]
+Description=RonDB data node for pnfs lab
+After=network-online.target rondb-mgmd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=${LAB_REMOTE_RONDB_LINK}/lib:${LAB_REMOTE_RONDB_LINK}/lib/mysql
+ExecStart=/usr/local/lib/pnfs-lab/rondb-ndbmtd-start.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOC
+systemctl daemon-reload
+systemctl enable --now rondb-ndbmtd.service
+EOF
+)"
+    done
+
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        sleep 5
+        capture_remote_cmd "${LAB_RONDB_MGM_HOST}" \
+            "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm \
+                --ndb-connectstring=${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT} \
+                -e show"
+    fi
+}
+
+phase_build() {
+    log "Command: build"
+
+    download_and_extract_local \
+        "${LAB_REMOTE_RONDB_TARBALL_URL}" \
+        "${LAB_BUILD_HOST_RONDB_BASE}" \
+        "${LAB_REMOTE_RONDB_VERSION}" \
+        "${LAB_BUILD_HOST_RONDB_LINK}"
+
+    run_local cmake \
+        -S "${LAB_SOURCE_DIR}" \
+        -B "${LAB_BUILD_DIR}" \
+        -DCMAKE_BUILD_TYPE="${LAB_BUILD_TYPE}" \
+        -DENABLE_RONDB=ON \
+        -DRonDB_ROOT="${LAB_BUILD_HOST_RONDB_LINK}"
+    heartbeat_start "cmake --build ${LAB_BUILD_DIR}"
+    run_local cmake --build "${LAB_BUILD_DIR}" -j"$(nproc)"
+    heartbeat_stop
+}
+
+phase_deploy() {
+    local pnfs_mds_bin="${LAB_BUILD_DIR}/src/mds/pnfs-mds"
+    local mds_admin_bin="${LAB_BUILD_DIR}/src/tools/mds-admin"
+    local idx
+    local host
+    local mds_conf
+
+    log "Command: deploy (profile: ${ACTIVE_PROFILE_NAME})"
+
+    [ -x "${pnfs_mds_bin}" ] || \
+        fail "Missing pnfs-mds binary: ${pnfs_mds_bin}"
+    if [ ! -x "${mds_admin_bin}" ]; then
+        warn "mds-admin binary not found at ${mds_admin_bin}; skipping it"
+    fi
+
+    for idx in "${!ACTIVE_MDS_HOSTS[@]}"; do
+        host="${ACTIVE_MDS_HOSTS[$idx]}"
+        log "  [${host}] deploy pnfs-mds (mds_id=${ACTIVE_MDS_IDS[$idx]})"
+        mds_conf="$(render_mds_config "${idx}")"
+
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages libntirpc-dev libgssapi-krb5-2 libssl3 nfs-common
+EOF
+)"
+
+        copy_to_host "${pnfs_mds_bin}" "${host}" "/tmp/pnfs-mds"
+        if [ -x "${mds_admin_bin}" ]; then
+            copy_to_host "${mds_admin_bin}" "${host}" "/tmp/mds-admin"
+        fi
+
+        run_remote_root_script "${host}" "$(cat <<EOF
+install -d -m 0755 /usr/local/bin
+install -d -m 0755 "${LAB_MDS_CONF_DIR}"
+install -d -m 0755 "${LAB_MDS_RUN_DIR}"
+# Stop the running daemon (if any) so we can replace the binary.
+systemctl stop pnfs-mds.service 2>/dev/null || true
+# Give kernel a moment to release the executable mapping.
+for _ in 1 2 3 4 5; do
+    if ! fuser /usr/local/bin/pnfs-mds >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+install -m 0755 /tmp/pnfs-mds /usr/local/bin/pnfs-mds
+if [ -f /tmp/mds-admin ]; then
+    install -m 0755 /tmp/mds-admin /usr/local/bin/mds-admin
+fi
+rm -f /tmp/pnfs-mds /tmp/mds-admin
+cat > "${LAB_MDS_CONF_DIR}/rondb.conf" <<'EOC'
+connect_string = ${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT}
+schema_name = ${LAB_RONDB_SCHEMA_NAME}
+EOC
+cat > "${LAB_MDS_CONF_DIR}/mds.conf" <<'EOC'
+${mds_conf}
+EOC
+$(render_ds_mount_script)
+cat > /etc/systemd/system/pnfs-mds.service <<'EOC'
+[Unit]
+Description=pnfs-mds lab daemon
+After=network-online.target rondb-mgmd.service rondb-ndbmtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=${LAB_REMOTE_RONDB_LINK}/lib:${LAB_REMOTE_RONDB_LINK}/lib/mysql
+ExecStart=/usr/local/bin/pnfs-mds ${LAB_MDS_CONF_DIR}/mds.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOC
+systemctl daemon-reload
+systemctl enable --now pnfs-mds.service
+EOF
+)"
+    done
+
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        log "  [${ACTIVE_MDS_HOSTS[0]}] wait for pnfs-mds NFS port ${LAB_MDS_NFS_PORT}"
+        local attempt=0
+        local max_attempts=30
+        local ready=0
+        while [ "${attempt}" -lt "${max_attempts}" ]; do
+            if capture_remote_cmd "${ACTIVE_MDS_HOSTS[0]}" \
+                "ss -tln | grep -q ':${LAB_MDS_NFS_PORT} '" >/dev/null 2>&1; then
+                ready=1
+                break
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+        done
+        if [ "${ready}" -ne 1 ]; then
+            fail "pnfs-mds did not open port ${LAB_MDS_NFS_PORT} on ${ACTIVE_MDS_HOSTS[0]} within $((max_attempts * 2))s"
+        fi
+        log "  [${ACTIVE_MDS_HOSTS[0]}] pnfs-mds is listening on ${LAB_MDS_NFS_PORT}"
+    fi
+}
+
+phase_client() {
+    local mount_opts="vers=4.2"
+
+    log "Command: client"
+
+    if [ "${LAB_CLIENT_NCONNECT}" -gt 1 ]; then
+        mount_opts+=",nconnect=${LAB_CLIENT_NCONNECT}"
+    fi
+
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+$(render_ensure_packages)
+ensure_packages nfs-common attr
+$(render_bounded_mount_function)
+bounded_mount "${ACTIVE_MDS_IPS[0]}:/" "${LAB_CLIENT_MOUNT}" "nfs4" "${mount_opts}"
+EOF
+)"
+}
+
+phase_smoke() {
+    local smoke_script="${REPO_ROOT}/scripts/pnfs-smoke.sh"
+    local smoke_body
+
+    log "Command: smoke"
+
+    [ -f "${smoke_script}" ] || fail "Smoke script not found: ${smoke_script}"
+    smoke_body="$(cat "${smoke_script}")"
+
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+export PNFS_MNT="${LAB_CLIENT_MOUNT}"
+${smoke_body}
+EOF
+)"
+}
+
+phase_test_suite() {
+    local suite_script="${REPO_ROOT}/scripts/pnfs-test-suite.sh"
+    local ds_ips
+
+    log "Command: test-suite (${TEST_SUITE_MODE})"
+
+    [ -f "${suite_script}" ] || fail "Test suite not found: ${suite_script}"
+    ds_ips="$(join_by ' ' "${LAB_DS_IPS[@]}")"
+
+    copy_to_host "${suite_script}" "${LAB_CLIENT_HOST}" "/tmp/pnfs-test-suite.sh"
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+chmod 0755 /tmp/pnfs-test-suite.sh
+PNFS_MNT="${LAB_CLIENT_MOUNT}" \
+PNFS_MDS1_IP="${ACTIVE_MDS_IPS[0]}" \
+PNFS_DS_IPS="${ds_ips}" \
+PNFS_SSH_USER="${LAB_USER}" \
+bash /tmp/pnfs-test-suite.sh "${TEST_SUITE_MODE}"
+EOF
+)"
+}
+
+# Phase C / Step 5 of docs/hpc-nto1-plan.md — lab-internal SSH mesh.
+#
+# Sets up passwordless SSH between every host in the lab so that the
+# hpc-prewarm DS-down injection sub-test (and any future inter-host
+# admin from the client) can run without manual key plumbing.
+#
+# Design choices:
+#   - Per-host ed25519 keypair, generated only if absent.  No shared
+#     private key crosses hosts; each host has its own identity.
+#   - The union of public keys is appended to every host's
+#     ~peak/.ssh/authorized_keys inside a `# BEGIN/END pnfs-lab mesh`
+#     marker block.  Re-runs replace the block, never duplicate it,
+#     and any pre-existing user-managed keys above/below the markers
+#     are preserved.
+#   - ~peak/.ssh/config gets a `Host *` block with
+#     StrictHostKeyChecking=accept-new and a 5s ConnectTimeout so
+#     first-connect prompts never block automation.
+#   - ssh-keyscan pre-populates known_hosts on every host for every
+#     other host (idempotent: only runs when the entry is missing)
+#     so the accept-new path is just a safety net.
+#   - Strictly additive: the only paths touched are inside
+#     ~peak/.ssh on each host, plus an apt-installed openssh-client
+#     package set the deps phase already covers.
+phase_ssh_mesh() {
+    local host
+    local pub
+    local pubkey_block
+    local kh_targets
+    local -a pubkeys=()
+
+    log "Command: ssh-mesh (mesh between ${#KNOWN_HOSTS[@]} hosts)"
+
+    [ "${#KNOWN_HOSTS[@]}" -gt 0 ] || \
+        fail "ssh-mesh: KNOWN_HOSTS is empty (load_inventory must run first)"
+
+    # Step 1 — ensure each host has a per-host ed25519 keypair for the
+    # lab user.  ssh-keygen -N "" leaves the private key passphrase-free,
+    # which is required for unattended automation.  install -d -o peak
+    # creates ~/.ssh with the right ownership when the user account is
+    # fresh.
+    for host in "${KNOWN_HOSTS[@]}"; do
+        log "  [${host}] ensure ed25519 keypair"
+        run_remote_root_script "${host}" "$(cat <<EOF
+peak_home=\$(getent passwd ${LAB_USER} | cut -d: -f6)
+[ -n "\${peak_home}" ] || { echo "no home for ${LAB_USER}" >&2; exit 1; }
+install -d -m 0700 -o ${LAB_USER} -g ${LAB_USER} "\${peak_home}/.ssh"
+if [ ! -f "\${peak_home}/.ssh/id_ed25519" ]; then
+    sudo -u ${LAB_USER} -H ssh-keygen -t ed25519 -N "" \\
+        -C "${LAB_USER}@\$(hostname) (pnfs-lab mesh)" \\
+        -f "\${peak_home}/.ssh/id_ed25519"
+fi
+EOF
+)"
+    done
+
+    # Step 2 — collect every host's public key.  capture_remote_cmd
+    # returns the full stdout of the remote command; sudo cat is used
+    # so we read with root privileges in case ~peak is mode 0700 and
+    # the SSH-as-peak path lacks read access for some other reason.
+    for host in "${KNOWN_HOSTS[@]}"; do
+        pub=$(capture_remote_cmd "${host}" \
+            "sudo cat /home/${LAB_USER}/.ssh/id_ed25519.pub" 2>/dev/null) || \
+            fail "ssh-mesh: could not read pubkey on ${host}"
+        [ -n "${pub}" ] || fail "ssh-mesh: empty pubkey on ${host}"
+        pubkeys+=("${pub}")
+    done
+
+    pubkey_block=$(printf '%s\n' "${pubkeys[@]}")
+
+    # Step 3 — distribute the union of pub keys to every host's
+    # authorized_keys inside a replaceable marker block.  sed deletes
+    # any prior pnfs-lab mesh block (if present) before we append the
+    # fresh one, so re-runs do not duplicate entries and a removed
+    # host's key naturally drops out the next time the mesh is run
+    # against the updated inventory.
+    for host in "${KNOWN_HOSTS[@]}"; do
+        log "  [${host}] update authorized_keys"
+        run_remote_root_script "${host}" "$(cat <<EOF
+peak_home=\$(getent passwd ${LAB_USER} | cut -d: -f6)
+[ -n "\${peak_home}" ] || { echo "no home for ${LAB_USER}" >&2; exit 1; }
+auth="\${peak_home}/.ssh/authorized_keys"
+install -d -m 0700 -o ${LAB_USER} -g ${LAB_USER} "\${peak_home}/.ssh"
+touch "\${auth}"
+chown ${LAB_USER}:${LAB_USER} "\${auth}"
+chmod 0600 "\${auth}"
+sed -i "/# BEGIN pnfs-lab mesh/,/# END pnfs-lab mesh/d" "\${auth}"
+{
+    printf '# BEGIN pnfs-lab mesh\n'
+    cat <<'PNFS_LAB_MESH_KEYS'
+${pubkey_block}
+PNFS_LAB_MESH_KEYS
+    printf '# END pnfs-lab mesh\n'
+} >> "\${auth}"
+chown ${LAB_USER}:${LAB_USER} "\${auth}"
+EOF
+)"
+    done
+
+    # Step 4 — ~peak/.ssh/config so first-connect host-key warnings
+    # don't block automation.  accept-new records the key on first
+    # connect and refuses any later mismatch (so we still detect MITM
+    # / host re-image scenarios).  ConnectTimeout=5 caps the per-hop
+    # wait at 5 seconds.  Marker block keeps re-runs idempotent.
+    for host in "${KNOWN_HOSTS[@]}"; do
+        log "  [${host}] update ${LAB_USER} ~/.ssh/config"
+        run_remote_root_script "${host}" "$(cat <<EOF
+peak_home=\$(getent passwd ${LAB_USER} | cut -d: -f6)
+[ -n "\${peak_home}" ] || { echo "no home for ${LAB_USER}" >&2; exit 1; }
+cfg="\${peak_home}/.ssh/config"
+install -d -m 0700 -o ${LAB_USER} -g ${LAB_USER} "\${peak_home}/.ssh"
+touch "\${cfg}"
+chown ${LAB_USER}:${LAB_USER} "\${cfg}"
+chmod 0600 "\${cfg}"
+sed -i "/# BEGIN pnfs-lab mesh/,/# END pnfs-lab mesh/d" "\${cfg}"
+{
+    printf '# BEGIN pnfs-lab mesh\n'
+    printf 'Host *\n'
+    printf '    StrictHostKeyChecking accept-new\n'
+    printf '    ConnectTimeout 5\n'
+    printf '    IdentityFile ~/.ssh/id_ed25519\n'
+    printf '# END pnfs-lab mesh\n'
+} >> "\${cfg}"
+chown ${LAB_USER}:${LAB_USER} "\${cfg}"
+EOF
+)"
+    done
+
+    # Step 5 — pre-populate known_hosts on every host with every
+    # other host's host key.  ssh-keyscan -T 5 caps the per-host wait
+    # at 5 seconds; the grep guard is what makes the loop idempotent
+    # (once an entry exists we skip the keyscan, so re-runs are
+    # cheap and don't re-fetch host keys we already trust).
+    kh_targets=$(join_by ' ' "${KNOWN_HOSTS[@]}")
+    for host in "${KNOWN_HOSTS[@]}"; do
+        log "  [${host}] populate known_hosts"
+        run_remote_root_script "${host}" "$(cat <<EOF
+peak_home=\$(getent passwd ${LAB_USER} | cut -d: -f6)
+[ -n "\${peak_home}" ] || { echo "no home for ${LAB_USER}" >&2; exit 1; }
+kh="\${peak_home}/.ssh/known_hosts"
+install -d -m 0700 -o ${LAB_USER} -g ${LAB_USER} "\${peak_home}/.ssh"
+touch "\${kh}"
+chown ${LAB_USER}:${LAB_USER} "\${kh}"
+chmod 0600 "\${kh}"
+for target in ${kh_targets}; do
+    if ! sudo -u ${LAB_USER} grep -qs "^[^ ]*\${target}\\b" "\${kh}"; then
+        sudo -u ${LAB_USER} -H ssh-keyscan -T 5 \\
+            -t rsa,ecdsa,ed25519 "\${target}" \\
+            >> "\${kh}" 2>/dev/null || true
+    fi
+done
+chown ${LAB_USER}:${LAB_USER} "\${kh}"
+EOF
+)"
+    done
+
+    log "ssh-mesh: done (${#KNOWN_HOSTS[@]} hosts)"
+}
+
+# Phase C / Step 5 of docs/hpc-nto1-plan.md — wide pre-warm HPC test.
+#
+# Streams scripts/pnfs-hpc-prewarm.sh to the client and runs it with the
+# environment the test needs:
+#
+#   - The client-mounted namespace path (PNFS_MNT).
+#   - The SSH-reachable MDS host (PNFS_MDS_SSH_HOST) for the DS-down
+#     injection phase.  cluster_transport's admin RPCs are
+#     IP-allowlisted to the configured cluster_peer set, so admin
+#     calls cannot originate from an arbitrary host — they have to
+#     come from the MDS itself.  The prewarm script SSHes to that
+#     host as the lab user (the SSH mesh authorises peak→peak) and
+#     runs mds-admin there, no sudo required because mds-admin
+#     just dials the local cluster_transport listener.
+#   - The cluster admin TCP endpoint (PNFS_MDS_ADMIN_HOST + _PORT)
+#     so the SSH'd mds-admin can target the right cluster_bind_addr
+#     and grpc_port.
+#   - PNFS_MDS1_IP / PNFS_SSH_USER are also set for older consumers.
+#   - The list of DS ids used to choose a victim for set-state offline.
+phase_hpc_prewarm() {
+    local hpc_script="${REPO_ROOT}/scripts/pnfs-hpc-prewarm.sh"
+    local ds_ids
+
+    log "Command: hpc-prewarm"
+
+    [ -f "${hpc_script}" ] || fail "HPC pre-warm script not found: ${hpc_script}"
+    ds_ids="$(join_by ' ' "${LAB_DS_IDS[@]}")"
+
+    copy_to_host "${hpc_script}" "${LAB_CLIENT_HOST}" "/tmp/pnfs-hpc-prewarm.sh"
+
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+chmod 0755 /tmp/pnfs-hpc-prewarm.sh
+PNFS_MNT="${LAB_CLIENT_MOUNT}" \
+PNFS_MDS_SSH_HOST="${ACTIVE_MDS_HOSTS[0]}" \
+PNFS_MDS_ADMIN_HOST="${ACTIVE_MDS_IPS[0]}" \
+PNFS_MDS_ADMIN_PORT="${LAB_MDS_GRPC_PORT}" \
+PNFS_MDS1_IP="${ACTIVE_MDS_HOSTS[0]}" \
+PNFS_DS_IDS="${ds_ids}" \
+PNFS_SSH_USER="${LAB_USER}" \
+bash /tmp/pnfs-hpc-prewarm.sh
+EOF
+)"
+}
+
+phase_stop() {
+    local host
+    local ds_id
+    local mount_target
+
+    log "Command: stop"
+
+    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+if command -v mountpoint >/dev/null 2>&1 && mountpoint -q "${LAB_CLIENT_MOUNT}"; then
+    timeout -k 5 10 umount "${LAB_CLIENT_MOUNT}" || true
+fi
+EOF
+)"
+
+    local stop_body
+    stop_body="systemctl stop pnfs-mds.service 2>/dev/null || true"$'\n'
+    for ds_id in "${LAB_DS_IDS[@]}"; do
+        mount_target="$(printf "${LAB_MDS_DS_MOUNT_FMT}" "${ds_id}")"
+        stop_body+="if command -v mountpoint >/dev/null 2>&1 && "
+        stop_body+="mountpoint -q '${mount_target}'; then"$'\n'
+        stop_body+="    timeout -k 5 10 umount '${mount_target}' || true"$'\n'
+        stop_body+="fi"$'\n'
+    done
+    for host in "${KNOWN_MDS_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "${stop_body}"
+    done
+
+    for host in "${KNOWN_RONDB_DATA_HOSTS[@]}"; do
+        run_remote_root_script "${host}" \
+            "systemctl stop rondb-ndbmtd.service 2>/dev/null || true"
+    done
+
+    run_remote_root_script "${LAB_RONDB_MGM_HOST}" \
+        "systemctl stop rondb-mgmd.service 2>/dev/null || true"
+}
+
+phase_reset() {
+    local host
+    local idx
+    local export_path
+
+    [ "${CONFIRM_RESET}" -eq 1 ] || \
+        fail "reset requires --confirm-reset"
+
+    log "Command: reset"
+    phase_stop
+
+    for host in "${KNOWN_MDS_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "$(cat <<EOF
+rm -f /etc/systemd/system/pnfs-mds.service
+rm -rf "${LAB_MDS_CONF_DIR}"
+rm -rf "${LAB_MDS_RUN_DIR}"
+rm -rf /usr/local/lib/pnfs-lab
+systemctl daemon-reload
+EOF
+)"
+    done
+
+    for host in "${KNOWN_RUNTIME_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "$(cat <<EOF
+rm -f /etc/systemd/system/rondb-mgmd.service
+rm -f /etc/systemd/system/rondb-ndbmtd.service
+rm -rf /etc/rondb
+rm -rf "${LAB_RONDB_DATA_DIR}"
+rm -rf /usr/local/lib/pnfs-lab
+systemctl daemon-reload
+EOF
+)"
+    done
+
+    for idx in "${!LAB_DS_HOSTS[@]}"; do
+        host="${LAB_DS_HOSTS[$idx]}"
+        export_path="${LAB_DS_EXPORTS[$idx]}"
+        run_remote_root_script "${host}" "$(cat <<EOF
+rm -f /etc/exports.d/pnfs-ds.exports
+rm -rf "${export_path}/data"
+exportfs -ra || true
+EOF
+)"
+    done
+}
+
+menu_loop() {
+    local choice
+
+    while true; do
+        printf '\n'
+        printf 'pNFS lab menu (current profile: %s)\n' "${PROFILE}"
+        printf ' 1) validate\n'
+        printf ' 2) deps\n'
+        printf ' 3) ds\n'
+        printf ' 4) rondb\n'
+        printf ' 5) build\n'
+        printf ' 6) deploy single-mds\n'
+        printf ' 7) deploy multi-mds\n'
+        printf ' 8) client\n'
+        printf ' 9) smoke\n'
+        printf '10) test-suite\n'
+        printf '11) hpc-prewarm\n'
+        printf '12) ssh-mesh\n'
+        printf '13) full single\n'
+        printf '14) full multi\n'
+        printf '15) stop\n'
+        printf '16) reset\n'
+        printf '17) quit\n'
+        printf '> '
+        read -r choice
+
+        case "${choice}" in
+            1) run_command validate ;;
+            2) run_command deps ;;
+            3) run_command ds ;;
+            4) run_command rondb ;;
+            5) run_command build ;;
+            6) run_command single-mds ;;
+            7) run_command multi-mds ;;
+            8) run_command client ;;
+            9) run_command smoke ;;
+            10) run_command test-suite ;;
+            11) run_command hpc-prewarm ;;
+            12) run_command ssh-mesh ;;
+            13) run_command full-single ;;
+            14) run_command full-multi ;;
+            15) run_command stop ;;
+            16) run_command reset ;;
+            17) return 0 ;;
+            *) warn "Unknown menu choice: ${choice}" ;;
+        esac
+    done
+}
+
+run_command() {
+    case "$1" in
+        validate)
+            phase_validate
+            ;;
+        deps)
+            phase_deps
+            ;;
+        ds)
+            phase_ds
+            ;;
+        rondb)
+            phase_rondb
+            ;;
+        build)
+            phase_build
+            ;;
+        deploy)
+            phase_deploy
+            ;;
+        single-mds)
+            PROFILE="single-mds"
+            apply_profile
+            phase_deploy
+            ;;
+        multi-mds)
+            PROFILE="multi-mds"
+            apply_profile
+            phase_deploy
+            ;;
+        client)
+            phase_client
+            ;;
+        smoke)
+            phase_smoke
+            ;;
+        test-suite)
+            phase_test_suite
+            ;;
+        hpc-prewarm)
+            phase_hpc_prewarm
+            ;;
+        ssh-mesh)
+            phase_ssh_mesh
+            ;;
+        stop)
+            phase_stop
+            ;;
+        reset)
+            phase_reset
+            ;;
+        full-single)
+            PROFILE="single-mds"
+            apply_profile
+            run_sequence validate deps ds rondb build single-mds client smoke
+            ;;
+        full-multi)
+            PROFILE="multi-mds"
+            apply_profile
+            run_sequence validate deps ds rondb build multi-mds client smoke
+            ;;
+        menu)
+            menu_loop
+            ;;
+        *)
+            fail "Unknown command: $1"
+            ;;
+    esac
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --inventory)
+                [ "$#" -ge 2 ] || fail "--inventory requires a path"
+                INVENTORY="$2"
+                shift 2
+                ;;
+            --profile)
+                [ "$#" -ge 2 ] || fail "--profile requires a name"
+                PROFILE="$2"
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --confirm-reset)
+                CONFIRM_RESET=1
+                shift
+                ;;
+            --test-suite-mode)
+                [ "$#" -ge 2 ] || fail "--test-suite-mode requires a mode"
+                TEST_SUITE_MODE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                COMMANDS+=("$1")
+                shift
+                ;;
+        esac
+    done
+}
+
+main() {
+    local command
+
+    parse_args "$@"
+    load_inventory
+    if [ "${#COMMANDS[@]}" -eq 0 ]; then
+        COMMANDS=(validate)
+    fi
+
+    for command in "${COMMANDS[@]}"; do
+        run_command "${command}"
+    done
+}
+
+main "$@"

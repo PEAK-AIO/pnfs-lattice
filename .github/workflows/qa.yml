@@ -1,0 +1,245 @@
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# Daily QA pipeline — runs all gates from CONTRIBUTING.md.
+# Triggers on every push, every PR, and daily at 06:00 UTC.
+
+name: QA Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Gate 1: Style checks (fast — no build needed)
+  # -----------------------------------------------------------------------
+  style:
+    name: Code Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run style checks
+        run: |
+          chmod +x scripts/check-style.sh
+          ./scripts/check-style.sh
+
+  # -----------------------------------------------------------------------
+  # Gate 2+3: Build with gcc and clang
+  # -----------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            liblmdb-dev \
+            libntirpc-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            libgrpc-dev \
+            libgrpc++-dev \
+            protobuf-compiler-grpc \
+            ${{ matrix.compiler }}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=${{ matrix.compiler }} \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EBPF=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Upload compile_commands.json
+        if: matrix.compiler == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-commands
+          path: build/compile_commands.json
+
+      - name: Upload test binaries
+        if: matrix.compiler == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-binaries
+          path: build/tests/
+
+  # -----------------------------------------------------------------------
+  # Gate 4: cppcheck
+  # -----------------------------------------------------------------------
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=all \
+            --std=c11 \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=unmatchedSuppression \
+            -I include \
+            src 2>&1 | tee cppcheck.log
+
+      - name: Upload cppcheck log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-log
+          path: cppcheck.log
+
+  # -----------------------------------------------------------------------
+  # Gate 5: clang-tidy
+  # -----------------------------------------------------------------------
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-tidy and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy liblmdb-dev libntirpc-dev
+
+      - name: Download compile_commands.json
+        uses: actions/download-artifact@v4
+        with:
+          name: compile-commands
+          path: build
+
+      - name: Run clang-tidy
+        run: |
+          FAIL=0
+          find src -name '*.c' -print0 | while IFS= read -r -d '' f; do
+            echo "Checking ${f}..."
+            if ! clang-tidy -p build --warnings-as-errors='*' "${f}" 2>&1; then
+              FAIL=1
+            fi
+          done
+          exit ${FAIL}
+
+  # -----------------------------------------------------------------------
+  # Gate 6: Unit tests
+  # -----------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake liblmdb-dev libntirpc-dev \
+            libprotobuf-dev libgrpc-dev
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EBPF=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: cd build && ctest --output-on-failure
+
+  # -----------------------------------------------------------------------
+  # Gate 7: Valgrind (daily only — too slow for every push)
+  # -----------------------------------------------------------------------
+  valgrind:
+    name: Valgrind Memory Check
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake valgrind liblmdb-dev libntirpc-dev \
+            libprotobuf-dev libgrpc-dev
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EBPF=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Run tests under valgrind
+        run: |
+          FAIL=0
+          find build/tests -name 'test_*' -executable -type f -print0 | \
+          while IFS= read -r -d '' bin; do
+            name=$(basename "${bin}")
+            echo "=== ${name} ==="
+            if ! valgrind \
+              --leak-check=full \
+              --show-leak-kinds=all \
+              --errors-for-leak-kinds=all \
+              --error-exitcode=99 \
+              --track-origins=yes \
+              "${bin}"; then
+              echo "FAIL: ${name}"
+              FAIL=1
+            fi
+          done
+          exit ${FAIL}
+
+  # -----------------------------------------------------------------------
+  # Summary gate — blocks merge if any job failed
+  # -----------------------------------------------------------------------
+  qa-passed:
+    name: QA Passed
+    runs-on: ubuntu-latest
+    needs: [style, build, cppcheck, unit-tests]
+    if: always()
+    steps:
+      - name: Check all gates
+        run: |
+          if [[ "${{ needs.style.result }}" != "success" ]] || \
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.cppcheck.result }}" != "success" ]] || \
+             [[ "${{ needs.unit-tests.result }}" != "success" ]]; then
+            echo "One or more QA gates failed."
+            exit 1
+          fi
+          echo "All QA gates passed."

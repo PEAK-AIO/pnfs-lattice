@@ -1,0 +1,393 @@
+.\" Copyright (c) 2026 PeakAIO
+.\" SPDX-License-Identifier: MIT
+.TH MDS-ADMIN 8 "2026-05-02" "pnfs-mds 0.1.1" "pnfs-mds Administrator Manual"
+.SH NAME
+mds-admin \- administer a running pnfs-mds daemon
+.SH SYNOPSIS
+.B mds-admin
+.RB [ \-h | \-\-help ]
+.RB [ \-V | \-\-version ]
+.I command
+.RI [ subcommand ]
+.RI [ arguments ...]
+.RB [ \-\-mds-host
+.IR host ]
+.RB [ \-\-mds-port
+.IR port ]
+.RB [ \-\-json ]
+.SH DESCRIPTION
+.B mds-admin
+is the command-line interface for operating a live
+.BR pnfs-mds (8)
+daemon.  It talks to the daemon over the cluster-transport admin socket
+and exposes commands for inspecting and mutating cluster membership,
+subtree ownership, data-server registration and weights, quotas,
+tiering, backup, online upgrade, and runtime configuration.
+.PP
+Every command operates on a single daemon endpoint selected by
+.B \-\-mds-host
+and
+.B \-\-mds-port
+(see
+.BR "GLOBAL OPTIONS" ).
+No command mutates the on-disk catalogue directly; all changes are
+routed through the daemon so that RonDB consistency, catalogue
+locking, and peer notifications are honoured.
+.PP
+The daemon enforces a peer allow-list on its admin socket.  When TLS
+is not enabled, only callers whose source address is
+.I 127.0.0.1
+or appears in the daemon's
+.I cluster_peer[]
+config are accepted; run
+.B mds-admin
+on one of the MDS hosts and point
+.B \-\-mds-host
+at the daemon's
+.I cluster_bind_addr
+(typically the internal pNFS IP) when administering remotely.
+.SH GLOBAL OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print the full usage summary and exit 0.
+.TP
+.BR \-V ", " \-\-version
+Print the tool's build version and exit 0.
+.TP
+.BI \-\-mds-host " host"
+Admin target hostname or IP.  Default
+.IR 127.0.0.1 .
+Every subcommand accepts this flag.
+.TP
+.BI \-\-mds-port " port"
+Admin TCP port.  Default
+.I 9800
+for legacy gRPC-era commands.  The C1\(enC3 commands added in 2026
+(\fBconfig show\fR, \fBds capacity show\fR, \fBds capacity probe-now\fR,
+\fBds set-weight\fR) share the daemon's cluster-transport port
+(\fIgrpc_port\fR in
+.IR mds.conf (5),
+default
+.IR 50051 ).
+In lab deployments use
+.BI \-\-mds-port " 50051"
+for those commands.
+.TP
+.B \-\-json
+Request machine-readable JSON output.  Supported by commands that
+produce listings (\fBsubtree list\fR, \fBds list\fR, \fBds capacity show\fR,
+\fBconfig show\fR, \fBstatus\fR, \fBmetrics\fR, \fBtier status\fR,
+\fBresilver status\fR, \fBrebalance status\fR, \fBquota report\fR,
+\fBcluster status\fR, \fBmigration progress\fR, \fBupgrade status\fR,
+\fBbackup info\fR).  Ignored by mutation commands.
+.SH COMMANDS
+Commands are grouped by subsystem.  Positional arguments are shown in
+angle brackets (\fI<id>\fR); bracketed \fB[\-\-flag]\fR tokens are
+optional.
+.SS "Cluster health and metrics"
+.TP
+.B status
+Compact health summary (active MDSes, DS online/offline counts, grace
+state, layout-recall backlog).  With
+.B \-\-json
+returns a structured object.
+.TP
+.B metrics
+Print the daemon's Prometheus exposition block (same content served on
+.I metrics_http_port
+over HTTP, fetched over the admin socket for hosts that can't reach
+the HTTP endpoint).
+.TP
+.B cluster status
+Cluster-wide view of peer liveness, owner_epoch, and fencing state.
+.TP
+.B migration progress
+Per-in-flight-subtree migration progress: source, destination,
+phase, bytes/ops moved.
+.SS "Subtree ownership"
+.TP
+.B subtree list \fR[\fB\-\-owner\fR \fI<mds_id>\fR]
+List every subtree entry with path, owner, state (ACTIVE / MIGRATING /
+FROZEN / DRAINING), op counter, and version.  The optional owner
+filter restricts to subtrees owned by a given MDS.
+.TP
+.B subtree owned \fI<mds_id>\fR
+Shorthand for \fBsubtree list \-\-owner \fI<mds_id>\fR.
+.TP
+.B subtree migrate \fI<path> <dest_mds_id>\fR \fR[\fB\-\-host\fR \fIh\fR] \fR[\fB\-\-port\fR \fIp\fR]
+Initiate a migration of
+.I <path>
+to
+.I <dest_mds_id>
+via the daemon.  The optional
+.BR \-\-host / \-\-port
+override the destination endpoint (default is taken from the subtree
+map).
+.TP
+.B subtree split \fI<parent> <child> <dest_mds_id>\fR \fR[\fB\-\-host\fR \fIh\fR] \fR[\fB\-\-port\fR \fIp\fR]
+Split
+.I <child>
+out of the subtree that contains
+.I <parent>
+and assign it to
+.IR <dest_mds_id> .
+.TP
+.B subtree assign \fI<path> <dest_mds_id>\fR \fR[\fB\-\-host\fR \fIh\fR] \fR[\fB\-\-port\fR \fIp\fR]
+Reassign the subtree rooted at
+.I <path>
+without moving data; requires the subtree to be empty or already on
+the destination.
+.SS "MDS node lifecycle"
+.TP
+.B node join \fI<mds_id> <hostname>\fR \fR[\fB\-\-nfs-port\fR \fIN\fR] \fR[\fB\-\-grpc-port\fR \fIN\fR]
+Register a new MDS node with the cluster.
+.TP
+.B node leave \fI<mds_id>\fR
+Gracefully remove a node after draining.
+.TP
+.B node drain \fI<mds_id>\fR
+Stop new client bindings and start shedding subtrees off
+.IR <mds_id> .
+.TP
+.B node undrain \fI<mds_id>\fR
+Reverse a
+.B node drain .
+.TP
+.B node detach \fI<mds_id>\fR
+Remove a node that is known-dead without waiting for drain.
+.TP
+.B node force-remove \fI<mds_id>\fR
+Emergency removal: drops the node's entries from the membership table
+without fencing or drain.  Use only when
+.B node detach
+fails and the target is verified offline.
+.TP
+.B node set-lifecycle \fI<mds_id> <state>\fR
+Manually set the lifecycle state of
+.IR <mds_id>
+(\fBactive\fR, \fBstandby\fR, \fBdraining\fR, \fBdetached\fR).
+.TP
+.B standby attach \fI<mds_id> <hostname>\fR \fR[...]
+Register a standby replica for
+.IR <mds_id> .
+Additional arguments are forwarded to the daemon's attach handler.
+.SS "Data servers"
+.TP
+.B ds list
+Registered DS table: id, host, port, state, mode, transport, tier,
+export path.
+.TP
+.B ds add \fI<ds_id> <host> <port>\fR \fR[\fB\-\-tier\fR \fIN\fR] \fR[\fB\-\-mode generic\fR] \fR[\fB\-\-transport\fR \fItcp\fR|\fIrdma\fR|\fItcp,rdma\fR] \fR[\fB\-\-export-path\fR \fI/path\fR]
+Add a new DS entry to the registry.  The daemon then probes the DS on
+the next heartbeat interval.
+.TP
+.B ds set-state \fI<ds_id> <state>\fR
+Force a DS state.  Valid states:
+.BR online ", " offline ", " draining ", " rebalancing .
+.TP
+.B ds remove \fI<ds_id>\fR
+Remove a DS from the registry.  Rejects if a live layout points at it.
+.TP
+.B ds validate \fI<ds_id>\fR \fR[\fB\-\-tool-version\fR \fIs\fR] \fR[\fB\-\-note\fR \fIs\fR]
+Mark a DS as operator-validated; stored as metadata in the registry
+row.
+.TP
+.B ds validate-clear \fI<ds_id>\fR
+Clear the validated flag.
+.TP
+.B ds validate-info \fI<ds_id>\fR
+Show the validation metadata for
+.IR <ds_id> .
+.TP
+.B ds set-weight \fI<ds_id> <weight>\fR
+Set the runtime WRR weight for
+.I <ds_id>
+(uint32).  Applied in the daemon's DS cache immediately; does not
+write the INI.  Persist by adding
+.BI ds_weight. <ds_id> = <weight>
+to
+.IR mds.conf (5).
+Requires
+.BI \-\-mds-port " 50051"
+(cluster-transport port) in a default deployment.
+.TP
+.B ds capacity show
+List statvfs-backed capacity for every DS: state, total, used,
+available, operator weight, and capacity-derived auto-weight.  The
+.B AUTO
+column is populated by the background statvfs probe when
+.I placement_capacity_weighting
+is
+.BR proportional
+in
+.IR mds.conf (5);
+it is zero when the feature is off or no successful probe has run
+yet.  Effective WRR weight is
+.B AUTO
+only when the operator
+.B WEIGHT
+column is zero.  Updated on the
+.I ds_capacity_poll_ms
+cadence; see
+.B ds capacity probe-now
+for an on-demand refresh.  Supports
+.BR \-\-json .
+.TP
+.B ds capacity probe-now
+Force an immediate statvfs sweep of every mounted DS.  Response
+reports the number of DSes probed.  Uses the cluster-transport port.
+.TP
+.B ds import \fI<ds_id> <source_dir>\fR \fB\-\-db\fR \fIPATH\fR \fB\-\-ds-mount\fR \fIPATH\fR \fR[\fB\-\-target-dir\fR \fI/path\fR]
+.TQ
+.B ds reattach \fI<ds_id>\fR \fB\-\-db\fR \fIPATH\fR \fB\-\-ds-mount\fR \fIPATH\fR
+.TQ
+.B ds scan \fI<ds_id>\fR \fB\-\-db\fR \fIPATH\fR \fB\-\-ds-mount\fR \fIPATH\fR \fR[\fB\-\-repair\fR]
+Offline DS onboarding / repair subcommands.  These are deprecated in
+the RonDB era and return an error on current builds; retained for
+backward compatibility with legacy tooling.
+.SS "Resilvering and rebalancing"
+.TP
+.B resilver start \fI<ds_id>\fR
+Start a full resilver of
+.I <ds_id>
+against its mirror peers.
+.TP
+.B resilver status \fR[\fI<ds_id>\fR]
+Show the in-flight resilver state, either globally or for a single
+DS.
+.TP
+.B rebalance start \fI<source_ds> <target_ds>\fR
+Move a balanced fraction of layout records from source to target.
+.TP
+.B rebalance status
+Show the current rebalance job's progress.
+.SS "Tiering"
+.TP
+.B tier start \fR[\fB\-\-interval\fR \fISEC\fR] \fR[\fB\-\-promote-thresh\fR \fIN\fR] \fR[\fB\-\-demote-thresh\fR \fIN\fR] \fR[\fB\-\-cooldown\fR \fIN\fR]
+Enable the tiering scanner with the given thresholds.
+.TP
+.B tier stop
+Disable tiering.
+.TP
+.B tier status
+Report the tiering scanner's state and last decision counts.
+.SS "Quotas"
+.TP
+.B quota set \fI<scope_type> <scope_id> <max_bytes> <max_inodes>\fR
+Create or update a quota rule.
+.I scope_type
+is
+.B uid
+or
+.BR gid .
+.TP
+.B quota report \fI<scope_type> <scope_id>\fR
+Report current usage and limits for the given scope.
+.TP
+.B quota del \fI<scope_type> <scope_id>\fR
+Delete a quota rule.
+.SS "Backup"
+.TP
+.B backup create \fI<path>\fR
+Start a catalogue snapshot to
+.IR <path> .
+.TP
+.B backup verify \fI<path>\fR
+Verify the structural integrity of a snapshot.
+.TP
+.B backup info \fI<path>\fR
+Print the snapshot's header and size.
+.TP
+.B backup restore \fI<path>\fR
+Restore the catalogue from
+.IR <path> .
+Daemon must be in a quiesced state.
+.SS "Online upgrade"
+.TP
+.B upgrade failover \fI<target_mds_id>\fR
+Hand control to
+.I <target_mds_id>
+so this node can be upgraded.
+.TP
+.B upgrade status
+Show in-flight upgrade state.
+.SS "Runtime configuration (C1\(enC3)"
+.TP
+.B config show \fR[\fI<key>\fR]
+Dump the daemon's live
+.IR mds.conf (5)
+in INI
+.IR key = value
+form.  With a positional
+.I <key>
+argument, restrict output to that key.  With
+.B \-\-json
+emit an object.  Requires
+.BI \-\-mds-port " 50051" .
+.SH EXIT STATUS
+.TP
+.B 0
+Command succeeded.
+.TP
+.B 1
+Command failed.  A diagnostic is written to
+.IR stderr ;
+common causes include an unreachable daemon, an invalid argument,
+rejection by the peer allow-list, or a catalogue-level error.
+.SH ENVIRONMENT
+No environment variables are consumed.  All configuration is supplied
+via command-line flags.
+.SH FILES
+.TP
+.I /etc/pnfs-mds/mds.conf
+INI file driving the daemon; mds-admin does not read it, but every
+.B config show
+key and every default port comes from it.  See
+.IR mds.conf (5).
+.TP
+.I /etc/pnfs-mds/rondb.conf
+RonDB connect string and schema name.
+.SH EXAMPLES
+.PP
+Inspect the live cluster from the local MDS host:
+.PP
+.RS 4
+.nf
+mds-admin status
+mds-admin subtree list
+mds-admin ds list
+mds-admin metrics | head -40
+.fi
+.RE
+.PP
+Administer a remote MDS over its cluster-transport port:
+.PP
+.RS 4
+.nf
+mds-admin ds capacity show --mds-host 10.0.0.101 --mds-port 50051
+mds-admin ds set-weight 0 250 --mds-host 10.0.0.101 --mds-port 50051
+mds-admin ds capacity probe-now --mds-host 10.0.0.101 --mds-port 50051
+mds-admin config show metrics_http_port --mds-host 10.0.0.101 --mds-port 50051
+.fi
+.RE
+.PP
+Drain an MDS before maintenance:
+.PP
+.RS 4
+.nf
+mds-admin node drain 2
+mds-admin subtree list --owner 2        # wait until empty
+mds-admin node leave 2
+.fi
+.RE
+.SH SEE ALSO
+.BR pnfs-mds (8),
+.BR mds.conf (5),
+.BR nfs (5),
+.BR exportfs (8),
+.BR statvfs (3),
+.BR ndb_mgm (1).
+.SH COPYRIGHT
+Copyright (c) 2026 PeakAIO.  Licensed under MIT.  See
+.B LICENSE-MIT
+in the source distribution.

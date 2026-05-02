@@ -1,0 +1,62 @@
+# Build output (any cmake out-of-tree directory)
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# eBPF generated
+*.bpf.o
+*.skel.h
+vmlinux.h
+
+# Protobuf generated
+*.pb.h
+*.pb.c
+*.pb-c.h
+*.pb-c.c
+*.grpc.pb.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+Testing/
+CTestTestfile.cmake
+build_test_*
+
+# Compiled test binaries (source is tests/unit/test_*.c)
+tests/unit/test_*
+!tests/unit/test_*.c
+
+# LMDB data files
+*.lmdb
+*.lmdb-lock
+-lock
+
+# Core dumps
+core
+core.*
+
+# QA / alternate build directories — covered by build-*/ above; the
+# lines below are kept for documentation only and have no additional
+# effect.
+# build-qa-*/  build-clang/  build-rondb/  build-rig*/
+# build-phase*/  build-oz-*/
+
+# QA artifacts
+valgrind-logs/

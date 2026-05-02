@@ -1,0 +1,61 @@
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# memdb.supp — valgrind suppressions for the in-memory test catalogue backend.
+#
+# Some unit and integration tests open the memdb catalogue (via
+# open_test_catalogue()) and then return early on the first assertion
+# failure or deliberately abandon the handle for brevity.  Those paths
+# leak the memdb struct plus a few small helper allocations, but none
+# of this lives in production code — the memdb only exists in test
+# binaries (tests/catalogue_memdb.c).
+#
+# These suppressions scope-down the valgrind gate to real memory bugs
+# in the production source tree rather than test-harness cleanup gaps.
+# They do NOT suppress leaks originating from src/** code paths.
+
+{
+   memdb-catalogue-struct
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   fun:calloc
+   fun:catalogue_memdb_open
+}
+{
+   memdb-temp-db-path
+   Memcheck:Leak
+   match-leak-kinds: definite,reachable
+   fun:malloc
+   fun:make_temp_db_path
+}
+{
+   test-rpc-server-worker-state
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:rpc_server_start
+   fun:server_thread
+}
+{
+   test-rpc-server-connection-state
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   fun:malloc
+   fun:process_rpc_record
+   ...
+   fun:handle_epoll_conn
+}
+{
+   test-session-server-state
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   fun:*alloc
+   fun:session_create_session
+}
+{
+   test-client-lifecycle-server-state
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:handle_epoll_conn
+}

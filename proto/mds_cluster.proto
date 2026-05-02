@@ -1,0 +1,134 @@
+// Copyright (c) 2026 PeakAIO
+// SPDX-License-Identifier: MIT
+//
+// mds_cluster.proto — Inter-MDS gRPC service definition.
+
+syntax = "proto3";
+
+package peakaio.pnfs;
+
+option optimize_for = SPEED;
+
+// ---------------------------------------------------------------------------
+// Cross-subtree rename (2PC)
+// ---------------------------------------------------------------------------
+
+message RenameRequest {
+    uint64 txn_id            = 1;
+    uint64 src_parent_fileid = 2;
+    string src_name          = 3;
+    uint64 dst_parent_fileid = 4;
+    string dst_name          = 5;
+    bytes  inode_data        = 6;  // Serialised inode + stripe_map
+}
+
+message RenameVote {
+    uint64 txn_id  = 1;
+    bool   commit  = 2;  // true = VOTE_COMMIT, false = VOTE_ABORT
+    int32  error   = 3;  // NFS4 error code if abort
+}
+
+message RenameCommit {
+    uint64 txn_id = 1;
+}
+
+message RenameAbort {
+    uint64 txn_id = 1;
+}
+
+message RenameResult {
+    uint64 txn_id = 1;
+    bool   ok     = 2;
+    int32  error  = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Subtree migration
+// ---------------------------------------------------------------------------
+
+message MigrationRequest {
+    string subtree_path    = 1;
+    uint32 source_mds_id   = 2;
+    uint32 dest_mds_id     = 3;
+    uint64 subtree_version = 4;
+}
+
+message MigrationAck {
+    bool  accepted = 1;
+    int32 error    = 2;
+}
+
+message InodeData {
+    uint64 fileid     = 1;
+    bytes  inode_blob = 2;  // Serialised inode
+    bytes  dirents    = 3;  // Serialised directory entries (if dir)
+    bytes  stripe_map = 4;  // Serialised stripe map (if regular file)
+    bytes  layout_state = 5; // Active layout records
+}
+
+message MigrationComplete {
+    uint64 inode_count = 1;
+    bool   ok          = 2;
+}
+
+message MigrationFinish {
+    string subtree_path    = 1;
+    uint64 subtree_version = 2;
+}
+
+message MigrationResult {
+    bool  ok    = 1;
+    int32 error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat
+// ---------------------------------------------------------------------------
+
+message HeartbeatMsg {
+    uint32 mds_id    = 1;
+    uint64 epoch     = 2;
+    uint64 txn_id    = 3;  // Latest committed txn_id (for lag monitoring)
+    bool   in_grace  = 4;
+}
+
+message HeartbeatAck {
+    uint32 mds_id = 1;
+    uint64 epoch  = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Client identity query (debugging / admin)
+// ---------------------------------------------------------------------------
+
+message ClientIdQuery {
+    bytes co_ownerid = 1;
+}
+
+message ClientIdResponse {
+    uint64 clientid  = 1;
+    uint32 mds_id    = 2;
+    bool   found     = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service MdsCluster {
+    // Cross-subtree rename (2PC)
+    rpc PrepareRename (RenameRequest) returns (RenameVote);
+    rpc CommitRename  (RenameCommit)  returns (RenameResult);
+    rpc AbortRename   (RenameAbort)   returns (RenameResult);
+
+    // Subtree migration
+    rpc BeginMigration  (MigrationRequest) returns (MigrationAck);
+    rpc StreamInodes    (stream InodeData) returns (MigrationComplete);
+    rpc FinishMigration (MigrationFinish)  returns (MigrationResult);
+
+    // Heartbeat
+    rpc Heartbeat (HeartbeatMsg) returns (HeartbeatAck);
+
+    // Client identity
+    rpc ResolveClientId (ClientIdQuery) returns (ClientIdResponse);
+}
