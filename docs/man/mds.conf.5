@@ -1,0 +1,728 @@
+.\" Copyright (c) 2026 PeakAIO
+.\" SPDX-License-Identifier: MIT
+.TH MDS.CONF 5 "2026-04-22" "pnfs-mds 0.1.0" "pnfs-mds Administrator Manual"
+.SH NAME
+mds.conf \- pnfs-mds runtime configuration file
+.SH SYNOPSIS
+.I /etc/pnfs-mds/mds.conf
+.SH DESCRIPTION
+.I mds.conf
+is the INI-style configuration file read by
+.BR pnfs-mds (8)
+at startup via
+.BR mds_config_load() .
+Each line is either blank, a comment (leading
+.B #
+or
+.BR ; ),
+or a
+.IR key " = " value
+assignment.  Whitespace around
+.B =
+and inside the
+.I value
+is trimmed.  Unknown keys are ignored with a
+.B WARN:
+line on
+.IR stderr ;
+values that fail validation are logged and the compiled-in default is
+retained.
+.PP
+Most keys take effect only at daemon start.  A small set of keys is
+adjustable at runtime via
+.BR mds-admin (8);
+those are noted below with
+.BR "live:" .
+.PP
+Operator-tunable DS geometry and placement-policy weights that are not
+yet parsed from this file can still be inspected and set at runtime
+with
+.BR "mds-admin config show" ,
+.BR "mds-admin ds capacity show" ,
+and
+.BR "mds-admin ds set-weight" .
+.SH FILE FORMAT
+.PP
+.RS 4
+.nf
+# Comment
+key = value
+list[0] = entry
+list[1] = entry
+.fi
+.RE
+.PP
+.B Types
+.TP
+.B bool
+.BR true / false ,
+.BR yes / no ,
+.BR 1 / 0 .
+.TP
+.B uint / int
+Decimal integer.
+.TP
+.B string
+Unquoted token; trailing whitespace is stripped.  Quotes are not
+special.
+.TP
+.B path
+Absolute filesystem path.  Not expanded; no
+.B ~
+or
+.BR $VAR .
+.TP
+.B enum
+One of an explicit set listed with each key.
+.SH KEYS
+Keys are grouped by subsystem.  Defaults in parentheses.
+.SS "Identity and cluster membership"
+.TP
+.B mds_id
+.IR uint ,
+range
+.IR "1..UINT32_MAX"
+(default
+.BR 1 ).
+Unique node id.  Must be unique across the cluster.
+.TP
+.B hostname
+.I string
+(default
+.BR localhost ).
+This node's advertised network name.
+.TP
+.B nfs_port
+.IR uint ,
+range
+.IR "1..65535"
+(default
+.BR 2049 ).
+Port for the NFSv4.1 listener.
+.TP
+.B grpc_port
+.IR uint ,
+range
+.IR "1..65535"
+(default
+.BR 50051 ).
+Cluster-transport listener (used for inter-MDS RPCs and for
+.BR mds-admin (8)'s
+C1\(enC3 commands).
+.TP
+.B cluster_size
+.IR uint .
+Expected number of MDS nodes.  Informational; used by
+.BR pnfs-mds (8)
+to seed
+.I /shardN
+partitions on first boot.
+.TP
+.B cluster_bind_addr
+.IR string
+(default
+.BR 127.0.0.1 ).
+Address to bind
+.I grpc_port
+on.  Should be the internal pNFS interface.
+.TP
+.B cluster_max_conns
+.IR uint ,
+range
+.IR "1..256"
+(default
+.BR 16 ).
+Peer connection ceiling.
+.TP
+.BI cluster_peer[ N ]
+.IR string .
+Peer allow-list entry at index
+.IR N .
+Must be set for every remote MDS that will talk to this node.
+.TP
+.BR cluster_ca_file ", " node_cert_file ", " node_key_file
+.IR path .
+X.509 material for mTLS on the cluster transport.
+.TP
+.B require_mtls
+.I bool
+(default
+.BR false ).
+Require peer mTLS on
+.IR grpc_port .
+When
+.BR true ,
+the peer allow-list is enforced by certificate SAN rather than source
+address.
+.SS "Catalogue"
+.TP
+.B catalogue_backend
+.I enum
+.RI ( rondb )
+(default
+.BR rondb ).
+Only
+.B rondb
+is supported on current builds.
+.TP
+.B catalogue_backend_conf
+.IR path .
+Backend-specific config file, e.g.
+.IR /etc/pnfs-mds/rondb.conf .
+.TP
+.B catalog_image_mode
+.I enum
+.RI ( off | shadow | compare | primary )
+(default
+.BR off ).
+Image-layer replay mode.
+.TP
+.B catalog_compare_reads
+.I bool
+(default
+.BR false ).
+Enable image-vs-authority compare reads.
+.TP
+.B catalog_replay_mode
+.I enum
+.RI ( off | log | journal )
+(default
+.BR off ).
+.TP
+.B catalog_replay_snapshot_path
+.IR path .
+.TP
+.B catalog_replay_rebuild_on_start
+.IR bool .
+.TP
+.B catalog_delta_log_path
+.IR path .
+.TP
+.B ndb_conn_pool_size
+.IR uint ,
+range
+.I "1..32"
+(default: auto-sized from worker count).
+NDB connections per MDS.
+.TP
+.B ndb_async_writes
+.I bool
+(default
+.BR false ).
+Use the async NDB batch pipeline for hot write paths.
+.TP
+.B transient_state_cache
+.I bool
+(default
+.BR true ).
+Skip NDB write-through for open/layout state.  Turn off for strict
+cross-MDS state visibility at the cost of extra RTs per OPEN/LAYOUTGET.
+.SS "Replication and failover"
+.TP
+.B repl_mode
+.I enum
+.RI ( sync | async | semi_sync ).
+.TP
+.BR standby_host ", " standby_port
+.IR string / uint .
+Standby target endpoint.
+.TP
+.B repl_listen_port
+.I uint
+(default
+.BR 9401 ).
+Port for incoming replica traffic.
+.TP
+.B repl_semi_sync_n
+.IR uint .
+Minimum acks required for
+.BR semi_sync .
+.TP
+.B repl_health_interval_ms
+.IR uint .
+.TP
+.B repl_refuse_writes_on_resync
+.IR bool .
+.TP
+.B self_role
+.I enum
+.RI ( 0 =ACTIVE,\  1 =STANDBY).
+.TP
+.B self_failover_partner_id
+.IR uint .
+Paired partner
+.IR mds_id .
+.SS "Workload and tuning"
+.TP
+.B workload_profile
+.I enum
+.RI ( default | hpc | ai_training | genomics | media ).
+Applies a curated set of tuning defaults.
+.TP
+.B worker_threads
+.I uint
+(default
+.BR 16 ).
+COMPOUND dispatch thread count.
+.TP
+.B stripe_unit_bytes
+.I uint
+(default
+.BR 65536 ).
+Default stripe unit for new layouts.
+.TP
+.BR default_stripe_count ", " default_mirror_count
+.I uint
+(default
+.BR 1 / 1 ).
+Default geometry for new files.
+.TP
+.BR lease_time_sec ", " grace_period_sec
+.IR uint .
+NFSv4 lease duration and server grace period.
+.TP
+.B prealloc_pool_size
+.I uint
+(default
+.BR 4096 ).
+DS pre-alloc pool size.
+.TP
+.B gpudirect_required
+.I bool
+(default
+.BR false ).
+Reject I/O from clients lacking GPUDirect support.
+.TP
+.B inline_enabled
+.I bool
+(default
+.BR true ).
+Enable inline-data acceleration.
+.TP
+.B inline_max_size
+.IR uint ,
+range
+.I "1..65536"
+(default
+.BR 65536 ).
+Maximum bytes stored inline per file.
+.SS "Commit pipeline"
+.TP
+.BR CommitBatchSize ", " CommitBatchMaxBytes ", " CommitFlushMs ", " CommitQueueDepth
+.IR uint .
+Single-writer batch-commit knobs.  Camel-case preserved for backward
+compatibility.
+.SS "Caches"
+.TP
+.B inode_cache_size
+.IR uint ,
+range
+.I "0..1000000"
+(default
+.BR 16384 ).
+Entries in the in-memory inode cache.
+.TP
+.B dirent_cache_size
+.IR uint ,
+range
+.I "0..1000000"
+(default
+.BR 32768 ).
+Entries in the dirent cache.
+.TP
+.B negative_cache_ttl_ms
+.IR uint ,
+range
+.I "0..3600000"
+(default
+.BR 5000 ).
+TTL for cached negative-lookup entries.
+.SS "Data servers"
+.TP
+.B ds_count
+.IR uint .
+Number of configured DS entries; must match the populated
+.BI ds[ N ]
+indices.
+.TP
+.BI ds[ N ]
+.IR string .
+DS spec at index
+.IR N ,
+formatted
+.BI host :/ export
+(e.g.
+.IR 10.0.0.103:/export/ds ).
+.TP
+.B ds_mount_path_fmt
+.I string
+(default
+.BR /mnt/ds%u ).
+printf format with exactly one
+.B %u
+for DS mount paths.
+.TP
+.B ds_heartbeat_ms
+.I uint
+(default
+.BR 5000 ).
+DS probe interval.
+.TP
+.B ds_health_fail_threshold
+.IR uint ,
+range
+.I "1..1024"
+(default
+.BR 6 ).
+Consecutive probe failures before a DS is marked OFFLINE.
+.TP
+.BI ds_weight. <id>
+.I uint32
+(default
+.BR 0 ).
+Per-DS WRR weight.
+.B 0
+means "unset" \(em the placement path falls back to free-bytes.
+.BR "live:"
+settable with
+.BR "mds-admin ds set-weight" .
+.TP
+.B ds_capacity_poll_ms
+.IR uint ,
+range
+.I "0..86400000"
+(default
+.BR 60000 ).
+statvfs() sweep interval.
+.B 0
+disables the background sweep;
+.BR "mds-admin ds capacity probe-now"
+still forces an on-demand sweep.
+.TP
+.B ds_gc_workers
+.IR uint ,
+range
+.I "1..32"
+(default
+.BR 4 ).
+Number of worker threads draining the catalogue GC queue.  One
+coordinator thread batch-peeks GC entries via the RonDB shim and
+stages them in a bounded queue; the workers pop one entry at a time
+and run the per-DS unlink sweep.  Setting this to
+.B 1
+reproduces the historical serial drainer while still benefiting from
+the batched peek.
+.TP
+.B ds_gc_batch_size
+.IR uint ,
+range
+.I "1..4096"
+(default
+.BR 256 ).
+Maximum entries fetched per coordinator tick.  Sizes the bounded
+queue between the coordinator and the workers; larger values
+amortise the gc_peek scan over more entries at the cost of a longer
+stop-drain window.
+.TP
+.B ds_prepare_queue_depth
+.IR uint ,
+range
+.IR "0..65536" .
+.TP
+.B ds_prepare_workers
+.IR uint ,
+range
+.IR "0..64" .
+.SS "Placement"
+.TP
+.B placement_policy
+.I enum
+.RI ( rr | wrr | weighted_rr | capacity )
+(default
+.BR rr ).
+.TP
+.B placement_policy_enabled
+.I bool
+(default
+.BR false ).
+Master switch for the placement-policy dispatcher.
+.TP
+.B placement_capacity_weighting
+.I enum
+.RI ( off | proportional )
+(default
+.BR off ).
+Derive per-DS WRR weights from the
+.I statvfs
+capacity probe.  Under
+.BR proportional ,
+each probe cycle stamps
+.BI auto_weight " = max(1, floor((1 − used/total) \(mu 100))"
+onto the DS cache entry; the value is clamped into
+.IR [1,\ 100] .
+Overlay precedence in the placement path becomes
+.IR ds_weight. <id>
+(operator override)
+>
+.I auto_weight
+>
+free-bytes heuristic
+>
+uniform.  Operators who want sharper skew can still layer
+.BI ds_weight. <id>
+on top — the capacity-derived value is only consulted when the
+operator weight is zero.  The rebalance scanner reads the same
+signal via
+.BR "mds-admin ds capacity show" .
+.BR "live:"
+applies on the next probe cycle after the daemon re-reads the
+config; for immediate effect use
+.BR "mds-admin ds capacity probe-now" .
+.SS "Authentication"
+.TP
+.B nfs_auth_mode
+.I enum
+.RI ( sys | krb5 | krb5i | krb5p ).
+.TP
+.BR krb5_keytab ", " krb5_principal
+.IR path / string .
+GSS credentials for
+.BR krb5* .
+.SS "Directory delegations"
+.TP
+.B dir_delegations_enabled
+.I bool
+(default
+.BR false ).
+Master switch for
+.BR OP_GET_DIR_DELEGATION
+grants.  When disabled the server returns an inner
+.B GDD4_UNAVAIL
+while keeping the outer compound status
+.B NFS4_OK
+so client compounds that bundle a trailing GETATTR still complete.
+.TP
+.B dir_deleg_recall_timeout_ms
+.IR uint ,
+range
+.I "50..300000"
+(default
+.BR 5000 ).
+Default CB_RECALL / CB_NOTIFY timeout for dir delegations; scales the
+in-flight dedupe window.
+.SS "Callback channel"
+.TP
+.B cb_recall_timeout_ms
+.IR uint ,
+range
+.I "50..300000"
+(default
+.BR 5000 ).
+Default CB_RECALL / CB_LAYOUTRECALL / CB_NOTIFY timeout when callers
+pass 0.
+.SS "Observability"
+.TP
+.B metrics_http_port
+.IR uint ,
+range
+.I "0..65535"
+(default
+.BR 9090 ).
+Prometheus scrape port.
+.B 0
+disables the HTTP endpoint.
+.SS "showmount -e compatibility (mountd_compat)"
+The MDS speaks NFSv4.1 / pNFS only and does not implement NFSv3
+MOUNT.  When the keys below are enabled, the daemon spawns a tiny
+ONC-RPC responder for program 100005 (mountd) version 3 that
+answers
+.B NULL ,
+.B EXPORT ,
+and
+.B DUMP
+with a synthetic, MDS-defined export list.  Every other procedure
+\(em including
+.BR MNT \(em
+is rejected with
+.BR PROC_UNAVAIL ,
+so the MDS cannot be NFSv3-mounted through this shim.  No DS
+interaction.  See
+.BR /usr/share/doc/pnfs-mds/mountd-compat.md
+for the full design and threat model.
+.TP
+.B mountd_compat_enabled
+.I bool
+(default
+.BR true ).
+Master switch.  Enabled by default so a fresh install satisfies
+.B showmount -e <mds>
+out-of-the-box.  Set to
+.B false
+to suppress the listener entirely (no port bound, no rpcbind entry).
+Note: on upgrade, an existing deployment will start binding
+.B 20048
+and registering with rpcbind on first restart \(em see CHANGELOG.
+.TP
+.B mountd_compat_port
+.IR uint ,
+range
+.I "0..65535"
+(default
+.BR 20048 ).
+UDP+TCP port to bind.
+.B 0
+lets the OS pick an ephemeral port.
+.TP
+.B mountd_compat_bind_addr
+.I ipv4-string
+(default
+.BR 0.0.0.0 ).
+Bind address.
+.TP
+.B mountd_compat_register_rpcbind
+.I bool
+(default
+.BR true ).
+Register
+.B 100005/3
+\(rA
+.I port
+with the local rpcbind at startup so
+.B showmount -e
+can discover the port via portmap on 111.  Requires
+.BR rpcbind
+running on the host; failure to register is logged and does not
+fail startup.
+.TP
+.B mountd_compat_exports
+.IR "comma-separated list" ,
+up to 16 entries, each
+.IR "\(<= 255 bytes"
+(default
+.BR / ).
+Synthetic export paths to advertise on
+.BR EXPORT .
+These strings are advisory; they do not need to map to any real
+filesystem path on the MDS or any DS.  Example:
+.RS 4
+.nf
+mountd_compat_exports = /pnfs, /scratch
+.fi
+.RE
+.SS "Auto-split"
+.TP
+.B auto_split_enabled
+.I bool
+(default
+.BR false ).
+.TP
+.B auto_split_execute
+.I bool
+(default
+.BR false ).
+.TP
+.B auto_split_threshold
+.I uint
+(default
+.BR 10000 ).
+Ops per interval to propose a split.
+.TP
+.B auto_split_interval
+.I uint
+(default
+.BR 300
+seconds).
+Evaluation cadence.
+.TP
+.B auto_split_cooldown
+.I uint
+(default
+.BR 600
+seconds).
+Minimum seconds between re-splits of the same parent.
+.TP
+.B auto_split_sustained
+.I uint
+(default
+.BR 2 ).
+Consecutive hot intervals required before acting.
+.TP
+.B auto_split_min_children
+.I uint
+(default
+.BR 4 ).
+Minimum children eligible for a split.
+.SS "Sharding"
+.TP
+.B shard_enabled
+.I bool
+(default
+.BR false ).
+Master switch for the shard router.
+.SH EXAMPLES
+A minimal 2-MDS lab config for
+.IR mds1 :
+.PP
+.RS 4
+.nf
+mds_id = 1
+hostname = mds1
+nfs_port = 2049
+grpc_port = 50051
+cluster_size = 2
+cluster_bind_addr = 10.0.0.101
+cluster_peer[0] = 10.0.0.101
+cluster_peer[1] = 10.0.0.102
+
+ds_count = 2
+ds[0] = 10.0.0.103:/export/ds
+ds[1] = 10.0.0.104:/export/ds
+ds_mount_path_fmt = /mnt/ds%u
+ds_weight.0 = 0
+ds_weight.1 = 0
+ds_capacity_poll_ms = 60000
+
+placement_policy = wrr
+placement_policy_enabled = true
+metrics_http_port = 9090
+.fi
+.RE
+.SH FILES
+.TP
+.I /etc/pnfs-mds/mds.conf
+The file described by this page.
+.TP
+.I /etc/pnfs-mds/rondb.conf
+RonDB connect string and schema name (referenced by
+.IR catalogue_backend_conf ).
+.SH HARDCODED CONSTANTS
+The following knobs are compiled-in and are not yet exposed in this
+file.  They can be promoted on request:
+.IP \(bu 2
+.B DS_HEALTH_DEFAULT_INTERVAL
+(alias for
+.IR ds_heartbeat_ms ).
+.IP \(bu 2
+.BR DS_HEALTH_COOLDOWN_BASE_MS ", "
+.BR DS_HEALTH_COOLDOWN_CAP_MS ", "
+.BR DS_HEALTH_FLAP_BACKOFF_MAX
+\(em flap suppression.
+.IP \(bu 2
+.B DS_HEALTH_RECOVERY_MIN
+\(em consecutive OK probes to mark ONLINE.
+.IP \(bu 2
+.BR DELEG_STRIPE_COUNT ", " DDT_STRIPE_COUNT
+\(em striped-lock width.
+.IP \(bu 2
+Inode / dirent-cache shard width.
+.IP \(bu 2
+.B CB_MAX_MSG_SIZE
+\(em callback XDR buffer size (4096 bytes).
+.SH SEE ALSO
+.BR pnfs-mds (8),
+.BR mds-admin (8),
+.BR nfs (5).
+.SH COPYRIGHT
+Copyright (c) 2026 PeakAIO.  Licensed under MIT.  See
+.B LICENSE-MIT
+in the source distribution.

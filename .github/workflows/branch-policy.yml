@@ -1,0 +1,64 @@
+name: Branch Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  reject-peak-hpc-ancestry:
+    name: Reject peak-hpc ancestry into main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Enforce one-way merge policy
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          base_ref='refs/remotes/upstream/main'
+          peak_ref='refs/remotes/upstream/peak-hpc'
+
+          git remote add upstream "https://github.com/${BASE_REPO}.git"
+          git fetch --no-tags upstream refs/heads/main:${base_ref} refs/heads/peak-hpc:${peak_ref}
+
+          if [ "$HEAD_REF" = 'peak-hpc' ]; then
+            echo "::error::PRs from 'peak-hpc' into 'main' are not allowed. Merge 'main' into 'peak-hpc' instead."
+            exit 1
+          fi
+
+          if ! git show-ref --verify --quiet "$base_ref"; then
+            echo "::error::Missing '$base_ref'. Update this workflow if the compatibility branch was renamed."
+            exit 1
+          fi
+
+          if ! git show-ref --verify --quiet "$peak_ref"; then
+            echo "::error::Missing '$peak_ref'. Update this workflow if the tightly coupled branch was renamed."
+            exit 1
+          fi
+
+          common_base="$(git merge-base "$HEAD_SHA" "$peak_ref")"
+          if [ -z "$common_base" ]; then
+            echo "::error::Unable to determine a merge base between the PR head and 'peak-hpc'."
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor "$common_base" "$base_ref"; then
+            echo "Branch ancestry policy passed: PR head does not contain peak-hpc-only history."
+            exit 0
+          fi
+
+          echo "::error::This PR contains history derived from 'peak-hpc'. Keep merges one-way: 'main' -> 'peak-hpc'."
+          echo "Common ancestor with peak-hpc: $common_base"
+          exit 1

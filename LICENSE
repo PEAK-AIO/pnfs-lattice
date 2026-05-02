@@ -1,0 +1,17 @@
+pnfs-mds (community edition)
+============================
+
+This project is dual-licensed.  See LICENSING.md for full details and the
+per-file split.
+
+In short:
+
+  - The vast majority of files are licensed under the MIT licence
+    (see LICENSE-MIT).
+
+  - The single file `src/catalogue/catalogue_rondb_shim.cpp` is licensed
+    under GPL-2.0-or-later (see LICENSE-GPL-2.0) because it `#include`s
+    the RonDB / MySQL Cluster NDB API headers, which are GPL-2.0.
+
+Every source file carries an SPDX-License-Identifier header indicating
+its licence.  When in doubt, that header is the source of truth.

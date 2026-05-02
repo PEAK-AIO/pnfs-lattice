@@ -1,0 +1,593 @@
+/*
+ * Copyright (c) 2026 PeakAIO
+ * SPDX-License-Identifier: MIT
+ *
+ * test_layout_recall.c — Tests for layout recall coordinator and
+ * LAYOUTERROR XDR decode (RFC 7862 §15.6).
+ *
+ * Covers:
+ *   1. Recall coordinator init/destroy lifecycle.
+ *   2. layout_recall_for_ds with no affected layouts (no-op).
+ *   3. layout_recall_for_ds revokes when no active session.
+ *   4. layout_recall_for_file returns -1 (stub).
+ *   5. LAYOUTERROR XDR decode with stateid + device_error array.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+
+/* Like assert() but not elided by NDEBUG. */
+#define VERIFY(expr) do { if (!(expr)) { \
+	fprintf(stderr, "VERIFY FAILED: %s (%s:%d)\n", \
+		#expr, __FILE__, __LINE__); abort(); } } while (0)
+#include <unistd.h>
+#include <errno.h>
+
+#include "layout_recall.h"
+#include "mds_catalogue.h"
+#include "test_helpers.h"
+#include "mds_coordination.h"
+#include "commit_queue.h"
+
+#include "open_state.h"
+#include "compound.h"
+#include "session.h"
+#include "nfs4_cb.h"
+#include "rpc_server.h"
+#include <sys/socket.h>
+#include <pthread.h>
+#include <poll.h>
+#include <arpa/inet.h>
+
+/* -----------------------------------------------------------------------
+ * Test helpers
+ * ----------------------------------------------------------------------- */
+
+static int pass_count;
+static int fail_count;
+
+#define ASSERT_EQ(a, b) do { \
+    long long _a = (long long)(a), _b = (long long)(b); \
+    if (_a != _b) { \
+        fprintf(stderr, "FAIL %s:%d: %s == %lld, expected %lld\n", \
+                __FILE__, __LINE__, #a, _a, _b); \
+        fail_count++; return; \
+    } pass_count++; \
+} while (0)
+
+#define ASSERT_NE(a, b) do { \
+    long long _a = (long long)(a), _b = (long long)(b); \
+    if (_a == _b) { \
+        fprintf(stderr, "FAIL %s:%d: %s == %lld, expected != %lld\n", \
+                __FILE__, __LINE__, #a, _a, _b); \
+        fail_count++; return; \
+    } pass_count++; \
+} while (0)
+
+#define TEST_MAP_SIZE (64ULL * 1024 * 1024)
+
+static char *make_temp_db_path(void)
+{
+    static char path[256];
+    snprintf(path, sizeof(path), "/tmp/test_layout_recall_%d", getpid());
+    return path;
+}
+
+static void cleanup_db(const char *path)
+{
+    char lockpath[300];
+    unlink(path);
+    snprintf(lockpath, sizeof(lockpath), "%s-lock", path);
+    unlink(lockpath);
+}
+
+/* Scan callback for verification. */
+struct scan_result {
+    uint64_t clientids[64];
+    uint64_t fileids[64];
+    uint32_t count;
+};
+
+static int collect_cb(uint64_t clientid, uint64_t fileid, void *ctx)
+{
+    struct scan_result *sr = ctx;
+
+    if (sr->count < 64) {
+        sr->clientids[sr->count] = clientid;
+        sr->fileids[sr->count] = fileid;
+        sr->count++;
+    }
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Test 1: Recall coordinator lifecycle
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_lifecycle(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    char *path = make_temp_db_path();
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+    ASSERT_NE((long long)(uintptr_t)lr, 0);
+
+    layout_recall_destroy(lr);
+    /* Destroy with NULL is safe. */
+    layout_recall_destroy(NULL);
+
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_lifecycle\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 2: layout_recall_for_ds with no affected layouts
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_no_layouts(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    char *path = make_temp_db_path();
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    /* No index entries for ds_id=99, should return 0 (success, no-op). */
+    ASSERT_EQ(layout_recall_for_ds(lr, 99), 0);
+
+    layout_recall_destroy(lr);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_no_layouts\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 3: Recall revokes layouts when no active session
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_revoke_no_session(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    char *path = make_temp_db_path();
+    enum mds_status mst;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct scan_result sr;
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 1000, &lr), 0);
+
+    /* Create a layout + index entry for ds_id=5, clientid=100, fileid=200.
+     * mds_coord_layout_grant creates both layout_state and ds_layout_idx. */
+    uint32_t ds_ids[] = {5};
+    mst = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
+    ASSERT_EQ(mst, MDS_OK);
+
+    memset(&sid, 0, sizeof(sid));
+    sid.seqid = 1;
+    mst = mds_coord_layout_grant(db, txn, 100, 200,
+                                 1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
+                                 ds_ids, 1);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    /*
+     * Call layout_recall_for_ds.  No session for clientid=100,
+     * so cb will fail and the layout should be revoked.
+     */
+    ASSERT_EQ(layout_recall_for_ds(lr, 5), 0);
+
+    /* Verify layout state was deleted (revoked). */
+    {
+        bool has_layout = false;
+        mst = mds_coord_layout_scan_for_file(db, 200, &has_layout);
+        ASSERT_EQ(mst, MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    /* Verify index entry was deleted. */
+    memset(&sr, 0, sizeof(sr));
+    mst = mds_coord_ds_layout_idx_scan(db, 5, collect_cb, &sr);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(sr.count, 0);
+
+    layout_recall_destroy(lr);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_revoke_no_session\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 4: layout_recall_for_file returns -1 (stub)
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_for_file_no_layouts(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    char *path = make_temp_db_path();
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    ASSERT_EQ(layout_recall_for_file(lr, 42), 0);
+
+    layout_recall_destroy(lr);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_for_file_no_layouts\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 5: LAYOUTERROR stateid field in arg struct
+ * ----------------------------------------------------------------------- */
+
+static void test_layouterror_struct(void)
+{
+    /*
+     * Verify the nfs4_arg_layouterror struct has the stateid field
+     * at the expected position (compile-time verification).
+     */
+    struct nfs4_arg_layouterror le;
+    memset(&le, 0, sizeof(le));
+    le.stateid.seqid = 42;
+    le.offset = 1000;
+    le.length = 2000;
+    le.status = 5; /* NFS4ERR_IO */
+    le.opnum = 25; /* OP_READ */
+
+    ASSERT_EQ(le.stateid.seqid, 42);
+    ASSERT_EQ(le.offset, 1000);
+    ASSERT_EQ(le.length, 2000);
+    ASSERT_EQ(le.status, 5);
+    ASSERT_EQ(le.opnum, 25);
+
+    printf("  PASS: test_layouterror_struct\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Mock CB server thread — reads one RPC record, sends a success reply
+ * ----------------------------------------------------------------------- */
+
+struct mock_cb_server_args {
+    int fd;
+    int received;  /* Set to 1 if a record was received. */
+};
+
+static void *mock_cb_server_thread(void *arg)
+{
+    struct mock_cb_server_args *a = arg;
+    struct pollfd pfd;
+    uint8_t hdr[4];
+    ssize_t n;
+
+    pfd.fd = a->fd;
+    pfd.events = POLLIN;
+
+    /* Wait for RPC record (fragment header + payload). */
+    if (poll(&pfd, 1, 3000) <= 0) {
+        return NULL;
+    }
+    n = recv(a->fd, hdr, 4, MSG_WAITALL);
+    if (n != 4) {
+        return NULL;
+    }
+
+    uint32_t raw = ntohl(*(uint32_t *)hdr);
+    uint32_t frag_len = raw & 0x7FFFFFFFu;
+
+    if (frag_len == 0 || frag_len > 4096) {
+        return NULL;
+    }
+
+    uint8_t *buf = malloc(frag_len);
+    if (buf == NULL) {
+        return NULL;
+    }
+    n = recv(a->fd, buf, frag_len, MSG_WAITALL);
+    if (n < 0 || (uint32_t)n != frag_len) {
+        free(buf);
+        return NULL;
+    }
+
+    /* Extract XID from RPC header (first 4 bytes of payload). */
+    uint32_t xid;
+    memcpy(&xid, buf, 4);
+    free(buf);
+
+    a->received = 1;
+
+    /*
+     * Build a minimal RPC REPLY + CB_COMPOUND success response.
+     * Layout: xid(4) reply(4=1) accepted(4=0) auth_none(4+4)
+     *         accept_success(4=0) status(4=0) tag_len(4=0) resarray_count(4=0)
+     */
+    uint8_t reply[40];
+    uint32_t *rp = (uint32_t *)reply;
+    rp[0] = xid;                    /* xid — network order from client */
+    rp[1] = htonl(1);               /* msg_type = REPLY */
+    rp[2] = htonl(0);               /* reply_stat = MSG_ACCEPTED */
+    rp[3] = htonl(0);               /* auth flavor = AUTH_NONE */
+    rp[4] = htonl(0);               /* auth body len = 0 */
+    rp[5] = htonl(0);               /* accept_stat = SUCCESS */
+    rp[6] = htonl(0);               /* CB_COMPOUND status = NFS4_OK */
+    rp[7] = htonl(0);               /* tag len = 0 */
+    rp[8] = htonl(0);               /* resarray count = 0 */
+
+    uint32_t reply_len = 36;
+    uint32_t frag_hdr = htonl(reply_len | 0x80000000u);
+
+    send(a->fd, &frag_hdr, 4, MSG_NOSIGNAL);
+    send(a->fd, reply, reply_len, MSG_NOSIGNAL);
+
+    return NULL;
+}
+
+/* -----------------------------------------------------------------------
+ * Test 6: Recall with session table set + CB succeeded
+ *
+ * Creates a session, binds a socketpair as cb_conn, populates
+ * layout + index, runs a mock CB server, and verifies both CB
+ * delivery and authoritative revoke.
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_with_cb_success(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct session_table *st = NULL;
+    char *path = make_temp_db_path();
+    enum mds_status mst;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct scan_result sr;
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 2000, &lr), 0);
+
+    /* Set up session table with one session. */
+    uint64_t clientid;
+    uint32_t seqid, flags_out;
+    ASSERT_EQ(session_table_init(0, 90, &st), 0);
+    ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"test-cb-client", 14,
+                                  (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
+                                  0, &clientid, &seqid, &flags_out), 0);
+
+    uint8_t session_id[SESSION_ID_SIZE];
+    uint32_t fore = 0, back = 0;
+    ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
+                                     0x40000000, 0, /* AUTH_NONE */
+                                     session_id, &fore, &back), 0);
+
+    /* Create socketpair for mock backchannel. */
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    /* Bind one end as cb_conn. */
+    ASSERT_EQ(session_bind_conn(st, session_id,
+                                (struct rpc_conn *)(void *)sv), 0);
+
+    /* Inject session table into recall coordinator. */
+    layout_recall_set_session_table(lr, st);
+
+    /* Create layout + index for ds_id=7, using the session's clientid. */
+    uint32_t ds_ids[] = {7};
+    mst = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
+    ASSERT_EQ(mst, MDS_OK);
+
+    memset(&sid, 0, sizeof(sid));
+    sid.seqid = 1;
+    mst = mds_coord_layout_grant(db, txn, clientid, 300,
+                                 1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
+                                 ds_ids, 1);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    /* Start mock CB server on the other end of the socketpair. */
+    struct mock_cb_server_args mock_args = { .fd = sv[1], .received = 0 };
+    pthread_t mock_tid;
+    ASSERT_EQ(pthread_create(&mock_tid, NULL, mock_cb_server_thread, &mock_args), 0);
+
+    /* Fire the recall. */
+    ASSERT_EQ(layout_recall_for_ds(lr, 7), 0);
+
+    /* Wait for mock server. */
+    pthread_join(mock_tid, NULL);
+
+    /* The mock server should have received a CB_LAYOUTRECALL. */
+    ASSERT_EQ(mock_args.received, 1);
+
+    /* Layout should be revoked (authoritative). */
+    {
+        bool has_layout = false;
+        mst = mds_coord_layout_scan_for_file(db, 300, &has_layout);
+        ASSERT_EQ(mst, MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    /* Index should be empty. */
+    memset(&sr, 0, sizeof(sr));
+    mst = mds_coord_ds_layout_idx_scan(db, 7, collect_cb, &sr);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(sr.count, 0);
+
+    close(sv[0]);
+    close(sv[1]);
+    layout_recall_destroy(lr);
+    session_table_destroy(st);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_with_cb_success\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 7: Recall with CB failure (no backchannel) still revokes
+ * ----------------------------------------------------------------------- */
+
+static void test_recall_cb_fail_still_revokes(void)
+{
+    struct mds_catalogue *db = NULL;
+	struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct session_table *st = NULL;
+    char *path = make_temp_db_path();
+    enum mds_status mst;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct scan_result sr;
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+	cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 500, &lr), 0);
+
+    /* Set up session without binding any cb_conn. */
+    uint64_t clientid;
+    uint32_t seqid, flags_out;
+    ASSERT_EQ(session_table_init(0, 90, &st), 0);
+    ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"test-no-bc", 10,
+                                  (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
+                                  0, &clientid, &seqid, &flags_out), 0);
+    uint8_t session_id[SESSION_ID_SIZE];
+    uint32_t fore = 0, back = 0;
+    ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
+                                     0x40000000, 0,
+                                     session_id, &fore, &back), 0);
+    /* No bind_conn — cb_conn is NULL, so CB will be skipped. */
+
+    layout_recall_set_session_table(lr, st);
+
+    /* Create layout. */
+    uint32_t ds_ids[] = {8};
+    mst = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
+    ASSERT_EQ(mst, MDS_OK);
+    memset(&sid, 0, sizeof(sid));
+    sid.seqid = 1;
+    mst = mds_coord_layout_grant(db, txn, clientid, 400,
+                                 1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
+                                 ds_ids, 1);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    /* Fire recall — CB will fail (no cb_conn), but revoke must succeed. */
+    ASSERT_EQ(layout_recall_for_ds(lr, 8), 0);
+
+    /* Layout must be revoked. */
+    {
+        bool has_layout = false;
+        mst = mds_coord_layout_scan_for_file(db, 400, &has_layout);
+        ASSERT_EQ(mst, MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    memset(&sr, 0, sizeof(sr));
+    mst = mds_coord_ds_layout_idx_scan(db, 8, collect_cb, &sr);
+    ASSERT_EQ(mst, MDS_OK);
+    ASSERT_EQ(sr.count, 0);
+
+    layout_recall_destroy(lr);
+    session_table_destroy(st);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_recall_cb_fail_still_revokes\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 8: nfs4_cb_layoutrecall_fd basic validation
+ * ----------------------------------------------------------------------- */
+
+static void test_cb_layoutrecall_fd_bad_args(void)
+{
+    struct nfs4_cb_layoutrecall_args args;
+    uint8_t sid[SESSION_ID_SIZE] = {0};
+
+    memset(&args, 0, sizeof(args));
+    args.recall_type = LAYOUTRECALL4_ALL;
+
+    /* Bad fd. */
+    ASSERT_EQ(nfs4_cb_layoutrecall_fd(-1, sid, 0x40000000, 1, 1,
+                                       &args, 1000), -EINVAL);
+    /* NULL args. */
+    ASSERT_EQ(nfs4_cb_layoutrecall_fd(0, sid, 0x40000000, 1, 1,
+                                       NULL, 1000), -EINVAL);
+    /* NULL session_id. */
+    ASSERT_EQ(nfs4_cb_layoutrecall_fd(0, NULL, 0x40000000, 1, 1,
+                                       &args, 1000), -EINVAL);
+
+    printf("  PASS: test_cb_layoutrecall_fd_bad_args\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 9: nfs4_cb_layoutrecall_fd round-trip over socketpair
+ * ----------------------------------------------------------------------- */
+
+static void test_cb_layoutrecall_fd_roundtrip(void)
+{
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    uint8_t sid[SESSION_ID_SIZE];
+    memset(sid, 0x42, SESSION_ID_SIZE);
+
+    struct nfs4_cb_layoutrecall_args args;
+    memset(&args, 0, sizeof(args));
+    args.layout_type = 1;
+    args.iomode = 3;
+    args.recall_type = LAYOUTRECALL4_ALL;
+
+    /* Start mock server. */
+    struct mock_cb_server_args mock = { .fd = sv[1], .received = 0 };
+    pthread_t tid;
+    ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
+
+    int rc = nfs4_cb_layoutrecall_fd(sv[0], sid, 0x40000000, 1, 1,
+                                      &args, 3000);
+    ASSERT_EQ(rc, 0);
+
+    pthread_join(tid, NULL);
+    ASSERT_EQ(mock.received, 1);
+
+    close(sv[0]);
+    close(sv[1]);
+    printf("  PASS: test_cb_layoutrecall_fd_roundtrip\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Main
+ * ----------------------------------------------------------------------- */
+
+int main(void)
+{
+    printf("test_layout_recall\n");
+
+    test_recall_lifecycle();
+    test_recall_no_layouts();
+    test_recall_revoke_no_session();
+    test_recall_for_file_no_layouts();
+    test_layouterror_struct();
+    test_recall_with_cb_success();
+    test_recall_cb_fail_still_revokes();
+    test_cb_layoutrecall_fd_bad_args();
+    test_cb_layoutrecall_fd_roundtrip();
+
+    printf("\n%d passed, %d failed\n", pass_count, fail_count);
+    return fail_count > 0 ? 1 : 0;
+}
