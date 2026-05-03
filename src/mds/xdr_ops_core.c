@@ -234,43 +234,81 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
 
-    /* cb_sec_parms4 array — capture first flavor, skip rest. */
+    /*
+     * RFC 8881 §2.10.8.3 / §18.36.3 — callback_sec_parms<> is an
+     * array of callback_sec_parms4 entries, one per security flavor
+     * the client is willing to receive callbacks under.  We capture
+     * the FIRST entry (AUTH_NONE or AUTH_SYS) into a->cb_sec; the
+     * legacy a->cb_sec_flavor scalar is also populated for back-
+     * compat with code paths that haven't been updated to consult
+     * the struct.  Subsequent entries are decoded only to advance
+     * the wire cursor.
+     *
+     * Pynfs DELEG5/6/7 verify that the server emits CB_RECALL with
+     * exactly the auth flavor (and uid/gid for AUTH_SYS) that the
+     * client supplied here.
+     */
     {
         uint32_t count;
 
         if (!xdr_uint32_t(xdrs, &count)) {
             return false;
-}
-        a->cb_sec_flavor = 0; /* default AUTH_NONE */
+        }
+        memset(&a->cb_sec, 0, sizeof(a->cb_sec));
+        a->cb_sec_flavor = NFS4_CB_AUTH_NONE;
         for (uint32_t i = 0; i < count; i++) {
             uint32_t flavor;
 
             if (!xdr_uint32_t(xdrs, &flavor)) {
                 return false;
-}
-            if (i == 0) {
+            }
+            bool capture = (i == 0);
+            if (capture) {
                 a->cb_sec_flavor = flavor;
-}
-            /* AUTH_NONE (0) has no additional data.
-             * AUTH_SYS (1) has variable-length body — skip it. */
-            if (flavor == 1) {
+                a->cb_sec.flavor = (flavor == NFS4_CB_AUTH_SYS)
+                    ? NFS4_CB_AUTH_SYS : NFS4_CB_AUTH_NONE;
+            }
+            if (flavor == NFS4_CB_AUTH_SYS) {
                 /* authsys_parms: stamp(4) + machinename(string) +
                  * uid(4) + gid(4) + gids<>(uint32 array). */
                 uint32_t stamp, mname_len, uid, gid, ngids;
                 if (!xdr_uint32_t(xdrs, &stamp)) { return false; }
                 if (!xdr_uint32_t(xdrs, &mname_len)) { return false; }
+                if (mname_len > 255) { return false; }
+                char mname_buf[256];
                 if (mname_len > 0) {
                     uint32_t padded = (mname_len + 3) & ~3u;
-                    char mskip[256];
-                    if (padded > sizeof(mskip)) { return false; }
-                    if (!xdr_opaque_decode(xdrs, mskip, padded)) { return false; }
+                    if (padded > sizeof(mname_buf)) { return false; }
+                    if (!xdr_opaque_decode(xdrs, mname_buf, padded)) {
+                        return false;
+                    }
                 }
                 if (!xdr_uint32_t(xdrs, &uid)) { return false; }
                 if (!xdr_uint32_t(xdrs, &gid)) { return false; }
                 if (!xdr_uint32_t(xdrs, &ngids)) { return false; }
+                uint32_t aux_buf[NFS4_CB_AUX_GIDS_MAX] = {0};
+                uint32_t kept_aux = 0;
                 for (uint32_t gi = 0; gi < ngids; gi++) {
                     uint32_t aux;
                     if (!xdr_uint32_t(xdrs, &aux)) { return false; }
+                    if (capture && kept_aux < NFS4_CB_AUX_GIDS_MAX) {
+                        aux_buf[kept_aux++] = aux;
+                    }
+                }
+                if (capture) {
+                    a->cb_sec.sys_stamp = stamp;
+                    a->cb_sec.sys_uid = uid;
+                    a->cb_sec.sys_gid = gid;
+                    a->cb_sec.sys_machname_len = mname_len;
+                    if (mname_len > 0) {
+                        memcpy(a->cb_sec.sys_machname, mname_buf,
+                               mname_len);
+                    }
+                    a->cb_sec.sys_ngids = kept_aux;
+                    if (kept_aux > 0) {
+                        memcpy(a->cb_sec.sys_gids, aux_buf,
+                               kept_aux * sizeof(uint32_t));
+                    }
                 }
             }
         }

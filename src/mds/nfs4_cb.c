@@ -197,43 +197,91 @@ static int recv_record(int fd, uint32_t timeout_ms,
  * XDR encoding: CB_COMPOUND { CB_SEQUENCE, CB_LAYOUTRECALL }
  * ----------------------------------------------------------------------- */
 
+/*
+ * RFC 8881 §2.10.8.3 / RFC 5531 §9 — emit the RPC credential per the
+ * captured callback security parameters.  AUTH_NONE (the RFC 8881
+ * default for callbacks) emits flavor=0 with an empty (length-zero)
+ * body.  AUTH_SYS emits flavor=1 with the authsys_parms tuple
+ * (stamp, machinename, uid, gid, gids<16>) length-prefixed by the
+ * total body size.  RPCSEC_GSS is not yet implemented; any other
+ * flavor falls back to AUTH_NONE so the encoder always emits a
+ * valid RPC header.
+ *
+ * @param sec  Captured parms (NULL is treated as AUTH_NONE for
+ *             back-compat with code paths that never populated it).
+ */
+static bool encode_rpc_cred(XDR *xdrs, const struct nfs4_cb_sec *sec)
+{
+    uint32_t flavor = (sec != NULL) ? sec->flavor : NFS4_CB_AUTH_NONE;
+
+    if (flavor != NFS4_CB_AUTH_SYS) {
+        flavor = NFS4_CB_AUTH_NONE;
+    }
+    {
+        uint32_t flavor_w = flavor;
+        if (!xdr_uint32_t(xdrs, &flavor_w)) {
+            return false;
+        }
+    }
+    if (flavor == NFS4_CB_AUTH_NONE) {
+        uint32_t body_len = 0;
+        return xdr_uint32_t(xdrs, &body_len);
+    }
+    /* AUTH_SYS body. */
+    uint32_t mname_len = sec->sys_machname_len;
+    if (mname_len > NFS4_CB_MACHNAME_MAX) {
+        mname_len = NFS4_CB_MACHNAME_MAX;
+    }
+    uint32_t mname_padded = (mname_len + 3) & ~3u;
+    uint32_t ngids = sec->sys_ngids;
+    if (ngids > NFS4_CB_AUX_GIDS_MAX) {
+        ngids = NFS4_CB_AUX_GIDS_MAX;
+    }
+    /* body = stamp(4) + mname_len(4) + mname_padded + uid(4) + gid(4)
+     *      + ngids(4) + ngids*4. */
+    uint32_t body_len = 4 + 4 + mname_padded + 4 + 4 + 4 + (ngids * 4);
+    uint32_t stamp = sec->sys_stamp;
+    uint32_t uid = sec->sys_uid;
+    uint32_t gid = sec->sys_gid;
+    uint32_t mname_len_w = mname_len;
+    uint32_t ngids_w = ngids;
+
+    if (!xdr_uint32_t(xdrs, &body_len)) { return false; }
+    if (!xdr_uint32_t(xdrs, &stamp)) { return false; }
+    if (!xdr_uint32_t(xdrs, &mname_len_w)) { return false; }
+    if (mname_len > 0) {
+        if (!xdr_opaque_encode(xdrs, sec->sys_machname, mname_len)) {
+            return false;
+        }
+    }
+    if (!xdr_uint32_t(xdrs, &uid)) { return false; }
+    if (!xdr_uint32_t(xdrs, &gid)) { return false; }
+    if (!xdr_uint32_t(xdrs, &ngids_w)) { return false; }
+    for (uint32_t i = 0; i < ngids; i++) {
+        uint32_t g = sec->sys_gids[i];
+        if (!xdr_uint32_t(xdrs, &g)) { return false; }
+    }
+    return true;
+}
+
 static bool encode_rpc_call_header(XDR *xdrs, uint32_t xid,
-                                   uint32_t prog, uint32_t proc)
+                                   uint32_t prog, uint32_t proc,
+                                   const struct nfs4_cb_sec *sec)
 {
     uint32_t v;
 
-    v = xid;           if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = RPC_CALL;      if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = RPC_MSG_VERSION; if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = prog;          if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = CB_PROG_VERSION; if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = proc;          if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    /* Credential: AUTH_SYS (flavor=1, uid=0, gid=0). */
-    v = 1; /* AUTH_SYS */
-    if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    {
-        /* AUTH_SYS body: stamp + machinename + uid + gid + gids[] */
-        uint32_t body_len = 20; /* 4+4+0+4+4+4 */
-        uint32_t stamp = 0, mname_len = 0, uid = 0, gid = 0, ngids = 0;
-        if (!xdr_uint32_t(xdrs, &body_len)) { return false; }
-        if (!xdr_uint32_t(xdrs, &stamp)) { return false; }
-        if (!xdr_uint32_t(xdrs, &mname_len)) { return false; }
-        if (!xdr_uint32_t(xdrs, &uid)) { return false; }
-        if (!xdr_uint32_t(xdrs, &gid)) { return false; }
-        if (!xdr_uint32_t(xdrs, &ngids)) { return false; }
-    }
-    /* Verifier: AUTH_NONE (flavor=0, body_len=0). */
-    v = AUTH_NONE;     if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
-    v = 0;             if (!xdr_uint32_t(xdrs, &v)) { return false;
-}
+    v = xid;             if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = RPC_CALL;        if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = RPC_MSG_VERSION; if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = prog;            if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = CB_PROG_VERSION; if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = proc;            if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    /* Credential: per session sec parms (AUTH_NONE / AUTH_SYS). */
+    if (!encode_rpc_cred(xdrs, sec)) { return false; }
+    /* Verifier: AUTH_NONE (flavor=0, body_len=0).  Per RFC 5531
+     * §9.5 the verifier is AUTH_NONE for AUTH_SYS calls. */
+    v = AUTH_NONE;     if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    v = 0;             if (!xdr_uint32_t(xdrs, &v)) { return false; }
     return true;
 }
 
@@ -672,7 +720,8 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
     /* Encode the full RPC message. */
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
+                                &session->cb_sec)) {
         rc = -EIO;
         goto out;
     }
@@ -761,7 +810,8 @@ int nfs4_cb_notify(struct nfs4_session *session,
 
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
+                                &session->cb_sec)) {
         rc = -EIO;
         goto out;
     }
@@ -810,6 +860,7 @@ int nfs4_cb_notify_fd(int fd,
                       uint32_t slot_seq_id,
                       uint32_t num_cb_slots,
                       uint32_t minorversion,
+                      const struct nfs4_cb_sec *sec,
                       const struct nfs4_cb_notify_args *args,
                       uint32_t timeout_ms)
 {
@@ -836,7 +887,7 @@ int nfs4_cb_notify_fd(int fd,
 
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1, sec)) {
         xdr_destroy(&xdrs);
         return -EIO;
     }
@@ -913,7 +964,8 @@ int nfs4_cb_recall(struct nfs4_session *session,
 
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
+                                &session->cb_sec)) {
         rc = -EIO;
         goto out;
     }
@@ -978,6 +1030,7 @@ int nfs4_cb_recall_fd(int fd,
                       uint32_t slot_seq_id,
                       uint32_t num_cb_slots,
                       uint32_t minorversion,
+                      const struct nfs4_cb_sec *sec,
                       const struct nfs4_cb_recall_args *args,
                       uint32_t timeout_ms)
 {
@@ -1000,7 +1053,7 @@ int nfs4_cb_recall_fd(int fd,
 
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1, sec)) {
         xdr_destroy(&xdrs);
         return -EIO;
     }
@@ -1047,6 +1100,7 @@ int nfs4_cb_layoutrecall_fd(int fd,
                             uint32_t slot_seq_id,
                             uint32_t num_cb_slots,
                             uint32_t minorversion,
+                            const struct nfs4_cb_sec *sec,
                             const struct nfs4_cb_layoutrecall_args *args,
                             uint32_t timeout_ms)
 {
@@ -1069,7 +1123,7 @@ int nfs4_cb_layoutrecall_fd(int fd,
 
     xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
 
-    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1)) {
+    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1, sec)) {
         xdr_destroy(&xdrs);
         return -EIO;
     }

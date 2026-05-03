@@ -530,13 +530,13 @@ static void test_cb_layoutrecall_fd_bad_args(void)
 
     /* Bad fd. */
     ASSERT_EQ(nfs4_cb_layoutrecall_fd(-1, sid, 0x40000000, 1, 1,
-                                       1, &args, 1000), -EINVAL);
+                                       1, NULL, &args, 1000), -EINVAL);
     /* NULL args. */
     ASSERT_EQ(nfs4_cb_layoutrecall_fd(0, sid, 0x40000000, 1, 1,
-                                       1, NULL, 1000), -EINVAL);
+                                       1, NULL, NULL, 1000), -EINVAL);
     /* NULL session_id. */
     ASSERT_EQ(nfs4_cb_layoutrecall_fd(0, NULL, 0x40000000, 1, 1,
-                                       1, &args, 1000), -EINVAL);
+                                       1, NULL, &args, 1000), -EINVAL);
 
     printf("  PASS: test_cb_layoutrecall_fd_bad_args\n");
 }
@@ -565,7 +565,8 @@ static void test_cb_layoutrecall_fd_roundtrip(void)
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
     int rc = nfs4_cb_layoutrecall_fd(sv[0], sid, 0x40000000, 1, 1,
-                                      1 /* minorversion */, &args, 3000);
+                                      1 /* minorversion */, NULL,
+                                      &args, 3000);
     ASSERT_EQ(rc, 0);
 
     pthread_join(tid, NULL);

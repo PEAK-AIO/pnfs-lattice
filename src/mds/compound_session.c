@@ -147,6 +147,19 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 	case 0:
 		r->csr_sequence = a->seqid;
 		r->csr_flags = 0;
+		/*
+		 * RFC 8881 §2.10.8.3 / §18.36.3 — push the captured
+		 * callback security parms onto the new session so the
+		 * CB encoder can emit the right RPC credential body
+		 * (AUTH_NONE void / AUTH_SYS authsys_parms) on every
+		 * subsequent CB_COMPOUND.  The decoder writes a->cb_sec
+		 * (the FIRST entry of csa_sec_parms<>); zero-init means
+		 * AUTH_NONE which is the safe baseline.  Errors here
+		 * are fatal-but-best-effort: a missed update means CBs
+		 * fall back to AUTH_NONE for this session, which is
+		 * still a legal flavor per RFC 8881 §2.10.8.3.
+		 */
+		(void)session_set_cb_sec(cd->st, r->session_id, &a->cb_sec);
 		/* Bind this client connection as the backchannel transport. */
 		if (cd->conn != NULL) {
 			(void)session_bind_conn(cd->st, r->session_id,

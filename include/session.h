@@ -24,6 +24,8 @@
 #include <stdbool.h>
 #include <time.h>
 
+#include "nfs4_cb_sec.h"  /* struct nfs4_cb_sec — callback security parms */
+
 struct mds_catalogue;
 struct commit_queue;  /* Forward declaration for session_table_set_cq() */
 struct rpc_conn;      /* Forward declaration for backchannel binding */
@@ -102,7 +104,16 @@ struct nfs4_session {
 	uint32_t             max_operations;
 	/* Backchannel state (RFC 8881 §2.10.3.1) */
 	uint32_t             cb_prog;         /* Callback program number */
-	uint32_t             cb_sec_flavor;   /* Callback security flavor */
+	uint32_t             cb_sec_flavor;   /* Callback security flavor (legacy alias for cb_sec.flavor) */
+	/*
+	 * RFC 8881 §2.10.8.3 / §18.36 — callback security parameters
+	 * captured from CREATE_SESSION's csa_sec_parms<> array.  The
+	 * CB encoder uses this to populate the RPC credential body
+	 * (flavor + AUTH_SYS authsys_parms or AUTH_NONE void) of
+	 * every CB_COMPOUND call.  Updated by BACKCHANNEL_CTL when
+	 * implemented.  Default (zero-initialised) yields AUTH_NONE.
+	 */
+	struct nfs4_cb_sec   cb_sec;
 	struct rpc_conn     *cb_conn;         /* Borrowed ptr to client connection */
 	struct nfs4_slot    *cb_slots;        /* Backchannel slot table */
 	uint32_t             num_cb_slots;    /* Backchannel slot count */
@@ -421,6 +432,12 @@ struct session_cb_snap {
     uint8_t  session_id[SESSION_ID_SIZE];
     uint32_t cb_prog;
     uint32_t cb_sec_flavor;
+    /*
+     * RFC 8881 §2.10.8.3 — captured callback security parameters.
+     * Snapped by value so the CB I/O thread doesn't need to take
+     * the session-table lock when building the RPC credential.
+     */
+    struct nfs4_cb_sec cb_sec;
     const struct rpc_conn *cb_conn; /**< Borrowed ptr — valid only during callback */
     uint32_t slot_seq_id;    /**< Current seq_id for backchannel slot 0 */
     /*
@@ -465,6 +482,33 @@ typedef int (*session_cb_snap_fn)(const struct session_cb_snap *snap,
  */
 int session_for_each_with_cb(struct session_table *st,
                              session_cb_snap_fn cb, void *ctx);
+
+/**
+ * Update the stored callback security parameters for a session.
+ *
+ * Used by op_create_session and op_backchannel_ctl (RFC 8881 §18.33).
+ * The new parms replace the previous value verbatim under the session-
+ * table lock.  Subsequent CB_COMPOUND calls use the new parms via
+ * snap.cb_sec.
+ *
+ * @param st          Session table.
+ * @param session_id  Target session.
+ * @param sec         New parms (NULL clears to zero/AUTH_NONE).
+ * @return 0 on success, -1 if session not found.
+ */
+int session_set_cb_sec(struct session_table *st,
+                       const uint8_t session_id[SESSION_ID_SIZE],
+                       const struct nfs4_cb_sec *sec);
+
+/**
+ * Update the callback program number for a session.
+ *
+ * Used by op_backchannel_ctl when the client supplies a new cb_prog
+ * (RFC 8881 §18.33.1 bca_cb_program).
+ */
+int session_set_cb_prog(struct session_table *st,
+                        const uint8_t session_id[SESSION_ID_SIZE],
+                        uint32_t cb_prog);
 
 #endif /* SESSION_H */
 /* Lease expiry reaper (R2.2). */

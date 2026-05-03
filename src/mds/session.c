@@ -1055,6 +1055,65 @@ int session_bind_conn(struct session_table *st,
 	return 0;
 }
 
+/*
+ * RFC 8881 §2.10.8.3 / §18.36 — update the captured callback security
+ * parameters on a session.  Called by op_create_session immediately
+ * after session_create_session, and by op_backchannel_ctl when the
+ * client supplies new bca_sec_parms.  A NULL @sec clears the parms
+ * to zero (AUTH_NONE void cred body).
+ *
+ * Also keeps the legacy cb_sec_flavor scalar in sync so any code
+ * that still reads it sees the new flavor.
+ */
+int session_set_cb_sec(struct session_table *st,
+                       const uint8_t session_id[SESSION_ID_SIZE],
+                       const struct nfs4_cb_sec *sec)
+{
+    struct nfs4_session *s;
+
+    if (st == NULL || session_id == NULL) {
+        return -1;
+    }
+    pthread_mutex_lock(&st->locks[0]);
+    s = find_session(st, session_id);
+    if (s == NULL) {
+        pthread_mutex_unlock(&st->locks[0]);
+        return -1;
+    }
+    if (sec != NULL) {
+        s->cb_sec = *sec;
+    } else {
+        memset(&s->cb_sec, 0, sizeof(s->cb_sec));
+    }
+    s->cb_sec_flavor = s->cb_sec.flavor;
+    pthread_mutex_unlock(&st->locks[0]);
+    return 0;
+}
+
+/*
+ * RFC 8881 §18.33 BACKCHANNEL_CTL — update the callback program
+ * number on a session.  No-op when the new value matches.
+ */
+int session_set_cb_prog(struct session_table *st,
+                        const uint8_t session_id[SESSION_ID_SIZE],
+                        uint32_t cb_prog)
+{
+    struct nfs4_session *s;
+
+    if (st == NULL || session_id == NULL) {
+        return -1;
+    }
+    pthread_mutex_lock(&st->locks[0]);
+    s = find_session(st, session_id);
+    if (s == NULL) {
+        pthread_mutex_unlock(&st->locks[0]);
+        return -1;
+    }
+    s->cb_prog = cb_prog;
+    pthread_mutex_unlock(&st->locks[0]);
+    return 0;
+}
+
 void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
 {
 	uint32_t i;
@@ -1108,6 +1167,7 @@ int session_for_each_with_cb(struct session_table *st,
             memcpy(snap.session_id, s->session_id, SESSION_ID_SIZE);
             snap.cb_prog = s->cb_prog;
             snap.cb_sec_flavor = s->cb_sec_flavor;
+            snap.cb_sec = s->cb_sec;
             snap.cb_conn = s->cb_conn;
             /*
              * RFC 8881 §2.10.5.1 / §18.46.4: CB_SEQUENCE sa_sequenceid

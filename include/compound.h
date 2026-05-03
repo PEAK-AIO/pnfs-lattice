@@ -324,7 +324,17 @@ struct nfs4_arg_create_session {
 	uint32_t fore_slots;
 	uint32_t back_slots;
 	uint32_t cb_prog;        /**< Callback program number. */
-	uint32_t cb_sec_flavor;  /**< Callback security flavor. */
+	uint32_t cb_sec_flavor;  /**< Callback security flavor (legacy alias). */
+	/*
+	 * RFC 8881 §2.10.8.3 / §18.36 — callback_sec_parms4 entry
+	 * captured by the decoder for the FIRST entry of csa_sec_parms<>.
+	 * Stored on the new session by op_create_session via
+	 * session_set_cb_sec() so the CB encoder can emit the right RPC
+	 * credential body (AUTH_NONE void or AUTH_SYS authsys_parms).
+	 * pynfs DELEG5/6/7 (testCBSecParms*) verify uid/gid/flavor on
+	 * received CB_RECALLs by inspecting this on the wire.
+	 */
+	struct nfs4_cb_sec cb_sec;
 	/* RFC 8881 §18.36.4 client-requested forechannel attrs.  The
 	 * server emits MIN(client_request, server_pref) in the reply
 	 * and stores the negotiated values on the session for enforcement
