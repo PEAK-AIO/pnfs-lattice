@@ -1044,11 +1044,23 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_READLINK:        op->opnum = OP_READLINK; return true;
     case OP_ACCESS:
         return xdr_uint32_t(xdrs, &op->arg.access.access);
-    case OP_DELEGRETURN: {
-        /* DELEGRETURN4args: stateid4 deleg_stateid. */
-        struct nfs4_stateid dsid;
-        return xdr_nfs4_stateid_decode(xdrs, &dsid);
-    }
+    case OP_DELEGRETURN:
+        /*
+         * RFC 8881 §18.6.1 DELEGRETURN4args = stateid4 deleg_stateid.
+         * op_delegreturn (compound_data_io.c) reads the stateid from
+         * op->arg.close.stateid — the close-arg slot is shared with
+         * delegreturn since both ops carry only a stateid.  Pre-fix,
+         * the decoder wrote the stateid to a stack-local that went
+         * out of scope before dispatch, leaving op->arg.close.stateid
+         * zero.  op_delegreturn then called deleg_return() with the
+         * special-zero stateid, which never matched a grant; the
+         * compound completed with NFS4_OK in the status word but
+         * without the encoder's per-op tail (DELEGRETURN was missing
+         * from the encoder switch entirely — fixed below) so the
+         * client never saw the reply at all and waited 30 s before
+         * FIN.  Pynfs DELEG1 hung exactly here.
+         */
+        return xdr_nfs4_stateid_decode(xdrs, &op->arg.close.stateid);
     case OP_LOCK: {
         struct nfs4_arg_lock *a = &op->arg.lock;
         if (!xdr_uint32_t(xdrs, &a->lock_type)) { return false; }
@@ -1400,6 +1412,22 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
     case OP_LOCKU:
         return xdr_nfs4_stateid_encode(xdrs, &r->res.locku.stateid);
     case OP_OPENATTR:        return true; /* status-only */
+    /*
+     * RFC 8881 §18.6.4 DELEGRETURN4res — status-only.  The status
+     * word is already emitted by encode_one_result before the
+     * switch; nothing follows it on the wire.  Pre-fix this case
+     * was missing and fell through to `default: return false;`,
+     * which made the caller abort the entire compound encode and
+     * silently drop the reply (pynfs DELEG1 hang root cause).
+     */
+    case OP_DELEGRETURN:     return true; /* RFC 8881 §18.6.4 */
+    /*
+     * RFC 8881 §18.18.4 OPEN_DOWNGRADE4res — stateid4 on NFS4_OK.
+     * op_open_downgrade stores the new stateid in r->res.close.stateid
+     * (close-result slot is shared, same as the close stateid path).
+     */
+    case OP_OPEN_DOWNGRADE:
+        return xdr_nfs4_stateid_encode(xdrs, &r->res.close.stateid);
     case OP_READ:            return encode_res_read(xdrs, r);
     case OP_WRITE:           return encode_res_write(xdrs, r);
     case OP_COMMIT: {
