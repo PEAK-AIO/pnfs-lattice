@@ -193,6 +193,75 @@ enum nfs4_status op_destroy_session(struct compound_data *cd,
 	return NFS4_OK;
 }
 
+/*
+ * RFC 8881 §18.33 BACKCHANNEL_CTL — update the captured callback
+ * program number and/or callback security parameters on the current
+ * session.
+ *
+ * The wire form (§18.33.1) carries no session_id; the operation
+ * applies to the session bound to the leading SEQUENCE of the same
+ * COMPOUND.  We therefore require sequence_done (enforced by
+ * dispatch_op's NFS4ERR_OP_NOT_IN_SESSION gate) and read the
+ * session_id from cd->ops[0], which compound_process() guarantees
+ * to be the SEQUENCE op when sequence_done is true.
+ *
+ * Memory ownership: a->cb_sec is decoded into op->arg by the codec
+ * and lives for the duration of compound_process().  session_set_cb_sec
+ * copies the struct under the session-table lock, so we don't take
+ * ownership of any pointers — the entire nfs4_cb_sec is by-value.
+ *
+ * Errors:
+ *   - NFS4ERR_SERVERFAULT if the session table is missing.
+ *   - NFS4ERR_OP_NOT_IN_SESSION if SEQUENCE was not the leading op.
+ *   - NFS4ERR_BADSESSION if the session lookup fails (stale/destroyed).
+ *
+ * Pynfs DELEG7 (testCBSecParmsChange) verifies that a CB_RECALL
+ * issued AFTER this call carries the new authsys uid/gid.
+ */
+enum nfs4_status op_backchannel_ctl(struct compound_data *cd,
+				    const struct nfs4_op *op,
+				    struct nfs4_result *res)
+{
+	const struct nfs4_arg_backchannel_ctl *a = &op->arg.backchannel_ctl;
+	const uint8_t *session_id;
+	int rc_sec = 0, rc_prog = 0;
+
+	(void)res;
+
+	if (cd->st == NULL) {
+		return NFS4ERR_SERVERFAULT;
+	}
+
+	/*
+	 * BACKCHANNEL_CTL operates on the SEQUENCE-bound session.
+	 * dispatch_op already rejects this op with
+	 * NFS4ERR_OP_NOT_IN_SESSION if SEQUENCE didn't run, so by the
+	 * time we get here cd->ops[0] is guaranteed to be the
+	 * SEQUENCE op of this compound.  Defensive null-checks are
+	 * kept for robustness in case dispatch ever calls this op
+	 * out-of-band (e.g. from a unit test that bypasses the
+	 * session gate).
+	 */
+	if (cd->ops == NULL || cd->op_count == 0 ||
+	    cd->ops[0].opnum != OP_SEQUENCE) {
+		return NFS4ERR_OP_NOT_IN_SESSION;
+	}
+	session_id = cd->ops[0].arg.sequence.session_id;
+
+	if (a->cb_sec_set) {
+		rc_sec = session_set_cb_sec(cd->st, session_id, &a->cb_sec);
+	}
+	if (a->cb_prog_set) {
+		rc_prog = session_set_cb_prog(cd->st, session_id,
+					      a->cb_prog);
+	}
+
+	if (rc_sec != 0 || rc_prog != 0) {
+		return NFS4ERR_BADSESSION;
+	}
+	return NFS4_OK;
+}
+
 /* -----------------------------------------------------------------------
  * ACCESS (RFC 8881 §18.1) — mandatory.
  *

@@ -790,6 +790,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		case OP_TEST_STATEID:
 		case OP_FREE_STATEID:
 		case OP_BIND_CONN_TO_SESSION:
+		case OP_BACKCHANNEL_CTL:  /* RFC 8881 §18.33 — session admin, safe in grace */
 		case OP_LOCK:
 		case OP_LOCKT:
 		case OP_LOCKU:
@@ -1064,6 +1065,14 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		       op->arg.destroy_session.session_id,
 		       SESSION_ID_SIZE);
 		return NFS4_OK;
+
+	/*
+	 * BACKCHANNEL_CTL (RFC 8881 §18.33) — update CB program
+	 * number and/or CB security parms on the SEQUENCE-bound
+	 * session.  Status-only result.  Pynfs DELEG7.
+	 */
+	case OP_BACKCHANNEL_CTL:
+		return op_backchannel_ctl(cd, op, res);
 
 	/* SECINFO / SECINFO_NO_NAME: return supported security flavors.
 	 * RFC 8881 §18.29 / §18.45. */

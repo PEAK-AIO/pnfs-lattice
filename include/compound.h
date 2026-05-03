@@ -166,6 +166,7 @@ enum nfs_opnum4 {
 	OP_LAYOUTGET        = 50,
 	OP_LAYOUTRETURN     = 51,
 	OP_SEQUENCE         = 53,
+	OP_BACKCHANNEL_CTL  = 40,  /* RFC 8881 §18.33 */
 	OP_BIND_CONN_TO_SESSION = 41,
 	OP_FREE_STATEID     = 45,
 	OP_TEST_STATEID     = 55,
@@ -346,6 +347,36 @@ struct nfs4_arg_create_session {
 
 struct nfs4_arg_destroy_session {
 	uint8_t session_id[SESSION_ID_SIZE];
+};
+
+/**
+ * RFC 8881 §18.33.1 — BACKCHANNEL_CTL arguments.
+ *
+ *   struct BACKCHANNEL_CTL4args {
+ *       uint32_t            bca_cb_program;
+ *       callback_sec_parms4 bca_sec_parms<>;
+ *   };
+ *
+ * Used by clients to update either the callback program number or the
+ * captured callback security parameters (or both) on an existing
+ * session, without having to tear it down and re-create it.  Pynfs
+ * DELEG7 (testCBSecParmsChange) drives this path by calling
+ * BACKCHANNEL_CTL with a fresh authsys_parms{uid2, gid2} after a
+ * CREATE_SESSION that supplied {uid1, gid1}; the test then verifies
+ * that the next CB_RECALL carries uid2/gid2.
+ *
+ * cb_prog_set is true iff the wire request actually carried a non-zero
+ * cb_program (we always decode it but want to distinguish "don't
+ * change" from "set to zero" for future-proofing; today we always
+ * apply it).  cb_sec is populated from the FIRST entry of
+ * bca_sec_parms<>; subsequent entries are decoded only to advance the
+ * wire cursor.
+ */
+struct nfs4_arg_backchannel_ctl {
+	uint32_t            cb_prog;
+	bool                cb_prog_set;
+	struct nfs4_cb_sec  cb_sec;
+	bool                cb_sec_set;
 };
 
 struct nfs4_arg_sequence {
@@ -730,6 +761,7 @@ struct nfs4_op {
 		struct nfs4_arg_exchange_id     exchange_id;
 		struct nfs4_arg_create_session  create_session;
 		struct nfs4_arg_destroy_session destroy_session;
+		struct nfs4_arg_backchannel_ctl backchannel_ctl;
 		uint64_t                        destroy_clientid;
 		struct nfs4_stateid             free_stateid;
 		struct nfs4_arg_sequence        sequence;

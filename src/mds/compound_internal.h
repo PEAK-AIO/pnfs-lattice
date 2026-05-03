@@ -227,6 +227,19 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 enum nfs4_status op_destroy_session(struct compound_data *cd,
 				    const struct nfs4_op *op,
 				    struct nfs4_result *res);
+/*
+ * RFC 8881 §18.33 BACKCHANNEL_CTL.
+ *
+ * Updates the callback program number and/or callback security
+ * parameters on the SEQUENCE-bound session.  Pynfs DELEG7
+ * (testCBSecParmsChange) drives this path.  The session_id is
+ * obtained from the leading SEQUENCE operation in the same
+ * compound — BACKCHANNEL_CTL's own arg struct does not carry one
+ * (the RFC defines it implicitly via the "current session").
+ */
+enum nfs4_status op_backchannel_ctl(struct compound_data *cd,
+				    const struct nfs4_op *op,
+				    struct nfs4_result *res);
 enum nfs4_status op_reclaim_complete(const struct compound_data *cd,
 				     const struct nfs4_op *op,
 				     struct nfs4_result *res);

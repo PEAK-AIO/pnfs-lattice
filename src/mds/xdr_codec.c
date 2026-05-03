@@ -1158,6 +1158,90 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
             && xdr_uint32_t(xdrs, &dir)
             && xdr_uint32_t(xdrs, &rdma);
     }
+    case OP_BACKCHANNEL_CTL: {
+        /*
+         * RFC 8881 §18.33.1 BACKCHANNEL_CTL4args:
+         *   uint32_t            bca_cb_program;
+         *   callback_sec_parms4 bca_sec_parms<>;
+         *
+         * Same callback_sec_parms4 wire form as CREATE_SESSION's
+         * csa_sec_parms<> entry: flavor (uint32) + per-flavor body
+         * (AUTH_NONE void / AUTH_SYS authsys_parms / RPCSEC_GSS
+         * gss_cb_handles4).  We capture the FIRST entry into
+         * a->cb_sec, mirroring decode_op_create_session.  Subsequent
+         * entries are decoded only to advance the wire cursor.
+         *
+         * Pynfs DELEG7 (testCBSecParmsChange) verifies that the
+         * very next CB_RECALL after this BACKCHANNEL_CTL carries
+         * the new uid/gid — so cb_sec_set MUST be true when at
+         * least one entry was present.
+         */
+        struct nfs4_arg_backchannel_ctl *a = &op->arg.backchannel_ctl;
+        uint32_t count;
+
+        memset(a, 0, sizeof(*a));
+        if (!xdr_uint32_t(xdrs, &a->cb_prog)) {
+            return false;
+        }
+        a->cb_prog_set = true;
+        if (!xdr_uint32_t(xdrs, &count)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t flavor;
+            if (!xdr_uint32_t(xdrs, &flavor)) {
+                return false;
+            }
+            bool capture = (i == 0);
+            if (capture) {
+                a->cb_sec.flavor = (flavor == NFS4_CB_AUTH_SYS)
+                    ? NFS4_CB_AUTH_SYS : NFS4_CB_AUTH_NONE;
+                a->cb_sec_set = true;
+            }
+            if (flavor == NFS4_CB_AUTH_SYS) {
+                uint32_t stamp, mname_len, uid, gid, ngids;
+                if (!xdr_uint32_t(xdrs, &stamp)) { return false; }
+                if (!xdr_uint32_t(xdrs, &mname_len)) { return false; }
+                if (mname_len > 255) { return false; }
+                char mname_buf[256];
+                if (mname_len > 0) {
+                    uint32_t padded = (mname_len + 3) & ~3u;
+                    if (padded > sizeof(mname_buf)) { return false; }
+                    if (!xdr_opaque_decode(xdrs, mname_buf, padded)) {
+                        return false;
+                    }
+                }
+                if (!xdr_uint32_t(xdrs, &uid)) { return false; }
+                if (!xdr_uint32_t(xdrs, &gid)) { return false; }
+                if (!xdr_uint32_t(xdrs, &ngids)) { return false; }
+                uint32_t aux_buf[NFS4_CB_AUX_GIDS_MAX] = {0};
+                uint32_t kept_aux = 0;
+                for (uint32_t gi = 0; gi < ngids; gi++) {
+                    uint32_t aux;
+                    if (!xdr_uint32_t(xdrs, &aux)) { return false; }
+                    if (capture && kept_aux < NFS4_CB_AUX_GIDS_MAX) {
+                        aux_buf[kept_aux++] = aux;
+                    }
+                }
+                if (capture) {
+                    a->cb_sec.sys_stamp = stamp;
+                    a->cb_sec.sys_uid = uid;
+                    a->cb_sec.sys_gid = gid;
+                    a->cb_sec.sys_machname_len = mname_len;
+                    if (mname_len > 0) {
+                        memcpy(a->cb_sec.sys_machname, mname_buf,
+                               mname_len);
+                    }
+                    a->cb_sec.sys_ngids = kept_aux;
+                    if (kept_aux > 0) {
+                        memcpy(a->cb_sec.sys_gids, aux_buf,
+                               kept_aux * sizeof(uint32_t));
+                    }
+                }
+            }
+        }
+        return true;
+    }
     /* pNFS layout operations */
     case OP_LAYOUTGET:       return decode_op_layoutget(xdrs, op);
     case OP_GETDEVICEINFO:   return decode_op_getdeviceinfo(xdrs, op);
@@ -1282,6 +1366,7 @@ int nfs4_decode_compound_args(XDR *xdrs,
         case OP_RECLAIM_COMPLETE:
         case OP_DESTROY_CLIENTID:
         case OP_BIND_CONN_TO_SESSION:
+        case OP_BACKCHANNEL_CTL:
         case OP_TEST_STATEID:
         case OP_FREE_STATEID:
         case OP_GET_DIR_DELEGATION:
@@ -1479,6 +1564,12 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
     case OP_CLONE:           return true; /* status-only */
     case OP_RECLAIM_COMPLETE: return true; /* status-only */
     case OP_FREE_STATEID: return true; /* status-only per RFC 5661 §18.38 */
+    /*
+     * RFC 8881 §18.33.2 BACKCHANNEL_CTL4res — status-only.  Like
+     * DELEGRETURN, the status word is already emitted before the
+     * switch and nothing follows it on the wire.
+     */
+    case OP_BACKCHANNEL_CTL: return true;
     case OP_TEST_STATEID: {
         /* RFC 8881 §18.48: return per-stateid status. */
         const struct nfs4_res_test_stateid *ts = &r->res.test_stateid;
