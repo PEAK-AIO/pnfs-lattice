@@ -1190,7 +1190,12 @@ static void test_nofilehandle(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_putfh_invalid — PUTFH with nonexistent fileid
+ * test_putfh_invalid — PUTFH with nonexistent fileid returns BADHANDLE.
+ *
+ * RFC 8881 §18.19.4: an unrecognised filehandle MUST yield
+ * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Pynfs PUTFH2 (testBadHandle)
+ * verifies the same code on the wire path; this unit test mirrors it
+ * for the in-process compound path.
  * ----------------------------------------------------------------------- */
 
 static void test_putfh_invalid(void)
@@ -1212,7 +1217,7 @@ static void test_putfh_invalid(void)
 
 	n = compound_process(&cd, ops, res, 2);
 	ASSERT_EQ(n, (uint32_t)2);
-	ASSERT_EQ(res[1].status, NFS4ERR_NOENT);
+	ASSERT_EQ(res[1].status, NFS4ERR_BADHANDLE);
 
 	close_test_db(db, path);
 }

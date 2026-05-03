@@ -197,6 +197,19 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 	 *   LOOKUP(junction) → MOVED → PUTFH(junction_fh) + GETATTR(fs_locations)
 	 */
 
+	/*
+	 * RFC 8881 §18.19.4 — PUTFH must return NFS4ERR_BADHANDLE when
+	 * the supplied filehandle is not in this server's recognised
+	 * format.  The decoder uses fileid==0 as the malformed-FH
+	 * sentinel (root is fileid 2, no real object lives at 0), so
+	 * reject it here before we install it as the current FH.
+	 * Pynfs PUTFH2 (testBadHandle) sends a 3-byte 'abc' FH and
+	 * expects NFS4ERR_BADHANDLE rather than NFS4ERR_BADXDR.
+	 */
+	if (op->arg.putfh.fh.fileid == 0) {
+		return NFS4ERR_BADHANDLE;
+	}
+
 	cd->current_fh = op->arg.putfh.fh;
 	cd->current_fh_set = true;
 	/* PUTFH with raw fileid — path unknown, clear it. */
@@ -244,6 +257,13 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 		 * success. */
 		st = compound_inode_get(cd, op->arg.putfh.fh.fileid,
 					&inode);
+		if (st == MDS_ERR_NOTFOUND) {
+			/* RFC 8881 §18.19.4: an unrecognised filehandle is
+			 * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Linux NFSD
+			 * has the same convention (fs/nfsd/nfs4proc.c
+			 * nfsd4_putfh).  Pynfs PUTFH2 expects this code. */
+			return NFS4ERR_BADHANDLE;
+		}
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);
 		}

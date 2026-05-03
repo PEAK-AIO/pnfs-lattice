@@ -1233,6 +1233,28 @@ static bool is_anonymous_stateid(const struct nfs4_stateid *sid)
 	       memcmp(sid->other, zero_other, NFS4_OTHER_SIZE) == 0;
 }
 
+/*
+ * RFC 8881 §16.2.4 / RFC 5661 §8.2.3 — the special READ_BYPASS
+ * stateid (seqid = 0xFFFFFFFF, other = all-1s) bypasses share-deny
+ * checks for read-side I/O.  Linux NFSD's nfs4_preprocess_stateid_op
+ * also accepts it for ALLOCATE / DEALLOCATE (write-side ops that
+ * do not hold any client state of their own); pynfs ALLOC3
+ * (testAllocateStateidOne) verifies that behaviour.  Treat it as a
+ * special stateid here so the validator below skips open-state
+ * lookup, share-mode, and clientid checks the way it does for the
+ * anonymous (all-zero) special stateid.
+ */
+static bool is_read_bypass_stateid(const struct nfs4_stateid *sid)
+{
+	static const uint8_t ones_other[NFS4_OTHER_SIZE] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	};
+
+	return sid->seqid == 0xFFFFFFFFu &&
+	       memcmp(sid->other, ones_other, NFS4_OTHER_SIZE) == 0;
+}
+
 /**
  * Validate stateid for a data I/O operation.
  *
@@ -1253,8 +1275,14 @@ enum nfs4_status validate_io_stateid(
 		return NFS4_OK;
 }
 
-	/* Anonymous stateid: RFC 8881 §8.2.3 bypass. */
-	if (is_anonymous_stateid(stateid)) {
+	/*
+	 * Special stateids (RFC 8881 §16.2.4 / §8.2.3) bypass the
+	 * full validation: anonymous (all zeros) and READ_BYPASS
+	 * (all ones).  Both are accepted for the data-path ops that
+	 * call this validator (READ, WRITE, SETATTR(size), ALLOCATE,
+	 * DEALLOCATE), matching Linux NFSD's behaviour.
+	 */
+	if (is_anonymous_stateid(stateid) || is_read_bypass_stateid(stateid)) {
 		return NFS4_OK;
 }
 

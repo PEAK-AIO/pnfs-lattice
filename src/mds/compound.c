@@ -1324,13 +1324,40 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	case OP_BACKCHANNEL_CTL:
 		return op_backchannel_ctl(cd, op, res);
 
-	/* SECINFO / SECINFO_NO_NAME: return supported security flavors.
-	 * RFC 8881 §18.29 / §18.45. */
+	/*
+	 * SECINFO / SECINFO_NO_NAME: return supported security flavors.
+	 * RFC 8881 §18.29 / §18.45.
+	 *
+	 * RFC 5661 §2.6.3.1.1.8 / RFC 8881 §2.6.3.1.1.8: SECINFO and
+	 * SECINFO_NO_NAME consume the current filehandle — any op that
+	 * follows in the same compound (e.g. GETFH) must observe
+	 * NFS4ERR_NOFILEHANDLE.  Pynfs SEC2, SECNN2 cover this.
+	 *
+	 * RFC 8881 §18.45.3: SECINFO_NO_NAME(SECINFO_STYLE4_PARENT)
+	 * applied to the root filehandle returns NFS4ERR_NOENT
+	 * because the root has no parent.  Pynfs SECNN3 covers this.
+	 * SECNN4 (SECINFO_STYLE4_PARENT on a non-root FH) succeeds.
+	 */
 	case OP_SECINFO:
-	case OP_SECINFO_NO_NAME:
+	case OP_SECINFO_NO_NAME: {
+		enum nfs4_status nst = require_current_fh(cd);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+		if (op->opnum == OP_SECINFO_NO_NAME &&
+		    op->arg.secinfo_no_name.style == SECINFO_STYLE4_PARENT &&
+		    cd->current_fh.fileid == MDS_FILEID_ROOT) {
+			return NFS4ERR_NOENT;
+		}
 		res->res.secinfo.count = 1;
 		res->res.secinfo.flavors[0] = 1; /* AUTH_SYS */
+		/* RFC 5661 §2.6.3.1.1.8: drop the current FH so trailing
+		 * compound ops see NFS4ERR_NOFILEHANDLE. */
+		cd->current_fh_set = false;
+		cd->current_inode_valid = false;
+		cd->current_path[0] = '\0';
 		return NFS4_OK;
+	}
 
 	default:
 		return NFS4ERR_OP_ILLEGAL;

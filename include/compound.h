@@ -422,6 +422,13 @@ struct nfs4_arg_reclaim_complete {
 	bool rca_one_fs;  /**< true = per-fs reclaim; false = global */
 };
 
+/** RFC 8881 §18.45 — SECINFO_NO_NAME arguments. */
+#define SECINFO_STYLE4_CURRENT_FH 0
+#define SECINFO_STYLE4_PARENT     1
+struct nfs4_arg_secinfo_no_name {
+	uint32_t style;  /**< SECINFO_STYLE4_CURRENT_FH or SECINFO_STYLE4_PARENT */
+};
+
 /** RFC 5661 §18.48 — TEST_STATEID arguments (count preserved for result). */
 struct nfs4_arg_test_stateid {
 	uint32_t count;
@@ -798,6 +805,7 @@ struct nfs4_op {
 		struct nfs4_arg_reclaim_complete reclaim_complete;
 		struct nfs4_arg_test_stateid   test_stateid;
 		struct nfs4_arg_get_dir_delegation get_dir_delegation;
+		struct nfs4_arg_secinfo_no_name secinfo_no_name;
 		/* pNFS layout */
 		struct nfs4_arg_layoutget       layoutget;
 		struct nfs4_arg_getdeviceinfo   getdeviceinfo;

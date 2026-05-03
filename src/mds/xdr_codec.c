@@ -53,12 +53,19 @@ bool xdr_nfs4_fh_encode_v1(XDR *xdrs, uint32_t owner_mds_id,
 
 bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
 {
-    /* Backward-compatible decode: v0 (8 bytes) or v1 (17 bytes). */
+    /* Backward-compatible decode: v0 (8 bytes) or v1 (17 bytes).
+     * Pynfs PUTFH2 sends a 3-byte FH ('abc') and expects the server
+     * to return NFS4ERR_BADHANDLE rather than NFS4ERR_BADXDR — so
+     * we now accept any well-formed opaque<NFS4_FHSIZE> payload at
+     * decode time and let op_putfh decide the malformed-FH error
+     * by checking for the fileid==0 sentinel below. */
     uint32_t len = 0;
     uint8_t buf[NFS4_FHSIZE];
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
-    if (len == 0 || len > NFS4_FHSIZE) { return false; }
-    if (!xdr_opaque_decode(xdrs, (char *)buf, len)) { return false; }
+    if (len > NFS4_FHSIZE) { return false; }
+    if (len > 0 && !xdr_opaque_decode(xdrs, (char *)buf, len)) {
+        return false;
+    }
     if (len == 8) {
         /* v0 legacy: 8-byte fileid BE. */
         *fileid = be64toh(*(uint64_t *)buf);
@@ -69,12 +76,11 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
         *fileid = be64toh(*(uint64_t *)(buf + 5));
         return true;
     }
-    /* Unknown format — try as raw 8-byte fileid. */
-    if (len >= 8) {
-        *fileid = be64toh(*(uint64_t *)buf);
-        return true;
-    }
-    return false;
+    /* Malformed wire FH — sentinel fileid=0 so op_putfh returns
+     * NFS4ERR_BADHANDLE.  fileid 0 is reserved (root is
+     * MDS_FILEID_ROOT == 2). */
+    *fileid = 0;
+    return true;
 }
 
 bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
@@ -82,8 +88,10 @@ bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
     uint32_t len = 0;
     uint8_t buf[NFS4_FHSIZE];
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
-    if (len == 0 || len > NFS4_FHSIZE) { return false; }
-    if (!xdr_opaque_decode(xdrs, (char *)buf, len)) { return false; }
+    if (len > NFS4_FHSIZE) { return false; }
+    if (len > 0 && !xdr_opaque_decode(xdrs, (char *)buf, len)) {
+        return false;
+    }
     memset(desc, 0, sizeof(*desc));
     if (len == 8) {
         desc->fileid = be64toh(*(uint64_t *)buf);
@@ -95,11 +103,11 @@ bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
         desc->generation = be32toh(*(uint32_t *)(buf + 13));
         return true;
     }
-    if (len >= 8) {
-        desc->fileid = be64toh(*(uint64_t *)buf);
-        return true;
-    }
-    return false;
+    /* Malformed FH — sentinel fileid=0 so op_putfh returns
+     * NFS4ERR_BADHANDLE.  Pynfs PUTFH2 covers the 3-byte case;
+     * any other unrecognized format gets the same treatment. */
+    desc->fileid = 0;
+    return true;
 }
 
 bool xdr_nfs4_stateid_encode(XDR *xdrs, const struct nfs4_stateid *sid)
@@ -1125,6 +1133,21 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_RECLAIM_COMPLETE: return decode_op_reclaim_complete(xdrs, op);
     case OP_DESTROY_CLIENTID:
         return xdr_uint64_t(xdrs, &op->arg.destroy_clientid);
+    case OP_SECINFO: {
+        /* RFC 8881 §18.29.1 SECINFO4args: component4 name. */
+        uint32_t name_len = 0;
+        if (!xdr_uint32_t(xdrs, &name_len)) { return false; }
+        if (name_len >= MDS_MAX_NAME) { return false; }
+        if (name_len > 0 &&
+            !xdr_opaque_decode(xdrs, op->arg.lookup.name, name_len)) {
+            return false;
+        }
+        op->arg.lookup.name[name_len] = '\0';
+        return true;
+    }
+    case OP_SECINFO_NO_NAME:
+        /* RFC 8881 §18.45.1 SECINFO_NO_NAME4args: secinfo_style4. */
+        return xdr_uint32_t(xdrs, &op->arg.secinfo_no_name.style);
     case OP_TEST_STATEID: {
         /* RFC 8881 §18.48: array of stateids to test. */
         uint32_t count, j;
@@ -1370,6 +1393,8 @@ int nfs4_decode_compound_args(XDR *xdrs,
         case OP_TEST_STATEID:
         case OP_FREE_STATEID:
         case OP_GET_DIR_DELEGATION:
+        case OP_SECINFO:
+        case OP_SECINFO_NO_NAME:
             break;  /* known op — continue decoding */
         default:
             /* Unknown op — stop decoding, include this op in count. */
