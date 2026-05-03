@@ -62,22 +62,30 @@ enum nfs4_status {
 	NFS4ERR_NOSPC        = 28,
 	NFS4ERR_NOTEMPTY     = 66,
 	NFS4ERR_STALE        = 70,
-	NFS4ERR_DENIED       = 10012,
+	/* RFC 8881 §15.1 numeric values are authoritative.  Earlier
+	 * revisions of this enum aliased NFS4ERR_DENIED and
+	 * NFS4ERR_STALE_CLIENTID to 10012, which is in fact
+	 * NFS4ERR_LOCKED on the wire — pynfs DESCID3/4/8 caught the
+	 * mis-numbering by reporting "got NFS4ERR_LOCKED" when the
+	 * server thought it was sending NFS4ERR_STALE_CLIENTID. */
+	NFS4ERR_DENIED       = 10010,
+	NFS4ERR_EXPIRED      = 10011,
+	NFS4ERR_LOCKED       = 10012,
+	NFS4ERR_GRACE        = 10013,
+	NFS4ERR_FHEXPIRED    = 10014,
+	NFS4ERR_WRONGSEC     = 10016,
+	NFS4ERR_RESOURCE     = 10018,
+	NFS4ERR_MOVED        = 10019,
+	NFS4ERR_NOFILEHANDLE = 10020,
 	NFS4ERR_MINOR_VERS_MISMATCH = 10021,
+	NFS4ERR_STALE_CLIENTID    = 10022,
 	NFS4ERR_BADHANDLE    = 10001,
 	NFS4ERR_NOTSUPP      = 10004,
 	NFS4ERR_SERVERFAULT  = 10006,
 	NFS4ERR_DELAY        = 10008,
-	NFS4ERR_GRACE        = 10013,
 	NFS4ERR_NO_GRACE     = 10033,
-	NFS4ERR_FHEXPIRED    = 10014,
-	NFS4ERR_RESOURCE     = 10018,
 	NFS4ERR_TOOSMALL     = 10005,  /* RFC 8881 §15 — reply > maxcount. */
-	NFS4ERR_MOVED        = 10019,
-	NFS4ERR_NOFILEHANDLE = 10020,
-	NFS4ERR_STALE_CLIENTID    = 10012,
 	NFS4ERR_OP_NOT_IN_SESSION = 10071,
-	NFS4ERR_EXPIRED           = 10011,
 	NFS4ERR_OLD_STATEID       = 10024,
 	NFS4ERR_BAD_STATEID       = 10025,
 	NFS4ERR_SHARE_DENIED      = 10045,
@@ -94,7 +102,6 @@ enum nfs4_status {
 	NFS4ERR_RETRY_UNCACHED_REP = 10068,
 	NFS4ERR_SEQ_FALSE_RETRY   = 10076,
 	NFS4ERR_LAYOUTUNAVAILABLE = 10058,
-	NFS4ERR_WRONGSEC          = 10016,
 	/* RFC 5661 §15.1 numeric values are authoritative.  Earlier
 	 * revisions of this enum used the wrong codes for NAMETOOLONG
 	 * (was 10110) and REQ_TOO_BIG (was 10041 — which is actually
@@ -110,6 +117,15 @@ enum nfs4_status {
 	NFS4ERR_BADNAME           = 10041,
 	NFS4ERR_REQ_TOO_BIG       = 10065,
 	NFS4ERR_TOO_MANY_OPS      = 10070,
+	/* RFC 8881 §15.1.16.4 — DESTROY_CLIENTID called against a clientid
+	 * that still has confirmed sessions or has not finished cleanup.
+	 * pynfs DESCID5/6 (testDestroyCIDSessionB / testDestroyCIDCSession). */
+	NFS4ERR_CLIENTID_BUSY     = 10074,
+	/* RFC 8881 §15.1.10.10 — a session/clientid management op was
+	 * combined with another op in violation of the per-op compound
+	 * placement rules (§2.10.6.4 / §18.36.3 / §18.37.3 / §18.50.3).
+	 * pynfs CSESS23, DSESS9004/9005, DESCID7. */
+	NFS4ERR_NOT_ONLY_OP       = 10081,
 	/* RFC 8881 §15.1.1.4 / §18.46.3 — SEQUENCE must be the first op
 	 * in every COMPOUND that uses session-state.  pynfs SEQ2. */
 	NFS4ERR_SEQUENCE_POS      = 10064,

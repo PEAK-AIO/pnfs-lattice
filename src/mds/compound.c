@@ -936,6 +936,58 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	}
 
 	/*
+	 * RFC 8881 §2.10.6.4 / §18.36.3 / §18.37.3 / §18.50.3 —
+	 * compound-position rules for session-management ops.
+	 *
+	 * CREATE_SESSION (§18.36.3): MUST be the SOLE op in its compound.
+	 * The session does not exist when it is invoked, so it cannot
+	 * follow SEQUENCE.  Pynfs CSESS23 (testNotOnlyOp) verifies this
+	 * with [CREATE_SESSION, PUTROOTFH] and expects NFS4ERR_NOT_ONLY_OP.
+	 *
+	 * DESTROY_SESSION (§18.37.3): if the compound starts with
+	 * SEQUENCE, DESTROY_SESSION MUST be the FINAL op (it tears down
+	 * the session that SEQUENCE used, so subsequent ops have no
+	 * session).  Otherwise it MUST be the SOLE op.  Pynfs DSESS9004
+	 * (testDestoryNotFinalOps) and DSESS9005 (testDestoryNotSoleOps)
+	 * each expect NFS4ERR_NOT_ONLY_OP.
+	 *
+	 * DESTROY_CLIENTID (§18.50.3): when the compound does not start
+	 * with SEQUENCE, DESTROY_CLIENTID MUST be the SOLE op.  When the
+	 * compound starts with SEQUENCE, DESTROY_CLIENTID may follow it
+	 * (pynfs DESCID4/5 drive that path).  Pynfs DESCID7
+	 * (testDestroyCIDNotOnly) verifies the no-SEQUENCE rule with
+	 * [DESTROY_CLIENTID(0), RECLAIM_COMPLETE] expecting NOT_ONLY_OP.
+	 */
+	{
+		bool starts_with_seq = (cd->op_count > 0 && cd->ops != NULL &&
+					cd->ops[0].opnum == OP_SEQUENCE);
+
+		switch (op->opnum) {
+		case OP_CREATE_SESSION:
+			if (cd->op_count != 1) {
+				return NFS4ERR_NOT_ONLY_OP;
+			}
+			break;
+		case OP_DESTROY_SESSION:
+			if (starts_with_seq) {
+				if (cd->op_index != cd->op_count - 1) {
+					return NFS4ERR_NOT_ONLY_OP;
+				}
+			} else if (cd->op_count != 1) {
+				return NFS4ERR_NOT_ONLY_OP;
+			}
+			break;
+		case OP_DESTROY_CLIENTID:
+			if (!starts_with_seq && cd->op_count != 1) {
+				return NFS4ERR_NOT_ONLY_OP;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	/*
 	 * RFC 8881 §8.4.2.1: During the grace period, reject all
 	 * operations except session management, PUTROOTFH, PUTFH,
 	 * GETFH, GETATTR, SAVEFH, RESTOREFH, and reclaim-path
@@ -1156,17 +1208,44 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	case OP_RECLAIM_COMPLETE: return op_reclaim_complete(cd, op, res);
 	case OP_GET_DIR_DELEGATION: return op_get_dir_delegation(cd, op, res);
 
-	/* DESTROY_CLIENTID (RFC 8881 §18.50):
-	 * Validate the clientid matches this session's client, then
-	 * accept.  Resource cleanup is completed asynchronously via
-	 * session lease expiry — this is safe because the RFC allows
-	 * servers to delay actual reclamation. */
-	case OP_DESTROY_CLIENTID:
-		if (cd->clientid != 0 &&
-		    op->arg.destroy_clientid != cd->clientid) {
+	/*
+	 * DESTROY_CLIENTID (RFC 8881 §18.50): destroy the named clientid.
+	 *
+	 *   - clientid not found      → NFS4ERR_STALE_CLIENTID (DESCID3/4/8)
+	 *   - clientid has confirmed  → NFS4ERR_CLIENTID_BUSY (DESCID5/6)
+	 *     sessions
+	 *   - otherwise                → destroy + NFS4_OK
+	 *
+	 * When session_table is absent (test compat) the legacy match-or-
+	 * accept behaviour is preserved.  When the SEQUENCE-bound clientid
+	 * (cd->clientid) matches the destroy target, RFC 8881 §18.50.3
+	 * mandates NFS4ERR_CLIENTID_BUSY — the session itself is in use
+	 * by the very compound issuing the destroy (DESCID5).
+	 */
+	case OP_DESTROY_CLIENTID: {
+		uint64_t target = op->arg.destroy_clientid;
+		int dc_rc;
+
+		if (cd->st == NULL) {
+			if (cd->clientid != 0 && target != cd->clientid) {
+				return NFS4ERR_STALE_CLIENTID;
+			}
+			return NFS4_OK;
+		}
+		if (cd->clientid != 0 && target == cd->clientid) {
+			/* Pynfs DESCID5: SEQUENCE on session of client X,
+			 * then DESTROY_CLIENTID(X).  RFC §18.50.3 — BUSY. */
+			return NFS4ERR_CLIENTID_BUSY;
+		}
+		dc_rc = session_destroy_client(cd->st, target);
+		if (dc_rc == -1) {
 			return NFS4ERR_STALE_CLIENTID;
 		}
+		if (dc_rc == -2) {
+			return NFS4ERR_CLIENTID_BUSY;
+		}
 		return NFS4_OK;
+	}
 	case OP_TEST_STATEID: {
 		const struct nfs4_arg_test_stateid *ts = &op->arg.test_stateid;
 		uint32_t k;

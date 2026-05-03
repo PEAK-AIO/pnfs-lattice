@@ -869,6 +869,54 @@ out:
 
 /* ----------------------------------------------------------------------- */
 
+/*
+ * RFC 8881 §18.50 DESTROY_CLIENTID — destroy a clientid record.
+ *
+ * Returns 0 on success, -1 on STALE_CLIENTID (clientid not found),
+ * -2 on CLIENTID_BUSY (the client still has confirmed sessions, the
+ * client must DESTROY_SESSION on each session first per §18.50.3).
+ *
+ * Pynfs DESCID3/4/5/6/7/8 drive every leg of this contract:
+ *   DESCID3/4   bad clientid → -1 → NFS4ERR_STALE_CLIENTID.
+ *   DESCID5/6   client owns at least one session → -2 → CLIENTID_BUSY.
+ *   DESCID8     destroy then destroy again → first 0, second -1.
+ *
+ * The first call removes the client record from both the clientid hash
+ * and the owner hash, so a subsequent find_client_by_id() returns NULL.
+ */
+int session_destroy_client(struct session_table *st, uint64_t clientid)
+{
+	struct nfs4_client *c;
+	int rc = 0;
+
+	if (st == NULL) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&st->locks[0]);
+	c = find_client_by_id(st, clientid);
+	if (c == NULL) {
+		rc = -1;
+		goto out;
+	}
+	/* RFC 8881 §18.50.3: NFS4ERR_CLIENTID_BUSY when the client
+	 * still holds confirmed sessions; the caller must tear those
+	 * down with DESTROY_SESSION first.  Unconfirmed clients (no
+	 * CREATE_SESSION yet) are eligible for destruction here. */
+	if (c->confirmed && c->sessions != NULL) {
+		rc = -2;
+		goto out;
+	}
+	unhash_client(st, c);
+	free_client(st, c);
+
+out:
+	pthread_mutex_unlock(&st->locks[0]);
+	return rc;
+}
+
+/* ----------------------------------------------------------------------- */
+
 int session_slot_cache_reply(struct session_table *st,
 			     const uint8_t session_id[SESSION_ID_SIZE],
 			     uint32_t slot_id,

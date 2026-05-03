@@ -702,7 +702,16 @@ static void test_compound_sequence_bad_session(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: Compound — replay returns NFS4ERR_SEQ_FALSE_RETRY
+ * Test: Compound — replay returns NFS4ERR_RETRY_UNCACHED_REP
+ *
+ * RFC 5661 §15.1.10.2 / RFC 8881 §2.10.6.2: when the slot's reply is
+ * not cached, the server may either (a) reconstruct the reply or (b)
+ * return NFS4ERR_RETRY_UNCACHED_REP.  The pnfs-mds session_sequence
+ * path takes (b) (driven by pynfs SEQ10b in op_sequence's case 1).
+ * NFS4ERR_SEQ_FALSE_RETRY (§15.1.10.6) is reserved for the case where
+ * the replay's op-array differs from the cached one; we don't track
+ * that distinction so we conservatively always return
+ * NFS4ERR_RETRY_UNCACHED_REP for the no-cache replay path.
  * ----------------------------------------------------------------------- */
 
 static void test_compound_replay_seq_false_retry(void)
@@ -759,12 +768,76 @@ static void test_compound_replay_seq_false_retry(void)
 	memset(res, 0, sizeof(res));
 	nres = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(nres, 1);  /* stopped at SEQUENCE */
-	ASSERT_EQ(res[0].status, NFS4ERR_SEQ_FALSE_RETRY);
+	ASSERT_EQ(res[0].status, NFS4ERR_RETRY_UNCACHED_REP);
 
 	session_table_destroy(st);
 	mds_catalogue_close(db);
 	cleanup_temp_db(path);
 	free(path);
+}
+
+/* -----------------------------------------------------------------------
+ * Commit 2 — session_destroy_client (RFC 8881 §18.50)
+ * ----------------------------------------------------------------------- */
+
+/** DESTROY_CLIENTID on an unknown clientid → -1 (STALE_CLIENTID). */
+static void test_destroy_client_stale(void)
+{
+	struct session_table *st = NULL;
+
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	/* No EXCHANGE_ID; clientid 0xDEAD doesn't exist. */
+	ASSERT_EQ(session_destroy_client(st, 0xDEAD), -1);
+	/* NULL session table also returns -1 (defensive). */
+	ASSERT_EQ(session_destroy_client(NULL, 0xDEAD), -1);
+	session_table_destroy(st);
+}
+
+/** DESTROY_CLIENTID on an unconfirmed client (EXCHANGE_ID only) → 0. */
+static void test_destroy_client_unconfirmed(void)
+{
+	struct session_table *st = NULL;
+	uint64_t clientid = 0;
+	uint32_t seqid = 0;
+
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL), 0);
+	/* Client exists but has no sessions — destroy is allowed. */
+	ASSERT_EQ(session_destroy_client(st, clientid), 0);
+	/* Second destroy → STALE_CLIENTID (DESCID8 semantics). */
+	ASSERT_EQ(session_destroy_client(st, clientid), -1);
+	session_table_destroy(st);
+}
+
+/** DESTROY_CLIENTID with a confirmed session → -2 (CLIENTID_BUSY). */
+static void test_destroy_client_busy(void)
+{
+	struct session_table *st = NULL;
+	uint64_t clientid = 0;
+	uint32_t seqid = 0;
+	uint8_t session_id[SESSION_ID_SIZE];
+	uint32_t fore = 0, back = 0;
+
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL), 0);
+	ASSERT_EQ(session_create_session(st, clientid, seqid,
+					 16, 4,
+					 0, 0,
+					 0, 0,
+					 1,
+					 session_id, &fore, &back,
+					 NULL, NULL), 0);
+	/* Confirmed client owns the session → BUSY (DESCID5/6). */
+	ASSERT_EQ(session_destroy_client(st, clientid), -2);
+	/* Tear down the session, then destroy succeeds. */
+	ASSERT_EQ(session_destroy_session(st, session_id), 0);
+	ASSERT_EQ(session_destroy_client(st, clientid), 0);
+	ASSERT_EQ(session_destroy_client(st, clientid), -1);
+	session_table_destroy(st);
 }
 
 /* -----------------------------------------------------------------------
@@ -838,6 +911,11 @@ int main(void)
 	RUN_TEST(test_compound_sequence_bad_session);
 	RUN_TEST(test_compound_replay_seq_false_retry);
 	RUN_TEST(test_compound_op_without_sequence);
+
+	/* Commit 2 — session_destroy_client (RFC 8881 §18.50) */
+	RUN_TEST(test_destroy_client_stale);
+	RUN_TEST(test_destroy_client_unconfirmed);
+	RUN_TEST(test_destroy_client_busy);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

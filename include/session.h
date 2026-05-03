@@ -510,6 +510,27 @@ int session_set_cb_prog(struct session_table *st,
                         const uint8_t session_id[SESSION_ID_SIZE],
                         uint32_t cb_prog);
 
+/**
+ * RFC 8881 §18.50 DESTROY_CLIENTID — destroy a clientid record.
+ *
+ * Looks up the clientid in the session table.  If absent, returns -1
+ * so the caller can map to NFS4ERR_STALE_CLIENTID (pynfs DESCID3/4/8).
+ * If present but the client still has confirmed sessions, returns -2
+ * so the caller can map to NFS4ERR_CLIENTID_BUSY (pynfs DESCID5/6) —
+ * the client must DESTROY_SESSION on each session first.
+ *
+ * Otherwise the client record (and any unconfirmed sessions, none in
+ * a well-behaved client) is unhashed and freed; subsequent lookups of
+ * the same clientid will return -1.  Confirmed-but-empty (sessions
+ * destroyed) clients are also eligible for destruction here.
+ *
+ * @param st        Session table (NULL tolerated; returns -1).
+ * @param clientid  Client identifier to destroy.
+ * @return  0 on success, -1 if not found (STALE_CLIENTID),
+ *         -2 if has confirmed sessions (CLIENTID_BUSY).
+ */
+int session_destroy_client(struct session_table *st, uint64_t clientid);
+
 #endif /* SESSION_H */
 /* Lease expiry reaper (R2.2). */
 int session_table_start_reaper(struct session_table *st);
