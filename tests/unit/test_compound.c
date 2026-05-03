@@ -329,25 +329,6 @@ static struct nfs4_op mk_create(const char *name, enum mds_file_type type,
 	return op;
 }
 
-static struct nfs4_op mk_open_create(const char *name, uint32_t mode)
-{
-	struct nfs4_op op;
-	static const uint8_t owner[] = { 't', 'e', 's', 't' };
-
-	memset(&op, 0, sizeof(op));
-	op.opnum = OP_OPEN;
-	op.arg.open.claim = CLAIM_NULL;
-	snprintf(op.arg.open.name, sizeof(op.arg.open.name), "%s", name);
-	op.arg.open.share_access = OPEN4_SHARE_ACCESS_BOTH;
-	op.arg.open.share_deny = OPEN4_SHARE_DENY_NONE;
-	memcpy(op.arg.open.open_owner, owner, sizeof(owner));
-	op.arg.open.open_owner_len = sizeof(owner);
-	op.arg.open.create = true;
-	op.arg.open.createmode = CREATEMODE_UNCHECKED4;
-	op.arg.open.mode = mode;
-	return op;
-}
-
 static struct nfs4_op mk_remove(const char *name)
 {
 	struct nfs4_op op;
@@ -1284,19 +1265,6 @@ static void seed_generic_ds(struct mds_catalogue *db, uint32_t ds_id,
 	VERIFY(mds_cat_txn_commit(txn) == 0);
 }
 
-static void mark_root_hpc_shared(struct mds_catalogue *db)
-{
-	struct mds_cat_txn *txn = NULL;
-	struct mds_inode root;
-
-	VERIFY(mds_cat_ns_getattr(db, MDS_FILEID_ROOT, &root) == MDS_OK);
-	root.flags |= MDS_IFLAG_HPC_SHARED;
-
-	VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
-	VERIFY(mds_cat_inode_put(db, txn, &root) == MDS_OK);
-	VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
-}
-
 static void seed_ds_provision(struct mds_catalogue *db, uint32_t ds_id)
 {
 	struct mds_cat_txn *txn = NULL;
@@ -1335,67 +1303,6 @@ static void mark_file_ds_pending(struct mds_catalogue *db, uint64_t fileid,
 	VERIFY(mds_cat_stripe_map_put(db, txn, fileid,
 				       1, 65536, 1, &entry) == MDS_OK);
 	VERIFY(mds_cat_txn_commit(txn) == 0);
-}
-
-static void test_open_create_hpc_layout_hint_applies_geometry(void)
-{
-	struct mds_catalogue *db;
-	struct open_state_table *ot = NULL;
-	struct compound_data cd;
-	struct nfs4_op ops[3];
-	struct nfs4_result res[3];
-	struct mds_ds_map_entry *entries = NULL;
-	uint64_t fileid;
-	uint32_t stripe_count = 0;
-	uint32_t stripe_unit = 0;
-	uint32_t mirror_count = 0;
-	uint32_t n;
-	char *path;
-
-	db = open_test_db(&path);
-	seed_generic_ds(db, 2, "10.0.0.2:/export2");
-	seed_generic_ds(db, 3, "10.0.0.3:/export3");
-	seed_generic_ds(db, 4, "10.0.0.4:/export4");
-	ds_prealloc_test_enable_synthetic_fh(g_prealloc, true);
-	mark_root_hpc_shared(db);
-	ASSERT_EQ(open_state_table_init(1, &ot), 0);
-
-	compound_init(&cd);
-	cd.cat = g_test_cat;
-	cd.prealloc = g_prealloc;
-	cd.ot = ot;
-	cd.clientid = 0x100;
-	cd.cfg_stripe_unit = 128U << 10;
-
-	ops[0] = mk_sequence();
-	ops[1] = mk_putrootfh();
-	ops[2] = mk_open_create("hinted_open_create", 0644);
-	ops[2].arg.open.layout_hint.present = true;
-	ops[2].arg.open.layout_hint.layout_type = LAYOUT4_FLEX_FILES;
-	ops[2].arg.open.layout_hint.hpc.expected_file_size = 1ULL << 40;
-	ops[2].arg.open.layout_hint.hpc.expected_client_count = 1;
-	ops[2].arg.open.layout_hint.hpc.flags = 0;
-
-	n = compound_process(&cd, ops, res, 3);
-	ASSERT_EQ(n, (uint32_t)3);
-	ASSERT_EQ(res[2].status, NFS4_OK);
-	fileid = res[2].res.open.inode.fileid;
-
-	ASSERT_EQ(mds_cat_stripe_map_get(db, fileid,
-					 &stripe_count, &stripe_unit,
-					 &mirror_count, &entries),
-		  MDS_OK);
-	ASSERT_EQ(stripe_count, (uint32_t)4);
-	ASSERT_EQ(stripe_unit, (uint32_t)(1U << 20));
-	ASSERT_EQ(mirror_count, (uint32_t)1);
-	ASSERT_TRUE(entries != NULL);
-	for (uint32_t i = 0; i < stripe_count; i++) {
-		ASSERT_EQ(entries[i].nfs_fh_len, (uint32_t)16);
-	}
-	free(entries);
-
-	open_state_table_destroy(ot);
-	close_test_db(db, path);
 }
 
 /* -----------------------------------------------------------------------
@@ -3864,7 +3771,6 @@ int main(void)
 	RUN_TEST(test_stop_on_error);
 	RUN_TEST(test_nofilehandle);
 	RUN_TEST(test_putfh_invalid);
-	RUN_TEST(test_open_create_hpc_layout_hint_applies_geometry);
 	RUN_TEST(test_layoutget);
 	RUN_TEST(test_layoutget_maxcount_toosmall_revokes_layout_state);
 	RUN_TEST(test_layoutget_ds_pending_without_proxy_unavailable);

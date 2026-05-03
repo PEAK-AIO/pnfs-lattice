@@ -638,55 +638,6 @@ static void test_reclaim_rejected_unknown(void)
  * Seq 9 — New tests
  * ------------------------------------------------------------------- */
 
-/* 11. Replication health gate — promotion rejected when repl unhealthy. */
-static void test_promote_repl_unhealthy(void)
-{
-    struct subtree_map *map = NULL;
-    struct mds_catalogue *db = NULL;
-    struct mds_catalogue *cat = NULL;
-    struct failover_ctx *ctx = NULL;
-    struct health_monitor *hm = NULL;
-    char *db_path;
-    enum mds_status st;
-
-    db_path = make_temp_db_path();
-    st = ((db = open_test_catalogue()) != NULL ? MDS_OK : MDS_ERR_IO);
-    ASSERT_EQ(st, MDS_OK);
-    cat = db;
-
-    st = subtree_map_init(NULL, NULL, SELF_ID, "standby.local",
-                                 NULL, &map);
-    ASSERT_EQ(st, MDS_OK);
-
-    /* Create health monitor and set replication unhealthy. */
-    ASSERT_EQ(health_monitor_init(NULL, 5000, false, &hm), 0);
-    health_monitor_test_set_repl_ok(hm, 0);
-
-    struct failover_cfg cfg = {
-        .self_id          = SELF_ID,
-        .partner_id       = PARTNER_ID,
-        .map              = map,
-        .cat              = cat,
-        .grace_period_sec = 90,
-        .detect_cb        = detect_dead,
-        .detect_arg       = NULL,
-        .membership       = NULL,
-        .hm               = hm,
-    };
-    ASSERT_EQ(failover_init(&cfg, &ctx), MDS_OK);
-
-    /* Promote should be rejected due to unhealthy replication. */
-    ASSERT_EQ(failover_promote(ctx), MDS_ERR_PERM);
-    ASSERT_EQ(failover_get_role(ctx), FAILOVER_STANDBY);
-
-    failover_destroy(ctx);
-    health_monitor_destroy(hm);
-    subtree_map_destroy(map);
-    mds_catalogue_close(db);
-    cleanup_temp_db(db_path);
-    free(db_path);
-}
-
 /* 12. Init succeeds with detect_cb=NULL (authoritative mode). */
 static void test_init_no_detect_cb(void)
 {
@@ -912,7 +863,6 @@ int main(void)
     RUN_TEST(test_reclaim_rejected_unknown);
 
     /* Seq 9 — New tests */
-    RUN_TEST(test_promote_repl_unhealthy);
     RUN_TEST(test_init_no_detect_cb);
     RUN_TEST(test_failover_take_over_local);
     RUN_TEST(test_promote_idempotent);

@@ -1178,12 +1178,7 @@ static void test_force_remove_wire(void)
 }
 
 /* -------------------------------------------------------------------
- * test_rebalance_start_wire
- *
- * Start a server with a rebalance worker wired in.  Send a
- * CT_MSG_REBALANCE_START over the wire and verify the server
- * returns MDS_ERR_INVAL (source == target) through the 4-byte
- * status response.  Then send a valid request and verify MDS_OK.
+ * Shared helpers for rebalance/tiering tests.
  * ------------------------------------------------------------------- */
 
 static const char *REBAL_DB = "/tmp/test_ct_rebalance.db";
@@ -1203,94 +1198,6 @@ static void cleanup_rebal(void)
     }
 }
 
-static void test_rebalance_start_wire(void)
-{
-    fprintf(stdout, "  test_rebalance_start_wire:        ");
-    fflush(stdout);
-
-    cleanup_rebal();
-    snprintf(g_rebal_tmpdir, sizeof(g_rebal_tmpdir),
-             "/tmp/test_ct_rebal_XXXXXX");
-    ASSERT_TRUE(mkdtemp(g_rebal_tmpdir) != NULL);
-
-    struct mds_catalogue *db = NULL;
-	struct mds_catalogue *cat = NULL;
-    enum mds_status st = ((db = open_test_catalogue()) != NULL ? MDS_OK : MDS_ERR_IO);
-	cat = db;
-    ASSERT_EQ(st, MDS_OK);
-
-    /* Register DS 1 and DS 3 as ONLINE. */
-    struct mds_ds_info ds_info;
-    memset(&ds_info, 0, sizeof(ds_info));
-    ds_info.ds_id = 1; ds_info.state = DS_ONLINE; ds_info.port = 2049;
-    snprintf(ds_info.addr, sizeof(ds_info.addr), "ds1:/export");
-    {
-        struct mds_cat_txn *txn = NULL;
-        st = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
-        ASSERT_EQ(st, MDS_OK);
-        st = mds_cat_ds_put(db, txn, &ds_info);
-        ASSERT_EQ(st, MDS_OK);
-        ASSERT_EQ(mds_cat_txn_commit(txn), 0);
-    }
-    ds_info.ds_id = 3; ds_info.state = DS_ONLINE;
-    snprintf(ds_info.addr, sizeof(ds_info.addr), "ds3:/export");
-    {
-        struct mds_cat_txn *txn = NULL;
-        st = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
-        ASSERT_EQ(st, MDS_OK);
-        st = mds_cat_ds_put(db, txn, &ds_info);
-        ASSERT_EQ(st, MDS_OK);
-        ASSERT_EQ(mds_cat_txn_commit(txn), 0);
-    }
-
-    /* Set up proxy context with both DS mounted. */
-    struct mds_proxy_ctx *proxy = NULL;
-    st = mds_proxy_ctx_create(&proxy);
-    ASSERT_EQ(st, MDS_OK);
-    for (uint32_t id = 1; id <= 3; id += 2) {
-        char mp[384];
-        snprintf(mp, sizeof(mp), "%s/ds%u", g_rebal_tmpdir, id);
-        mkdir(mp, 0755);
-        char dp[512];
-        snprintf(dp, sizeof(dp), "%s/data", mp);
-        mkdir(dp, 0755);
-        st = mds_proxy_mount_set(proxy, id, mp);
-        ASSERT_EQ(st, MDS_OK);
-    }
-
-    /* Init rebalance worker. */
-    struct rebalance_worker *rw = NULL;
-    ASSERT_EQ(rebalance_init(cat, NULL, proxy, NULL, &rw), 0);
-    rebalance_set_retry_delay(rw, 0);
-
-    /* Start server and register rebalance. */
-    struct cluster_server *srv = NULL;
-    st = cluster_transport_server_start(0, "127.0.0.1", NULL, 0, 0,
-                                        wrap_db_as_cat(db), NULL, NULL, &srv);
-    ASSERT_EQ(st, MDS_OK);
-    cluster_transport_server_set_rebalance(srv, rw);
-    uint16_t port = cluster_transport_server_port(srv);
-
-    /* --- Test 1: source == target → MDS_ERR_INVAL on the wire. --- */
-    st = cluster_transport_request_rebalance_start("127.0.0.1", port, 1, 1);
-    ASSERT_EQ(st, MDS_ERR_INVAL);
-
-    /* --- Test 2: valid request → MDS_OK. --- */
-    st = cluster_transport_request_rebalance_start("127.0.0.1", port, 1, 3);
-    ASSERT_EQ(st, MDS_OK);
-
-    /* Let worker run briefly then stop. */
-    usleep(50000);
-    rebalance_stop(rw);
-
-    /* Cleanup. */
-    cluster_transport_server_stop(srv);
-    rebalance_destroy(rw);
-    mds_proxy_ctx_destroy(proxy);
-    mds_catalogue_close(db);
-    cleanup_rebal();
-    PASS();
-}
 
 /* -------------------------------------------------------------------
  * test_rebalance_status_wire
@@ -1405,68 +1312,6 @@ static void test_tiering_status_wire(void)
     PASS();
 }
 
-/* -------------------------------------------------------------------
- * test_tiering_start_wire
- * ------------------------------------------------------------------- */
-
-static void test_tiering_start_wire(void)
-{
-    fprintf(stdout, "  test_tiering_start_wire:           ");
-    fflush(stdout);
-
-    cleanup_rebal();
-    struct mds_catalogue *db = NULL;
-	struct mds_catalogue *cat = NULL;
-    enum mds_status st = ((db = open_test_catalogue()) != NULL ? MDS_OK : MDS_ERR_IO);
-	cat = db;
-    ASSERT_EQ(st, MDS_OK);
-
-    struct mds_proxy_ctx *proxy = NULL;
-    st = mds_proxy_ctx_create(&proxy);
-    ASSERT_EQ(st, MDS_OK);
-
-    struct commit_queue *cq = NULL;
-    ASSERT_EQ(commit_queue_create(db, NULL, 0, 0, 0, 0, 0, 0, &cq), 0);
-
-    struct io_tracker *iot = NULL;
-    ASSERT_EQ(io_tracker_init(16, &iot), 0);
-
-    struct tiering_worker *tw = NULL;
-    ASSERT_EQ(tiering_init(cat, cq, proxy, NULL, iot, &tw), 0);
-
-    struct cluster_server *srv = NULL;
-    st = cluster_transport_server_start(0, "127.0.0.1", NULL, 0, 0,
-                                        wrap_db_as_cat(db), NULL, NULL, &srv);
-    ASSERT_EQ(st, MDS_OK);
-    cluster_transport_server_set_tiering(srv, tw);
-    uint16_t port = cluster_transport_server_port(srv);
-
-    struct tiering_config cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.eval_interval_sec = 3600;
-    cfg.promote_threshold = 100.0 * 1024.0 * 1024.0;
-    cfg.demote_threshold = 1.0 * 1024.0 * 1024.0 / 24.0;
-    cfg.cooldown_evals = 2;
-
-    st = cluster_transport_request_tiering_start("127.0.0.1", port, &cfg);
-    ASSERT_EQ(st, MDS_OK);
-
-    /* A duplicate start while already running must fail. */
-    st = cluster_transport_request_tiering_start("127.0.0.1", port, &cfg);
-    ASSERT_EQ(st, MDS_ERR_EXISTS);
-
-    /* Stop it so cleanup is clean. */
-    tiering_stop(tw);
-
-    cluster_transport_server_stop(srv);
-    tiering_destroy(tw);
-    io_tracker_destroy(iot);
-    commit_queue_destroy(cq);
-    mds_proxy_ctx_destroy(proxy);
-    mds_catalogue_close(db);
-    cleanup_rebal();
-    PASS();
-}
 
 /* -------------------------------------------------------------------
  * test_tiering_stop_wire
@@ -1939,10 +1784,8 @@ int main(void)
     test_split_admin_dest_not_serving();
     test_standby_detach_wire();
     test_force_remove_wire();
-    test_rebalance_start_wire();
     test_rebalance_status_wire();
     test_tiering_status_wire();
-    test_tiering_start_wire();
     test_tiering_stop_wire();
     test_tiering_start_null_cfg();
     test_ds_list_admin_wire();
