@@ -37,6 +37,174 @@
 /* Internal counter helper, defined in dir_delegation.c. */
 void dir_deleg_count_conflict_unavail(struct dir_deleg_table *ddt);
 
+/* -----------------------------------------------------------------------
+ * RFC 8881 §1.7 / §14.4 — UTF-8 (utf8str_cs) well-formedness validator.
+ *
+ * RFC 8881 §1.7 mandates utf8str_cs is the "Net-Unicode" form defined by
+ * RFC 5198 §3, which builds on RFC 3629 UTF-8 with two extra constraints
+ * relevant here:
+ *   - the byte sequence must be a well-formed UTF-8 encoding (RFC 3629);
+ *   - the encoded codepoints must NOT include Unicode "noncharacters".
+ *
+ * This implementation rejects:
+ *   - isolated continuation bytes (0x80-0xBF as a lead).
+ *   - overlong encodings (0xC0/0xC1 leads, E0 80-9F, F0 80-8F).
+ *   - UTF-16 surrogate halves (ED A0-BF).
+ *   - codepoints above U+10FFFF (F4 90-BF, plus all F5-FF leads).
+ *   - truncated multi-byte sequences.
+ *   - noncharacter codepoints: U+FDD0..U+FDEF and U+xxFFFE / U+xxFFFF
+ *     (for plane xx in 0..0x10) per The Unicode Standard §2.4 and
+ *     RFC 5198 §3, which pynfs RNM8/9 and COMP3 exercise via
+ *     get_invalid_utf8strings() (e.g. \xEF\xBF\xBE = U+FFFE).
+ *
+ * Embedded NUL is treated as valid UTF-8 here; callers that forbid it
+ * (component4 names, compound tag) check that separately.
+ */
+static inline bool utf8_is_noncharacter(uint32_t cp)
+{
+	/* Per-plane noncharacters: low 16 bits == FFFE or FFFF. */
+	uint32_t low = cp & 0xFFFFu;
+
+	if (low == 0xFFFEu || low == 0xFFFFu) {
+		return true;
+	}
+	/* BMP-only noncharacter range. */
+	if (cp >= 0xFDD0u && cp <= 0xFDEFu) {
+		return true;
+	}
+	return false;
+}
+
+bool compound_is_valid_utf8(const char *buf, size_t len)
+{
+	const uint8_t *p;
+	size_t i;
+
+	if (buf == NULL) {
+		return (len == 0);
+	}
+	p = (const uint8_t *)buf;
+	for (i = 0; i < len; ) {
+		uint8_t c = p[i];
+		uint8_t c1, c2, c3;
+		uint32_t cp;
+
+		if (c < 0x80u) {
+			i++;
+			continue;
+		}
+		if (c < 0xC2u) {
+			return false;
+		}
+		if (c < 0xE0u) {
+			if (i + 1 >= len) {
+				return false;
+			}
+			c1 = p[i + 1];
+			if (c1 < 0x80u || c1 > 0xBFu) {
+				return false;
+			}
+			/* 2-byte form encodes U+0080..U+07FF: no noncharacters
+			 * live in this range, no further check needed. */
+			i += 2;
+			continue;
+		}
+		if (c < 0xF0u) {
+			if (i + 2 >= len) {
+				return false;
+			}
+			c1 = p[i + 1];
+			c2 = p[i + 2];
+			if (c == 0xE0u) {
+				if (c1 < 0xA0u || c1 > 0xBFu) {
+					return false;
+				}
+			} else if (c == 0xEDu) {
+				if (c1 < 0x80u || c1 > 0x9Fu) {
+					return false;
+				}
+			} else {
+				if (c1 < 0x80u || c1 > 0xBFu) {
+					return false;
+				}
+			}
+			if (c2 < 0x80u || c2 > 0xBFu) {
+				return false;
+			}
+			cp = ((uint32_t)(c & 0x0Fu) << 12) |
+			     ((uint32_t)(c1 & 0x3Fu) << 6) |
+			     (uint32_t)(c2 & 0x3Fu);
+			if (utf8_is_noncharacter(cp)) {
+				return false;
+			}
+			i += 3;
+			continue;
+		}
+		if (c >= 0xF5u) {
+			return false;
+		}
+		if (i + 3 >= len) {
+			return false;
+		}
+		c1 = p[i + 1];
+		c2 = p[i + 2];
+		c3 = p[i + 3];
+		if (c == 0xF0u) {
+			if (c1 < 0x90u || c1 > 0xBFu) {
+				return false;
+			}
+		} else if (c == 0xF4u) {
+			if (c1 < 0x80u || c1 > 0x8Fu) {
+				return false;
+			}
+		} else {
+			if (c1 < 0x80u || c1 > 0xBFu) {
+				return false;
+			}
+		}
+		if (c2 < 0x80u || c2 > 0xBFu) {
+			return false;
+		}
+		if (c3 < 0x80u || c3 > 0xBFu) {
+			return false;
+		}
+		cp = ((uint32_t)(c & 0x07u) << 18) |
+		     ((uint32_t)(c1 & 0x3Fu) << 12) |
+		     ((uint32_t)(c2 & 0x3Fu) << 6) |
+		     (uint32_t)(c3 & 0x3Fu);
+		if (utf8_is_noncharacter(cp)) {
+			return false;
+		}
+		i += 4;
+	}
+	return true;
+}
+
+enum nfs4_status compound_validate_name(const char *name)
+{
+	size_t i;
+	size_t len;
+
+	if (name == NULL || name[0] == '\0') {
+		return NFS4ERR_INVAL;
+	}
+	if (name[0] == '.' &&
+	    (name[1] == '\0' ||
+	     (name[1] == '.' && name[2] == '\0'))) {
+		return NFS4ERR_BADNAME;
+	}
+	len = strlen(name);
+	for (i = 0; i < len; i++) {
+		if (name[i] == '/' || name[i] == '\0') {
+			return NFS4ERR_INVAL;
+		}
+	}
+	if (!compound_is_valid_utf8(name, len)) {
+		return NFS4ERR_INVAL;
+	}
+	return NFS4_OK;
+}
+
 /*
  * op_get_dir_delegation — RFC 8881 §18.39 dispatch handler.
  *

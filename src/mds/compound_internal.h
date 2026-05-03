@@ -152,6 +152,21 @@ void compound_recall_dir_delegations(struct compound_data *cd,
 				     uint64_t dir_fileid);
 
 /**
+ * RFC 8881 §12.7 / §16.4.5 / §18.26.4 — component4 name validation.
+ *
+ * Returns NFS4_OK iff @a name is a valid component4:
+ *   - non-empty                          (else NFS4ERR_INVAL)
+ *   - not "." or ".."                    (else NFS4ERR_BADNAME)
+ *   - well-formed UTF-8 with no NUL or '/' (else NFS4ERR_INVAL)
+ *
+ * Caller passes a NUL-terminated string read out of the per-op arg
+ * struct (struct nfs4_arg_lookup.name etc.); the decoder NUL-
+ * terminates these buffers, so strlen() is safe.  Length is implicitly
+ * bounded by the decoder's MDS_MAX_NAME cap.
+ */
+enum nfs4_status compound_validate_name(const char *name);
+
+/**
  * Notify-or-recall dispatcher for namespace mutations.
  *
  * For each dir delegation on @p dir_fileid held by a different

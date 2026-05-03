@@ -106,6 +106,7 @@ enum nfs4_status {
 	 * decode-failure path (rpc_server.c).  These MUST be carried in
 	 * a synthesised SEQUENCE result so the resarray is non-empty. */
 	NFS4ERR_BADXDR            = 10036,
+	NFS4ERR_BADCHAR           = 10040,
 	NFS4ERR_BADNAME           = 10041,
 	NFS4ERR_REQ_TOO_BIG       = 10065,
 	NFS4ERR_TOO_MANY_OPS      = 10070,
@@ -1530,6 +1531,22 @@ struct compound_data {
  * @param cat  Catalogue handle used for namespace operations.
  */
 void compound_init(struct compound_data *cd);
+
+/**
+ * RFC 8881 §1.7 / §14.4 — UTF-8 well-formedness check.
+ *
+ * Returns true iff @a buf points at @a len bytes that form a valid
+ * UTF-8 sequence: no overlong encodings, no surrogates, no codepoints
+ * above U+10FFFF, no isolated continuation bytes.  An embedded NUL
+ * (0x00) is treated as valid UTF-8 here — callers that need to
+ * forbid it (component4 names, compound tag) check for it separately.
+ *
+ * Used by compound_validate_name() (compound_internal.h) and the
+ * compound-tag validator in rpc_server.c to honour pynfs RNM8/9
+ * (testBadutf8*) and COMP3 (testBadTags) which iterate
+ * get_invalid_utf8strings() and expect NFS4ERR_INVAL.
+ */
+bool compound_is_valid_utf8(const char *buf, size_t len);
 
 /**
  * Free heap state owned by a result.  Currently only the layoutget

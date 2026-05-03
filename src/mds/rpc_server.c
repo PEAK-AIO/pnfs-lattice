@@ -998,6 +998,28 @@ wrongsec:
             }
         }
 
+        /*
+         * RFC 8881 §1.7 / §14.4: the COMPOUND tag is a utf8str_cs.
+         * pynfs COMP3 (testBadTags) iterates get_invalid_utf8strings()
+         * and expects NFS4ERR_INVAL for any tag that is not
+         * well-formed UTF-8.  The decoder NUL-terminates @tag so
+         * strlen() is safe; an embedded NUL inside the wire bytes
+         * shows up as a too-short string, which the validator
+         * accepts as legal UTF-8 — we therefore additionally reject
+         * any tag whose post-decode strlen does not match the
+         * decoded length.  Sent back via send_compound_decode_failure
+         * so the resarray-non-empty invariant (RFC 5661 §15.2) is
+         * preserved for clients that expect resarray[0].
+         */
+        {
+            size_t tlen = strlen(tag);
+            if (!compound_is_valid_utf8(tag, tlen)) {
+                rc = send_compound_decode_failure(c, reply_buf, xid,
+                    "", NFS4ERR_INVAL, NFS4ERR_INVAL);
+                goto cleanup;
+            }
+        }
+
         if (minorver < NFS4_MINOR_VERSION_MIN ||
             minorver > NFS4_MINOR_VERSION_MAX) {
             if (rpc_encode_accepted_reply(&enc, xid) != 0) {

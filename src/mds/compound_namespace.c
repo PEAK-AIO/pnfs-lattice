@@ -330,23 +330,18 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 5661 §16.4.5 / RFC 8881 §18.16.5: "If the component is
-	 * a zero length string [...] the error NFS4ERR_INVAL will be
-	 * returned."  Without this guard, falling through to the
-	 * catalogue layer for an empty name returns NFS4ERR_NOENT
-	 * (the dirent lookup misses), which violates the RFC and is
-	 * what pynfs SEQ9c (testReplayCache003) was catching: the
-	 * test sends LOOKUP(b"") expecting INVAL, then re-sends with
-	 * the same SEQUENCE seqid to verify the replay cache returns
-	 * the SAME error.  The replay cache itself was correct; the
-	 * first response was simply mis-coded.  Decoder always
-	 * NUL-terminates op->arg.lookup.name (struct nfs4_arg_lookup
-	 * uses a fixed char[MDS_MAX_NAME + 1] populated via
-	 * xdr_string_decode), so name[0] == '\0' iff the wire
-	 * component4 length was zero.
+	 * RFC 5661 §16.4.5 / RFC 8881 §18.16.5 + §12.7 — component4
+	 * validation.  Empty name → NFS4ERR_INVAL (pynfs SEQ9c).
+	 * "." / ".." → NFS4ERR_BADNAME (pynfs RNM10 family for
+	 * RENAME, same rule applies to LOOKUP per RFC 8881 §12.7
+	 * "the dot and dot-dot conventions are not used in NFSv4").
+	 * Invalid UTF-8 / embedded NUL / '/' → NFS4ERR_INVAL
+	 * (pynfs RNM8/9 testBadutf8*).  Decoder NUL-terminates
+	 * op->arg.lookup.name so strlen() inside the helper is safe.
 	 */
-	if (op->arg.lookup.name[0] == '\0') {
-		return NFS4ERR_INVAL;
+	nst = compound_validate_name(op->arg.lookup.name);
+	if (nst != NFS4_OK) {
+		return nst;
 	}
 
 	/* Xattr namespace: LOOKUP verifies the xattr exists. */
@@ -970,6 +965,18 @@ enum nfs4_status op_create(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+	/*
+	 * RFC 8881 §18.4.4 / §12.7 — component4 validation.  Empty
+	 * name → NFS4ERR_INVAL; "." / ".." → NFS4ERR_BADNAME; bad
+	 * UTF-8 → NFS4ERR_INVAL.  Validate BEFORE the freeze /
+	 * health checks so a malformed argument cannot mask state
+	 * with a transient DELAY.  Same precedence as op_lookup /
+	 * op_rename above.
+	 */
+	nst = compound_validate_name(a->name);
+	if (nst != NFS4_OK) {
+		return nst;
+	}
 	nst = check_subtree_frozen(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1294,6 +1301,16 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+	/*
+	 * RFC 8881 §18.25.4 / §12.7 — component4 validation.  Empty
+	 * → NFS4ERR_INVAL; "." / ".." → NFS4ERR_BADNAME; bad UTF-8 →
+	 * NFS4ERR_INVAL.  Same shape and precedence as op_lookup,
+	 * op_create, op_rename above.
+	 */
+	nst = compound_validate_name(op->arg.remove.name);
+	if (nst != NFS4_OK) {
+		return nst;
+	}
 	nst = check_subtree_frozen(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1439,23 +1456,24 @@ enum nfs4_status op_rename(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 8881 §18.26.4: "If oldname or newname has zero length,
-	 * NFS4ERR_INVAL will be returned."  Without this guard the
-	 * empty source name falls through to cat_rename which returns
-	 * NFS4ERR_NOENT (the source dirent doesn't exist), violating
-	 * the RFC and breaking pynfs SEQ9d (testReplayCache004).
-	 * Both names are decoded into NUL-terminated fixed buffers
-	 * (struct nfs4_arg_rename.{src,dst}_name[MDS_MAX_NAME + 1])
-	 * so name[0] == '\0' iff the wire component4 was zero-length.
-	 * The check is intentionally placed BEFORE the freeze /
-	 * health checks: a malformed argument is a client bug that
-	 * deserves an immediate INVAL regardless of subtree state,
-	 * and ordering INVAL ahead of DELAY matches the precedence
-	 * implied by RFC 8881 §2.6.3.1.
+	 * RFC 8881 §18.26.4 / §12.7 — component4 validation for both
+	 * names.  Empty → NFS4ERR_INVAL (pynfs SEQ9d).  "." / ".." →
+	 * NFS4ERR_BADNAME (pynfs RNM10 testDotsOldname / RNM11
+	 * testDotsNewname).  Invalid UTF-8 → NFS4ERR_INVAL (pynfs
+	 * RNM8/9 testBadutf8*).  Both names live in NUL-terminated
+	 * fixed buffers so the helper can use strlen() safely.
+	 * Validation runs BEFORE the freeze / health checks: a
+	 * malformed argument is a client bug that deserves an
+	 * immediate error regardless of subtree state, matching the
+	 * precedence implied by RFC 8881 §2.6.3.1.
 	 */
-	if (op->arg.rename.src_name[0] == '\0' ||
-	    op->arg.rename.dst_name[0] == '\0') {
-		return NFS4ERR_INVAL;
+	nst = compound_validate_name(op->arg.rename.src_name);
+	if (nst != NFS4_OK) {
+		return nst;
+	}
+	nst = compound_validate_name(op->arg.rename.dst_name);
+	if (nst != NFS4_OK) {
+		return nst;
 	}
 
 	/* Check BOTH target and source directories for freeze. */
@@ -1685,6 +1703,16 @@ enum nfs4_status op_link(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+	/*
+	 * RFC 8881 §18.20.4 / §12.7 — component4 validation on the
+	 * link's new name.  Empty → NFS4ERR_INVAL; "." / ".." →
+	 * NFS4ERR_BADNAME; bad UTF-8 → NFS4ERR_INVAL.  Same shape
+	 * and precedence as the other namespace ops above.
+	 */
+	nst = compound_validate_name(op->arg.link.name);
+	if (nst != NFS4_OK) {
+		return nst;
+	}
 	nst = check_subtree_frozen(cd);
 	if (nst != NFS4_OK) {
 		return nst;

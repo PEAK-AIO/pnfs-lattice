@@ -3684,6 +3684,127 @@ static void test_get_dir_delegation_no_fh(void)
 	close_test_db(db, path);
 }
 
+/* -----------------------------------------------------------------------
+ * Commit 1 — component4 / UTF-8 validators (pynfs RNM8–11 + COMP3).
+ * ----------------------------------------------------------------------- */
+
+/* compound_is_valid_utf8 lives in compound.h (public).
+ * compound_validate_name lives in compound_internal.h (private), but
+ * test_compound.c does not pull in compound_internal.h.  Re-declare the
+ * symbol locally with the same prototype so the linker can resolve it
+ * against the static library; this avoids dragging the entire private
+ * header into the test binary just for one prototype. */
+enum nfs4_status compound_validate_name(const char *name);
+
+static void test_validate_utf8_well_formed(void)
+{
+	ASSERT_TRUE(compound_is_valid_utf8("", 0));
+	ASSERT_TRUE(compound_is_valid_utf8("hello", 5));
+	/* 2-byte: U+00E9 é */
+	ASSERT_TRUE(compound_is_valid_utf8("\xC3\xA9", 2));
+	/* 3-byte: U+20AC € */
+	ASSERT_TRUE(compound_is_valid_utf8("\xE2\x82\xAC", 3));
+	/* 4-byte: U+1F600 😀 */
+	ASSERT_TRUE(compound_is_valid_utf8("\xF0\x9F\x98\x80", 4));
+}
+
+static void test_validate_utf8_rejects_overlong(void)
+{
+	/* C0 lead is always overlong. */
+	ASSERT_EQ(compound_is_valid_utf8("\xC0\x80", 2), false);
+	/* C1 lead likewise. */
+	ASSERT_EQ(compound_is_valid_utf8("\xC1\xBF", 2), false);
+	/* E0 followed by 80-9F is overlong. */
+	ASSERT_EQ(compound_is_valid_utf8("\xE0\x80\x80", 3), false);
+	ASSERT_EQ(compound_is_valid_utf8("\xE0\x9F\xBF", 3), false);
+	/* F0 followed by 80-8F is overlong. */
+	ASSERT_EQ(compound_is_valid_utf8("\xF0\x80\x80\x80", 4), false);
+}
+
+static void test_validate_utf8_rejects_surrogates(void)
+{
+	/* ED A0-BF marks a high surrogate (U+D800..U+DBFF). */
+	ASSERT_EQ(compound_is_valid_utf8("\xED\xA0\x80", 3), false);
+	/* Low surrogate (U+DC00..U+DFFF). */
+	ASSERT_EQ(compound_is_valid_utf8("\xED\xBF\xBF", 3), false);
+}
+
+static void test_validate_utf8_rejects_above_max(void)
+{
+	/* F4 90-BF exceeds U+10FFFF. */
+	ASSERT_EQ(compound_is_valid_utf8("\xF4\x90\x80\x80", 4), false);
+	/* F5-FF lead bytes invalid. */
+	ASSERT_EQ(compound_is_valid_utf8("\xF5\x80\x80\x80", 4), false);
+	ASSERT_EQ(compound_is_valid_utf8("\xFF", 1), false);
+}
+
+static void test_validate_utf8_rejects_truncated(void)
+{
+	/* 2-byte lead with no continuation. */
+	ASSERT_EQ(compound_is_valid_utf8("\xC3", 1), false);
+	/* 3-byte lead with one continuation. */
+	ASSERT_EQ(compound_is_valid_utf8("\xE2\x82", 2), false);
+	/* 4-byte lead with two continuations. */
+	ASSERT_EQ(compound_is_valid_utf8("\xF0\x9F\x98", 3), false);
+	/* Bare continuation byte. */
+	ASSERT_EQ(compound_is_valid_utf8("\x80", 1), false);
+}
+
+static void test_validate_utf8_rejects_noncharacters(void)
+{
+	/* U+FFFE (BMP last-1 sentinel) — the exact byte sequence pynfs
+	 * RNM8/9 + COMP3 use to drive get_invalid_utf8strings(). */
+	ASSERT_EQ(compound_is_valid_utf8("\xEF\xBF\xBE", 3), false);
+	/* U+FFFF (BMP last sentinel). */
+	ASSERT_EQ(compound_is_valid_utf8("\xEF\xBF\xBF", 3), false);
+	/* U+FDD0..U+FDEF range — first and last. */
+	ASSERT_EQ(compound_is_valid_utf8("\xEF\xB7\x90", 3), false); /* FDD0 */
+	ASSERT_EQ(compound_is_valid_utf8("\xEF\xB7\xAF", 3), false); /* FDEF */
+	/* U+1FFFE (supplementary noncharacter). */
+	ASSERT_EQ(compound_is_valid_utf8("\xF0\x9F\xBF\xBE", 4), false);
+	/* U+10FFFE (last plane noncharacter). */
+	ASSERT_EQ(compound_is_valid_utf8("\xF4\x8F\xBF\xBE", 4), false);
+	/* Adjacent valid codepoint U+FDCF still passes. */
+	ASSERT_TRUE(compound_is_valid_utf8("\xEF\xB7\x8F", 3));
+}
+
+static void test_validate_name_basic(void)
+{
+	/* Non-empty, plain-ASCII, no special chars → OK. */
+	ASSERT_EQ(compound_validate_name("foo"), NFS4_OK);
+	ASSERT_EQ(compound_validate_name("foo.bar"), NFS4_OK);
+	ASSERT_EQ(compound_validate_name("..."), NFS4_OK);
+	/* Valid 2-byte UTF-8 (split-string keeps "clair" out of the
+	 * \x hex escape). */
+	ASSERT_EQ(compound_validate_name("\xC3\xA9" "clair"), NFS4_OK);
+}
+
+static void test_validate_name_empty_inval(void)
+{
+	ASSERT_EQ(compound_validate_name(""), NFS4ERR_INVAL);
+	ASSERT_EQ(compound_validate_name(NULL), NFS4ERR_INVAL);
+}
+
+static void test_validate_name_dots_badname(void)
+{
+	ASSERT_EQ(compound_validate_name("."), NFS4ERR_BADNAME);
+	ASSERT_EQ(compound_validate_name(".."), NFS4ERR_BADNAME);
+}
+
+static void test_validate_name_slash_inval(void)
+{
+	ASSERT_EQ(compound_validate_name("foo/bar"), NFS4ERR_INVAL);
+	ASSERT_EQ(compound_validate_name("/foo"), NFS4ERR_INVAL);
+	ASSERT_EQ(compound_validate_name("foo/"), NFS4ERR_INVAL);
+}
+
+static void test_validate_name_bad_utf8_inval(void)
+{
+	ASSERT_EQ(compound_validate_name("\xC0\x80"), NFS4ERR_INVAL);
+	ASSERT_EQ(compound_validate_name("\xED\xA0\x80"), NFS4ERR_INVAL);
+	ASSERT_EQ(compound_validate_name("\xF5"), NFS4ERR_INVAL);
+}
+
 /** GETXATTR/SETXATTR without current FH → NFS4ERR_NOFILEHANDLE. */
 static void test_rfc8276_xattr_no_fh(void)
 {
@@ -3777,6 +3898,19 @@ int main(void)
 	/* Phase 8a — GET_DIR_DELEGATION wire compat (RFC 8881 §18.39) */
 	RUN_TEST(test_get_dir_delegation_unavail);
 	RUN_TEST(test_get_dir_delegation_no_fh);
+
+	/* Commit 1 — component4 / UTF-8 validators (pynfs RNM8–11 + COMP3) */
+	RUN_TEST(test_validate_utf8_well_formed);
+	RUN_TEST(test_validate_utf8_rejects_overlong);
+	RUN_TEST(test_validate_utf8_rejects_surrogates);
+	RUN_TEST(test_validate_utf8_rejects_above_max);
+	RUN_TEST(test_validate_utf8_rejects_truncated);
+	RUN_TEST(test_validate_utf8_rejects_noncharacters);
+	RUN_TEST(test_validate_name_basic);
+	RUN_TEST(test_validate_name_empty_inval);
+	RUN_TEST(test_validate_name_dots_badname);
+	RUN_TEST(test_validate_name_slash_inval);
+	RUN_TEST(test_validate_name_bad_utf8_inval);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;
