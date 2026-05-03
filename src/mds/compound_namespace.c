@@ -1644,6 +1644,68 @@ enum nfs4_status op_rename(struct compound_data *cd,
 }
 	}
 
+	/*
+	 * RFC 8881 §18.26.4 — RENAME of a file to itself MUST be a
+	 * no-op.  This covers two flavours both required by pynfs:
+	 *
+	 *   RNM19 (testSelfRenameFile): src_name == dst_name in the
+	 *   same directory, naming the same object.
+	 *
+	 *   RNM20 (testLinkRename): src_name != dst_name (possibly in
+	 *   different directories) but both names resolve to the same
+	 *   inode — i.e. the destination is a hard link to the source.
+	 *
+	 * In both cases the source and target change_info4 values MUST
+	 * have before == after; mutating the catalogue would bump the
+	 * change counter on at least one directory and break the test
+	 * (and cause real clients to invalidate caches unnecessarily).
+	 */
+	{
+		bool same_dir = (cd->saved_fh.fileid == cd->current_fh.fileid);
+		bool same_name = (strcmp(op->arg.rename.src_name,
+					 op->arg.rename.dst_name) == 0);
+		bool noop = false;
+
+		if (same_dir && same_name) {
+			noop = true;
+		} else {
+			struct mds_inode src_obj;
+			struct mds_inode dst_obj;
+			enum mds_status sst, dst_st;
+
+			sst = compound_lookup_local_child(cd,
+				cd->saved_fh.fileid,
+				op->arg.rename.src_name, &src_obj);
+			dst_st = compound_lookup_local_child(cd,
+				cd->current_fh.fileid,
+				op->arg.rename.dst_name, &dst_obj);
+			if (sst == MDS_OK && dst_st == MDS_OK &&
+			    src_obj.fileid == dst_obj.fileid) {
+				noop = true;
+			}
+		}
+		if (noop) {
+			struct mds_inode src_dir;
+			struct mds_inode dst_dir;
+
+			if (compound_inode_get(cd, cd->saved_fh.fileid,
+					       &src_dir) == MDS_OK) {
+				res->res.change_info.src_before =
+					src_dir.change;
+				res->res.change_info.src_after =
+					src_dir.change;
+			}
+			if (compound_inode_get(cd, cd->current_fh.fileid,
+					       &dst_dir) == MDS_OK) {
+				res->res.change_info.before =
+					dst_dir.change;
+				res->res.change_info.after =
+					dst_dir.change;
+			}
+			return NFS4_OK;
+		}
+	}
+
 	/* Capture pre-rename change counters for both directories. */
 	{
 		struct mds_inode src_pre, dst_pre;
@@ -1870,7 +1932,19 @@ enum nfs4_status op_link(struct compound_data *cd,
 							 cd->saved_path);
 		bool dir_local = subtree_map_is_local(cd->smap,
 						      cd->current_path);
-		if (!target_local || !dir_local) {
+		/*
+		 * In the single-RonDB-cluster deployment model every MDS
+		 * sees the same catalogue, so an unmapped path (e.g. the
+		 * pynfs default test root /pynfs-test/...) is reachable
+		 * here even though it falls outside any configured subtree
+		 * — mirror the op_rename precedent that allows the
+		 * `!src_local && !dst_local` case to fall through to
+		 * cat_link.  The historical NFS4ERR_XDEV here was
+		 * over-conservative and broke pynfs RNM20 (testLinkRename)
+		 * which LINKs within the same dir before exercising rename.
+		 */
+		if ((!target_local && dir_local) ||
+		    (target_local && !dir_local)) {
 			return NFS4ERR_XDEV;
 		}
 	}
