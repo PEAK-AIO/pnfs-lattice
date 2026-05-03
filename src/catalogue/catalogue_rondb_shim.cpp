@@ -4553,15 +4553,41 @@ int rondb_shim_stripe_get_and_layout_grant(
             (void)rondb_set_value_u64(op, RONDB_LS_COL_GRANT_EPOCH, (Uint64)0);
         }
 
-        /* Index tables (layout_by_client, layout_by_file, ds_layout_idx)
-         * are written separately by the fallback layout_state_put path.
-         * The fused path only handles the authoritative layout_state row
-         * to keep the mixed read+write transaction simple. */
+        /* 3b. layout_by_file row — required by
+         *     mds_coord_layout_iter_file for byte-range
+         *     CB_LAYOUTRECALL conflict detection (Mark's bug:
+         *     bugs from mark/mds_byte_range_layoutrecall.md).
+         *
+         *     The previous version skipped this index write in the
+         *     fused path on the assumption that a fallback
+         *     layout_state_put would persist it.  In reality the
+         *     fused path returns success directly (compound_layout.c
+         *     calls catalogue_rondb_layoutget_fused, observes
+         *     MDS_OK, and goes straight to fill_layoutget_result),
+         *     so layout_by_file was never written for any grant
+         *     that hit the fused fast path.  That left the
+         *     byte-range recall scanner unable to see existing
+         *     holders and silently suppressed every conflict
+         *     CB_LAYOUTRECALL.
+         *
+         *     Adding the write here keeps the fused fast path
+         *     atomic (one Commit) and matches the row set produced
+         *     by the non-fused rondb_shim_layout_state_put. */
+        op = tx->getNdbOperation(lbf_tbl);
+        if (op == nullptr) { goto fused_lg_err; }
+        op->writeTuple();
+        (void)rondb_equal_u64(op, RONDB_LBF_COL_FILEID, fileid);
+        op->equal(RONDB_LBF_COL_STATEID,
+                  (const char *)sid_enc, sid_enc_len);
 
-        /* 3d. ds_layout_idx: we can't know ds_ids yet (PK reads
-         * haven't executed), so skip — the fallback layout_state_put
-         * already handles ds_layout_idx via the separate call path.
-         * The fused path optimizes the layout_state + indexes only. */
+        /* 3c. ds_layout_idx is keyed on per-stripe ds_id which is
+         *     not known until the entry PK reads above commit.
+         *     The DS-failure recall path already tolerates a
+         *     missing ds_layout_idx row by falling through to a
+         *     full file scan, so leaving it written by the
+         *     non-fused path (or a follow-up post-commit insert)
+         *     is the conservative choice for now.  Tracked in
+         *     docs/pending.md. */
 
         /* Commit: header PK read + entry PK reads + layout writes
          * all in ONE network round-trip (2 NDB executes total:
