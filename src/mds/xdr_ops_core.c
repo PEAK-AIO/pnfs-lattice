@@ -156,12 +156,13 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
 
-    /* fore_chan_attrs: headerpadsize, maxrequestsize, maxresponsesize,
-     * maxresponsesize_cached, maxoperations, maxrequests.  Capture
-     * maxrequestsize and maxoperations into a-> fields so the
-     * server-side negotiation in session_create_session() can return
-     * MIN(client, server) and the SEQUENCE wire path can enforce the
-     * negotiated limit (RFC 8881 §18.36.4 / pynfs SEQ6+SEQ7). */
+    /* fore_chan_attrs (RFC 8881 §18.36.1 channel_attrs4):
+     *   ca_headerpadsize, ca_maxrequestsize, ca_maxresponsesize,
+     *   ca_maxresponsesize_cached, ca_maxoperations, ca_maxrequests,
+     *   ca_rdma_ird<1>.
+     * Capture every field into a-> so op_create_session can apply the
+     * NFS4ERR_TOOSMALL / NFS4ERR_INVAL semantics required by
+     * §18.36.3.  Pynfs CSESS25/28/29 and SEQ6/SEQ7 drive these. */
     {
         uint32_t pad, maxreq, maxresp, maxcached, maxops;
 
@@ -180,15 +181,20 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         if (!xdr_uint32_t(xdrs, &maxops)) {
             return false;
 }
-        a->fore_max_request_size = maxreq;
-        a->fore_max_operations   = maxops;
+        a->fore_max_request_size  = maxreq;
+        a->fore_max_response_size = maxresp;
+        a->fore_max_operations    = maxops;
         if (!xdr_uint32_t(xdrs, &a->fore_slots)) {
             return false;
         }
-        /* ca_rdma_ird<1>: variable-length array. */
+        /* ca_rdma_ird<1>: XDR upper-bound 1.  ird_count > 1 is an
+         * XDR violation — pynfs CSESS19 (testRdmaArray2) sends
+         * length 2 expecting NFS4ERR_BADXDR / GARBAGE_ARGS, both
+         * of which our decode-failure path produces. */
         {
             uint32_t ird_count;
             if (!xdr_uint32_t(xdrs, &ird_count)) { return false; }
+            if (ird_count > 1U) { return false; }
             for (uint32_t ri = 0; ri < ird_count; ri++) {
                 uint32_t ird_val;
                 if (!xdr_uint32_t(xdrs, &ird_val)) { return false; }
@@ -196,7 +202,10 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         }
     }
 
-    /* back_chan_attrs: same 7 fields (6 + ca_rdma_ird). */
+    /* back_chan_attrs: same 7 fields.  We capture all of them into
+     * a-> so op_create_session can apply the same TOOSMALL floor as
+     * for the fore channel — pynfs CSESS29 (testDRCMemLeak) sets the
+     * back channel's ca_maxrequestsize=10 and expects TOOSMALL. */
     {
         uint32_t pad, maxreq, maxresp, maxcached, maxops;
 
@@ -215,13 +224,20 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         if (!xdr_uint32_t(xdrs, &maxops)) {
             return false;
 }
+        a->back_max_request_size  = maxreq;
+        a->back_max_response_size = maxresp;
+        a->back_max_operations    = maxops;
         if (!xdr_uint32_t(xdrs, &a->back_slots)) {
             return false;
         }
-        /* ca_rdma_ird<1> */
+        a->back_max_requests = a->back_slots;
+        /* ca_rdma_ird<1> with the same XDR-bound check as the
+         * fore channel; CSESS19 covers the fore-channel path but
+         * the same wire constraint applies here. */
         {
             uint32_t ird_count;
             if (!xdr_uint32_t(xdrs, &ird_count)) { return false; }
+            if (ird_count > 1U) { return false; }
             for (uint32_t ri = 0; ri < ird_count; ri++) {
                 uint32_t ird_val;
                 if (!xdr_uint32_t(xdrs, &ird_val)) { return false; }

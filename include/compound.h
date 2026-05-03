@@ -360,6 +360,19 @@ struct nfs4_arg_create_session {
 	 * SEQ7 (testTooManyOps). */
 	uint32_t fore_max_request_size;
 	uint32_t fore_max_operations;
+	/* RFC 8881 §18.36.4 channel_attrs4 fields kept for
+	 * NFS4ERR_TOOSMALL validation in op_create_session.  Decoded
+	 * verbatim from the wire; never used by session bookkeeping.
+	 * Pynfs CSESS25 (fore maxresponsesize=0), CSESS28 (fore
+	 * maxrequestsize=20), CSESS29 (back maxrequestsize=10) all
+	 * expect NFS4ERR_TOOSMALL — see op_create_session for the
+	 * floor we apply (>= 256 bytes for max{request,response}size
+	 * and >= 1 for max{operations,requests}). */
+	uint32_t fore_max_response_size;
+	uint32_t back_max_request_size;
+	uint32_t back_max_response_size;
+	uint32_t back_max_operations;
+	uint32_t back_max_requests;
 };
 
 struct nfs4_arg_destroy_session {

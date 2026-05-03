@@ -154,6 +154,20 @@ static struct nfs4_op mk_create_session(uint64_t clientid, uint32_t seqid,
 	op.arg.create_session.csa_flags = 0;
 	op.arg.create_session.fore_slots = slots;
 	op.arg.create_session.back_slots = slots;
+	/*
+	 * RFC 8881 §18.36 channel attributes — op_create_session now
+	 * enforces NFS4ERR_TOOSMALL on too-small ca_max{request,response}
+	 * size and zero ca_maxoperations / ca_maxrequests, so populate
+	 * realistic values here so the integration test exercises a
+	 * fully-formed CREATE_SESSION rather than an XDR shell.
+	 */
+	op.arg.create_session.fore_max_request_size  = 8192;
+	op.arg.create_session.fore_max_response_size = 8192;
+	op.arg.create_session.fore_max_operations    = 64;
+	op.arg.create_session.back_max_request_size  = 4096;
+	op.arg.create_session.back_max_response_size = 4096;
+	op.arg.create_session.back_max_operations    = 2;
+	op.arg.create_session.back_max_requests      = slots;
 	return op;
 }
 

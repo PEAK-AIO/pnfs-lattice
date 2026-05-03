@@ -166,6 +166,19 @@ static struct nfs4_op mk_create_session(uint64_t clientid, uint32_t seqid,
 	op.arg.create_session.csa_flags = 0;
 	op.arg.create_session.fore_slots = slots;
 	op.arg.create_session.back_slots = slots;
+	/* RFC 8881 §18.36 channel attrs — sized so op_create_session
+	 * passes its NFS4ERR_TOOSMALL gate (ca_max{request,response}
+	 * size >= 256, ca_max{operations,requests} >= 1).  The bench
+	 * is a synthetic harness; it doesn't drive the SEQUENCE
+	 * enforcement path so the precise values don't matter
+	 * beyond the floor. */
+	op.arg.create_session.fore_max_request_size  = 8192;
+	op.arg.create_session.fore_max_response_size = 8192;
+	op.arg.create_session.fore_max_operations    = 64;
+	op.arg.create_session.back_max_request_size  = 4096;
+	op.arg.create_session.back_max_response_size = 4096;
+	op.arg.create_session.back_max_operations    = 2;
+	op.arg.create_session.back_max_requests      = slots;
 	return op;
 }
 

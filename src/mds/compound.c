@@ -957,17 +957,20 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	 * (pynfs DESCID4/5 drive that path).  Pynfs DESCID7
 	 * (testDestroyCIDNotOnly) verifies the no-SEQUENCE rule with
 	 * [DESTROY_CLIENTID(0), RECLAIM_COMPLETE] expecting NOT_ONLY_OP.
+	 *
+	 * For CREATE_SESSION specifically, pynfs CSESS29 (testDRCMemLeak)
+	 * sends [SEQUENCE, CREATE_SESSION] with bad channel attrs and
+	 * expects NFS4ERR_TOOSMALL rather than NFS4ERR_NOT_ONLY_OP — the
+	 * test author's view (and Linux NFSD's behaviour) is that
+	 * argument validation precedes placement validation.  We therefore
+	 * delegate CREATE_SESSION's NOT_ONLY_OP check to op_create_session,
+	 * which runs the arg validators first.
 	 */
 	{
 		bool starts_with_seq = (cd->op_count > 0 && cd->ops != NULL &&
 					cd->ops[0].opnum == OP_SEQUENCE);
 
 		switch (op->opnum) {
-		case OP_CREATE_SESSION:
-			if (cd->op_count != 1) {
-				return NFS4ERR_NOT_ONLY_OP;
-			}
-			break;
 		case OP_DESTROY_SESSION:
 			if (starts_with_seq) {
 				if (cd->op_index != cd->op_count - 1) {

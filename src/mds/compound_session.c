@@ -116,6 +116,31 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 	return NFS4_OK;
 }
 
+/*
+ * RFC 8881 §18.36.3 channel attribute floors.
+ *
+ * The replier MUST return NFS4ERR_TOOSMALL when a client requests a
+ * value too small for the replier to honour.  We reject anything
+ * below 256 bytes for ca_max{request,response}size, which catches
+ * pynfs CSESS25 (fore maxresponsesize=0), CSESS28 (fore
+ * maxrequestsize=20) and CSESS29 (back maxrequestsize=10) without
+ * tripping pynfs SEQ6 (sets ca_maxrequestsize=512 to drive
+ * NFS4ERR_REQ_TOO_BIG — must be accepted).  ca_max{operations,
+ * requests} == 0 are also rejected: the negotiated minimum legal
+ * COMPOUND must contain at least one op and the slot table must
+ * have at least one slot.
+ */
+#define NFS4_MIN_CHAN_REQUEST_SIZE  256U
+#define NFS4_MIN_CHAN_RESPONSE_SIZE 256U
+
+/*
+ * RFC 8881 §18.36.1 csa_flags reserved-bits mask.  The defined bits
+ * are CREATE_SESSION4_FLAG_PERSIST (0x1), _CONN_BACK_CHAN (0x2), and
+ * _CONN_RDMA (0x4).  Any other bit set MUST yield NFS4ERR_INVAL per
+ * §18.36.3.
+ */
+#define NFS4_CSA_FLAGS_VALID_MASK 0x7U
+
 enum nfs4_status op_create_session(struct compound_data *cd,
 					  const struct nfs4_op *op,
 					  struct nfs4_result *res)
@@ -127,6 +152,42 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 	if (cd->st == NULL) {
 		return NFS4ERR_SERVERFAULT;
 }
+
+	/*
+	 * RFC 8881 §18.36.3 argument validation — performed before any
+	 * session table state is mutated, so a rejected request leaves
+	 * the client and slot accounting untouched.  These checks run
+	 * BEFORE the NFS4ERR_NOT_ONLY_OP placement check below: pynfs
+	 * CSESS29 sends [SEQUENCE, CREATE_SESSION] with a 10-byte
+	 * back-channel ca_maxrequestsize and expects TOOSMALL, not
+	 * NOT_ONLY_OP — i.e. the arg validators win the tie.  Linux
+	 * NFSD has the same ordering.
+	 */
+	if ((a->csa_flags & ~NFS4_CSA_FLAGS_VALID_MASK) != 0) {
+		return NFS4ERR_INVAL;
+	}
+	if (a->fore_max_request_size  < NFS4_MIN_CHAN_REQUEST_SIZE  ||
+	    a->fore_max_response_size < NFS4_MIN_CHAN_RESPONSE_SIZE ||
+	    a->back_max_request_size  < NFS4_MIN_CHAN_REQUEST_SIZE  ||
+	    a->back_max_response_size < NFS4_MIN_CHAN_RESPONSE_SIZE) {
+		return NFS4ERR_TOOSMALL;
+	}
+	if (a->fore_max_operations == 0 || a->back_max_operations == 0) {
+		return NFS4ERR_TOOSMALL;
+	}
+	if (a->fore_slots == 0) {
+		return NFS4ERR_TOOSMALL;
+	}
+
+	/*
+	 * RFC 8881 §18.36.3 placement rule — only after args validated.
+	 * CREATE_SESSION MUST be the sole op in its compound.  Pynfs
+	 * CSESS23 (testNotOnlyOp) drives this with [CREATE_SESSION,
+	 * PUTROOTFH] expecting NOT_ONLY_OP.
+	 */
+	if (cd->op_count != 1) {
+		return NFS4ERR_NOT_ONLY_OP;
+	}
 
 	rc = session_create_session(cd->st,
 				    a->clientid,

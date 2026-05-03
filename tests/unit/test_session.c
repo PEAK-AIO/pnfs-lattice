@@ -594,13 +594,23 @@ static void test_compound_full_flow(void)
 
 		ASSERT_NE(clientid, 0);
 
-		/* Op 0: CREATE_SESSION */
+		/* Op 0: CREATE_SESSION (RFC 8881 §18.36 — channel attrs
+		 * must be sized so op_create_session doesn't reject the
+		 * request with NFS4ERR_TOOSMALL).  Use the same defaults
+		 * as a healthy Linux client. */
 		memset(&ops[0], 0, sizeof(ops[0]));
 		ops[0].opnum = OP_CREATE_SESSION;
 		ops[0].arg.create_session.clientid = clientid;
 		ops[0].arg.create_session.seqid = seqid;
 		ops[0].arg.create_session.fore_slots = 16;
 		ops[0].arg.create_session.back_slots = 4;
+		ops[0].arg.create_session.fore_max_request_size  = 8192;
+		ops[0].arg.create_session.fore_max_response_size = 8192;
+		ops[0].arg.create_session.fore_max_operations    = 64;
+		ops[0].arg.create_session.back_max_request_size  = 4096;
+		ops[0].arg.create_session.back_max_response_size = 4096;
+		ops[0].arg.create_session.back_max_operations    = 2;
+		ops[0].arg.create_session.back_max_requests      = 4;
 
 		/* Process CREATE_SESSION. */
 		compound_init(&cd);
@@ -841,6 +851,120 @@ static void test_destroy_client_busy(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Commit 3 — op_create_session argument validation (RFC 8881 §18.36.3)
+ *
+ * The compound-level handler must reject:
+ *   - csa_flags reserved bits (§18.36.1)        → NFS4ERR_INVAL
+ *   - too-small ca_max{request,response}size  → NFS4ERR_TOOSMALL
+ *   - zero ca_max{operations,requests}        → NFS4ERR_TOOSMALL
+ * BEFORE calling session_create_session, so a rejected request leaves
+ * the slot table untouched (CSESS29 sends 10000 of these in a row).
+ * ----------------------------------------------------------------------- */
+
+static void seed_create_session_args(struct nfs4_op *op,
+				     uint64_t clientid,
+				     uint32_t seqid)
+{
+	memset(op, 0, sizeof(*op));
+	op->opnum = OP_CREATE_SESSION;
+	op->arg.create_session.clientid = clientid;
+	op->arg.create_session.seqid = seqid;
+	op->arg.create_session.csa_flags = 0;
+	op->arg.create_session.fore_slots = 16;
+	op->arg.create_session.back_slots = 4;
+	op->arg.create_session.fore_max_request_size  = 8192;
+	op->arg.create_session.fore_max_response_size = 8192;
+	op->arg.create_session.fore_max_operations    = 64;
+	op->arg.create_session.back_max_request_size  = 4096;
+	op->arg.create_session.back_max_response_size = 4096;
+	op->arg.create_session.back_max_operations    = 2;
+	op->arg.create_session.back_max_requests      = 4;
+}
+
+static void run_create_session_with_mutator(
+	void (*mutate)(struct nfs4_arg_create_session *),
+	enum nfs4_status expected)
+{
+	struct mds_catalogue *db = NULL;
+	struct session_table *st = NULL;
+	struct compound_data cd;
+	char *path;
+	struct nfs4_op op;
+	struct nfs4_result res;
+	uint64_t clientid = 0;
+	uint32_t seqid = 0;
+	uint32_t nres;
+
+	path = make_temp_db_path();
+	db = open_test_catalogue(); VERIFY(db != NULL);
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL), 0);
+
+	seed_create_session_args(&op, clientid, seqid);
+	mutate(&op.arg.create_session);
+
+	compound_init(&cd);
+	cd.cat = db;
+	cd.st = st;
+	memset(&res, 0, sizeof(res));
+	nres = compound_process(&cd, &op, &res, 1);
+	ASSERT_EQ(nres, 1);
+	ASSERT_EQ(res.status, expected);
+
+	session_table_destroy(st);
+	mds_catalogue_close(db);
+	cleanup_temp_db(path);
+	free(path);
+}
+
+static void mut_csa_flags_reserved(struct nfs4_arg_create_session *a)
+{
+	a->csa_flags = 0x80;  /* outside 0x7 valid mask */
+}
+
+static void mut_fore_maxreq_too_small(struct nfs4_arg_create_session *a)
+{
+	a->fore_max_request_size = 20;  /* CSESS28 case */
+}
+
+static void mut_back_maxreq_too_small(struct nfs4_arg_create_session *a)
+{
+	a->back_max_request_size = 10;  /* CSESS29 case */
+}
+
+static void mut_fore_maxops_zero(struct nfs4_arg_create_session *a)
+{
+	a->fore_max_operations = 0;
+}
+
+static void test_create_session_reserved_flags(void)
+{
+	run_create_session_with_mutator(mut_csa_flags_reserved,
+					NFS4ERR_INVAL);
+}
+
+static void test_create_session_fore_maxreq_too_small(void)
+{
+	run_create_session_with_mutator(mut_fore_maxreq_too_small,
+					NFS4ERR_TOOSMALL);
+}
+
+static void test_create_session_back_maxreq_too_small(void)
+{
+	run_create_session_with_mutator(mut_back_maxreq_too_small,
+					NFS4ERR_TOOSMALL);
+}
+
+static void test_create_session_fore_maxops_zero(void)
+{
+	run_create_session_with_mutator(mut_fore_maxops_zero,
+					NFS4ERR_TOOSMALL);
+}
+
+/* -----------------------------------------------------------------------
  * Test: Compound — session-bound op without SEQUENCE
  * ----------------------------------------------------------------------- */
 
@@ -916,6 +1040,12 @@ int main(void)
 	RUN_TEST(test_destroy_client_stale);
 	RUN_TEST(test_destroy_client_unconfirmed);
 	RUN_TEST(test_destroy_client_busy);
+
+	/* Commit 3 — op_create_session validation (RFC 8881 §18.36.3) */
+	RUN_TEST(test_create_session_reserved_flags);
+	RUN_TEST(test_create_session_fore_maxreq_too_small);
+	RUN_TEST(test_create_session_back_maxreq_too_small);
+	RUN_TEST(test_create_session_fore_maxops_zero);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;
