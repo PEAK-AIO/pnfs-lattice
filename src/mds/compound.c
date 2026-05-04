@@ -1477,8 +1477,29 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		return NFS4ERR_BAD_STATEID;
 	}
 
-	/* BIND_CONN_TO_SESSION: accept and echo session_id. */
+	/*
+	 * BIND_CONN_TO_SESSION (RFC 8881 §18.34) — attach the
+	 * incoming TCP connection to the named session as a
+	 * backchannel.  The Linux kernel client sends this op
+	 * after CREATE_SESSION when it wants this connection to
+	 * carry callbacks; without an actual binding here the
+	 * kernel records the bind as having failed and rejects
+	 * every subsequent CB_SEQUENCE with NFS4ERR_BADSESSION.
+	 *
+	 * The decoder stores the session_id in
+	 * op->arg.destroy_session.session_id (it reuses that union
+	 * slot to avoid adding a new struct on the hot path; see
+	 * decode_one_op).  We treat any direction request as
+	 * "bind backchannel on this conn" — the only direction
+	 * the kernel ever asks us to act on — and return BOTH in
+	 * the response so the kernel sees its request honoured.
+	 */
 	case OP_BIND_CONN_TO_SESSION:
+		if (cd->st != NULL && cd->conn != NULL) {
+			(void)session_bind_conn(cd->st,
+				op->arg.destroy_session.session_id,
+				cd->conn);
+		}
 		memcpy(res->res.sequence.session_id,
 		       op->arg.destroy_session.session_id,
 		       SESSION_ID_SIZE);

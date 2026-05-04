@@ -240,7 +240,26 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 	switch (rc) {
 	case 0:
 		r->csr_sequence = a->seqid;
-		r->csr_flags = 0;
+		/*
+		 * RFC 8881 §18.36.4 csr_flags semantics.  The server
+		 * MUST echo CREATE_SESSION4_FLAG_CONN_BACK_CHAN back
+		 * in csr_flags when it has accepted the requesting
+		 * connection as the backchannel for this session.
+		 * The pre-fix behaviour of always returning 0 caused
+		 * the Linux kernel client (per fs/nfs/nfs4session.c)
+		 * to record "backchannel not bound" and reject every
+		 * subsequent CB_SEQUENCE with NFS4ERR_BADSESSION — the
+		 * exact symptom in PEAK:AIO Mark's two-client harness
+		 * (Q2 of bugs from mark/PROMPT_FOR_MDS_DEVTEAM.md).
+		 *
+		 * We always perform the actual bind below (cd->conn !=
+		 * NULL); only the wire signal needs to mirror the
+		 * client's request bit.  CONN_RDMA / PERSIST are not
+		 * supported by this server, so we mask them out before
+		 * echoing.
+		 */
+		r->csr_flags = (a->csa_flags &
+				 CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
 		/*
 		 * RFC 8881 §2.10.8.3 / §18.36.3 — push the captured
 		 * callback security parms onto the new session so the
