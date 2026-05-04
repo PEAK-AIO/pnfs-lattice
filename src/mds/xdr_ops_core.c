@@ -86,12 +86,17 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
         /* We accept SP4_NONE only; other values we'd skip. */
     }
 
-    /* nfs_impl_id4 array (optional, we skip). */
+    /* nfs_impl_id4<1> array (optional, max 1 per RFC 8881 §18.35.1).
+     * pynfs EID3 testLongArray sends 2 entries expecting NFS4ERR_BADXDR
+     * (or RPC GARBAGE_ARGS).  Returning false from the decoder here
+     * yields BADXDR/GARBAGE_ARGS via the existing decode-failure path. */
     if (!xdr_uint32_t(xdrs, &impl_count)) {
         return false;
 }
+    if (impl_count > 1U) {
+        return false;
+    }
     /* Skip impl_id entries by consuming raw bytes. */
-    /* For Phase 1 we expect most clients send 0 or 1 entries. */
     for (uint32_t i = 0; i < impl_count; i++) {
         /* nfs_impl_id4: nii_domain (string) + nii_name (string) +
          * nii_date (nfstime4). We need to skip these. */

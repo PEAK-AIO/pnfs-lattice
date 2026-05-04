@@ -72,6 +72,10 @@ enum nfs4_status {
 	NFS4ERR_EXPIRED      = 10011,
 	NFS4ERR_LOCKED       = 10012,
 	NFS4ERR_GRACE        = 10013,
+	/* RFC 8881 §15.1.16.5 / §18.35.4 — EXCHANGE_ID UPDATE with a
+	 * verifier that does not match the existing record's verifier.
+	 * pynfs EID6f testUpdate101. */
+	NFS4ERR_NOT_SAME     = 10027,
 	NFS4ERR_FHEXPIRED    = 10014,
 	NFS4ERR_WRONGSEC     = 10016,
 	NFS4ERR_RESOURCE     = 10018,

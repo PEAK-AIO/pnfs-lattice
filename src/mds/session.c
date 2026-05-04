@@ -471,82 +471,59 @@ static int grace_recovery_scan_cb(uint64_t clientid,
 	return 0;
 }
 
-/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
-int session_exchange_id(struct session_table *st,
-			const uint8_t *co_ownerid,
-			uint32_t co_ownerid_len,
-			const uint8_t verifier[NFS4_VERIFIER_SIZE],
-			uint32_t eia_flags,
-			uint64_t *out_clientid,
-			uint32_t *out_seqid,
-			uint32_t *out_flags)
+/*
+ * Principal-match helper for RFC 8881 §18.35.4 cases 8 / 9 and case 2.
+ *
+ * When auth_flavor == 0 either side, principal matching is suppressed
+ * (legacy / unit-test path).  Otherwise the (flavor, uid, gid) triple
+ * must match exactly.  AUTH_SYS is the only protected flavor we
+ * currently capture; GSS principals are deferred to a future change.
+ */
+static bool client_principal_matches(const struct nfs4_client *c,
+				     uint32_t auth_flavor,
+				     uint32_t cred_uid,
+				     uint32_t cred_gid)
+{
+	if (c->auth_flavor == 0 || auth_flavor == 0) {
+		return true;
+	}
+	return c->auth_flavor == auth_flavor &&
+	       c->cred_uid    == cred_uid    &&
+	       c->cred_gid    == cred_gid;
+}
+
+/*
+ * Allocate a fresh client record under the session-table lock.
+ * Caller already holds st->locks[0].  Returns SESSION_EID_OK on
+ * success and writes the new clientid/seqid/flags via the out_*
+ * pointers; SESSION_EID_RESOURCE on allocation failure.
+ */
+static int session_alloc_new_client(struct session_table *st,
+				    const uint8_t *co_ownerid,
+				    uint32_t co_ownerid_len,
+				    const uint8_t verifier[NFS4_VERIFIER_SIZE],
+				    uint32_t auth_flavor,
+				    uint32_t cred_uid,
+				    uint32_t cred_gid,
+				    uint64_t *out_clientid,
+				    uint32_t *out_seqid,
+				    uint32_t *out_flags)
 {
 	struct nfs4_client *c;
-	int rc = 0;
-
-	(void)eia_flags;
-
-	if (st == NULL || co_ownerid == NULL || out_clientid == NULL) {
-		return -1;
-}
-	if (co_ownerid_len == 0 || co_ownerid_len > CO_OWNERID_MAX) {
-		return -1;
-}
-
-	pthread_mutex_lock(&st->locks[0]);
-
-	c = find_client_by_owner(st, co_ownerid, co_ownerid_len);
-
-	if (c != NULL && memcmp(c->verifier, verifier,
-				NFS4_VERIFIER_SIZE) == 0) {
-		/*
-		 * UPDATE case: same co_ownerid, same verifier.
-		 * Return existing clientid.
-		 */
-		c->last_renewed = time(NULL);
-		*out_clientid = c->clientid;
-		if (out_seqid != NULL) {
-			*out_seqid = c->create_seq;
-}
-		if (out_flags != NULL) {
-			*out_flags = EXCHGID4_FLAG_USE_PNFS_MDS |
-				     EXCHGID4_FLAG_SUPP_MOVED_REFER;
-}
-		goto out;
-	}
-
-	if (c != NULL) {
-		/*
-		 * New incarnation: same co_ownerid, different verifier.
-		 * Per RFC 8881 §18.35.4 case 3: if the client has no
-		 * state, remove the old record and create a new one.
-		 * (Confirmed clients with state would need more complex
-		 * handling — deferred to SAL/open state layer.)
-		 */
-		unhash_client(st, c);
-		free_client(st, c);
-		c = NULL;
-	}
-
-	/*
-	 * Post-failover recovery: if we are in grace and have a
-	 * persisted recovery record that matches this co_ownerid,
-	 * re-create the client with its original clientid so that
-	 * subsequent CLAIM_PREVIOUS opens resolve correctly.
-	 */
 	uint64_t recovered_clientid = 0;
 	bool use_recovered_id = false;
 
+	/* Post-failover recovery: if we are in grace and have a
+	 * persisted recovery record that matches this co_ownerid,
+	 * re-create the client with its original clientid so that
+	 * subsequent CLAIM_PREVIOUS opens resolve correctly. */
 	if (st->cat != NULL && grace_is_active()) {
-		/* Scan recovery records via coordination vtable,
-		 * then look up each to match co_ownerid+verifier. */
 		struct grace_recovery_ctx grc;
 		grc.cat = st->cat;
 		grc.co_ownerid = co_ownerid;
 		grc.co_ownerid_len = co_ownerid_len;
 		grc.verifier = verifier;
 		grc.found = false;
-
 		(void)mds_coord_recovery_list(st->cat, st->mds_id,
 			grace_recovery_scan_cb, &grc);
 		if (grc.found) {
@@ -555,19 +532,16 @@ int session_exchange_id(struct session_table *st,
 		}
 	}
 
-	/* New client: allocate clientid (or reuse recovered one). */
 	c = calloc(1, sizeof(*c));
 	if (c == NULL) {
-		rc = -1;
-		goto out;
+		return SESSION_EID_RESOURCE;
 	}
 
 	if (use_recovered_id) {
 		c->clientid = recovered_clientid;
-		/* Ensure next_clientid stays above recovered value. */
 		if (st->next_clientid <= recovered_clientid) {
 			st->next_clientid = recovered_clientid + 1;
-}
+		}
 	} else {
 		c->clientid = st->next_clientid++;
 	}
@@ -577,22 +551,20 @@ int session_exchange_id(struct session_table *st,
 	c->confirmed = false;
 	c->create_seq = 1;
 	c->last_renewed = time(NULL);
+	c->auth_flavor = auth_flavor;
+	c->cred_uid = cred_uid;
+	c->cred_gid = cred_gid;
 	c->sessions = NULL;
 	c->hash_next = NULL;
 	c->owner_hash_next = NULL;
 
-	/* Insert into client hash. */
 	{
 		uint32_t idx = hash_clientid(c->clientid);
-
 		c->hash_next = st->client_hash[idx];
 		st->client_hash[idx] = c;
 	}
-	/* Insert into owner hash. */
 	{
-		uint32_t idx = hash_ownerid(c->co_ownerid,
-					   c->co_ownerid_len);
-
+		uint32_t idx = hash_ownerid(c->co_ownerid, c->co_ownerid_len);
 		c->owner_hash_next = st->owner_hash[idx];
 		st->owner_hash[idx] = c;
 	}
@@ -600,11 +572,145 @@ int session_exchange_id(struct session_table *st,
 	*out_clientid = c->clientid;
 	if (out_seqid != NULL) {
 		*out_seqid = c->create_seq;
-}
+	}
 	if (out_flags != NULL) {
 		*out_flags = EXCHGID4_FLAG_USE_PNFS_MDS |
 			     EXCHGID4_FLAG_SUPP_MOVED_REFER;
+	}
+	return SESSION_EID_OK;
 }
+
+/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
+int session_exchange_id(struct session_table *st,
+			const uint8_t *co_ownerid,
+			uint32_t co_ownerid_len,
+			const uint8_t verifier[NFS4_VERIFIER_SIZE],
+			uint32_t eia_flags,
+			uint64_t *out_clientid,
+			uint32_t *out_seqid,
+			uint32_t *out_flags,
+			uint32_t auth_flavor,
+			uint32_t cred_uid,
+			uint32_t cred_gid)
+{
+	struct nfs4_client *c;
+	bool update;
+	bool verf_match;
+	bool princ_match;
+	int rc;
+
+	if (st == NULL || co_ownerid == NULL || out_clientid == NULL) {
+		return SESSION_EID_RESOURCE;
+	}
+	if (co_ownerid_len == 0 || co_ownerid_len > CO_OWNERID_MAX) {
+		return SESSION_EID_RESOURCE;
+	}
+
+	update = (eia_flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
+
+	pthread_mutex_lock(&st->locks[0]);
+
+	c = find_client_by_owner(st, co_ownerid, co_ownerid_len);
+
+	/*
+	 * RFC 8881 §18.35.4 — UPDATE branch.
+	 *
+	 * The UPDATE flag asserts "there is already a confirmed record
+	 * for this co_ownerid; refresh it".  If no record exists, or the
+	 * record exists but is unconfirmed, the request fails with
+	 * NFS4ERR_NOENT.  Pynfs EID6 / EID6a-d.
+	 *
+	 * For a confirmed record we then validate verifier and principal:
+	 *   verifier mismatch                 → NFS4ERR_NOT_SAME (case 8).
+	 *   verifier match + princ mismatch   → NFS4ERR_PERM     (case 9).
+	 *   both match                        → case 6, return existing.
+	 */
+	if (update) {
+		if (c == NULL || !c->confirmed) {
+			rc = SESSION_EID_NOENT;
+			goto out;
+		}
+		verf_match  = memcmp(c->verifier, verifier,
+				     NFS4_VERIFIER_SIZE) == 0;
+		princ_match = client_principal_matches(c, auth_flavor,
+						       cred_uid, cred_gid);
+		if (!verf_match) {
+			rc = SESSION_EID_NOT_SAME;
+			goto out;
+		}
+		if (!princ_match) {
+			rc = SESSION_EID_PERM;
+			goto out;
+		}
+		/* Case 6 — verifier + principal match, return existing. */
+		c->last_renewed = time(NULL);
+		*out_clientid = c->clientid;
+		if (out_seqid != NULL) {
+			*out_seqid = c->create_seq;
+		}
+		if (out_flags != NULL) {
+			*out_flags = EXCHGID4_FLAG_USE_PNFS_MDS |
+				     EXCHGID4_FLAG_SUPP_MOVED_REFER;
+		}
+		rc = SESSION_EID_OK;
+		goto out;
+	}
+
+	/*
+	 * RFC 8881 §18.35.4 — non-UPDATE branch.
+	 *
+	 * Case 1 (no record)               → fresh allocation.
+	 * Case 4 (unconfirmed record)      → record is replaced unconditionally;
+	 *                                    a fresh clientid is minted.
+	 * Case 2 (confirmed + verf + princ)→ renewal, return existing clientid.
+	 * Cases 3/5/7 (confirmed, mismatch)→ record is replaced; a fresh
+	 *                                    clientid is minted.  We do not
+	 *                                    yet preserve the old record
+	 *                                    until CREATE_SESSION confirms
+	 *                                    the replacement (case 5 wire
+	 *                                    behaviour); pynfs EID5f covers
+	 *                                    that path and is left for a
+	 *                                    follow-up commit.
+	 */
+	if (c == NULL) {
+		rc = session_alloc_new_client(st, co_ownerid, co_ownerid_len,
+					      verifier, auth_flavor,
+					      cred_uid, cred_gid,
+					      out_clientid, out_seqid,
+					      out_flags);
+		goto out;
+	}
+
+	verf_match  = memcmp(c->verifier, verifier,
+			     NFS4_VERIFIER_SIZE) == 0;
+	princ_match = client_principal_matches(c, auth_flavor,
+					       cred_uid, cred_gid);
+
+	if (c->confirmed && verf_match && princ_match) {
+		/* Case 2 — renewal, return existing clientid. */
+		c->last_renewed = time(NULL);
+		*out_clientid = c->clientid;
+		if (out_seqid != NULL) {
+			*out_seqid = c->create_seq;
+		}
+		if (out_flags != NULL) {
+			*out_flags = EXCHGID4_FLAG_USE_PNFS_MDS |
+				     EXCHGID4_FLAG_SUPP_MOVED_REFER;
+		}
+		rc = SESSION_EID_OK;
+		goto out;
+	}
+
+	/* Otherwise replace the existing record (cases 3 / 4 / 5 / 7). */
+	unhash_client(st, c);
+	free_client(st, c);
+	c = NULL;
+
+	rc = session_alloc_new_client(st, co_ownerid, co_ownerid_len,
+				      verifier, auth_flavor,
+				      cred_uid, cred_gid,
+				      out_clientid, out_seqid,
+				      out_flags);
 
 out:
 	pthread_mutex_unlock(&st->locks[0]);

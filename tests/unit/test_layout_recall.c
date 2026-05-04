@@ -370,7 +370,7 @@ static void test_recall_with_cb_success(void)
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
     ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"test-cb-client", 14,
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
-                                  0, &clientid, &seqid, &flags_out), 0);
+                                  0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
 
     uint8_t session_id[SESSION_ID_SIZE];
     uint32_t fore = 0, back = 0;
@@ -468,7 +468,7 @@ static void test_recall_cb_fail_still_revokes(void)
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
     ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"test-no-bc", 10,
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
-                                  0, &clientid, &seqid, &flags_out), 0);
+                                  0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     uint8_t session_id[SESSION_ID_SIZE];
     uint32_t fore = 0, back = 0;
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,

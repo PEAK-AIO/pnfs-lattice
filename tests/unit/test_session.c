@@ -104,7 +104,7 @@ static void test_exchange_id_new_client(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, &flags), 0);
+				      &clientid, &seqid, &flags, 0, 0, 0), 0);
 
 	ASSERT_NE(clientid, 0);
 	ASSERT_EQ(seqid, 1);
@@ -114,7 +114,16 @@ static void test_exchange_id_new_client(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: EXCHANGE_ID — same verifier returns same clientid (UPDATE)
+ * Test: EXCHANGE_ID — confirmed record + same params returns same clientid
+ *
+ * RFC 8881 §18.35.4 case 2 ("renewal"): a confirmed record matched on
+ * co_ownerid + verifier + principal returns the same clientid.
+ *
+ * Note: prior to commit "compound: EXCHANGE_ID conformance ..." this
+ * test exercised the bogus "two unconfirmed EXCHANGE_IDs return the
+ * same clientid" path, which violated case 4 ("unconfirmed records are
+ * replaced unconditionally").  We now CREATE_SESSION between the two
+ * EID calls to confirm the record before re-asserting renewal.
  * ----------------------------------------------------------------------- */
 
 static void test_exchange_id_same_verifier(void)
@@ -122,17 +131,30 @@ static void test_exchange_id_same_verifier(void)
 	struct session_table *st = NULL;
 	uint64_t cid1 = 0, cid2 = 0;
 	uint32_t seqid = 0;
+	uint8_t session_id[SESSION_ID_SIZE];
+	uint32_t fore = 0, back = 0;
 
 	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &cid1, &seqid, NULL), 0);
+				      &cid1, &seqid, NULL, 0, 0, 0), 0);
+
+	/* Confirm the client so the second EID hits case 2 (renewal),
+	 * not case 4 (unconfirmed-record replacement). */
+	ASSERT_EQ(session_create_session(st, cid1, seqid,
+					 32, 4,
+					 0, 0,
+					 0, 0,
+					 1,
+					 session_id, &fore, &back, NULL, NULL), 0);
+
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &cid2, &seqid, NULL), 0);
+				      &cid2, &seqid, NULL, 0, 0, 0), 0);
 
-	/* Same co_ownerid + same verifier → same clientid. */
+	/* Confirmed record + same verifier + same (default) principal →
+	 * same clientid (case 2). */
 	ASSERT_EQ(cid1, cid2);
 
 	session_table_destroy(st);
@@ -152,10 +174,10 @@ static void test_exchange_id_new_verifier(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &cid1, &seqid, NULL), 0);
+				      &cid1, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_b, 0,
-				      &cid2, &seqid, NULL), 0);
+				      &cid2, &seqid, NULL, 0, 0, 0), 0);
 
 	/* Different verifier → new incarnation → different clientid. */
 	ASSERT_NE(cid1, cid2);
@@ -177,10 +199,10 @@ static void test_exchange_id_two_clients(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &cid_alice, &seqid, NULL), 0);
+				      &cid_alice, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_exchange_id(st, owner_bob, owner_bob_len,
 				      verifier_a, 0,
-				      &cid_bob, &seqid, NULL), 0);
+				      &cid_bob, &seqid, NULL, 0, 0, 0), 0);
 
 	ASSERT_NE(cid_alice, cid_bob);
 
@@ -203,7 +225,7 @@ static void test_create_session_basic(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 32, 4,
@@ -265,7 +287,7 @@ static void test_create_session_bad_seqid(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
 	/* seqid should be 1; use 99 → NFS4ERR_SEQ_MISORDERED (rc = -2). */
 	ASSERT_EQ(session_create_session(st, clientid, 99,
@@ -294,7 +316,7 @@ static void test_create_session_slot_cap(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
 	/* Request 9999 slots → capped at SESSION_MAX_SLOTS (64). */
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
@@ -325,7 +347,7 @@ static void test_destroy_session(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -360,7 +382,7 @@ static void test_sequence_valid(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -400,7 +422,7 @@ static void test_sequence_replay(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -438,7 +460,7 @@ static void test_sequence_misordered(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -496,7 +518,7 @@ static void test_sequence_bad_slot(void)
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 4, 0,
 					 0, 0,
@@ -745,7 +767,7 @@ static void test_compound_replay_seq_false_retry(void)
 	/* Set up client + session. */
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -813,7 +835,7 @@ static void test_destroy_client_unconfirmed(void)
 	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	/* Client exists but has no sessions — destroy is allowed. */
 	ASSERT_EQ(session_destroy_client(st, clientid), 0);
 	/* Second destroy → STALE_CLIENTID (DESCID8 semantics). */
@@ -833,7 +855,7 @@ static void test_destroy_client_busy(void)
 	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 16, 4,
 					 0, 0,
@@ -901,7 +923,7 @@ static void run_create_session_with_mutator(
 
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
-				      &clientid, &seqid, NULL), 0);
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
 	seed_create_session_args(&op, clientid, seqid);
 	mutate(&op.arg.create_session);

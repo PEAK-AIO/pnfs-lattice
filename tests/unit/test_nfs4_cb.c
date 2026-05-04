@@ -85,7 +85,7 @@ static int setup_session(struct session_table **out_st,
         return -1;
     if (session_exchange_id(st, owner_a, owner_a_len,
                             verifier_a, 0,
-                            &clientid, &seqid, NULL) != 0) {
+                            &clientid, &seqid, NULL, 0, 0, 0) != 0) {
         session_table_destroy(st);
         return -1;
     }
@@ -236,7 +236,7 @@ static void test_cb_slots_allocated(void)
     ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
     ASSERT_EQ(session_exchange_id(st, owner_a, owner_a_len,
                                   verifier_a, 0,
-                                  &clientid, &seqid, NULL), 0);
+                                  &clientid, &seqid, NULL, 0, 0, 0), 0);
 
     /* Request 8 back slots. */
     ASSERT_EQ(session_create_session(st, clientid, seqid,
@@ -267,7 +267,7 @@ static void test_zero_back_slots(void)
     ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
     ASSERT_EQ(session_exchange_id(st, owner_a, owner_a_len,
                                   verifier_a, 0,
-                                  &clientid, &seqid, NULL), 0);
+                                  &clientid, &seqid, NULL, 0, 0, 0), 0);
 
     ASSERT_EQ(session_create_session(st, clientid, seqid,
                                      16, 0,

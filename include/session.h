@@ -46,11 +46,38 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
  * EXCHANGE_ID flags (RFC 8881 §18.35)
  * ----------------------------------------------------------------------- */
 
-#define EXCHGID4_FLAG_SUPP_MOVED_REFER  0x00000001
-#define EXCHGID4_FLAG_SUPP_MOVED_MIGR   0x00000002
-#define EXCHGID4_FLAG_USE_NON_PNFS      0x00010000
-#define EXCHGID4_FLAG_USE_PNFS_MDS      0x00020000
-#define EXCHGID4_FLAG_USE_PNFS_DS       0x00040000
+#define EXCHGID4_FLAG_SUPP_MOVED_REFER     0x00000001
+#define EXCHGID4_FLAG_SUPP_MOVED_MIGR      0x00000002
+#define EXCHGID4_FLAG_BIND_PRINC_STATEID   0x00000100
+#define EXCHGID4_FLAG_USE_NON_PNFS         0x00010000
+#define EXCHGID4_FLAG_USE_PNFS_MDS         0x00020000
+#define EXCHGID4_FLAG_USE_PNFS_DS          0x00040000
+#define EXCHGID4_FLAG_MASK_PNFS            0x00070000
+#define EXCHGID4_FLAG_UPD_CONFIRMED_REC_A  0x40000000
+/* CONFIRMED_R is a server-only response bit; clients that set it in
+ * eia_flags MUST be rejected with NFS4ERR_INVAL (RFC 8881 §18.35.3,
+ * pynfs EID7 testSupported1a). */
+#define EXCHGID4_FLAG_CONFIRMED_R          0x80000000
+
+/* All bits a client is allowed to set in eia_flags.  Anything else
+ * (including CONFIRMED_R, which is server-only) yields NFS4ERR_INVAL
+ * per RFC 8881 §18.35.3 — pynfs EID4 testBadFlags / EID7 testSupported1a. */
+#define EXCHGID4_VALID_CLIENT_MASK         (\
+	EXCHGID4_FLAG_SUPP_MOVED_REFER | \
+	EXCHGID4_FLAG_SUPP_MOVED_MIGR | \
+	EXCHGID4_FLAG_BIND_PRINC_STATEID | \
+	EXCHGID4_FLAG_USE_NON_PNFS | \
+	EXCHGID4_FLAG_USE_PNFS_MDS | \
+	EXCHGID4_FLAG_USE_PNFS_DS | \
+	EXCHGID4_FLAG_UPD_CONFIRMED_REC_A)
+
+/* Return-code constants for session_exchange_id beyond plain success.
+ * Negative so callers can use the existing rc==0 check unchanged. */
+#define SESSION_EID_OK         0
+#define SESSION_EID_RESOURCE  -1   /* allocation failure */
+#define SESSION_EID_NOENT     -2   /* NFS4ERR_NOENT (UPDATE w/o confirmed record) */
+#define SESSION_EID_NOT_SAME  -3   /* NFS4ERR_NOT_SAME (UPDATE + verifier mismatch) */
+#define SESSION_EID_PERM      -4   /* NFS4ERR_PERM (UPDATE + principal mismatch) */
 
 /* -----------------------------------------------------------------------
  * CREATE_SESSION flags (RFC 8881 §18.36)
@@ -132,6 +159,15 @@ struct nfs4_client {
 	bool                 confirmed;       /* Confirmed by CREATE_SESSION */
 	time_t               last_renewed;    /* Lease renewal timestamp */
 	uint32_t             create_seq;      /* Sequencing for CREATE_SESSION */
+	/* RFC 8881 §18.35.4 — principal identity captured at
+	 * EXCHANGE_ID time so subsequent EID + UPDATE flag checks can
+	 * detect principal mismatch (cases 8/9 → NFS4ERR_PERM /
+	 * NFS4ERR_NOT_SAME).  auth_flavor==0 means "no principal
+	 * captured" (test/legacy path); cred matching is then
+	 * suppressed and only the verifier is consulted. */
+	uint32_t             auth_flavor;
+	uint32_t             cred_uid;
+	uint32_t             cred_gid;
 	struct nfs4_session *sessions;        /* Linked list of sessions */
 	struct nfs4_client  *hash_next;       /* Client hash chain (by clientid) */
 	struct nfs4_client  *owner_hash_next; /* Owner hash chain (by co_ownerid) */
@@ -215,25 +251,43 @@ void session_table_set_shard(struct session_table *st,
  * ----------------------------------------------------------------------- */
 
 /**
- * Process an EXCHANGE_ID request.
+ * Process an EXCHANGE_ID request (RFC 8881 §18.35.4).
  *
- * Lookup or create a client record by co_ownerid.  If the co_ownerid
- * already exists with a matching verifier, the existing clientid is
- * returned (UPDATE case).  If the verifier differs, the old client is
- * invalidated and a new clientid is allocated.  If the co_ownerid is
- * new, a fresh clientid is allocated.
+ * Implements the seven non-UPDATE / four UPDATE cases of §18.35.4 against
+ * the server's per-co_ownerid client record:
+ *
+ *   - No record + UPDATE flag                                 → NOENT.
+ *   - No record + no UPDATE flag                              → case 1, fresh clientid.
+ *   - Record exists + UPDATE flag + unconfirmed               → NOENT.
+ *   - Record exists + UPDATE flag + confirmed:
+ *       verifier match + principal match                       → case 6, return existing.
+ *       verifier mismatch                                       → NOT_SAME.
+ *       verifier match + principal mismatch                     → PERM.
+ *   - Record exists + no UPDATE + unconfirmed                 → case 4, replace (new clientid).
+ *   - Record exists + no UPDATE + confirmed:
+ *       verifier match + principal match                       → case 2, return existing (renew).
+ *       otherwise                                              → case 3/5/7, replace (new clientid).
  *
  * The new client is "unconfirmed" until CREATE_SESSION succeeds.
+ * Principal matching uses (auth_flavor, cred_uid, cred_gid).  When
+ * auth_flavor == 0 the principal check is suppressed (only the verifier
+ * is consulted); this preserves legacy unit-test invocations.
  *
  * @param st              Session table.
  * @param co_ownerid      Client owner ID (opaque).
  * @param co_ownerid_len  Length of co_ownerid.
  * @param verifier        8-byte boot verifier.
- * @param eia_flags       EXCHGID4_FLAG_* from client.
+ * @param eia_flags       EXCHGID4_FLAG_* from client (UPDATE bit honoured).
  * @param out_clientid    Receives the assigned clientid.
  * @param out_seqid       Receives the sequence ID for CREATE_SESSION.
  * @param out_flags       Receives the server's EXCHGID4_FLAG_* response.
- * @return 0 on success, -1 on failure (allocation error).
+ * @param auth_flavor     RPC auth flavor of the calling principal (0 = no cred / legacy).
+ * @param cred_uid        AUTH_SYS uid (ignored when auth_flavor == 0).
+ * @param cred_gid        AUTH_SYS gid (ignored when auth_flavor == 0).
+ * @return SESSION_EID_OK on success.
+ *         SESSION_EID_NOENT, SESSION_EID_NOT_SAME, SESSION_EID_PERM
+ *         encode the corresponding RFC errors; SESSION_EID_RESOURCE
+ *         indicates an allocation failure.
  */
 int session_exchange_id(struct session_table *st,
 			const uint8_t *co_ownerid,
@@ -242,7 +296,10 @@ int session_exchange_id(struct session_table *st,
 			uint32_t eia_flags,
 			uint64_t *out_clientid,
 			uint32_t *out_seqid,
-			uint32_t *out_flags);
+			uint32_t *out_flags,
+			uint32_t auth_flavor,
+			uint32_t cred_uid,
+			uint32_t cred_gid);
 
 /* -----------------------------------------------------------------------
  * API — CREATE_SESSION (RFC 8881 §18.36)

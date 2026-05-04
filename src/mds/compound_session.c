@@ -101,6 +101,28 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 		return NFS4ERR_DELAY;
 	}
 
+	/*
+	 * RFC 8881 §18.35.3 / §18.35.4 argument validation.
+	 *
+	 * Any bit set in eia_flags that is not in EXCHGID4_VALID_CLIENT_MASK
+	 * (which deliberately excludes EXCHGID4_FLAG_CONFIRMED_R, the
+	 * server-only response bit) yields NFS4ERR_INVAL.  Pynfs EID4
+	 * (testBadFlags) sets bit 0x4 and EID7 (testSupported1a) sets
+	 * CONFIRMED_R; both expect NFS4ERR_INVAL.
+	 */
+	if ((a->eia_flags & ~EXCHGID4_VALID_CLIENT_MASK) != 0) {
+		return NFS4ERR_INVAL;
+	}
+
+	/*
+	 * RFC 8881 §18.35.3 placement rule — EXCHANGE_ID MUST be the sole
+	 * op in its compound.  Pynfs EID8 testNotOnlyOp drives this with
+	 * [EXCHANGE_ID, PUTROOTFH] expecting NFS4ERR_NOT_ONLY_OP.
+	 */
+	if (cd->op_count != 1) {
+		return NFS4ERR_NOT_ONLY_OP;
+	}
+
 	rc = session_exchange_id(cd->st,
 				 a->co_ownerid,
 				 a->co_ownerid_len,
@@ -108,12 +130,23 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 				 a->eia_flags,
 				 &r->clientid,
 				 &r->seqid,
-				 &r->eir_flags);
-	if (rc != 0) {
+				 &r->eir_flags,
+				 cd->auth_flavor,
+				 cd->cred_uid,
+				 cd->cred_gid);
+	switch (rc) {
+	case SESSION_EID_OK:
+		return NFS4_OK;
+	case SESSION_EID_NOENT:
+		return NFS4ERR_NOENT;
+	case SESSION_EID_NOT_SAME:
+		return NFS4ERR_NOT_SAME;
+	case SESSION_EID_PERM:
+		return NFS4ERR_PERM;
+	case SESSION_EID_RESOURCE:
+	default:
 		return NFS4ERR_SERVERFAULT;
 	}
-
-	return NFS4_OK;
 }
 
 /*
