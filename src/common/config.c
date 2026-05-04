@@ -281,6 +281,12 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 
     /* Directory delegations (Phase 8b) default off. */
     cfg->dir_delegations_enabled = false;
+    /* File delegations (RFC 8881 §10.4) default ON.  Operators who
+     * want zero CB_RECALL traffic (e.g. lab harnesses with
+     * clientaddr=0.0.0.0) flip the INI key to false; main.c then
+     * leaves rpc_cfg.dt = NULL and op_open() short-circuits the
+     * deleg-grant arm via cd->dt == NULL. */
+    cfg->file_delegations_enabled = true;
 
     /* AutoSplit defaults (Tier 3 Phase 1) */
     cfg->auto_split_enabled = false;
@@ -894,6 +900,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             }
         } else if (strcmp(key, "dir_delegations_enabled") == 0) {
             cfg->dir_delegations_enabled =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (strcmp(key, "file_delegations_enabled") == 0) {
+            cfg->file_delegations_enabled =
                 (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         } else if (strcmp(key, "ndb_conn_pool_size") == 0) {
             unsigned long v = strtoul(val, NULL, 10);

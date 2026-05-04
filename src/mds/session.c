@@ -1295,6 +1295,48 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
  * Callback target enumeration (layout recall support)
  * ----------------------------------------------------------------------- */
 
+/*
+ * Build a session_cb_snap from a live session under the session-table
+ * lock and invoke @cb.  When @cb returns 1 ("snap consumed"), commit
+ * the slot-0 seqid advance back to the session so subsequent CBs on
+ * this session use a fresh, monotonic sa_sequenceid per RFC 8881
+ * §18.46.4.  Internal helper shared by both iterators below.
+ */
+static int session_invoke_cb_locked(struct nfs4_session *s,
+                                    session_cb_snap_fn cb, void *ctx)
+{
+    struct session_cb_snap snap;
+    uint32_t prepared_seq;
+    int rc;
+
+    snap.clientid = s->clientid;
+    memcpy(snap.session_id, s->session_id, SESSION_ID_SIZE);
+    snap.cb_prog = s->cb_prog;
+    snap.cb_sec_flavor = s->cb_sec_flavor;
+    snap.cb_sec = s->cb_sec;
+    snap.cb_conn = s->cb_conn;
+    /*
+     * RFC 8881 §2.10.5.1 / §18.46.4: CB_SEQUENCE sa_sequenceid MUST
+     * start at 1 and increment by 1 per CB on the slot.  The fd-based
+     * callers (delegation/layout conflict-recall) use this snap value
+     * verbatim as sa_sequenceid, so we hand them the NEXT id
+     * (current + 1), not the current one.  We commit the increment
+     * only when @cb returns 1 ("snap consumed").  rc != 1 leaves the
+     * slot's seq_id untouched so an uninterested visit doesn't burn
+     * sequenceids.
+     */
+    prepared_seq = (s->cb_slots != NULL && s->num_cb_slots > 0)
+                       ? s->cb_slots[0].seq_id + 1 : 0;
+    snap.slot_seq_id = prepared_seq;
+    snap.minorversion = s->minorversion;
+
+    rc = cb(&snap, ctx);
+    if (rc == 1 && s->cb_slots != NULL && s->num_cb_slots > 0) {
+        s->cb_slots[0].seq_id = prepared_seq;
+    }
+    return rc;
+}
+
 int session_for_each_with_cb(struct session_table *st,
                              session_cb_snap_fn cb, void *ctx)
 {
@@ -1315,41 +1357,9 @@ int session_for_each_with_cb(struct session_table *st,
                 continue;
             }
 
-            struct session_cb_snap snap;
-
-            snap.clientid = s->clientid;
-            memcpy(snap.session_id, s->session_id, SESSION_ID_SIZE);
-            snap.cb_prog = s->cb_prog;
-            snap.cb_sec_flavor = s->cb_sec_flavor;
-            snap.cb_sec = s->cb_sec;
-            snap.cb_conn = s->cb_conn;
-            /*
-             * RFC 8881 §2.10.5.1 / §18.46.4: CB_SEQUENCE sa_sequenceid
-             * MUST start at 1 and increment by 1 per CB on the slot.
-             * The fd-based callers (delegation/layout conflict-recall)
-             * use this snap value verbatim as sa_sequenceid, so we must
-             * hand them the NEXT id (current + 1), not the current one.
-             *
-             * We commit the increment only when the callback signals it
-             * actually consumed the snap (rc == 1).  rc == 0 — "keep
-             * looking" — leaves the slot's seq_id untouched, so an
-             * uninterested iteration over many sessions doesn't burn
-             * seqids on slots whose CB never goes out.  Seqid skips
-             * would be silently rejected by the v4.1 client (the
-             * sequenceid contract is +1 exactly, never a jump).
-             */
-            uint32_t prepared_seq =
-                (s->cb_slots != NULL && s->num_cb_slots > 0)
-                    ? s->cb_slots[0].seq_id + 1 : 0;
-            snap.slot_seq_id = prepared_seq;
-            snap.minorversion = s->minorversion;
-
-            rc = cb(&snap, ctx);
+            rc = session_invoke_cb_locked(s, cb, ctx);
             if (rc == 1) {
-                /* Snap consumed — commit the seq advance. */
-                if (s->cb_slots != NULL && s->num_cb_slots > 0) {
-                    s->cb_slots[0].seq_id = prepared_seq;
-                }
+                /* Snap consumed; iterator stops. */
                 break;
             }
             if (rc != 0) {
@@ -1358,7 +1368,48 @@ int session_for_each_with_cb(struct session_table *st,
         }
     }
     pthread_mutex_unlock(&st->locks[0]);
+    return rc;
+}
 
+int session_for_each_with_cb_for_clientid(struct session_table *st,
+                                          uint64_t clientid,
+                                          session_cb_snap_fn cb,
+                                          void *ctx)
+{
+    struct nfs4_client *c;
+    struct nfs4_session *s;
+    int rc = 0;
+
+    if (st == NULL || cb == NULL) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&st->locks[0]);
+    c = find_client_by_id(st, clientid);
+    if (c == NULL) {
+        pthread_mutex_unlock(&st->locks[0]);
+        return 0;
+    }
+    /*
+     * c->sessions is head-inserted at session_create_session() time
+     * (see session_create_session at the head-insertion site), so the
+     * first node is the most-recently-created session for this client.
+     * That is exactly the session the kernel client believes is
+     * current; older sessions whose cb_conn happens to still be
+     * non-NULL after a remount are skipped, eliminating the
+     * NFS4ERR_BADSESSION window described in include/session.h on
+     * this iterator's docstring.
+     */
+    for (s = c->sessions; s != NULL; s = s->client_next) {
+        if (s->cb_conn == NULL) {
+            continue;
+        }
+        rc = session_invoke_cb_locked(s, cb, ctx);
+        /* Stop at the first session we visit — we want exactly one
+         * CB delivery per clientid per call. */
+        break;
+    }
+    pthread_mutex_unlock(&st->locks[0]);
     return rc;
 }
 

@@ -746,6 +746,27 @@ struct mds_config {
      * directories; concurrent mutations recall via CB_RECALL. */
     bool                dir_delegations_enabled;
 
+    /* File delegations (RFC 8881 §10.4).
+     *
+     * When true (the default), op_open() grants OPEN_DELEGATE_READ /
+     * OPEN_DELEGATE_WRITE to clients that did not pass
+     * OPEN4_SHARE_ACCESS_WANT_NO_DELEG, and uses CB_RECALL to break
+     * conflicts between clients.
+     *
+     * When false, the MDS never wires a delegation table into the RPC
+     * server (rpc_cfg.dt = NULL); op_open() short-circuits the deleg
+     * grant path because cd->dt == NULL and reports
+     * OPEN_DELEGATE_NONE_EXT with WND4_NOT_WANTED.  Useful for
+     * deployments that want to avoid CB_RECALL traffic entirely
+     * (e.g. PEAK:AIO Mark's two-client harness with
+     * `clientaddr=0.0.0.0`, where Linux v4.1+ does not translate the
+     * mount option into the OPEN's WANT_NO_DELEG bit).
+     *
+     * The CB_LAYOUTRECALL path is unaffected by this flag: layout
+     * conflict-recall (Mark's byte-range bug) is gated separately by
+     * the layout_recall coordinator. */
+    bool                file_delegations_enabled;
+
     /* RonDB connection pool */
     /* NDB connections per MDS (0 = auto, max 64). */
     uint32_t            ndb_conn_pool_size;

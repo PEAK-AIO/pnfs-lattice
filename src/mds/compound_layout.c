@@ -837,6 +837,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			req_iomode_for_recall,
 			a->offset,
 			a->length,
+			a->layout_type,
 			&recalled);
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
 	}

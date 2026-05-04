@@ -1474,8 +1474,21 @@ int main(int argc, char *argv[])
 			rpc_cfg.lcommit_agg = lcommit_agg;
 		}
 
-		/* Delegation state table (RFC 8881 §10.4). */
-		{
+		/* Delegation state table (RFC 8881 §10.4).
+		 *
+		 * Gated by cfg.file_delegations_enabled (default true).  When
+		 * false, we skip the table init entirely and leave
+		 * rpc_cfg.dt == NULL so cd->dt == NULL in compound_data;
+		 * op_open's deleg-grant arm short-circuits at the
+		 * `if (cd->dt != NULL)` guard in compound_data_io.c, so the
+		 * server never grants a file delegation and never has to
+		 * issue CB_RECALL.  Operators reach for this when the kernel
+		 * client cannot honour delegation hints (e.g. Linux v4.1+
+		 * does not translate `clientaddr=0.0.0.0` into
+		 * OPEN4_SHARE_ACCESS_WANT_NO_DELEG \u2014 see Mark's two-client
+		 * harness report). */
+		rpc_cfg.dt = NULL;
+		if (cfg.file_delegations_enabled) {
 			struct deleg_table *dt = NULL;
 			if (deleg_table_init(cfg.self.id, &dt) == 0) {
 				(void)fprintf(stderr,
@@ -1490,21 +1503,26 @@ int main(int argc, char *argv[])
 				 * can snapshot the holder's backchannel and
 				 * issue CB_RECALL on a dup'd fd.  Without this,
 				 * the recall path silently revokes the
-				 * delegation without notifying the client —
+				 * delegation without notifying the client \u2014
 				 * legacy pre-fix behaviour, retained when
 				 * session_tbl == NULL. */
 				deleg_table_set_session_table(dt, session_tbl);
 				/* Transient-state profile keeps delegations
-				 * in memory only — removes the NDB write
+				 * in memory only \u2014 removes the NDB write
 				 * from the OPEN hot path. */
 				if (cfg.transient_state_cache) {
 					deleg_table_set_skip_transient(dt, true);
 				}
+				rpc_cfg.dt = dt;
 			} else {
 				(void)fprintf(stderr,
 					"WARN: deleg_table_init failed\n");
 			}
-			rpc_cfg.dt = dt;
+		} else {
+			(void)fprintf(stderr,
+				"INFO: file_delegations_enabled=false "
+				"(deleg table not wired; OPEN never grants"
+				" file delegations)\n");
 		}
 
 		/* Directory delegation table (RFC 8881 §10.9). */

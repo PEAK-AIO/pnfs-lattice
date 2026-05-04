@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "layout_recall.h"
+#include "layout_types.h"  /* LAYOUT4_FLEX_FILES default */
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
 #include "commit_queue.h"
@@ -50,6 +51,19 @@ struct layout_recall {
     struct commit_queue     *cq;
     struct session_table    *st;       /* Optional: for CB delivery */
     uint32_t                 revoke_ms;
+    /*
+     * Default layout_type echoed in CB_LAYOUTRECALL.clora_type for
+     * recall paths that do not have a per-grant layout_type to plumb
+     * through (currently only the DS-failure / LAYOUTRECALL4_ALL
+     * path).  The catalogue does not persist per-grant layout_type,
+     * so we need a coordinator-level default in homogeneous
+     * deployments.  Initialised to LAYOUT4_FLEX_FILES at
+     * layout_recall_init() time — production deployments grant
+     * flexfiles layouts (RFC 8435 §5) and the prior hard-coded
+     * LAYOUT4_NFSV4_1_FILES value caused Linux flexfiles clients to
+     * reject the recall.
+     */
+    uint32_t                 default_layout_type;
 };
 
 /* -----------------------------------------------------------------------
@@ -160,15 +174,28 @@ static int snap_cb_target(const struct session_cb_snap *snap, void *ctx)
 /**
  * Build a temporary nfs4_session from snapshot data and call
  * nfs4_cb_layoutrecall().  Best-effort: failures are logged, not fatal.
+ *
+ * @param layout_type  Layout type to advertise in clora_type.  The
+ *                     DS-failure path uses the recall coordinator's
+ *                     configured default (set by
+ *                     layout_recall_set_default_layout_type, default
+ *                     LAYOUT4_FLEX_FILES).
  */
 static void attempt_cb_for_target(const struct cb_target *t,
+                                  uint32_t layout_type,
                                   uint32_t timeout_ms)
 {
     struct nfs4_cb_layoutrecall_args args;
 
-    /* Send LAYOUTRECALL4_ALL — the DS is offline, recall everything. */
+    /* Send LAYOUTRECALL4_ALL — the DS is offline, recall everything.
+     * RFC 8881 §20.3.4 still requires clora_type even for ALL/FSID;
+     * the value MUST match the holder's layout type or the kernel
+     * client will reject the CB — see Mark's two-client harness
+     * report (bugs from mark/STRICT_ANALYSIS.md).  We therefore
+     * advertise the coordinator's default layout_type rather than
+     * the previous hard-coded LAYOUT4_NFSV4_1_FILES (1). */
     memset(&args, 0, sizeof(args));
-    args.layout_type = 1;  /* LAYOUT4_NFSV4_1_FILES */
+    args.layout_type = layout_type;
     args.iomode = 3;       /* LAYOUTIOMODE4_ANY */
     args.recall_type = LAYOUTRECALL4_ALL;
 
@@ -178,7 +205,7 @@ static void attempt_cb_for_target(const struct cb_target *t,
                                       &args, timeout_ms);
     if (rc != 0) {
         (void)fprintf(stderr, "layout_recall: CB_LAYOUTRECALL to "
-                "clientid=%lu failed (rc=%d) — will revoke\n",
+                "clientid=%lu failed (rc=%d) \u2014 will revoke\n",
                 (unsigned long)t->clientid, rc);
     }
 }
@@ -383,6 +410,10 @@ int layout_recall_init(const struct mds_catalogue *cat,
     lr->cq = cq;
     lr->st = NULL;
     lr->revoke_ms = (revoke_ms > 0) ? revoke_ms : DEFAULT_REVOKE_MS;
+    /* Production deployments grant flexfiles layouts (RFC 8435 §5).
+     * Operators with a files-layout deployment can override via
+     * layout_recall_set_default_layout_type(). */
+    lr->default_layout_type = LAYOUT4_FLEX_FILES;
 
     *out = lr;
     return 0;
@@ -398,6 +429,14 @@ void layout_recall_set_session_table(struct layout_recall *lr,
 {
     if (lr != NULL) {
         lr->st = st;
+    }
+}
+
+void layout_recall_set_default_layout_type(struct layout_recall *lr,
+                                           uint32_t layout_type)
+{
+    if (lr != NULL && layout_type != 0) {
+        lr->default_layout_type = layout_type;
     }
 }
 
@@ -466,7 +505,9 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
 
         /* Send CB_LAYOUTRECALL to each target (outside lock). */
         for (i = 0; i < tl.count; i++) {
-            attempt_cb_for_target(&tl.targets[i], lr->revoke_ms);
+            attempt_cb_for_target(&tl.targets[i],
+                                  lr->default_layout_type,
+                                  lr->revoke_ms);
             close(tl.targets[i].fd);
         }
     }
@@ -608,6 +649,17 @@ struct byte_range_holder {
     uint64_t            length;
     uint64_t            recall_offset;
     uint64_t            recall_length;
+    /*
+     * Layout type echoed in CB_LAYOUTRECALL.clora_type for this
+     * holder.  The catalogue layer does not persist per-grant
+     * layout_type, so we copy the requesting LAYOUTGET's
+     * a->layout_type into every holder — op_layoutget validates
+     * that value against { LAYOUT4_NFSV4_1_FILES, LAYOUT4_FLEX_FILES }
+     * before reaching this scan, and our grant policy never mixes
+     * layout types within the same fileid (compound_layout.c
+     * always echoes a->layout_type in r->layout_type).
+     */
+    uint32_t            layout_type;
 };
 
 #define LAYOUT_BYTE_RANGE_MAX_HOLDERS 256
@@ -621,6 +673,7 @@ struct byte_range_collect_ctx {
     uint32_t                  req_iomode;
     uint64_t                  req_offset;
     uint64_t                  req_length;
+    uint32_t                  req_layout_type;
     struct mds_catalogue     *cat;
 };
 
@@ -691,74 +744,85 @@ static int byte_range_collect_cb(uint64_t clientid,
     c->holders[c->count].length         = hold_len;
     c->holders[c->count].recall_offset  = inter_off;
     c->holders[c->count].recall_length  = inter_len;
+    c->holders[c->count].layout_type    = c->req_layout_type;
     c->count++;
     return 0;
 }
 
-struct byte_range_cb_ctx {
-    struct byte_range_holder *holders;
-    uint32_t                  count;
-    uint32_t                  timeout_ms;
+/*
+ * Per-holder CB context.  Only one holder is sent per
+ * session_for_each_with_cb_for_clientid() invocation — the iterator
+ * stops at the first session it visits for the holder's clientid.
+ */
+struct byte_range_one_cb_ctx {
+    const struct byte_range_holder *holder;
+    uint32_t                        timeout_ms;
 };
 
-static int byte_range_cb_target_cb(const struct session_cb_snap *snap,
-                                   void *ctx)
+static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
+                                    void *ctx)
 {
-    struct byte_range_cb_ctx *c = ctx;
-    uint32_t i;
+    struct byte_range_one_cb_ctx *c = ctx;
+    struct nfs4_cb_layoutrecall_args args;
+    int fd;
+    int dup_fd;
+    int rc;
 
-    if (snap == NULL || c == NULL) {
+    if (snap == NULL || c == NULL || c->holder == NULL) {
         return 0;
     }
-    /* For each holder this session belongs to, snapshot fd and emit
-     * the byte-range CB_LAYOUTRECALL.  We only consume the snap
-     * pointer for the duration of this callback; no state survives. */
-    for (i = 0; i < c->count; i++) {
-        struct nfs4_cb_layoutrecall_args args;
-        int fd;
-        int dup_fd;
-        int rc;
-
-        if (c->holders[i].clientid != snap->clientid) {
-            continue;
-        }
-        fd = rpc_conn_get_fd(snap->cb_conn);
-        if (fd < 0) {
-            continue;
-        }
-        dup_fd = dup(fd);
-        if (dup_fd < 0) {
-            continue;
-        }
-
-        memset(&args, 0, sizeof(args));
-        args.layout_type = 1; /* LAYOUT4_NFSV4_1_FILES */
-        args.iomode      = c->holders[i].iomode;
-        args.recall_type = LAYOUTRECALL4_FILE;
-        args.fileid      = c->holders[i].fileid;
-        args.stateid     = c->holders[i].stateid;
-        args.offset      = c->holders[i].recall_offset;
-        args.length      = c->holders[i].recall_length;
-
-        rc = nfs4_cb_layoutrecall_fd(dup_fd, snap->session_id,
-                                     snap->cb_prog,
-                                     snap->slot_seq_id,
-                                     1, snap->minorversion,
-                                     &snap->cb_sec,
-                                     &args, c->timeout_ms);
-        if (rc != 0) {
-            (void)fprintf(stderr,
-                "layout_recall: byte-range CB_LAYOUTRECALL "
-                "clientid=%llu fileid=%llu off=%llu len=%llu "
-                "rc=%d \u2014 revoking\n",
-                (unsigned long long)c->holders[i].clientid,
-                (unsigned long long)c->holders[i].fileid,
-                (unsigned long long)args.offset,
-                (unsigned long long)args.length, rc);
-        }
-        (void)close(dup_fd);
+    /* Defensive: per-clientid iterator already filters by clientid,
+     * but a same-process race could in theory invoke this from the
+     * global iterator path — keep the explicit check. */
+    if (c->holder->clientid != snap->clientid) {
+        return 0;
     }
-    return 0;
+    fd = rpc_conn_get_fd(snap->cb_conn);
+    if (fd < 0) {
+        return 0;
+    }
+    dup_fd = dup(fd);
+    if (dup_fd < 0) {
+        return 0;
+    }
+
+    memset(&args, 0, sizeof(args));
+    args.layout_type = c->holder->layout_type;
+    args.iomode      = c->holder->iomode;
+    args.recall_type = LAYOUTRECALL4_FILE;
+    args.fileid      = c->holder->fileid;
+    args.stateid     = c->holder->stateid;
+    args.offset      = c->holder->recall_offset;
+    args.length      = c->holder->recall_length;
+
+    rc = nfs4_cb_layoutrecall_fd(dup_fd, snap->session_id,
+                                 snap->cb_prog,
+                                 snap->slot_seq_id,
+                                 1, snap->minorversion,
+                                 &snap->cb_sec,
+                                 &args, c->timeout_ms);
+    if (rc != 0) {
+        (void)fprintf(stderr,
+            "layout_recall: byte-range CB_LAYOUTRECALL "
+            "clientid=%llu fileid=%llu off=%llu len=%llu "
+            "rc=%d \u2014 revoking\n",
+            (unsigned long long)c->holder->clientid,
+            (unsigned long long)c->holder->fileid,
+            (unsigned long long)args.offset,
+            (unsigned long long)args.length, rc);
+    }
+    (void)close(dup_fd);
+
+    /*
+     * Return 1 ("snap consumed") so session_invoke_cb_locked()
+     * commits the slot-0 sequenceid advance before releasing the
+     * session-table lock.  Without this, a second CB on the same
+     * session would reuse sa_sequenceid and the kernel would treat
+     * it as a slot replay (RFC 8881 §18.46.4).  We commit even on
+     * CB send failure: the kernel's contract is +1 per CB attempt,
+     * not per CB success.
+     */
+    return 1;
 }
 
 int layout_recall_byte_range_for_holders(struct layout_recall *lr,
@@ -767,11 +831,11 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
                                          uint32_t req_iomode,
                                          uint64_t req_offset,
                                          uint64_t req_length,
+                                         uint32_t req_layout_type,
                                          uint32_t *recalled_out)
 {
     struct byte_range_holder holders[LAYOUT_BYTE_RANGE_MAX_HOLDERS];
     struct byte_range_collect_ctx col;
-    struct byte_range_cb_ctx cb_ctx;
     enum mds_status st;
     uint32_t i;
 
@@ -787,14 +851,15 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     }
 
     memset(&col, 0, sizeof(col));
-    col.holders      = holders;
-    col.capacity     = LAYOUT_BYTE_RANGE_MAX_HOLDERS;
-    col.fileid       = fileid;
-    col.req_clientid = req_clientid;
-    col.req_iomode   = req_iomode;
-    col.req_offset   = req_offset;
-    col.req_length   = req_length;
-    col.cat          = lr->cat;
+    col.holders         = holders;
+    col.capacity        = LAYOUT_BYTE_RANGE_MAX_HOLDERS;
+    col.fileid          = fileid;
+    col.req_clientid    = req_clientid;
+    col.req_iomode      = req_iomode;
+    col.req_offset      = req_offset;
+    col.req_length      = req_length;
+    col.req_layout_type = req_layout_type;
+    col.cat             = lr->cat;
 
     st = mds_coord_layout_iter_file(lr->cat, fileid,
                                      byte_range_collect_cb, &col);
@@ -806,20 +871,22 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     }
 
     /*
-     * Snapshot every holder's backchannel under the session-table
-     * lock and emit CB_LAYOUTRECALL on the dup'd fd.  We use the
-     * existing session_for_each_with_cb iterator: it visits every
-     * session with cb_conn != NULL exactly once, and for each call
-     * we walk our local holders[] array filtering by clientid.  This
-     * keeps the lock window short (no nested I/O) and avoids storing
-     * raw session pointers across the operation.
+     * For each holder, dispatch one CB_LAYOUTRECALL via the per-
+     * clientid session iterator, which selects the most-recently
+     * created session for the holder (Q2(a) of Mark's bug report).
+     * The iterator commits the slot-0 sequenceid advance under the
+     * session-table lock when our callback returns 1.
      */
     if (lr->st != NULL) {
-        cb_ctx.holders    = holders;
-        cb_ctx.count      = col.count;
-        cb_ctx.timeout_ms = lr->revoke_ms;
-        (void)session_for_each_with_cb(lr->st, byte_range_cb_target_cb,
-                                       &cb_ctx);
+        for (i = 0; i < col.count; i++) {
+            struct byte_range_one_cb_ctx one_ctx = {
+                .holder = &holders[i],
+                .timeout_ms = lr->revoke_ms,
+            };
+            (void)session_for_each_with_cb_for_clientid(
+                lr->st, holders[i].clientid,
+                byte_range_cb_one_holder, &one_ctx);
+        }
     }
 
     /*
@@ -896,7 +963,9 @@ int layout_recall_for_file(struct layout_recall *lr, uint64_t fileid)
         session_for_each_with_cb(lr->st, snap_cb_target, &tl);
 
         for (uint32_t i = 0; i < tl.count; i++) {
-            attempt_cb_for_target(&tl.targets[i], lr->revoke_ms);
+            attempt_cb_for_target(&tl.targets[i],
+                                  lr->default_layout_type,
+                                  lr->revoke_ms);
             close(tl.targets[i].fd);
         }
     }

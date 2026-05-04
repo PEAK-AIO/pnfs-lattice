@@ -98,6 +98,18 @@ int layout_recall_for_file(struct layout_recall *lr, uint64_t fileid);
  * @param req_iomode     LAYOUTIOMODE4_READ or LAYOUTIOMODE4_RW.
  * @param req_offset     Requested range start (bytes).
  * @param req_length     Requested range length (UINT64_MAX = to-EOF).
+ * @param req_layout_type Layout type the requester is asking for
+ *                       (e.g. LAYOUT4_FLEX_FILES).  This value is
+ *                       echoed in the CB_LAYOUTRECALL `clora_type`
+ *                       field — the holder's grant uses the same
+ *                       layout type since the catalogue does not
+ *                       persist per-grant layout_type and we never
+ *                       grant a mixed-type layout for a single file
+ *                       (compound_layout.c:op_layoutget validates
+ *                       a->layout_type ∈ { LAYOUT4_NFSV4_1_FILES,
+ *                       LAYOUT4_FLEX_FILES }).  Passing a stale or
+ *                       wrong value would yield a CB the holder
+ *                       client cannot decode — Mark's bug.
  * @param recalled_out   Optional: receives the count of holders the
  *                       helper recalled.  Pass NULL to ignore.
  * @return 0 on success (zero or more recalls sent), -errno on
@@ -109,7 +121,24 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
                                          uint32_t req_iomode,
                                          uint64_t req_offset,
                                          uint64_t req_length,
+                                         uint32_t req_layout_type,
                                          uint32_t *recalled_out);
+
+/**
+ * Set the default layout type used by the DS-failure recall path.
+ *
+ * The DS-failure path (layout_recall_for_ds) emits LAYOUTRECALL4_ALL
+ * which still carries a `clora_type` per RFC 8881 §20.3.4.  The
+ * catalogue does not persist per-grant layout_type, so callers must
+ * tell the coordinator which type was used to grant layouts on the
+ * affected DS.  In a homogeneous deployment (all flexfiles or all
+ * files-layout) this is a single value set once at startup.
+ *
+ * Default is LAYOUT4_FLEX_FILES (matches the production layout type).
+ * Pass 0 to keep the current default.  NULL @lr is tolerated.
+ */
+void layout_recall_set_default_layout_type(struct layout_recall *lr,
+                                           uint32_t layout_type);
 
 struct session_table;
 

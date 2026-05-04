@@ -541,6 +541,47 @@ int session_for_each_with_cb(struct session_table *st,
                              session_cb_snap_fn cb, void *ctx);
 
 /**
+ * Enumerate sessions belonging to a single clientid, most recent first.
+ *
+ * Walks the per-client `c->sessions` list (which is head-inserted by
+ * session_create_session, so the head is the most recently created
+ * session) and invokes @cb on the FIRST session that has cb_conn !=
+ * NULL.  Iteration stops at the first invocation regardless of @cb's
+ * return value.
+ *
+ * Why this exists, separately from session_for_each_with_cb:
+ *
+ *   The global iterator visits every session-with-backchannel for
+ *   every callback emission.  When a holder client just remounted,
+ *   its old session may still be in the hash with a stale cb_conn
+ *   (the epoll dispatch has not yet processed EPOLLHUP on the dead
+ *   socket fd).  The global iterator can pick that stale session
+ *   first; the kernel's new mount has no record of the stale
+ *   session_id and rejects the CB_SEQUENCE with NFS4ERR_BADSESSION.
+ *
+ *   Walking c->sessions head-first selects the newest session
+ *   (which the kernel client created on its current mount) and
+ *   skips lingering stale entries, eliminating the BADSESSION
+ *   window.
+ *
+ * On @cb return == 1 (snap consumed), the slot-0 sequenceid is
+ * advanced by 1 under the session-table lock so subsequent CBs on
+ * the same session use a fresh, monotonic sa_sequenceid per RFC
+ * 8881 §18.46.4.
+ *
+ * @param st         Session table (NULL tolerated — returns 0).
+ * @param clientid   Target client.
+ * @param cb         Callback (must not do network I/O).
+ * @param ctx        Opaque user context.
+ * @return 0 if no session was visited (no client, no live cb_conn),
+ *         otherwise the value @cb returned.
+ */
+int session_for_each_with_cb_for_clientid(struct session_table *st,
+                                          uint64_t clientid,
+                                          session_cb_snap_fn cb,
+                                          void *ctx);
+
+/**
  * Update the stored callback security parameters for a session.
  *
  * Used by op_create_session and op_backchannel_ctl (RFC 8881 §18.33).
