@@ -348,6 +348,89 @@ void make_layout_stateid(uint32_t mds_id,
 }
 
 /*
+ * Hard upper bound on the per-LAYOUTGET grant range length.
+ *
+ * Linux pNFS clients legitimately send LAYOUTGET with
+ * (length == UINT64_MAX, minlength == UINT64_MAX) to mean "give me
+ * access starting at the offset onward".  Granting an actual
+ * UINT64_MAX-byte window forces every CB_LAYOUTRECALL on a conflict
+ * to be whole-file because there is no narrower range to intersect
+ * against.
+ *
+ * Cap the per-grant range so the wire response and persisted row are
+ * always strictly bounded.  Linux clients re-issue LAYOUTGET when
+ * their I/O extends past the granted window, so a bounded grant is
+ * functionally equivalent for finite workloads while letting the
+ * server emit byte-range CB_LAYOUTRECALLs.
+ */
+#define MDS_LAYOUT_GRANT_MAX_LENGTH (1ULL << 30) /* 1 GiB */
+
+static uint64_t layout_clamp_grant_length(uint64_t offset, uint64_t length)
+{
+	uint64_t cap = MDS_LAYOUT_GRANT_MAX_LENGTH;
+
+	if (offset >= UINT64_MAX - 1ULL) {
+		return 0;
+	}
+	if (cap > UINT64_MAX - 1ULL - offset) {
+		cap = UINT64_MAX - 1ULL - offset;
+	}
+	if (length > cap) {
+		return cap;
+	}
+	return length;
+}
+
+static enum nfs4_status layout_select_grant_range(
+	const struct nfs4_arg_layoutget *a,
+	const struct mds_inode *inode,
+	uint32_t configured_stripe_unit,
+	uint64_t *grant_offset,
+	uint64_t *grant_length)
+{
+	uint64_t window;
+
+	if (a == NULL || grant_offset == NULL || grant_length == NULL) {
+		return NFS4ERR_IO;
+	}
+
+	*grant_offset = a->offset;
+	if (a->length != UINT64_MAX) {
+		if (a->length > UINT64_MAX - a->offset) {
+			return NFS4ERR_INVAL;
+		}
+		*grant_length = a->length;
+		return NFS4_OK;
+	}
+
+	if (a->offset == UINT64_MAX) {
+		return NFS4ERR_INVAL;
+	}
+
+	window = configured_stripe_unit > 0 ? configured_stripe_unit : 65536ULL;
+	if (a->minlength != UINT64_MAX && a->minlength > window) {
+		window = a->minlength;
+	}
+	if (inode != NULL && inode->size > a->offset) {
+		uint64_t remaining = inode->size - a->offset;
+
+		if (remaining > window) {
+			window = remaining;
+		}
+	}
+	if (window == 0) {
+		window = 1;
+	}
+	window = layout_clamp_grant_length(a->offset, window);
+	if (window == 0) {
+		return NFS4ERR_INVAL;
+	}
+
+	*grant_length = window;
+	return NFS4_OK;
+}
+
+/*
  * RFC 8881 §12.5.3 / §8.2.2 — layout stateid renewal.
  *
  * When a client passes the previously-issued layout stateid as input
@@ -763,8 +846,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * window.
 	 */
 	const uint32_t grant_iomode = LAYOUTIOMODE4_RW;
-	const uint64_t grant_offset = 0;
-	const uint64_t grant_length = UINT64_MAX;
+	uint64_t grant_offset = 0;
+	uint64_t grant_length = UINT64_MAX;
 
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
@@ -791,6 +874,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	    !(inode.flags & MDS_IFLAG_DS_PENDING)) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
 }
+	nst = layout_select_grant_range(
+		a, &inode, cd->cfg_stripe_unit,
+		&grant_offset, &grant_length);
+	if (nst != NFS4_OK) {
+		return nst;
+	}
 
 	/*
 	 * Mark's bug — byte-range CB_LAYOUTRECALL.
@@ -835,8 +924,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			cd->current_fh.fileid,
 			cd->clientid,
 			req_iomode_for_recall,
-			a->offset,
-			a->length,
+			grant_offset,
+			grant_length,
 			a->layout_type,
 			&recalled);
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
@@ -1466,9 +1555,9 @@ fill_layoutget_result:
 	}
 	/* Fill result.
 	 *
-	 * Phase 6 — advertise the wide long-lived grant to the client:
+	 * Advertise the persisted long-lived grant to the client:
 	 *   - iomode = RW  (server may widen per RFC 8881 §12.5.3)
-	 *   - offset = 0, length = UINT64_MAX  (whole file)
+	 *   - offset/length = bounded grant selected above
 	 *   - return_on_close = false  (client keeps the layout across
 	 *     close; returned only on explicit LAYOUTRETURN or when
 	 *     the server CB_RECALLs it)
