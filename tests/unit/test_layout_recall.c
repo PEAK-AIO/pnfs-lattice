@@ -1093,12 +1093,12 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     ASSERT_EQ(mock.received, 1);
 
     /*
-     * NFS4ERR_BADSESSION is terminal — the client cannot be reached
-     * via this session.  The server MUST revoke so the row is not
-     * leaked.  The next time this client comes back via a fresh
-     * session it discovers the revoke on its first op against the
-     * layout stateid (NFS4ERR_BAD_STATEID), which the kernel knows
-     * how to recover from cleanly.
+     * With the send-only CB model (no recv on the shared fd), the
+     * recall coordinator never sees the client's terminal status.
+     * cb_status == 0 ("send succeeded") is treated as transient,
+     * so the layout row is preserved — the client's natural
+     * LAYOUTRETURN cleans it up.  The unlink path has its own
+     * forced-revoke logic that does not depend on CB status.
      */
     {
         bool has_layout = false;
@@ -1106,7 +1106,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
 
         mst = mds_coord_layout_scan_for_file(db, 900, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 0);
+        ASSERT_EQ(has_layout, 1);
     }
 
     close(sv[0]);
@@ -1186,13 +1186,18 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
     ASSERT_EQ(recalled, 1);
     ASSERT_EQ(mock.received, 1);
 
+    /*
+     * Send-only CB: NOMATCHING_LAYOUT is never observed by the
+     * server; cb_status == 0 keeps the row (transient).  Same
+     * rationale as test_byte_range_recall_revokes_on_terminal_status.
+     */
     {
         bool has_layout = false;
         enum mds_status mst;
 
         mst = mds_coord_layout_scan_for_file(db, 901, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 0);
+        ASSERT_EQ(has_layout, 1);
     }
 
     close(sv[0]);

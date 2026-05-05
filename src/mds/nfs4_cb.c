@@ -142,57 +142,6 @@ static int send_record(int fd, const uint8_t *data, uint32_t len)
     return 0;
 }
 
-/**
- * Read a complete RPC record-marked message.
- * Caller must free(*out).  Returns 0 on success.
- */
-static int recv_record(int fd, uint32_t timeout_ms,
-                       uint8_t **out, uint32_t *out_len)
-{
-    struct pollfd pfd;
-    uint8_t hdr[4];
-    ssize_t n;
-
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-
-    /* Read 4-byte fragment header. */
-    if (poll(&pfd, 1, (int)timeout_ms) <= 0) {
-        return -ETIMEDOUT;
-}
-    n = recv(fd, hdr, 4, MSG_WAITALL);
-    if (n != 4) {
-        return -EIO;
-}
-
-    uint32_t raw = ntohl(*(uint32_t *)hdr);
-    uint32_t frag_len = raw & 0x7FFFFFFFu;
-
-    if (frag_len == 0 || frag_len > CB_MAX_MSG_SIZE) {
-        return -EIO;
-}
-
-    uint8_t *buf = malloc(frag_len);
-
-    if (buf == NULL) {
-        return -ENOMEM;
-}
-
-    if (poll(&pfd, 1, (int)timeout_ms) <= 0) {
-        free(buf);
-        return -ETIMEDOUT;
-    }
-    n = recv(fd, buf, frag_len, MSG_WAITALL);
-    if (n < 0 || (uint32_t)n != frag_len) {
-        free(buf);
-        return -EIO;
-    }
-
-    *out = buf;
-    *out_len = frag_len;
-    return 0;
-}
-
 /* -----------------------------------------------------------------------
  * XDR encoding: CB_COMPOUND { CB_SEQUENCE, CB_LAYOUTRECALL }
  * ----------------------------------------------------------------------- */
@@ -597,79 +546,6 @@ static bool encode_cb_layoutrecall(XDR *xdrs,
     return true;
 }
 
-/* -----------------------------------------------------------------------
- * Decode CB_COMPOUND reply
- * ----------------------------------------------------------------------- */
-
-/**
- * Minimal decode of CB_COMPOUND reply.
- * Returns the status of the first failed op, or 0 on all-success.
- */
-/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
-static int decode_cb_compound_reply(const uint8_t *buf, uint32_t len)
-{
-    XDR xdrs;
-    uint32_t xid, msg_type, reply_stat, accept_stat, v;
-
-    xdrmem_create(&xdrs, (char *)buf, len, XDR_DECODE);
-
-    /* RPC reply header. */
-    if (!xdr_uint32_t(&xdrs, &xid)) { goto err;
-}
-    if (!xdr_uint32_t(&xdrs, &msg_type)) { goto err;
-}
-    if (msg_type != RPC_REPLY) { goto err;
-}
-    if (!xdr_uint32_t(&xdrs, &reply_stat)) { goto err;
-}
-    if (reply_stat != RPC_MSG_ACCEPTED) { goto err;
-}
-
-    /* Auth verifier (skip). */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto err; /* flavor */
-}
-    if (!xdr_uint32_t(&xdrs, &v)) { goto err; /* body len */
-}
-
-    if (!xdr_uint32_t(&xdrs, &accept_stat)) { goto err;
-}
-    if (accept_stat != RPC_ACCEPT_SUCCESS) { goto err;
-}
-
-    /* CB_COMPOUND reply: status, tag, resarray. */
-    uint32_t status;
-
-    if (!xdr_uint32_t(&xdrs, &status)) { goto err;
-}
-    if (status != 0) {
-        xdr_destroy(&xdrs);
-        return (int)status;
-    }
-
-    /* Skip tag. */
-    uint32_t tag_len;
-
-    if (!xdr_uint32_t(&xdrs, &tag_len)) { goto err;
-}
-    /* Skip tag bytes. */
-    {
-        char skip[256];
-        uint32_t padded = (tag_len + 3) & ~3u;
-
-        if (padded > sizeof(skip)) { goto err;
-}
-        if (!xdr_opaque(&xdrs, skip, padded)) { goto err;
-}
-    }
-
-    /* Skip result array — overall status already checked. */
-    xdr_destroy(&xdrs);
-    return 0;
-
-err:
-    xdr_destroy(&xdrs);
-    return -EIO;
-}
 
 /* -----------------------------------------------------------------------
  * Public API
@@ -684,8 +560,6 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
     uint32_t xid;
     int slot_idx;
     int fd;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (session == NULL || args == NULL) {
@@ -753,17 +627,22 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
         goto out;
     }
 
-    /* Receive reply. */
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        goto out;
-}
-
-    /* Decode reply. */
-    rc = decode_cb_compound_reply(reply, reply_len);
+    /*
+     * Do NOT recv() the CB reply on this fd.  NFSv4.1 multiplexes
+     * fore- and back-channel on the same TCP connection (RFC 8881
+     * §2.10.3.1).  The epoll reader is the sole consumer of inbound
+     * records; recv() here races with it and can steal the client's
+     * next fore-channel record (e.g. LAYOUTRETURN), producing -EIO
+     * on our decode and stranding the client's op without a reply.
+     *
+     * Treat a successful send as "callback delivered".  The recall
+     * coordinator's transient-status logic handles cb_status == 0
+     * correctly: it skips the preemptive revoke and waits for the
+     * client's natural LAYOUTRETURN / DELEGRETURN.
+     */
+    rc = 0;
 
 out:
-    free(reply);
     cb_slot_release(session, slot_idx);
     return rc;
 }
@@ -777,8 +656,6 @@ int nfs4_cb_notify(struct nfs4_session *session,
     uint32_t xid;
     int slot_idx;
     int fd;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (session == NULL || args == NULL) {
@@ -841,15 +718,10 @@ int nfs4_cb_notify(struct nfs4_session *session,
         goto out;
     }
 
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        goto out;
-    }
-
-    rc = decode_cb_compound_reply(reply, reply_len);
+    /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
+    rc = 0;
 
 out:
-    free(reply);
     cb_slot_release(session, slot_idx);
     return rc;
 }
@@ -867,8 +739,6 @@ int nfs4_cb_notify_fd(int fd,
     char msg_buf[CB_MAX_MSG_SIZE];
     XDR xdrs;
     uint32_t xid;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (fd < 0 || args == NULL || session_id == NULL) {
@@ -917,14 +787,8 @@ int nfs4_cb_notify_fd(int fd,
         return -EIO;
     }
 
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = decode_cb_compound_reply(reply, reply_len);
-    free(reply);
-    return rc;
+    /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
+    return 0;
 }
 
 int nfs4_cb_recall(struct nfs4_session *session,
@@ -936,8 +800,6 @@ int nfs4_cb_recall(struct nfs4_session *session,
     uint32_t xid;
     int slot_idx;
     int fd;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (session == NULL || args == NULL) {
@@ -996,15 +858,10 @@ int nfs4_cb_recall(struct nfs4_session *session,
         goto out;
     }
 
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        goto out;
-    }
-
-    rc = decode_cb_compound_reply(reply, reply_len);
+    /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
+    rc = 0;
 
 out:
-    free(reply);
     cb_slot_release(session, slot_idx);
     return rc;
 }
@@ -1037,8 +894,6 @@ int nfs4_cb_recall_fd(int fd,
     char msg_buf[CB_MAX_MSG_SIZE];
     XDR xdrs;
     uint32_t xid;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (fd < 0 || args == NULL || session_id == NULL) {
@@ -1084,14 +939,8 @@ int nfs4_cb_recall_fd(int fd,
         return -EIO;
     }
 
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = decode_cb_compound_reply(reply, reply_len);
-    free(reply);
-    return rc;
+    /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
+    return 0;
 }
 
 int nfs4_cb_layoutrecall_fd(int fd,
@@ -1107,8 +956,6 @@ int nfs4_cb_layoutrecall_fd(int fd,
     char msg_buf[CB_MAX_MSG_SIZE];
     XDR xdrs;
     uint32_t xid;
-    uint8_t *reply = NULL;
-    uint32_t reply_len = 0;
     int rc;
 
     if (fd < 0 || args == NULL || session_id == NULL) {
@@ -1153,12 +1000,6 @@ int nfs4_cb_layoutrecall_fd(int fd,
         return -EIO;
     }
 
-    rc = recv_record(fd, timeout_ms, &reply, &reply_len);
-    if (rc != 0) {
-        return rc;
-    }
-
-    rc = decode_cb_compound_reply(reply, reply_len);
-    free(reply);
-    return rc;
+    /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
+    return 0;
 }
