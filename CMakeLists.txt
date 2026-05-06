@@ -121,9 +121,22 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-# libntirpc — NFS RPC + optional RDMA control plane
-find_library(NTIRPC_LIB ntirpc REQUIRED)
+# libntirpc — NFS RPC + optional RDMA control plane.
+#
+# On Debian/Ubuntu: apt install libntirpc-dev
+# On Rocky/RHEL 10 (not in repos): run deps/build-ntirpc.sh
+# See docs/INSTALL_ROCKY.md for details.
+find_library(NTIRPC_LIB ntirpc)
 find_path(NTIRPC_INCLUDE_DIR ntirpc/rpc/rpc.h)
+
+if(NOT NTIRPC_LIB OR NOT NTIRPC_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "libntirpc not found.\n"
+        "  Debian/Ubuntu:  sudo apt install libntirpc-dev\n"
+        "  Rocky/RHEL 10:  run deps/build-ntirpc.sh   (builds from source)\n"
+        "  See docs/INSTALL_ROCKY.md for the full dependency list.")
+endif()
+message(STATUS "libntirpc: ${NTIRPC_LIB}")
 
 # gRPC + protobuf — inter-MDS communication (optional until implemented)
 # grpc_service.c is currently stubbed; require when Phase 7 lands.
