@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * referral.h — Junction directory and fs_locations referral API.
+ * referral.h -- Junction directory and fs_locations referral API.
  */
 
 #ifndef REFERRAL_H

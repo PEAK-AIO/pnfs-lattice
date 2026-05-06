@@ -2,9 +2,9 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_hpc_shared.c — pure-function unit tests for the Phase G HPC
+ * test_hpc_shared.c -- pure-function unit tests for the Phase G HPC
  * striping-hint helpers (decoder + geometry picker).  No catalogue,
- * no compound, no daemon — just the math.
+ * no compound, no daemon -- just the math.
  */
 
 #include <stdio.h>
@@ -286,7 +286,7 @@ static void test_geom_null_args(void)
  *
  * These tests run against the in-memory catalogue (no proxy attached)
  * and use the synthetic-FH knob on ds_prealloc to exercise the
- * full sequence (alloc fileid → inode + dirent → wide batch → stripe
+ * full sequence (alloc fileid -> inode + dirent -> wide batch -> stripe
  * map persistence) without a live DS mount.
  * ----------------------------------------------------------------------- */
 
@@ -305,13 +305,13 @@ static void test_create_wide_invalid_args(void)
     passed++;
 }
 
-/* Phase 3 of the QA plan — simulate the crash-between-rows orphan.
+/* Phase 3 of the QA plan -- simulate the crash-between-rows orphan.
  *
  * Construct an inode at the catalogue layer that mirrors the state
  * left behind by an MDS that crashed after committing the inode +
  * dirent rows but before the stripe_map row.  The catalogue layer
- * does not filter the PENDING bit — it is the NFS-facing read path
- * (compound_inode_get / compound_lookup_local_child) that does — so
+ * does not filter the PENDING bit -- it is the NFS-facing read path
+ * (compound_inode_get / compound_lookup_local_child) that does -- so
  * we assert that:
  *   (a) mds_cat_ns_getattr surfaces the orphan with the flag set
  *       (cleanup paths need to see it);
@@ -332,7 +332,7 @@ static void test_pending_flag_lifecycle(void)
 
     /* Allocate a fileid and persist a synthetic orphan inode with the
      * PENDING bit set, mirroring hpc_create_inode_and_dirent's pre-
-     * stripe-map state.  No DSes / no stripe map — we only need the
+     * stripe-map state.  No DSes / no stripe map -- we only need the
      * inode row for this lifecycle check. */
     uint64_t fid = 0;
     ASSERT_EQ(mds_cat_alloc_fileid(db, NULL, &fid), MDS_OK);
@@ -422,10 +422,10 @@ int main(void)
     test_geom_null_args();
     test_geom_unknown_flags_ignored();
 
-    /* Phase C / Steps 4 + 5 — wide create (community subset). */
+    /* Phase C / Steps 4 + 5 -- wide create (community subset). */
     test_create_wide_invalid_args();
 
-    /* Phase 3 of the QA plan — PENDING flag lifecycle. */
+    /* Phase 3 of the QA plan -- PENDING flag lifecycle. */
     test_pending_flag_lifecycle();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);

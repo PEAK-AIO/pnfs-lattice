@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_health.c — Tests for DS health monitoring infrastructure.
+ * test_ds_health.c -- Tests for DS health monitoring infrastructure.
  *
  * Covers:
  *   1. ds_addr_parse_host with valid/invalid formats.
@@ -78,10 +78,10 @@ static void test_addr_parse_host(void)
     ASSERT_EQ(ds_addr_parse_host("ds1.example.com:/export/nfs", host, sizeof(host)), 0);
     ASSERT_STR_EQ(host, "ds1.example.com");
 
-    /* No colon — invalid. */
+    /* No colon -- invalid. */
     ASSERT_EQ(ds_addr_parse_host("nocolon", host, sizeof(host)), -1);
 
-    /* Empty host — colon at start. */
+    /* Empty host -- colon at start. */
     ASSERT_EQ(ds_addr_parse_host(":/export", host, sizeof(host)), -1);
 
     /* NULL inputs. */
@@ -109,7 +109,7 @@ static void test_probe_null_refused(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 3: DS health monitor — force_fail triggers callback
+ * Test 3: DS health monitor -- force_fail triggers callback
  * ----------------------------------------------------------------------- */
 
 static uint32_t test3_failed_ds_id;
@@ -218,12 +218,12 @@ static void test_report_error_threshold(void)
     ASSERT_EQ(ds_health_init(cat, NULL, 60000, 3,
                               test4_fail_cb, NULL, &hm), 0);
 
-    /* Two reports — below threshold. */
+    /* Two reports -- below threshold. */
     ds_health_report_error(hm, 7);
     ds_health_report_error(hm, 7);
     ASSERT_EQ(test4_cb_count, 0);
 
-    /* Third report — hits threshold. */
+    /* Third report -- hits threshold. */
     ds_health_report_error(hm, 7);
     ASSERT_EQ(test4_cb_count, 1);
     ASSERT_EQ(test4_failed_ds_id, 7);
@@ -310,7 +310,7 @@ static void test_init_rejects_zero_interval(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 7: Anti-flapping — recovery requires multiple consecutive probes
+ * Test 7: Anti-flapping -- recovery requires multiple consecutive probes
  *
  * After force_fail marks DS offline, a single report_error(ds_id)
  * resets the recovery counter.  The DS should NOT come back online
@@ -353,7 +353,7 @@ static void test_recovery_threshold(void)
     test7_failed_ds_id = 0;
     test7_cb_count = 0;
 
-    /* threshold=6 → recovery_threshold = max(6/2, 3) = 3 */
+    /* threshold=6 -> recovery_threshold = max(6/2, 3) = 3 */
     ASSERT_EQ(ds_health_init(db, NULL, 60000, 6,
                               test7_fail_cb, NULL, &hm), 0);
 
@@ -387,7 +387,7 @@ static void test_recovery_threshold(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 8: Anti-flapping — repeated failures increase cooldown (flap_count)
+ * Test 8: Anti-flapping -- repeated failures increase cooldown (flap_count)
  *
  * The first force_fail sets flap_count=1, second sets flap_count=2.
  * Verify the callback fires both times (the cooldown only affects

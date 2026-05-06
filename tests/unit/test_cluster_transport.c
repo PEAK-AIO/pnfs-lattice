@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_cluster_transport.c — Unit tests for the TCP inter-MDS
+ * test_cluster_transport.c -- Unit tests for the TCP inter-MDS
  *                             transport (cluster_transport.c).
  */
 
@@ -239,7 +239,7 @@ static void test_tcp_prepare_vote_commit(void)
         ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
     }
 
-    /* PREPARE — expect VOTE_COMMIT. */
+    /* PREPARE -- expect VOTE_COMMIT. */
     uint64_t txn_id = 42;
     int vote = client->prepare(1, txn_id, dstdir.fileid, "moved_file",
                                &fake_inode, sizeof(fake_inode),
@@ -352,7 +352,7 @@ static void test_connect_failure(void)
 /* -------------------------------------------------------------------
  * test_prepare_vote_abort_on_conflict
  *
- * PREPARE targeting a name that already exists — server should
+ * PREPARE targeting a name that already exists -- server should
  * return VOTE_ABORT (vote=0).
  * ------------------------------------------------------------------- */
 
@@ -395,7 +395,7 @@ static void test_prepare_vote_abort_on_conflict(void)
     fake_inode.mode = 0644;
     fake_inode.nlink = 1;
 
-    /* PREPARE with conflicting name — expect VOTE_ABORT (0). */
+    /* PREPARE with conflicting name -- expect VOTE_ABORT (0). */
     uint64_t txn_id = 99;
     int vote = client->prepare(1, txn_id, dir.fileid, "existing_file",
                                &fake_inode, sizeof(fake_inode),
@@ -492,7 +492,7 @@ static void test_mig_admin_request(void)
     usleep(100000);
 
     /* -- Verify destination has migrated inodes ---------------------- */
-    /* Migration copies inodes by fileid (the parent→root dirent lives
+    /* Migration copies inodes by fileid (the parent->root dirent lives
      * above the subtree and is handled by the referral layer, so we
      * verify by direct fileid and child-dirent lookups). */
     struct mds_inode dst_dir;
@@ -528,7 +528,7 @@ static void test_mig_admin_request(void)
  *
  * Start a source server with membership set.  Register the
  * destination as MDS 2 in membership.  Send an admin migration
- * request with dest_host=NULL (host_len=0) — the handler should
+ * request with dest_host=NULL (host_len=0) -- the handler should
  * resolve MDS 2 from membership and complete the migration.
  * ------------------------------------------------------------------- */
 
@@ -662,7 +662,7 @@ static void test_mig_admin_membership_resolve(void)
 }
 
 /* -------------------------------------------------------------------
- * Sequence 6 — set-lifecycle wire round-trip
+ * Sequence 6 -- set-lifecycle wire round-trip
  * ------------------------------------------------------------------- */
 
 static void test_set_lifecycle_wire(void)
@@ -951,7 +951,7 @@ static void test_assign_admin_not_exact_root(void)
     ASSERT_EQ(st, MDS_OK);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Send assign for /data — should fail (not exact root). */
+    /* Send assign for /data -- should fail (not exact root). */
     st = cluster_transport_request_assign(
         "127.0.0.1", port,
         "/data", 2,
@@ -1031,7 +1031,7 @@ static void test_split_admin_dest_not_serving(void)
     st = cluster_node_join(cm, &peer);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Send split targeting IDLE node — expect MDS_ERR_PERM. */
+    /* Send split targeting IDLE node -- expect MDS_ERR_PERM. */
     st = cluster_transport_request_split(
         "127.0.0.1", port,
         "/data", "/data/hot", 2,
@@ -1095,7 +1095,7 @@ static void test_standby_detach_wire(void)
     st = cluster_node_join(cm, &peer);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Detach via wire — should succeed. */
+    /* Detach via wire -- should succeed. */
     st = cluster_transport_request_standby_detach("127.0.0.1", port, 2);
     ASSERT_EQ(st, MDS_OK);
 
@@ -1160,7 +1160,7 @@ static void test_force_remove_wire(void)
     st = cluster_node_join(cm, &peer);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Force-remove via wire — should succeed. */
+    /* Force-remove via wire -- should succeed. */
     st = cluster_transport_request_force_remove("127.0.0.1", port, 3);
     ASSERT_EQ(st, MDS_OK);
 
@@ -1232,7 +1232,7 @@ static void test_rebalance_status_wire(void)
     cluster_transport_server_set_rebalance(srv, rw);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Query status — worker never started, should be idle/zeroed. */
+    /* Query status -- worker never started, should be idle/zeroed. */
     struct rebalance_status_info info;
     memset(&info, 0xFF, sizeof(info));
     st = cluster_transport_request_rebalance_status("127.0.0.1", port, &info);
@@ -1291,7 +1291,7 @@ static void test_tiering_status_wire(void)
     cluster_transport_server_set_tiering(srv, tw);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Query status — worker never started, should be idle/zeroed. */
+    /* Query status -- worker never started, should be idle/zeroed. */
     struct tiering_status_info info;
     memset(&info, 0xFF, sizeof(info));
     st = cluster_transport_request_tiering_status("127.0.0.1", port, &info);
@@ -1349,7 +1349,7 @@ static void test_tiering_stop_wire(void)
     cluster_transport_server_set_tiering(srv, tw);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Stop without start — should still return OK. */
+    /* Stop without start -- should still return OK. */
     st = cluster_transport_request_tiering_stop("127.0.0.1", port);
     ASSERT_EQ(st, MDS_OK);
 
@@ -1380,7 +1380,7 @@ static void test_tiering_start_null_cfg(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_ds_list_admin_wire — DS list via loopback (Item 47)
+ * test_ds_list_admin_wire -- DS list via loopback (Item 47)
  * ----------------------------------------------------------------------- */
 
 static void test_ds_list_admin_wire(void)
@@ -1486,7 +1486,7 @@ static void test_ds_list_admin_wire(void)
 
 
 /* -----------------------------------------------------------------------
- * test_ds_add_set_state_remove_wire — DS lifecycle via loopback (Item 47b)
+ * test_ds_add_set_state_remove_wire -- DS lifecycle via loopback (Item 47b)
  * ----------------------------------------------------------------------- */
 
 static void test_ds_add_set_state_remove_wire(void)
@@ -1548,7 +1548,7 @@ static void test_ds_add_set_state_remove_wire(void)
                                                  55, DS_ONLINE);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Remove should fail — DS is ONLINE. */
+    /* Remove should fail -- DS is ONLINE. */
     st = cluster_transport_request_ds_remove("127.0.0.1", port, 55);
     ASSERT_EQ(st, MDS_ERR_PERM);
 
@@ -1695,7 +1695,7 @@ static void test_ds_admin_invalidates_cache(void)
 
 
 /* -----------------------------------------------------------------------
- * test_ds_add_v2_mode_transport — DS add with structured fields (Phase 1)
+ * test_ds_add_v2_mode_transport -- DS add with structured fields (Phase 1)
  * ----------------------------------------------------------------------- */
 
 static void test_ds_add_v2_mode_transport(void)

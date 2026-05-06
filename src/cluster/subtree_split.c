@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * subtree_split.c — Subtree split/merge orchestration.
+ * subtree_split.c -- Subtree split/merge orchestration.
  *
  * Performs validation, catalogue checks, and migration coordination.
  * The subtree_map itself stays pure (map-only operations).
@@ -52,7 +52,7 @@ enum mds_status subtree_split_execute(
         return st;
 }
 
-    /* Step 2: Catalogue checks — child must exist and be a directory. */
+    /* Step 2: Catalogue checks -- child must exist and be a directory. */
     st = mds_cat_ns_getattr(cat, child_fileid, &inode);
     if (st != MDS_OK) {
         return st;
@@ -90,7 +90,7 @@ enum mds_status subtree_split_execute(
     /* Step 5: If remote destination, migrate. */
     if (dest_mds_id != self_id) {
         if (transport == NULL) {
-            /* No transport — rollback. */
+            /* No transport -- rollback. */
             subtree_map_remove_subtree(map, child_path);
             return MDS_ERR_INVAL;
         }
@@ -99,7 +99,7 @@ enum mds_status subtree_split_execute(
                                 child_fileid, dest_mds_id,
                                        NULL);
         if (st != MDS_OK) {
-            /* Migration failed — rollback the split. */
+            /* Migration failed -- rollback the split. */
             subtree_map_remove_subtree(map, child_path);
             return st;
         }
@@ -181,7 +181,7 @@ struct split_evaluator {
     pthread_t                          thread;
     _Atomic bool                       running;
     _Atomic uint64_t                   proposal_counter;
-    /* Proposal store — protected by mtx. */
+    /* Proposal store -- protected by mtx. */
     pthread_mutex_t                    mtx;
     struct split_proposal              store[SPLIT_PROPOSAL_MAX];
     uint32_t                           store_count;
@@ -313,7 +313,7 @@ void split_evaluator_run_once(struct split_evaluator *eval)
                     req = SPLIT_EVAL_DEFAULT_SUSTAINED;
                 }
 
-                /* Existing proposal — update. */
+                /* Existing proposal -- update. */
                 p->sampled_ops = ops;
                 if (p->state == PROPOSAL_COOLDOWN &&
                     p->cooldown_expiry > 0) {
@@ -321,7 +321,7 @@ void split_evaluator_run_once(struct split_evaluator *eval)
                         pthread_mutex_unlock(&eval->mtx);
                         continue;
                     }
-                    /* Cooldown expired — restart sustained tracking. */
+                    /* Cooldown expired -- restart sustained tracking. */
                     p->cooldown_expiry = 0;
                     p->hot_intervals = 0;
                     p->first_seen_sec = now_sec;
@@ -339,7 +339,7 @@ void split_evaluator_run_once(struct split_evaluator *eval)
                         memory_order_relaxed);
                 }
             } else if (eval->store_count < SPLIT_PROPOSAL_MAX) {
-                /* New proposal — start tracking. */
+                /* New proposal -- start tracking. */
                 p = &eval->store[eval->store_count++];
                 memset(p, 0, sizeof(*p));
                 (void)snprintf(p->path, sizeof(p->path),
@@ -424,7 +424,7 @@ int split_evaluator_start(struct subtree_map *map,
 
     if (!cfg->auto_split_enabled) {
         *out = NULL;
-        return 0;  /* Not an error — just disabled. */
+        return 0;  /* Not an error -- just disabled. */
     }
 
     eval = calloc(1, sizeof(*eval));

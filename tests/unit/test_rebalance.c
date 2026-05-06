@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rebalance.c — Unit tests for admin-triggered mirror relocation.
+ * test_rebalance.c -- Unit tests for admin-triggered mirror relocation.
  */
 
 #include <assert.h>
@@ -222,7 +222,7 @@ static void test_moves_file(void)
     VERIFY(rebalance_init(cat, cq, proxy, ot, &rw) == 0);
     rebalance_set_retry_delay(rw, 0);
 
-    /* Move DS1 → DS3. */
+    /* Move DS1 -> DS3. */
     VERIFY(rebalance_start(rw, 1, 3) == 0);
     wait_rebalance_done(rw);
 
@@ -349,7 +349,7 @@ static void test_skips_active_writer(void)
     create_test_inode(db, 300, 8);
     write_ds_data(1, 300, 0, 0, "12345678", 8);
 
-    /* Open file for writing — triggers active-writer skip. */
+    /* Open file for writing -- triggers active-writer skip. */
     struct nfs4_stateid osid;
     uint8_t owner[] = "test_owner";
     VERIFY(open_state_open(ot, 42, owner, sizeof(owner) - 1,
@@ -394,7 +394,7 @@ static void test_no_candidates(void)
     mount_ds(proxy, 2);
     mount_ds(proxy, 3);
 
-    /* No stripe maps → no candidates for any source DS. */
+    /* No stripe maps -> no candidates for any source DS. */
 
     struct commit_queue *cq = NULL;
     VERIFY(commit_queue_create(db, NULL, 0, 0, 0, 0, 0, 0, &cq) == 0);
@@ -575,7 +575,7 @@ static void test_rejects_target_already_mirror(void)
     mount_ds(proxy, 1);
     mount_ds(proxy, 2);
 
-    /* File 400: mirrors on DS1 + DS2. Rebalance DS1 → DS2 should skip
+    /* File 400: mirrors on DS1 + DS2. Rebalance DS1 -> DS2 should skip
      * because target is already a mirror. */
     struct mds_ds_map_entry ent[2];
     memset(ent, 0, sizeof(ent));

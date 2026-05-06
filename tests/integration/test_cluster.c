@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_cluster.c — Authoritative-mode etcd cluster integration tests.
+ * test_cluster.c -- Authoritative-mode etcd cluster integration tests.
  *
  * Each test uses a unique etcd key prefix for isolation.
  * Gated by PNFS_TEST_ETCD=1 environment variable.
@@ -41,10 +41,10 @@ static int g_tests_passed;
 
 
 /* -----------------------------------------------------------------------
- * 1. test_etcd_join — node join registers in etcd
+ * 1. test_etcd_join -- node join registers in etcd
  * ----------------------------------------------------------------------- */
 
-#if 0  /* etcd tests removed — coordination is RonDB-native */
+#if 0  /* etcd tests removed -- coordination is RonDB-native */
 static void test_etcd_join(void)
 {
     char prefix[256];
@@ -97,7 +97,7 @@ static void test_etcd_join(void)
 }
 
 /* -----------------------------------------------------------------------
- * 2. test_etcd_subtree_owner — subtree ownership reflected in etcd
+ * 2. test_etcd_subtree_owner -- subtree ownership reflected in etcd
  * ----------------------------------------------------------------------- */
 
 static void test_etcd_subtree_owner(void)
@@ -137,7 +137,7 @@ static void test_etcd_subtree_owner(void)
 }
 
 /* -----------------------------------------------------------------------
- * 3. test_etcd_referral_update — owner change reflected in lookup
+ * 3. test_etcd_referral_update -- owner change reflected in lookup
  * ----------------------------------------------------------------------- */
 
 static void test_etcd_referral_update(void)
@@ -151,7 +151,7 @@ static void test_etcd_referral_update(void)
     assert(subtree_map_add(smap, "/vol1", 1, "node1.local",
                            SUBTREE_ACTIVE, 0) == MDS_OK);
 
-    /* Change owner from 1 → 2. */
+    /* Change owner from 1 -> 2. */
     struct subtree_entry entry;
     assert(subtree_map_lookup(smap, "/vol1", &entry) == MDS_OK);
     assert(subtree_map_set_owner(smap, "/vol1", 2,
@@ -169,7 +169,7 @@ static void test_etcd_referral_update(void)
 }
 
 /* -----------------------------------------------------------------------
- * 4. test_etcd_drain_leave — drain + leave lifecycle
+ * 4. test_etcd_drain_leave -- drain + leave lifecycle
  * ----------------------------------------------------------------------- */
 
 static void test_etcd_drain_leave(void)
@@ -213,7 +213,7 @@ static void test_etcd_drain_leave(void)
 }
 
 /* -----------------------------------------------------------------------
- * 5. test_etcd_restart_snapshot — destroy + re-init from same prefix
+ * 5. test_etcd_restart_snapshot -- destroy + re-init from same prefix
  * ----------------------------------------------------------------------- */
 
 static void test_etcd_restart_snapshot(void)
@@ -228,7 +228,7 @@ static void test_etcd_restart_snapshot(void)
                            SUBTREE_ACTIVE, 0) == MDS_OK);
     subtree_map_destroy(smap1);
 
-    /* Phase 2: re-init from same prefix → should find /snap. */
+    /* Phase 2: re-init from same prefix -> should find /snap. */
     struct subtree_map *smap2 = NULL;
     assert(subtree_map_init(ETCD_URL, prefix, 1, "r-node.local", NULL, &smap2) == MDS_OK);
 
@@ -245,7 +245,7 @@ static void test_etcd_restart_snapshot(void)
 }
 
 /* -----------------------------------------------------------------------
- * 6. test_etcd_migration_tracker — tracker lifecycle
+ * 6. test_etcd_migration_tracker -- tracker lifecycle
  * ----------------------------------------------------------------------- */
 
 #endif  /* etcd tests removed */
@@ -297,7 +297,7 @@ static void test_etcd_migration_tracker(void)
 
     migration_tracker_destroy(t);
 
-    /* NULL tracker → idle. */
+    /* NULL tracker -> idle. */
     migration_tracker_get_progress(NULL, &mstate, mpath, sizeof(mpath),
                                    &total, &done);
     assert(mstate == MIG_IDLE);

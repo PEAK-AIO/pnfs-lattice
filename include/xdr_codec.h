@@ -2,13 +2,13 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * xdr_codec.h — NFSv4.1/4.2 XDR encode/decode for COMPOUND requests.
+ * xdr_codec.h -- NFSv4.1/4.2 XDR encode/decode for COMPOUND requests.
  *
  * Uses libntirpc XDR primitives (xdrmem_ncreate, xdr_uint32_t, etc.)
  * for the low-level encoding.  This module adds the NFSv4.1/4.2-specific
  * compound and per-operation codecs.
  *
- * See docs/architecture.md §18.3 and the Phase 1 plan.
+ * See docs/architecture.md S18.3 and the Phase 1 plan.
  */
 
 #ifndef XDR_CODEC_H
@@ -31,7 +31,7 @@
 #define NFSPROC4_NULL     0
 #define NFSPROC4_COMPOUND 1
 
-/** NFSv4 filehandle maximum size (RFC 8881 §3.1). */
+/** NFSv4 filehandle maximum size (RFC 8881 S3.1). */
 #define NFS4_FHSIZE       128
 
 /** Maximum compound tag length. */
@@ -47,7 +47,7 @@
 /* -----------------------------------------------------------------------
  * NFSv4 attribute bit positions (for bitmap4)
  *
- * We support a Phase-1 subset.  Bit numbers from RFC 8881 §5.8.
+ * We support a Phase-1 subset.  Bit numbers from RFC 8881 S5.8.
  * ----------------------------------------------------------------------- */
 
 #define FATTR4_SUPPORTED_ATTRS  0
@@ -81,12 +81,12 @@
 #define FATTR4_SPACE_TOTAL     44
 /* Word 1 (bits 32-63) */
 #define FATTR4_FS_LAYOUT_TYPES 62
-/* RFC 5662 §2 — layouthint4 set-only pNFS creation hint. */
+/* RFC 5662 S2 -- layouthint4 set-only pNFS creation hint. */
 #define FATTR4_LAYOUT_HINT    63
 /* Word 2 (bits 64-95) */
 #define FATTR4_LAYOUT_BLKSIZE  66
 #define FATTR4_MDSTHRESHOLD    68
-/* RFC 7862 §10.2.3 — change_attr_type (bit 79).
+/* RFC 7862 S10.2.3 -- change_attr_type (bit 79).
  *
  * When a client requests this attribute, we advertise that every
  * mutation strictly increases the change counter, so clients may
@@ -105,14 +105,14 @@
 /* RFC 8276 extended attribute support (bit 82). */
 #define FATTR4_XATTR_SUPPORT   82
 
-/* RFC 7862 §10.2.3 — values for change_attr_type. */
+/* RFC 7862 S10.2.3 -- values for change_attr_type. */
 #define NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR         0
 #define NFS4_CHANGE_TYPE_IS_VERSION_COUNTER        1
 #define NFS4_CHANGE_TYPE_IS_VERSION_COUNTER_NOPNFS 2
 #define NFS4_CHANGE_TYPE_IS_TIME_METADATA          3
 #define NFS4_CHANGE_TYPE_IS_UNDEFINED              4
 
-/** Number of 32-bit words needed for our bitmap (bits 0-68 → 3 words). */
+/** Number of 32-bit words needed for our bitmap (bits 0-68 -> 3 words). */
 #define NFS4_BITMAP_WORDS  3
 
 /** Bitmap helper: set bit in a 3-word bitmap array. */
@@ -152,8 +152,8 @@ static inline bool nfs4_bitmap_test(const uint32_t bm[NFS4_BITMAP_WORDS],
  * Encode/decode an nfs_fh4 (variable-length opaque filehandle).
  *
  * We represent filehandles as 8-byte big-endian fileids.
- * Encode: fileid → 8-byte opaque on the wire.
- * Decode: 8-byte opaque from the wire → fileid.
+ * Encode: fileid -> 8-byte opaque on the wire.
+ * Decode: 8-byte opaque from the wire -> fileid.
  *
  * @return true on success.
  */

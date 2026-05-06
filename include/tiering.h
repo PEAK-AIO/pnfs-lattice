@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * tiering.h — DS storage tiering V1.
+ * tiering.h -- DS storage tiering V1.
  *
  * Periodic full stripe-map scan that classifies files as promote/demote
  * based on I/O tracker scores, then moves them to the correct tier via
@@ -10,7 +10,7 @@
  *
  * V1 scope: single-stripe, mirror_count >= 1, LAYOUTSTATS primary,
  * LAYOUTGET fallback, cooldown hysteresis.
- * See docs/architecture.md §3.9 for design.
+ * See docs/architecture.md S3.9 for design.
  */
 
 #ifndef TIERING_H
@@ -101,7 +101,7 @@ void tiering_destroy(struct tiering_worker *tw);
 
 /**
  * Query tiering status.
- * @param tw    Tiering worker (NULL tolerated — zeroed output).
+ * @param tw    Tiering worker (NULL tolerated -- zeroed output).
  * @param info  Receives all status fields.
  */
 void tiering_status(const struct tiering_worker *tw,

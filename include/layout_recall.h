@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_recall.h — Layout recall / revocation coordinator.
+ * layout_recall.h -- Layout recall / revocation coordinator.
  *
  * Coordinates layout recall and revocation for DS failure and
  * per-file recall (migration, rebalance, tiering).  Best-effort
@@ -10,7 +10,7 @@
  * attached; authoritative revoke follows regardless of callback
  * outcome.  Client ack tracking and timeout/retry are still TODO.
  *
- * See docs/architecture.md §15 for design.
+ * See docs/architecture.md S15 for design.
  */
 
 #ifndef LAYOUT_RECALL_H
@@ -106,11 +106,11 @@ int layout_recall_revoke_all_for_unlink(struct layout_recall *lr,
  * requesting iomode (RW vs anything; READ vs RW).  For each such
  * holder we emit `CB_LAYOUTRECALL` with `recall_type = LAYOUTRECALL4_FILE`
  * and the *intersection* of (req_off, req_len) with (hold_off, hold_len)
- * — RFC 8881 §12.5.5 byte-range partial recall.  The holder's
+ * -- RFC 8881 S12.5.5 byte-range partial recall.  The holder's
  * authoritative layout state is then revoked from the catalogue (full
  * stateid revoke; partial-revoke granularity is a Phase 2 follow-up).
  *
- * Same-client renew (clientid == requesting_clientid) is skipped — a
+ * Same-client renew (clientid == requesting_clientid) is skipped -- a
  * client may upgrade or extend its own layout without recalling itself.
  *
  * Best-effort and idempotent.  CB delivery failure (no backchannel,
@@ -129,15 +129,15 @@ int layout_recall_revoke_all_for_unlink(struct layout_recall *lr,
  * @param req_layout_type Layout type the requester is asking for
  *                       (e.g. LAYOUT4_FLEX_FILES).  This value is
  *                       echoed in the CB_LAYOUTRECALL `clora_type`
- *                       field — the holder's grant uses the same
+ *                       field -- the holder's grant uses the same
  *                       layout type since the catalogue does not
  *                       persist per-grant layout_type and we never
  *                       grant a mixed-type layout for a single file
  *                       (compound_layout.c:op_layoutget validates
- *                       a->layout_type ∈ { LAYOUT4_NFSV4_1_FILES,
+ *                       a->layout_type in { LAYOUT4_NFSV4_1_FILES,
  *                       LAYOUT4_FLEX_FILES }).  Passing a stale or
  *                       wrong value would yield a CB the holder
- *                       client cannot decode — Mark's bug.
+ *                       client cannot decode -- Mark's bug.
  *
  *                       Pass 0 for callers that do not have an
  *                       active LAYOUTGET request (for example
@@ -164,7 +164,7 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
  * Set the default layout type used by the DS-failure recall path.
  *
  * The DS-failure path (layout_recall_for_ds) emits LAYOUTRECALL4_ALL
- * which still carries a `clora_type` per RFC 8881 §20.3.4.  The
+ * which still carries a `clora_type` per RFC 8881 S20.3.4.  The
  * catalogue does not persist per-grant layout_type, so callers must
  * tell the coordinator which type was used to grant layouts on the
  * affected DS.  In a homogeneous deployment (all flexfiles or all

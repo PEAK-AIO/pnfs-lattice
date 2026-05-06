@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_tls.h — TLS helper for inter-MDS transport.
+ * mds_tls.h -- TLS helper for inter-MDS transport.
  *
  * Wraps OpenSSL SSL_CTX and SSL for cluster transport,
  * replication, and etcd connections.

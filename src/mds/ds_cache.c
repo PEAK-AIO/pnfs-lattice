@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_cache.c — In-memory DS registry cache.
+ * ds_cache.c -- In-memory DS registry cache.
  *
  * Indexed by ds_id (0..MDS_MAX_DS_NODES-1).  Populated from catalogue
  * at startup, reloaded on admin commands.  All hot-path lookups
@@ -36,11 +36,11 @@ struct ds_cache_entry {
 	uint32_t           auto_weight;
 	/*
 	 * Wall-clock (CLOCK_REALTIME) seconds at which info.total_bytes /
-	 * info.used_bytes were last refreshed — either by a successful
+	 * info.used_bytes were last refreshed -- either by a successful
 	 * local statvfs probe or by a remote-observation merge from
 	 * ds_cache_apply_remote_observations().  Zero means "never
 	 * observed".  Read by ds_cache_aggregate_capacity to gate stale
-	 * readings out of the GETATTR fill-in.  Internal-only — never
+	 * readings out of the GETATTR fill-in.  Internal-only -- never
 	 * persisted, never exposed to clients or other subsystems; the
 	 * mds_ds_info struct (which IS persisted via mds_cat_ds_put)
 	 * deliberately does not carry this field.

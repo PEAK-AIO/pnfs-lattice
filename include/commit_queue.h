@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * commit_queue.h — Catalogue-dispatch commit pipeline.
+ * commit_queue.h -- Catalogue-dispatch commit pipeline.
  *
  * Request threads build immutable operation descriptors and submit
  * them via commit_queue_submit().  Each op is dispatched directly
@@ -312,7 +312,7 @@ int commit_queue_create(struct mds_catalogue *cat,
  *
  * @param cq   Commit queue.
  * @param op   Operation descriptor (caller-owned, stack is fine).
- * @return op->result (convenience — same value stored in the op).
+ * @return op->result (convenience -- same value stored in the op).
  */
 enum mds_status commit_queue_submit(struct commit_queue *cq,
 				    struct commit_op *op);

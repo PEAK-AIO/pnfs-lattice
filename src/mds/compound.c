@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * compound.c — NFSv4.1/4.2 COMPOUND request dispatcher.
+ * compound.c -- NFSv4.1/4.2 COMPOUND request dispatcher.
  *
  * Dispatches an array of NFSv4.1/4.2 operations sequentially,
  * maintaining the current/saved file handle state.  Stops on
- * the first error (RFC 8881 §2.6.3.1.1.4).
+ * the first error (RFC 8881 S2.6.3.1.1.4).
  *
  * Handlers call into the namespace layer (namespace.h) for all
  * metadata operations.
@@ -38,10 +38,10 @@
 void dir_deleg_count_conflict_unavail(struct dir_deleg_table *ddt);
 
 /* -----------------------------------------------------------------------
- * RFC 8881 §16.2.4 — current-stateid helpers.
+ * RFC 8881 S16.2.4 -- current-stateid helpers.
  *
  * The wire form of the special CURRENT_STATEID4 marker is
- * seqid==1 with other==all-zeros (§16.2.3.1.2).  Operations that
+ * seqid==1 with other==all-zeros (S16.2.3.1.2).  Operations that
  * consume a stateid call compound_resolve_stateid() before validating
  * it; producing operations call compound_set_current_stateid() in
  * compound_process()'s post-dispatch state machine.  See
@@ -175,10 +175,10 @@ static void compound_update_current_stateid_post(
 }
 
 /* -----------------------------------------------------------------------
- * RFC 8881 §1.7 / §14.4 — UTF-8 (utf8str_cs) well-formedness validator.
+ * RFC 8881 S1.7 / S14.4 -- UTF-8 (utf8str_cs) well-formedness validator.
  *
- * RFC 8881 §1.7 mandates utf8str_cs is the "Net-Unicode" form defined by
- * RFC 5198 §3, which builds on RFC 3629 UTF-8 with two extra constraints
+ * RFC 8881 S1.7 mandates utf8str_cs is the "Net-Unicode" form defined by
+ * RFC 5198 S3, which builds on RFC 3629 UTF-8 with two extra constraints
  * relevant here:
  *   - the byte sequence must be a well-formed UTF-8 encoding (RFC 3629);
  *   - the encoded codepoints must NOT include Unicode "noncharacters".
@@ -190,8 +190,8 @@ static void compound_update_current_stateid_post(
  *   - codepoints above U+10FFFF (F4 90-BF, plus all F5-FF leads).
  *   - truncated multi-byte sequences.
  *   - noncharacter codepoints: U+FDD0..U+FDEF and U+xxFFFE / U+xxFFFF
- *     (for plane xx in 0..0x10) per The Unicode Standard §2.4 and
- *     RFC 5198 §3, which pynfs RNM8/9 and COMP3 exercise via
+ *     (for plane xx in 0..0x10) per The Unicode Standard S2.4 and
+ *     RFC 5198 S3, which pynfs RNM8/9 and COMP3 exercise via
  *     get_invalid_utf8strings() (e.g. \xEF\xBF\xBE = U+FFFE).
  *
  * Embedded NUL is treated as valid UTF-8 here; callers that forbid it
@@ -343,13 +343,13 @@ enum nfs4_status compound_validate_name(const char *name)
 }
 
 /*
- * op_get_dir_delegation — RFC 8881 §18.39 dispatch handler.
+ * op_get_dir_delegation -- RFC 8881 S18.39 dispatch handler.
  *
  * Phase 8b: when cd->ddt is NULL (feature flag off) we preserve the
  * Phase 8a UNAVAIL behaviour.  When ddt is present and no other
  * client already holds a delegation on this directory, grant a real
  * delegation: allocate a stateid, a cookieverf, and echo the
- * supported notification subset (which in 8b is empty — the client
+ * supported notification subset (which in 8b is empty -- the client
  * falls back to CB_RECALL semantics on any mutation).
  *
  * The client's session is not wired into the grant yet because
@@ -403,12 +403,12 @@ enum nfs4_status op_get_dir_delegation(struct compound_data *cd,
 	memset(r, 0, sizeof(*r));
 
 	/*
-	 * Feature flag off — signal "cannot grant" via the inner
+	 * Feature flag off -- signal "cannot grant" via the inner
 	 * gddrnf_status = GDD4_UNAVAIL, keeping the outer op status
 	 * NFS4_OK so the rest of the client's compound (typically a
 	 * trailing GETATTR) still executes.  Returning
 	 * NFS4ERR_DIRDELEG_UNAVAIL at the outer status halts the
-	 * compound and produces EIO on the client — the regression
+	 * compound and produces EIO on the client -- the regression
 	 * this path is fixing.
 	 */
 	if (cd->ddt == NULL) {
@@ -434,8 +434,8 @@ enum nfs4_status op_get_dir_delegation(struct compound_data *cd,
 	 * Phase 8c supported notification mask: three structural
 	 * events (REMOVE/ADD/RENAME).  CHANGE_CHILD_ATTRS and
 	 * CHANGE_DIR_ATTRS carry fattr4 payloads and land in Phase 8d.
-	 * We intersect with the client's request — never advertise
-	 * bits the client did not ask for (RFC 8881 §18.39.2).
+	 * We intersect with the client's request -- never advertise
+	 * bits the client did not ask for (RFC 8881 S18.39.2).
 	 */
 	const uint32_t supported = ((uint32_t)1u << NOTIFY4_REMOVE_ENTRY) |
 				   ((uint32_t)1u << NOTIFY4_ADD_ENTRY) |
@@ -455,7 +455,7 @@ enum nfs4_status op_get_dir_delegation(struct compound_data *cd,
 
 	/*
 	 * Echo the granted notification bitmap.  Child/dir attribute
-	 * bitmaps stay empty in 8c — Phase 8d will negotiate those when
+	 * bitmaps stay empty in 8c -- Phase 8d will negotiate those when
 	 * CHANGE_*_ATTRS events are supported.
 	 */
 	if (granted_mask != 0) {
@@ -557,7 +557,7 @@ static enum mds_status compound_cat_dirent_get(
 		if (dc_rc == 1) {
 			return MDS_ERR_NOTFOUND; /* negative hit */
 		}
-		/* dc_rc == -1: miss — fall through to backend */
+		/* dc_rc == -1: miss -- fall through to backend */
 	}
 
 	if (cd->cat == NULL) {
@@ -614,7 +614,7 @@ enum mds_status compound_inode_get(struct compound_data *cd,
 		return MDS_OK;
 	}
 
-	/* Miss — read from the active namespace backend. */
+	/* Miss -- read from the active namespace backend. */
 	st = compound_cat_inode_get(cd, fileid, out);
 	if (st != MDS_OK) {
 		return st;
@@ -694,7 +694,7 @@ enum mds_status compound_lookup_local_child(
 		return MDS_ERR_NOTDIR;
 	}
 
-	/* Fast path: check dirent cache → inode cache.
+	/* Fast path: check dirent cache -> inode cache.
 	 * Both caches are populated by prior lookups; repeated
 	 * stat/read on the same files hits memory, not NDB. */
 	{
@@ -724,12 +724,12 @@ enum mds_status compound_lookup_local_child(
 				inode_cache_invalidate(cd->icache,
 						       cached_fid);
 			} else {
-				return MDS_OK; /* both caches hit — zero NDB */
+				return MDS_OK; /* both caches hit -- zero NDB */
 			}
 		}
 	}
 
-	/* Cache miss — fused dirent + inode read via cat_lookup.
+	/* Cache miss -- fused dirent + inode read via cat_lookup.
 	 * Single NDB transaction instead of two separate reads. */
 	st = cat_lookup(cd, parent_fileid, name, child);
 	if (st == MDS_ERR_NOTFOUND && cd->dcache != NULL) {
@@ -741,7 +741,7 @@ enum mds_status compound_lookup_local_child(
 
 	/* Phase 3 visibility filter: hide HPC-Shared wide CREATEs whose
 	 * stripe map has not yet been persisted.  Do not populate the
-	 * dirent or inode caches with the PENDING inode — either the
+	 * dirent or inode caches with the PENDING inode -- either the
 	 * create is still in flight (the next read will see the flag
 	 * cleared and cache normally) or the MDS crashed mid-create and
 	 * the orphan must remain invisible until reaped. */
@@ -766,7 +766,7 @@ enum mds_status compound_lookup_local_child(
 
 /**
  * Submit a COMMIT_OP_QUOTA_ADJUST via CQ.
- * For non-CQ (test) path, this is a no-op — quota accounting is
+ * For non-CQ (test) path, this is a no-op -- quota accounting is
  * handled only by the writer thread.
  */
 void quota_submit_adjust(struct compound_data *cd,
@@ -1035,11 +1035,11 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 				    struct nfs4_result *res)
 {
 	/*
-	 * RFC 8881 §18.46.3 + §15.1.1.4: SEQUENCE must be the very
+	 * RFC 8881 S18.46.3 + S15.1.1.4: SEQUENCE must be the very
 	 * first op of every session-aware COMPOUND.  Receiving it at
 	 * any later position is NFS4ERR_SEQUENCE_POS.  Without this
 	 * check the second SEQUENCE silently re-passes session state
-	 * checks and leaves cd->sequence_done unchanged — pynfs SEQ2
+	 * checks and leaves cd->sequence_done unchanged -- pynfs SEQ2
 	 * (testNotFirst).
 	 */
 	if (cd->minorversion >= 1 && op->opnum == OP_SEQUENCE &&
@@ -1048,12 +1048,12 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §2.10.6.2: all operations except session management
+	 * RFC 8881 S2.10.6.2: all operations except session management
 	 * require a preceding SEQUENCE in the same COMPOUND.
 	 * When cd->st is NULL (test-compat mode), enforcement is skipped.
 	 */
 	/* NFSv4.0 (minorversion 0) does not use SEQUENCE.
-	 * Only enforce for v4.1+ (RFC 8881 §2.10.6.2). */
+	 * Only enforce for v4.1+ (RFC 8881 S2.10.6.2). */
 	if (cd->minorversion >= 1 && cd->st != NULL &&
 	    !cd->sequence_done) {
 		switch (op->opnum) {
@@ -1073,22 +1073,22 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §2.10.6.4 / §18.36.3 / §18.37.3 / §18.50.3 —
+	 * RFC 8881 S2.10.6.4 / S18.36.3 / S18.37.3 / S18.50.3 --
 	 * compound-position rules for session-management ops.
 	 *
-	 * CREATE_SESSION (§18.36.3): MUST be the SOLE op in its compound.
+	 * CREATE_SESSION (S18.36.3): MUST be the SOLE op in its compound.
 	 * The session does not exist when it is invoked, so it cannot
 	 * follow SEQUENCE.  Pynfs CSESS23 (testNotOnlyOp) verifies this
 	 * with [CREATE_SESSION, PUTROOTFH] and expects NFS4ERR_NOT_ONLY_OP.
 	 *
-	 * DESTROY_SESSION (§18.37.3): if the compound starts with
+	 * DESTROY_SESSION (S18.37.3): if the compound starts with
 	 * SEQUENCE, DESTROY_SESSION MUST be the FINAL op (it tears down
 	 * the session that SEQUENCE used, so subsequent ops have no
 	 * session).  Otherwise it MUST be the SOLE op.  Pynfs DSESS9004
 	 * (testDestoryNotFinalOps) and DSESS9005 (testDestoryNotSoleOps)
 	 * each expect NFS4ERR_NOT_ONLY_OP.
 	 *
-	 * DESTROY_CLIENTID (§18.50.3): when the compound does not start
+	 * DESTROY_CLIENTID (S18.50.3): when the compound does not start
 	 * with SEQUENCE, DESTROY_CLIENTID MUST be the SOLE op.  When the
 	 * compound starts with SEQUENCE, DESTROY_CLIENTID may follow it
 	 * (pynfs DESCID4/5 drive that path).  Pynfs DESCID7
@@ -1097,7 +1097,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	 *
 	 * For CREATE_SESSION specifically, pynfs CSESS29 (testDRCMemLeak)
 	 * sends [SEQUENCE, CREATE_SESSION] with bad channel attrs and
-	 * expects NFS4ERR_TOOSMALL rather than NFS4ERR_NOT_ONLY_OP — the
+	 * expects NFS4ERR_TOOSMALL rather than NFS4ERR_NOT_ONLY_OP -- the
 	 * test author's view (and Linux NFSD's behaviour) is that
 	 * argument validation precedes placement validation.  We therefore
 	 * delegate CREATE_SESSION's NOT_ONLY_OP check to op_create_session,
@@ -1128,7 +1128,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §8.4.2.1: During the grace period, reject all
+	 * RFC 8881 S8.4.2.1: During the grace period, reject all
 	 * operations except session management, PUTROOTFH, PUTFH,
 	 * GETFH, GETATTR, SAVEFH, RESTOREFH, and reclaim-path
 	 * OPENs (CLAIM_PREVIOUS for reclaim of previously held opens).
@@ -1145,12 +1145,12 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		case OP_GETATTR:
 		case OP_SAVEFH:
 		case OP_RESTOREFH:
-		case OP_OPEN:  /* Allow through — claim type checked in op_open */
+		case OP_OPEN:  /* Allow through -- claim type checked in op_open */
 		case OP_DESTROY_CLIENTID:
 		case OP_TEST_STATEID:
 		case OP_FREE_STATEID:
 		case OP_BIND_CONN_TO_SESSION:
-		case OP_BACKCHANNEL_CTL:  /* RFC 8881 §18.33 — session admin, safe in grace */
+		case OP_BACKCHANNEL_CTL:  /* RFC 8881 S18.33 -- session admin, safe in grace */
 		case OP_LOCK:
 		case OP_LOCKT:
 		case OP_LOCKU:
@@ -1258,7 +1258,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		int rc;
 		if (cd->lt == NULL) { return NFS4ERR_NOTSUPP; }
 		if (!cd->current_fh_set) { return NFS4ERR_NOFILEHANDLE; }
-		/* Grace-period enforcement (RFC 8881 §18.10.4):
+		/* Grace-period enforcement (RFC 8881 S18.10.4):
 		 * - During grace: only reclaim locks allowed.
 		 * - Outside grace: reclaim locks rejected. */
 		if (grace_is_active() && !a->reclaim) {
@@ -1267,7 +1267,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		if (!grace_is_active() && a->reclaim) {
 			return NFS4ERR_NO_GRACE;
 		}
-		/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 magic in
+		/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 magic in
 		 * either locker variant.  The new-lock-owner branch uses
 		 * open_stateid; the existing-lock-owner branch uses
 		 * lock_stateid.  Both can carry the marker. */
@@ -1367,17 +1367,17 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	case OP_GET_DIR_DELEGATION: return op_get_dir_delegation(cd, op, res);
 
 	/*
-	 * DESTROY_CLIENTID (RFC 8881 §18.50): destroy the named clientid.
+	 * DESTROY_CLIENTID (RFC 8881 S18.50): destroy the named clientid.
 	 *
-	 *   - clientid not found      → NFS4ERR_STALE_CLIENTID (DESCID3/4/8)
-	 *   - clientid has confirmed  → NFS4ERR_CLIENTID_BUSY (DESCID5/6)
+	 *   - clientid not found      -> NFS4ERR_STALE_CLIENTID (DESCID3/4/8)
+	 *   - clientid has confirmed  -> NFS4ERR_CLIENTID_BUSY (DESCID5/6)
 	 *     sessions
-	 *   - otherwise                → destroy + NFS4_OK
+	 *   - otherwise                -> destroy + NFS4_OK
 	 *
 	 * When session_table is absent (test compat) the legacy match-or-
 	 * accept behaviour is preserved.  When the SEQUENCE-bound clientid
-	 * (cd->clientid) matches the destroy target, RFC 8881 §18.50.3
-	 * mandates NFS4ERR_CLIENTID_BUSY — the session itself is in use
+	 * (cd->clientid) matches the destroy target, RFC 8881 S18.50.3
+	 * mandates NFS4ERR_CLIENTID_BUSY -- the session itself is in use
 	 * by the very compound issuing the destroy (DESCID5).
 	 */
 	case OP_DESTROY_CLIENTID: {
@@ -1392,7 +1392,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		}
 		if (cd->clientid != 0 && target == cd->clientid) {
 			/* Pynfs DESCID5: SEQUENCE on session of client X,
-			 * then DESTROY_CLIENTID(X).  RFC §18.50.3 — BUSY. */
+			 * then DESTROY_CLIENTID(X).  RFC S18.50.3 -- BUSY. */
 			return NFS4ERR_CLIENTID_BUSY;
 		}
 		dc_rc = session_destroy_client(cd->st, target);
@@ -1443,7 +1443,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		return NFS4_OK;
 	}
 	case OP_FREE_STATEID: {
-		/* RFC 8881 §18.38: free lock/layout stateid.
+		/* RFC 8881 S18.38: free lock/layout stateid.
 		 * Open stateids must be freed via CLOSE, not FREE_STATEID;
 		 * an attempt to FREE_STATEID a still-open stateid returns
 		 * NFS4ERR_LOCKS_HELD (pynfs CSID9 testOpenFreestateidClose). */
@@ -1478,7 +1478,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	}
 
 	/*
-	 * BIND_CONN_TO_SESSION (RFC 8881 §18.34) — attach the
+	 * BIND_CONN_TO_SESSION (RFC 8881 S18.34) -- attach the
 	 * incoming TCP connection to the named session as a
 	 * backchannel.  The Linux kernel client sends this op
 	 * after CREATE_SESSION when it wants this connection to
@@ -1490,8 +1490,8 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	 * op->arg.destroy_session.session_id (it reuses that union
 	 * slot to avoid adding a new struct on the hot path; see
 	 * decode_one_op).  We treat any direction request as
-	 * "bind backchannel on this conn" — the only direction
-	 * the kernel ever asks us to act on — and return BOTH in
+	 * "bind backchannel on this conn" -- the only direction
+	 * the kernel ever asks us to act on -- and return BOTH in
 	 * the response so the kernel sees its request honoured.
 	 */
 	case OP_BIND_CONN_TO_SESSION:
@@ -1506,7 +1506,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		return NFS4_OK;
 
 	/*
-	 * BACKCHANNEL_CTL (RFC 8881 §18.33) — update CB program
+	 * BACKCHANNEL_CTL (RFC 8881 S18.33) -- update CB program
 	 * number and/or CB security parms on the SEQUENCE-bound
 	 * session.  Status-only result.  Pynfs DELEG7.
 	 */
@@ -1515,14 +1515,14 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 
 	/*
 	 * SECINFO / SECINFO_NO_NAME: return supported security flavors.
-	 * RFC 8881 §18.29 / §18.45.
+	 * RFC 8881 S18.29 / S18.45.
 	 *
-	 * RFC 5661 §2.6.3.1.1.8 / RFC 8881 §2.6.3.1.1.8: SECINFO and
-	 * SECINFO_NO_NAME consume the current filehandle — any op that
+	 * RFC 5661 S2.6.3.1.1.8 / RFC 8881 S2.6.3.1.1.8: SECINFO and
+	 * SECINFO_NO_NAME consume the current filehandle -- any op that
 	 * follows in the same compound (e.g. GETFH) must observe
 	 * NFS4ERR_NOFILEHANDLE.  Pynfs SEC2, SECNN2 cover this.
 	 *
-	 * RFC 8881 §18.45.3: SECINFO_NO_NAME(SECINFO_STYLE4_PARENT)
+	 * RFC 8881 S18.45.3: SECINFO_NO_NAME(SECINFO_STYLE4_PARENT)
 	 * applied to the root filehandle returns NFS4ERR_NOENT
 	 * because the root has no parent.  Pynfs SECNN3 covers this.
 	 * SECNN4 (SECINFO_STYLE4_PARENT on a non-root FH) succeeds.
@@ -1540,7 +1540,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		}
 		res->res.secinfo.count = 1;
 		res->res.secinfo.flavors[0] = 1; /* AUTH_SYS */
-		/* RFC 5661 §2.6.3.1.1.8: drop the current FH so trailing
+		/* RFC 5661 S2.6.3.1.1.8: drop the current FH so trailing
 		 * compound ops see NFS4ERR_NOFILEHANDLE. */
 		cd->current_fh_set = false;
 		cd->current_inode_valid = false;
@@ -1554,7 +1554,7 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * Phase C / Step 1 of docs/hpc-nto1-plan.md — wire-buffer
+ * Phase C / Step 1 of docs/hpc-nto1-plan.md -- wire-buffer
  * heap-ification helpers.  See compound.h for the public contract.
  *
  * The functions below are the ONLY allowed lifecycle entry points
@@ -1581,7 +1581,7 @@ int nfs4_ff_mirror_alloc(struct nfs4_ff_mirror *m, uint32_t n)
 	m->ds = NULL;
 	m->ds_count = 0;
 	if (n == 0) {
-		/* Empty mirror is a valid state — caller may want to
+		/* Empty mirror is a valid state -- caller may want to
 		 * record a zero-DS placeholder.  Treat as success. */
 		return 0;
 	}
@@ -1685,7 +1685,7 @@ void compound_init(struct compound_data *cd)
  * Increments the owning subtree root's op counter after a successful
  * mutating operation.  Uses subtree_map_lookup() (longest-prefix match)
  * to resolve the affected subtree, then calls subtree_map_inc_ops()
- * on the root path — not the raw file path, which would miss most
+ * on the root path -- not the raw file path, which would miss most
  * real subtree traffic.
  *
  * Only mutating metadata ops are counted (CREATE, REMOVE, RENAME,
@@ -1721,11 +1721,11 @@ static void account_subtree_op(struct compound_data *cd,
 	}
 	/* Resolve the owning subtree root from current_path. */
 	if (cd->current_path[0] == '\0') {
-		return; /* Path unknown (raw PUTFH) — cannot attribute. */
+		return; /* Path unknown (raw PUTFH) -- cannot attribute. */
 	}
 	if (subtree_map_lookup(cd->smap, cd->current_path,
 			       &entry) != MDS_OK) {
-		return; /* Lookup failed — skip silently. */
+		return; /* Lookup failed -- skip silently. */
 	}
 	/* Increment the resolved subtree root, not the raw path. */
 	(void)subtree_map_inc_ops(cd->smap, entry.path);
@@ -1897,7 +1897,7 @@ uint32_t compound_process(struct compound_data *cd,
 
 		if (results[i].status == NFS4_OK) {
 			account_subtree_op(cd, ops[i].opnum);
-			/* RFC 8881 §16.2.4 — update current_stateid from
+			/* RFC 8881 S16.2.4 -- update current_stateid from
 			 * producer ops (OPEN, OPEN_DOWNGRADE, CLOSE, LOCK,
 			 * LOCKU, LAYOUTGET, LAYOUTRETURN), invalidate on
 			 * FH-changing ops (PUTFH, PUTROOTFH, LOOKUP,

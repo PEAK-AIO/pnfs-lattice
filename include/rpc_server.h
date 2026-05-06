@@ -2,16 +2,16 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rpc_server.h — TCP-based ONC-RPC server for NFSv4.1.
+ * rpc_server.h -- TCP-based ONC-RPC server for NFSv4.1.
  *
  * Accepts TCP connections, reassembles ONC-RPC record-marked messages
- * (RFC 5531 §11), and dispatches NFS NULL (proc 0) and COMPOUND
+ * (RFC 5531 S11), and dispatches NFS NULL (proc 0) and COMPOUND
  * (proc 1) procedures via the XDR codec and compound dispatch layers.
  *
  * Epoll event loop with optional thread-pool COMPOUND dispatch
  * (worker_threads > 1).  RDMA via libntirpc SVCXPRT deferred.
  *
- * See docs/architecture.md §4.1 for design overview.
+ * See docs/architecture.md S4.1 for design overview.
  */
 
 #ifndef RPC_SERVER_H
@@ -88,19 +88,19 @@ struct rpc_server_config {
      * flag above is true.  Each defaults to 1. */
     uint32_t    default_stripe_count;
     uint32_t    default_mirror_count;
-    /* Phase F of docs/hpc-nto1-plan.md — HPC-Shared GETATTR
+    /* Phase F of docs/hpc-nto1-plan.md -- HPC-Shared GETATTR
      * consistency mode.  Default MDS_HPC_GETATTR_STRICT preserves
      * POSIX stat() semantics by forcing a flush of any in-memory
      * LAYOUTCOMMIT aggregate before serving the reply. */
     enum mds_hpc_getattr_mode hpc_getattr_mode;
-    /* Phase C / Step 5 of docs/hpc-nto1-plan.md — wide pre-warm
+    /* Phase C / Step 5 of docs/hpc-nto1-plan.md -- wide pre-warm
      * stripe-count cap for HPC-Shared CREATEs.  0 selects the
      * compile-time default (128, matches src/common/config.c).
      * Clamped at use site by MDS_MAX_STRIPES and the count of
      * ONLINE GENERIC DSes; an HPC CREATE with 0 ONLINE DSes
      * surfaces NFS4ERR_NOSPC to the client. */
     uint32_t    hpc_max_stripe_count;
-    /* Phase C of docs/hpc-nto1-plan.md — flex-files layout XDR wire
+    /* Phase C of docs/hpc-nto1-plan.md -- flex-files layout XDR wire
      * form for HPC-Shared inodes.  AUTO emits striped form for
      * HPC-Shared inodes with mirror_count == 1 && stripe_count > 1
      * and legacy form for everything else; LEGACY / STRIPED force
@@ -135,12 +135,12 @@ struct rpc_server_config {
     struct mds_shard_map *shard_map; /**< Shard routing map (NULL = no routing). */
     struct inode_cache *icache; /**< Global inode LRU cache (NULL = no caching). */
     struct dirent_cache *dcache; /**< Global dirent+negative LRU cache (NULL = no caching). */
-    /* Phase D of docs/hpc-nto1-plan.md — per-inode stripe-map cache,
+    /* Phase D of docs/hpc-nto1-plan.md -- per-inode stripe-map cache,
      * exclusively for HPC-Shared inodes.  NULL = no caching (every
      * LAYOUTGET reads the catalogue, matching pre-Phase-D
      * behaviour). */
     struct layout_cache *lcache;
-    /* Phase F of docs/hpc-nto1-plan.md — LAYOUTCOMMIT aggregator,
+    /* Phase F of docs/hpc-nto1-plan.md -- LAYOUTCOMMIT aggregator,
      * exclusively for HPC-Shared inodes.  NULL = no aggregator
      * (every LAYOUTCOMMIT writes synchronously, matching
      * pre-Phase-F behaviour). */
@@ -148,7 +148,7 @@ struct rpc_server_config {
     struct deleg_table *dt;
     struct dir_deleg_table *ddt; /**< Dir delegation table (NULL when feature off). */
     /*
-     * Layout recall coordinator (RFC 8881 §12.5.5 / DS-failure /
+     * Layout recall coordinator (RFC 8881 S12.5.5 / DS-failure /
      * admin recall / Mark's byte-range partial recall on op_layoutget).
      * NULL means "no conflict-recall"; the LAYOUTGET path skips the
      * holder scan and grants without consulting other clients,
@@ -172,7 +172,7 @@ struct rpc_server;  /* Defined in rpc_server.c */
  * Create an RPC server.
  *
  * Allocates the server, creates the listening socket, and binds it.
- * Does not start accepting connections — call rpc_server_start() for that.
+ * Does not start accepting connections -- call rpc_server_start() for that.
  *
  * @param cfg  Configuration.  The struct is copied; the caller may free it.
  * @param out  Receives the server handle.

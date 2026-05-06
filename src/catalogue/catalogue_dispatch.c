@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_dispatch.c — Vtable dispatch for mds_cat_* / mds_coord_*.
+ * catalogue_dispatch.c -- Vtable dispatch for mds_cat_* / mds_coord_*.
  *
  * Each public catalogue operation dispatches through the authority
  * or coordination vtable populated at catalogue open time.  This
@@ -36,7 +36,7 @@ void mds_catalogue_close(struct mds_catalogue *cat)
     free(cat);
 }
 
-/* Default implementation — overridden by RonDB backend. */
+/* Default implementation -- overridden by RonDB backend. */
 __attribute__((weak))
 void *mds_catalogue_backend_handle(const struct mds_catalogue *cat)
 {
@@ -131,7 +131,7 @@ void mds_cat_txn_abort(struct mds_cat_txn *txn)
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Namespace
+ * Authority ops dispatch -- Namespace
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
@@ -388,7 +388,7 @@ enum mds_status mds_cat_alloc_fileid(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Low-level inode/dirent ops
+ * Authority ops dispatch -- Low-level inode/dirent ops
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_dirent_get(struct mds_catalogue *cat,
@@ -450,7 +450,7 @@ static int dir_empty_cb(const struct mds_cat_dirent *entry, void *arg)
 
     (void)entry;
     ctx->found = true;
-    return 1; /* Stop iteration — at least one entry exists. */
+    return 1; /* Stop iteration -- at least one entry exists. */
 }
 
 enum mds_status mds_cat_dir_is_empty(struct mds_catalogue *cat,
@@ -571,7 +571,7 @@ static int cat_iter_collect_xattr_name(const char *name, size_t name_len,
 }
 
 /**
- * Recursive DFS helper — catalogue-native.
+ * Recursive DFS helper -- catalogue-native.
  */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 static enum mds_status cat_subtree_dfs(struct mds_catalogue *cat,
@@ -720,7 +720,7 @@ enum mds_status mds_cat_subtree_iter(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Inline data
+ * Authority ops dispatch -- Inline data
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_inline_get(struct mds_catalogue *cat,
@@ -756,7 +756,7 @@ enum mds_status mds_cat_inline_del(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Extended attributes
+ * Authority ops dispatch -- Extended attributes
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_xattr_get(struct mds_catalogue *cat,
@@ -812,7 +812,7 @@ enum mds_status mds_cat_xattr_exists(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Stripe maps
+ * Authority ops dispatch -- Stripe maps
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_stripe_map_get(struct mds_catalogue *cat,
@@ -868,7 +868,7 @@ enum mds_status mds_cat_stripe_map_scan(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — DS registry
+ * Authority ops dispatch -- DS registry
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_ds_get(struct mds_catalogue *cat,
@@ -949,7 +949,7 @@ enum mds_status mds_cat_ds_provision_del(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Quota
+ * Authority ops dispatch -- Quota
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_quota_rule_get(struct mds_catalogue *cat,
@@ -1003,7 +1003,7 @@ enum mds_status mds_cat_quota_usage_put(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — GC queue
+ * Authority ops dispatch -- GC queue
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_gc_enqueue(struct mds_catalogue *cat,
@@ -1089,7 +1089,7 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Shard routing
+ * Authority ops dispatch -- Shard routing
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_shard_fileid_get(struct mds_catalogue *cat,
@@ -1124,7 +1124,7 @@ enum mds_status mds_cat_shard_fileid_del(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Cross-shard ext_dirents
+ * Authority ops dispatch -- Cross-shard ext_dirents
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_ext_dirent_get(struct mds_catalogue *cat,
@@ -1172,7 +1172,7 @@ enum mds_status mds_cat_ext_dirent_del(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Authority ops dispatch — Cross-shard link anchors
+ * Authority ops dispatch -- Cross-shard link anchors
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_link_anchor_put(struct mds_catalogue *cat,
@@ -1201,7 +1201,7 @@ enum mds_status mds_cat_link_anchor_del(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Coordination ops dispatch — Shared 2PC journal
+ * Coordination ops dispatch -- Shared 2PC journal
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_coord_journal_put(
@@ -1256,7 +1256,7 @@ enum mds_status mds_coord_journal_scan(
 }
 
 /* -----------------------------------------------------------------------
- * Coordination ops dispatch — Layout state
+ * Coordination ops dispatch -- Layout state
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_coord_layout_grant(struct mds_catalogue *cat,
@@ -1362,7 +1362,7 @@ enum mds_status mds_coord_layout_iter_file(
 }
 
 /* -----------------------------------------------------------------------
- * Coordination ops dispatch — Client recovery
+ * Coordination ops dispatch -- Client recovery
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_coord_recovery_put(struct mds_catalogue *cat,
@@ -1404,7 +1404,7 @@ enum mds_status mds_coord_recovery_get(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
- * Coordination ops dispatch — Phase 9D bulk operations
+ * Coordination ops dispatch -- Phase 9D bulk operations
  *
  * These functions are not (yet) dispatched through the vtable;
  * the RonDB implementations are called directly from the cluster
@@ -1450,7 +1450,7 @@ enum mds_status mds_coord_layout_transfer_grant_owner(
 }
 
 /* -----------------------------------------------------------------------
- * Coordination ops dispatch — Shared protocol state (shared-attr)
+ * Coordination ops dispatch -- Shared protocol state (shared-attr)
  * ----------------------------------------------------------------------- */
 
 /* --- Open/share state ------------------------------------------------- */

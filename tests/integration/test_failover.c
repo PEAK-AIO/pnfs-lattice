@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_failover.c — Integration tests for failover topology.
+ * test_failover.c -- Integration tests for failover topology.
  *
  * RonDB-native: uses catalogue + coordination API.
  * Skips gracefully if no RonDB cluster is available.

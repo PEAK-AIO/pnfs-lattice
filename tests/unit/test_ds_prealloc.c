@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_prealloc.c — Unit tests for the DS pre-allocation pool.
+ * test_ds_prealloc.c -- Unit tests for the DS pre-allocation pool.
  */
 
 #include <stdio.h>
@@ -160,7 +160,7 @@ static void test_pop_empty_pool(void)
 
     if (ds_prealloc_init(cat, NULL, 4, &ctx) != 0) { mds_catalogue_close(db); return; }
 
-    /* Don't sleep — pop immediately before background fills. */
+    /* Don't sleep -- pop immediately before background fills. */
     /* Even with empty ring, pop should succeed via sync fallback. */
     int rc = ds_prealloc_pop(ctx, &entry, &stripe_unit, &fileid);
     /* May succeed (sync fallback) or ring already has entries. */
@@ -260,7 +260,7 @@ static void test_pop_no_ds(void)
 
     if (ds_prealloc_init(cat, NULL, 4, &ctx) != 0) { mds_catalogue_close(db); return; }
 
-    /* Pop should fail — no DSes available. */
+    /* Pop should fail -- no DSes available. */
     ASSERT_EQ(ds_prealloc_pop(ctx, &entry, &stripe_unit, &fileid), -1);
 
     ds_prealloc_destroy(ctx);

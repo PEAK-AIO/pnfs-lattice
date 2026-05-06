@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_nfsv42.c — Unit tests for NFSv4.2 operation dispatch.
+ * test_nfsv42.c -- Unit tests for NFSv4.2 operation dispatch.
  *
  * RonDB-native: tests compound dispatch for NFSv4.2 operations
  * (ALLOCATE, SEEK, IO_ADVISE, COPY, READ_PLUS, etc.) using the
@@ -21,7 +21,7 @@
 #include "io_tracker.h"
 
 /*
- * Forward declaration — op_io_advise is declared in compound_internal.h,
+ * Forward declaration -- op_io_advise is declared in compound_internal.h,
  * which is intentionally private to the mds subsystem.  Re-declare the
  * prototype here so the test can call the handler directly without
  * adding src/mds to the test target's include path.
@@ -107,7 +107,7 @@ static void io_advise_op_init(struct nfs4_op *op, uint32_t hints)
 	op->arg.io_advise.offset = 0;
 	op->arg.io_advise.count = 4096;
 	op->arg.io_advise.hints = hints;
-	/* Leave stateid zero-filled — that's the anonymous stateid,
+	/* Leave stateid zero-filled -- that's the anonymous stateid,
 	 * which validate_io_stateid always accepts. */
 }
 
@@ -184,7 +184,7 @@ static void test_io_advise_dontneed_invalidates_icache(void)
 	inode_cache_destroy(ic);
 }
 
-/** Hints we cannot act on must NOT be echoed (RFC 7862 §15.5.3). */
+/** Hints we cannot act on must NOT be echoed (RFC 7862 S15.5.3). */
 static void test_io_advise_ignored_hints_not_echoed(void)
 {
 	struct compound_data cd;
@@ -210,7 +210,7 @@ static void test_write_stability(void)
     ASSERT_EQ(FILE_SYNC4, 2);
 }
 
-/** Test ALLOCATE without a current FH → NFS4ERR_NOFILEHANDLE. */
+/** Test ALLOCATE without a current FH -> NFS4ERR_NOFILEHANDLE. */
 static void test_allocate_no_fh(void)
 {
     struct mds_catalogue *cat = open_test_catalogue();
@@ -236,7 +236,7 @@ static void test_allocate_no_fh(void)
     mds_catalogue_close(cat);
 }
 
-/** Test SEEK without current FH → NFS4ERR_NOFILEHANDLE. */
+/** Test SEEK without current FH -> NFS4ERR_NOFILEHANDLE. */
 static void test_seek_no_fh(void)
 {
     struct mds_catalogue *cat = open_test_catalogue();

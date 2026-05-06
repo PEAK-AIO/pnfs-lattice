@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_gc.h — Background drainer for the catalogue GC queue.
+ * ds_gc.h -- Background drainer for the catalogue GC queue.
  *
  * The catalogue GC queue collects (fileid, ds_id, nfs_fh) tuples
  * scheduled for cleanup whenever a regular file is finally unlinked
@@ -15,12 +15,12 @@
  * retried on the next tick, and ENOENT on the DS is treated as
  * success because the GC entry was meant to delete a file that is
  * already gone.  Permanent errors block dequeue so the queue cannot
- * silently lose work — operators recover by clearing the underlying
+ * silently lose work -- operators recover by clearing the underlying
  * DS condition (e.g., remounting the DS export) and the next tick
  * picks up where it left off.
  *
  * Concurrency model: a single thread, signalled to stop via an
- * atomic flag plus a self-pipe.  No locking on the queue itself —
+ * atomic flag plus a self-pipe.  No locking on the queue itself --
  * the catalogue's gc_peek/gc_dequeue API is the synchronisation
  * point.  Run interval is configurable so labs can tune for fast
  * cleanup vs. low background overhead in production.
@@ -45,7 +45,7 @@ struct ds_gc;
  *
  * Lifetime: the caller owns @a cat and @a proxy.  Both must remain
  * valid until ds_gc_stop() returns.  On any allocation/thread-create
- * failure the function returns -1 and *out stays NULL — callers must
+ * failure the function returns -1 and *out stays NULL -- callers must
  * tolerate the daemon running without a GC drainer (data still gets
  * cleaned up on the next start, since GC entries are persisted).
  *

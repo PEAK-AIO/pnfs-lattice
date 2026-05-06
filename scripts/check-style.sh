@@ -2,7 +2,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# check-style.sh — Code style checker per CONTRIBUTING.md.
+# check-style.sh -- Code style checker per CONTRIBUTING.md.
 #
 # Checks:
 #   1. No trailing whitespace in .c/.h files
@@ -25,12 +25,12 @@ NC='\033[0m'
 ERRORS=0
 
 check_fail() {
-    echo -e "  ${RED}✗${NC} $1"
+    echo -e "  ${RED}[ ]${NC} $1"
     ERRORS=$((ERRORS + 1))
 }
 
 check_pass() {
-    echo -e "  ${GREEN}✓${NC} $1"
+    echo -e "  ${GREEN}[x]${NC} $1"
 }
 
 # Collect all .c and .h files (exclude build dirs and generated files)

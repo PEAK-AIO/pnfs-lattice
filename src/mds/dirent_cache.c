@@ -2,9 +2,9 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * dirent_cache.c — In-memory directory entry LRU cache.
+ * dirent_cache.c -- In-memory directory entry LRU cache.
  *
- * Caches (parent_fileid, name) → (child_fileid, child_type).
+ * Caches (parent_fileid, name) -> (child_fileid, child_type).
  * Negative entries (NOTFOUND) use child_fileid == 0 with a
  * monotonic timestamp for TTL-based expiry.
  *
@@ -37,8 +37,8 @@ struct dc_entry {
     uint64_t         child_fileid;  /* 0 = negative entry */
     uint8_t          child_type;
     uint64_t         insert_ms;     /* monotonic ms (for negative TTL) */
-    struct dc_entry *prev;          /* LRU list — towards tail (older) */
-    struct dc_entry *next;          /* LRU list — towards head (newer) */
+    struct dc_entry *prev;          /* LRU list -- towards tail (older) */
+    struct dc_entry *next;          /* LRU list -- towards head (newer) */
     struct dc_entry *hash_next;     /* hash chain (singly linked) */
 };
 
@@ -62,7 +62,7 @@ struct dirent_cache {
  * Hash helpers
  * ----------------------------------------------------------------------- */
 
-/** splitmix64 — same hash used in inode_cache.c. */
+/** splitmix64 -- same hash used in inode_cache.c. */
 static uint64_t splitmix64(uint64_t x)
 {
     x ^= x >> 30;
@@ -113,7 +113,7 @@ static uint64_t monotonic_ms(void)
 }
 
 /* -----------------------------------------------------------------------
- * Per-stripe helpers — caller must hold stripe lock
+ * Per-stripe helpers -- caller must hold stripe lock
  * ----------------------------------------------------------------------- */
 
 static struct dc_entry *dc_find(const struct dc_stripe *st,
@@ -335,7 +335,7 @@ int dirent_cache_get(struct dirent_cache *dc,
         return -1; /* miss */
     }
 
-    /* Negative entry — check TTL. */
+    /* Negative entry -- check TTL. */
     if (e->child_fileid == 0) {
         uint64_t now = monotonic_ms();
         if ((now - e->insert_ms) > dc->neg_ttl_ms) {

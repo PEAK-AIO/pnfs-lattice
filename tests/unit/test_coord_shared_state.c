@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_coord_shared_state.c — Unit tests for shared protocol-state
+ * test_coord_shared_state.c -- Unit tests for shared protocol-state
  *                              coordination API (shared-attr Stage 1+).
  *
  * Stage 1: verifies dispatch stubs return MDS_ERR_NOSUPPORT when

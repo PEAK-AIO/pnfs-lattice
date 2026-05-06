@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rebalance.h — Admin-triggered mirror relocation (V1).
+ * rebalance.h -- Admin-triggered mirror relocation (V1).
  *
  * Moves mirrored data from a source DS to a target DS by copying
  * the data and atomically updating the stripe map + GC-enqueueing
@@ -11,7 +11,7 @@
  *   - no active layouts/writers (skipped)
  *   - dense files only (sparse files skipped)
  *
- * See docs/architecture.md §3.8 for design.
+ * See docs/architecture.md S3.8 for design.
  */
 
 #ifndef REBALANCE_H
@@ -105,7 +105,7 @@ void rebalance_destroy(struct rebalance_worker *rw);
 /**
  * Query extended rebalance status including skip reasons.
  *
- * @param rw    Rebalance worker (NULL tolerated — zeroed output).
+ * @param rw    Rebalance worker (NULL tolerated -- zeroed output).
  * @param info  Receives all status fields.
  */
 void rebalance_status_ext(const struct rebalance_worker *rw,

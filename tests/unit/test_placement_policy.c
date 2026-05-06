@@ -176,7 +176,7 @@ static void test_invalid_args(void)
 }
 
 /* -----------------------------------------------------------------------
- * Phase H of docs/hpc-nto1-plan.md — ds_filter_compatible_preferred
+ * Phase H of docs/hpc-nto1-plan.md -- ds_filter_compatible_preferred
  *
  * Smoke-tests the four behavioural quadrants:
  *   1. preferred subset non-empty  -> only preferred DSes returned
@@ -238,7 +238,7 @@ static void test_filter_preferred_falls_back_when_none(void)
 {
     fprintf(stdout, "  filter_preferred_falls_back:      ");
 
-    /* No RDMA / GPUDirect anywhere — all three are TCP-only.
+    /* No RDMA / GPUDirect anywhere -- all three are TCP-only.
      * Expected behaviour: HPC-shared still gets a layout, the
      * preferred subset is empty so the helper hands back the
      * full required-matching set unchanged. */

@@ -2,12 +2,12 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * health.h — Cluster health monitoring API.
+ * health.h -- Cluster health monitoring API.
  *
  * Provides periodic replication health checks with operator alerting
  * and optional write refusal when the standby requires resync.
  *
- * See docs/architecture.md §23 item 38a.
+ * See docs/architecture.md S23 item 38a.
  */
 
 #ifndef HEALTH_H

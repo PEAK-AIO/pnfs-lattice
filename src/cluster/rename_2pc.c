@@ -2,9 +2,9 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rename_2pc.c — Cross-subtree rename via two-phase commit.
+ * rename_2pc.c -- Cross-subtree rename via two-phase commit.
  *
- * See docs/architecture.md §10 for the full protocol description.
+ * See docs/architecture.md S10 for the full protocol description.
  *
  * The transport layer (gRPC) is abstracted via function pointers in
  * struct rename_2pc_transport, allowing in-process loopback for tests.
@@ -42,7 +42,7 @@ enum rename_2pc_role {
 };
 
 /* -----------------------------------------------------------------------
- * Internal rename_2pc_ctx — used for coordination journal record conversion
+ * Internal rename_2pc_ctx -- used for coordination journal record conversion
  * ----------------------------------------------------------------------- */
 
 struct rename_2pc_ctx {
@@ -279,7 +279,7 @@ enum mds_status rename_2pc_initiate(
 
 	/* Phase 1: Write PREPARED journal entry.
 	 * Persist the source inode snapshot so it survives into the
-	 * COMMITTED entry — needed by on_commit() when coordinator and
+	 * COMMITTED entry -- needed by on_commit() when coordinator and
 	 * participant share the same DB (loopback), and by recovery
 	 * when the commit must be retried on a new connection. */
 	struct rename_2pc_ctx ctx;
@@ -532,7 +532,7 @@ int rename_2pc_on_prepare(struct mds_catalogue *cat,
 	st = mds_cat_dirent_get(cat, dst_parent, dst_name,
 	                        &existing, &existing_type);
 	if (st == MDS_OK) {
-	    /* Name already exists — abort. */
+	    /* Name already exists -- abort. */
 	    return 0;
 	}
 	if (st != MDS_ERR_NOTFOUND) {
@@ -588,7 +588,7 @@ int rename_2pc_on_prepare(struct mds_catalogue *cat,
  * Reads the inode snapshot from the PREPARE journal entry, inserts
  * the inode and dirent, then deletes the journal entry.
  *
- * The inode_data parameter is no longer required — the participant
+ * The inode_data parameter is no longer required -- the participant
  * persists the inode payload in its PREPARE journal for crash
  * recovery across connection loss.
  */
@@ -608,7 +608,7 @@ enum mds_status rename_2pc_on_commit(struct mds_catalogue *cat,
 	    return st;
 	}
 
-	/* Read participant's journal — contains dst_parent, dst_name, and inode snapshot. */
+	/* Read participant's journal -- contains dst_parent, dst_name, and inode snapshot. */
 	struct rename_2pc_ctx ctx;
 	st = rename_2pc_journal_get(cat, ct, txn_id, R2PC_PARTICIPANT, &ctx);
 	if (st != MDS_OK) {
@@ -1042,7 +1042,7 @@ static enum mds_status rename_2pc_recover_rondb(
  *
  * In the catalogue model, all shards share the same backend (RonDB or
  * catalogue).  Moving a file between shards does NOT require physically
- * copying records — the metadata already lives in the shared cluster.
+ * copying records -- the metadata already lives in the shared cluster.
  * The rename is a dirent swap + parent timestamp update + fileid-map
  * routing change.  No 2PC journal is needed because the catalogue
  * vtable provides its own atomicity guarantees.
@@ -1187,9 +1187,9 @@ enum mds_status rename_2pc_initiate_local_shard(
  * Scans rename_journal DBI.  For each entry, decides based on
  * state and role:
  *
- *   - ABORTED (any role): safe to delete — no side effects.
+ *   - ABORTED (any role): safe to delete -- no side effects.
  *   - PREPARED + COORDINATOR: coordinator crashed before deciding.
- *     Source dirent is still intact.  Safe to abort — delete.
+ *     Source dirent is still intact.  Safe to abort -- delete.
  *   - COMMITTED + COORDINATOR: source is already deleted locally.
  *     If transport is provided, re-send CommitRename.  On success,
  *     delete the journal entry.  On failure, keep it.
@@ -1205,7 +1205,7 @@ enum mds_status rename_2pc_recover(struct mds_catalogue *cat,
 	                               const struct rename_2pc_transport *transport,
 	                               const struct mds_shard_map *shard_map)
 {
-	(void)shard_map; /* Legacy parameter — no longer used. */
+	(void)shard_map; /* Legacy parameter -- no longer used. */
 
 	if (cat == NULL) {
 	    return MDS_ERR_INVAL;

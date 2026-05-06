@@ -2,15 +2,15 @@
  * Copyright (c) 2026 PeakAIO. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-PeakAIO-Proprietary
  *
- * nfs4_cb_sec.h — NFSv4.1 callback security parameters (RFC 8881 §2.10.8.3).
+ * nfs4_cb_sec.h -- NFSv4.1 callback security parameters (RFC 8881 S2.10.8.3).
  *
  * Extracted into its own header so both session.h (struct nfs4_session)
  * and nfs4_cb.h (struct session_cb_snap, fd helpers) can embed/reference
  * struct nfs4_cb_sec without creating a circular include chain.
  *
  * The struct holds the callback-channel security parameters captured
- * from CREATE_SESSION's csa_sec_parms<> (RFC 8881 §18.36) and updated
- * by BACKCHANNEL_CTL's bca_sec_parms<> (RFC 8881 §18.33).  The CB
+ * from CREATE_SESSION's csa_sec_parms<> (RFC 8881 S18.36) and updated
+ * by BACKCHANNEL_CTL's bca_sec_parms<> (RFC 8881 S18.33).  The CB
  * encoder uses it to populate the RPC credential body (AUTH_NONE void
  * or AUTH_SYS authsys_parms{stamp, machinename, uid, gid, gids<16>})
  * of every CB_COMPOUND call.
@@ -33,7 +33,7 @@
 
 /*
  * Captured callback security parameters.  A zero-initialised struct
- * encodes as AUTH_NONE (RFC 8881 §2.10.8.3 permits AUTH_NONE for
+ * encodes as AUTH_NONE (RFC 8881 S2.10.8.3 permits AUTH_NONE for
  * callbacks; it produces a void RPC cred body).
  *
  * For AUTH_SYS the body fields carry the authsys_parms tuple verbatim

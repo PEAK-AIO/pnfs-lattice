@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_memdb.c — In-memory catalogue backend for unit tests.
+ * catalogue_memdb.c -- In-memory catalogue backend for unit tests.
  *
  * Provides a lightweight implementation of the catalogue + coordination
  * vtables backed by flat arrays and linear scans.  No external
@@ -1407,7 +1407,7 @@ static enum mds_status mem_ext_dirent_del(struct mds_catalogue *cat,
     return MDS_ERR_NOTFOUND;
 }
 
-/* Link anchors — stub */
+/* Link anchors -- stub */
 static enum mds_status mem_link_anchor_put(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t anchor_id,
     uint32_t remote_mds_id, uint64_t parent_fileid, const char *name)
@@ -1417,7 +1417,7 @@ static enum mds_status mem_link_anchor_del(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t anchor_id)
 { (void)cat;(void)txn;(void)anchor_id; return MDS_OK; }
 
-/* Quota — simple stubs for now */
+/* Quota -- simple stubs for now */
 static enum mds_status mem_quota_rule_get(struct mds_catalogue *cat,
     uint8_t scope_type, uint64_t scope_id, struct mds_quota_rule *rule)
 { (void)cat;(void)scope_type;(void)scope_id;(void)rule; return MDS_ERR_NOTFOUND; }
@@ -1659,7 +1659,7 @@ static const struct mds_coordination_ops memdb_coord_ops = {
 };
 
 /* -----------------------------------------------------------------------
- * Public API — used by test_helpers.h
+ * Public API -- used by test_helpers.h
  * ----------------------------------------------------------------------- */
 
 struct mds_catalogue *catalogue_memdb_open(void)

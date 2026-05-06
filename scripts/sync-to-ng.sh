@@ -1,13 +1,13 @@
 #!/bin/bash
-# sync-to-ng.sh — Mirror main to PEAK-AIO/pnfs-ng with Warp artefacts stripped.
+# sync-to-ng.sh -- Mirror main to PEAK-AIO/pnfs-ng with Warp artefacts stripped.
 #
 # pmds (this repo) tracks some files that must never land in the
 # public pnfs-ng mirror:
 #
-#   .warp/                 — Warp agent working directory
-#   AGENTS.md              — project rules for the Warp agent
-#   scripts/sync-to-ng.sh  — this script (pnfs-ng has no use for it)
-#   scripts/git-hooks/     — the ng-specific pre-push guardrail
+#   .warp/                 -- Warp agent working directory
+#   AGENTS.md              -- project rules for the Warp agent
+#   scripts/sync-to-ng.sh  -- this script (pnfs-ng has no use for it)
+#   scripts/git-hooks/     -- the ng-specific pre-push guardrail
 #
 # The script:
 #   1. Clones the current main branch into a scratch directory.
@@ -30,7 +30,7 @@ set -euo pipefail
 NG_URL="${NG_URL:-https://github.com/PEAK-AIO/pnfs-ng.git}"
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
-# Pre-flight checks — fail loudly before touching anything.
+# Pre-flight checks -- fail loudly before touching anything.
 if ! command -v git-filter-repo >/dev/null 2>&1; then
     printf 'error: git-filter-repo not found in PATH.\n' >&2
     printf 'install: pipx install git-filter-repo\n' >&2
@@ -38,14 +38,14 @@ if ! command -v git-filter-repo >/dev/null 2>&1; then
 fi
 
 # In a plain checkout .git is a directory; in a worktree it's a
-# file pointing at the real gitdir.  Accept either shape — both
+# file pointing at the real gitdir.  Accept either shape -- both
 # satisfy `git rev-parse --show-toplevel` above.
 if [ -z "${REPO_ROOT}" ] || [ ! -e "${REPO_ROOT}/.git" ]; then
     printf 'error: could not locate the pmds repo root.\n' >&2
     exit 1
 fi
 
-# Refuse to run if main has uncommitted changes — we want to mirror
+# Refuse to run if main has uncommitted changes -- we want to mirror
 # committed state only.
 if ! git -C "${REPO_ROOT}" diff --quiet HEAD -- 2>/dev/null; then
     printf 'error: working tree has uncommitted changes; commit or stash first.\n' >&2

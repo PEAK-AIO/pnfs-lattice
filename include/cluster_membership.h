@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_membership.h — MDS cluster membership table.
+ * cluster_membership.h -- MDS cluster membership table.
  *
  * Write operations are dispatched through an internal backend vtable
  * (local in-memory).  All operations are explicit
@@ -72,7 +72,7 @@ struct cluster_membership;
  * Change callback
  *
  * Fired on successful join or leave only (NOT on rejected operations).
- * Informational — must not call back into cluster_membership (deadlock).
+ * Informational -- must not call back into cluster_membership (deadlock).
  * ----------------------------------------------------------------------- */
 
 typedef void (*cluster_change_cb)(uint32_t mds_id, bool joined, void *arg);
@@ -333,7 +333,7 @@ enum mds_status cluster_membership_remove_self(
 /* -----------------------------------------------------------------------
  * Partner-loss observer (Seq 9)
  *
- * Dedicated callback for failover — NOT the generic change_cb.
+ * Dedicated callback for failover -- NOT the generic change_cb.
  * Fired by membership_watch_handler on DELETE of the configured
  * partner, only when the removed member's last cached role was
  * NODE_ACTIVE and lifecycle was NODE_ACTIVE_SERVING.

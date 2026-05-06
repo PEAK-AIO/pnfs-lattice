@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * pnfs_mds.h — Top-level header for the pNFS MDS project.
+ * pnfs_mds.h -- Top-level header for the pNFS MDS project.
  */
 
 #ifndef PNFS_MDS_H
@@ -17,7 +17,7 @@ enum nfs_auth_mode {
 };
 
 /* -----------------------------------------------------------------------
- * Toolchain gate — GCC >= 12.1 is mandatory.
+ * Toolchain gate -- GCC >= 12.1 is mandatory.
  *
  * GCC 13.1+ has improved -Wreturn-type coverage at -O0, but the
  * project compiles and passes CI cleanly on GCC 12.x with -Werror
@@ -28,7 +28,7 @@ enum nfs_auth_mode {
 #if defined(__GNUC__) && !defined(__clang__)
 # define PNFS_GCC_VERSION (__GNUC__ * 10000 + __GNUC_MINOR__ * 100)
 # if PNFS_GCC_VERSION < 120100
-_Static_assert(0, "pnfs-mds requires GCC >= 12.1 — see docs/architecture.md §20");
+_Static_assert(0, "pnfs-mds requires GCC >= 12.1 -- see docs/architecture.md S20");
 # endif
 #elif !defined(__clang__)
 # error "pnfs-mds requires GCC >= 12.1"
@@ -55,7 +55,7 @@ _Static_assert(0, "pnfs-mds requires GCC >= 12.1 — see docs/architecture.md §
                                  PNFS_MDS_VERSION_PATCH)
 
 /**
- * Wire compatibility version — bumped only on breaking wire/replication/RPC
+ * Wire compatibility version -- bumped only on breaking wire/replication/RPC
  * changes.  Used as the promotion/demotion gate during rolling upgrades.
  */
 #define PNFS_MDS_WIRE_COMPAT_VERSION  1
@@ -93,8 +93,8 @@ _Static_assert(0, "pnfs-mds requires GCC >= 12.1 — see docs/architecture.md §
 /* Schema version (bump on incompatible DB changes).
  * v2 -> v3 (Phase A of docs/hpc-nto1-plan.md): MDS_MAX_STRIPES bumped
  * from 16 to 1024 and MDS_IFLAG_HPC_SHARED added.  No on-disk row
- * format change — stripe maps already serialise stripe_count as a
- * uint32 — but bump the version anyway so backups produced by older
+ * format change -- stripe maps already serialise stripe_count as a
+ * uint32 -- but bump the version anyway so backups produced by older
  * MDSes can be flagged. */
 #define MDS_SCHEMA_VERSION  3
 
@@ -182,14 +182,14 @@ enum cluster_mode {
 #define MDS_IFLAG_INLINE  (1U << 0)  /* File data stored inline in catalogue */
 #define MDS_IFLAG_PROMOTING (1U << 1)  /* Promotion to DS in progress (serialisation) */
 #define MDS_IFLAG_DS_PENDING (1U << 2) /* Stripe map assigned, DS file not yet created */
-/* Phase A of docs/hpc-nto1-plan.md — HPC-Shared mode (N-to-1 wide
+/* Phase A of docs/hpc-nto1-plan.md -- HPC-Shared mode (N-to-1 wide
  * stripe path).  Set by Phase B's three triggers (layouthint4, the
  * trusted.pnfs.hpc_shared xattr, or `mds-admin hpc set`).  Consumed
  * by Phase C (CREATE pre-warm), Phase D (shared layout cache), and
  * Phase F (aggregated LAYOUTCOMMIT).  Persisted in the inode flags
  * column so all MDSes observe the mode. */
 #define MDS_IFLAG_HPC_SHARED (1U << 3)
-/* Phase 3 of the QA plan — HPC-Shared wide CREATE in flight.
+/* Phase 3 of the QA plan -- HPC-Shared wide CREATE in flight.
  *
  * Set by hpc_shared_create_wide_layout() on the freshly-created
  * inode BEFORE the wide stripe map is persisted.  Cleared after
@@ -204,7 +204,7 @@ enum cluster_mode {
  * instead of an inconsistent file.
  *
  * Cleanup status (QA review Blocker 5).  The runtime filter is the
- * ONLY mechanism shipped today — there is NO lazy-reap-on-access and
+ * ONLY mechanism shipped today -- there is NO lazy-reap-on-access and
  * NO scan-based reaper.  A persistent orphan inode that survives an
  * MDS crash stays in the catalogue indefinitely; it is harmless
  * (invisible to every client and to readdir) but consumes a fileid
@@ -213,9 +213,9 @@ enum cluster_mode {
  * focused follow-up (see docs/hpc-shared-files.md "Deferred").  Do
  * NOT rely on the GC drainer's stripe_map_scan to reap these: the
  * GC drainer reclaims orphan stripe_map rows whose inode is gone,
- * NOT orphan inodes whose stripe_map is gone — the inverse direction.
+ * NOT orphan inodes whose stripe_map is gone -- the inverse direction.
  *
- * Plain (non-HPC) CREATEs do NOT set this flag — the legacy 1×1
+ * Plain (non-HPC) CREATEs do NOT set this flag -- the legacy 1x1
  * fused CREATE primitive in catalogue_rondb_ns_create_with_layout
  * already gives crash atomicity. */
 #define MDS_IFLAG_HPC_CREATE_PENDING (1U << 4)
@@ -278,7 +278,7 @@ struct mds_ds_info {
 	 * Placement weight for WRR.  Runtime field populated from
 	 * config (ds_weight.<id>) at daemon startup; not persisted in
 	 * RonDB so it can be tuned per-MDS without a schema migration.
-	 * A value of 0 means "unset" — the WRR dispatcher then falls
+	 * A value of 0 means "unset" -- the WRR dispatcher then falls
 	 * back to the old free-bytes heuristic (which on 3rd-party DSes
 	 * collapses to uniform because total_bytes / used_bytes are
 	 * never populated).  Operator-assigned weights are the reliable
@@ -381,7 +381,7 @@ enum mds_workload_profile {
 #define MDS_CFG_SET_PLACEMENT_POLICY       (1ULL << 11)
 #define MDS_CFG_SET_DEFAULT_STRIPE_COUNT   (1ULL << 12)
 #define MDS_CFG_SET_DEFAULT_MIRROR_COUNT   (1ULL << 13)
-/* Phase C of docs/hpc-nto1-plan.md — wide-stripe HPC knobs.  Set when
+/* Phase C of docs/hpc-nto1-plan.md -- wide-stripe HPC knobs.  Set when
  * an INI key (or a profile) explicitly populates the matching field;
  * leaves the post-parse auto-sizer free to fall back to the
  * compile-time default when the bit is clear. */
@@ -438,7 +438,7 @@ enum mds_placement_policy {
  *                of 1 while an empty DS tops out at 100.
  *
  * The derived value is bounded to [1, 100] so a full DS stays
- * selectable (no silent capacity lockout — use ds set-state
+ * selectable (no silent capacity lockout -- use ds set-state
  * offline for that) and one empty DS cannot dominate peers by more
  * than a factor of 100.  Operators who want sharper skew can still
  * layer ds_weight.<id> on top; the auto_weight path is only
@@ -471,10 +471,10 @@ enum mds_catalog_replay_mode {
 /* -----------------------------------------------------------------------
  * HPC-Shared GETATTR consistency mode (Phase F of docs/hpc-nto1-plan.md).
  *
- * STRICT      — default.  GETATTR forces a flush of any in-memory
+ * STRICT      -- default.  GETATTR forces a flush of any in-memory
  *               LAYOUTCOMMIT aggregation for the fileid before
  *               replying.  POSIX `stat()` semantics preserved.
- * OPTIMISTIC  — GETATTR returns max(persisted_size, aggregated_size)
+ * OPTIMISTIC  -- GETATTR returns max(persisted_size, aggregated_size)
  *               from memory without forcing a flush.  Cheaper but
  *               deviates from POSIX; opt-in only.  Documented in
  *               docs/hpc-shared-files.md.
@@ -487,16 +487,16 @@ enum mds_hpc_getattr_mode {
 /* -----------------------------------------------------------------------
  * HPC-Shared layout XDR wire form (Phase C of docs/hpc-nto1-plan.md).
  *
- * AUTO        — default.  Emit the multi-DS-per-mirror form for
+ * AUTO        -- default.  Emit the multi-DS-per-mirror form for
  *               HPC-Shared inodes whose layout has mirror_count == 1
  *               and stripe_count > 1.  All other inodes (plain files,
  *               mirrored layouts) keep the legacy one-DS-per-mirror
  *               form so existing clients see bit-for-bit identical
  *               wire output.
- * LEGACY      — force one-DS-per-mirror unconditionally.  Useful for
+ * LEGACY      -- force one-DS-per-mirror unconditionally.  Useful for
  *               operators with pre-6.18 Linux clients in the fleet
- *               (see docs/hpc-nto1-plan.md §14).
- * STRIPED     — force multi-DS-per-mirror unconditionally.  Used in
+ *               (see docs/hpc-nto1-plan.md S14).
+ * STRIPED     -- force multi-DS-per-mirror unconditionally.  Used in
  *               lab and on fleets confirmed to be 6.18+ across the
  *               board.
  *
@@ -617,10 +617,10 @@ struct mds_config {
      * command fails with "RPC: Program not registered".  When this
      * shim is enabled, the MDS answers ONC-RPC program 100005 v3
      * with a synthetic export list (procedure NULL, EXPORT, DUMP
-     * only — every other procedure, including MNT, returns
+     * only -- every other procedure, including MNT, returns
      * PROC_UNAVAIL so the MDS cannot be NFSv3-mounted).
      *
-     * No DS interaction.  ENABLED by default — see CHANGELOG and
+     * No DS interaction.  ENABLED by default -- see CHANGELOG and
      * docs/mountd-compat.md for the upgrade-path notes.  Operators
      * who want the shim off (no extra port, no rpcbind entry) set
      * `mountd_compat_enabled = false` in mds.conf.
@@ -706,21 +706,21 @@ struct mds_config {
     /* HPC-Shared layout cache (Phase D of docs/hpc-nto1-plan.md).
      * Max number of cached stripe maps; cache is sharded 16 ways so
      * each shard gets ceil(N / 16) entries.  Default 1024 entries
-     * (≈16 KiB metadata + caller-bounded heap for the entry
-     * arrays — see layout_cache.h memory-footprint note). */
+     * (~16 KiB metadata + caller-bounded heap for the entry
+     * arrays -- see layout_cache.h memory-footprint note). */
     uint32_t            layout_cache_size;     /**< 0 = default 1024. */
 
     /* HPC-Shared LAYOUTCOMMIT aggregator (Phase F of
      * docs/hpc-nto1-plan.md).  Bucket capacity (sharded 16 ways) and
      * periodic flush interval.  Both fields are consumed by the
-     * Phase F integration patch — v1 keeps the aggregator unwired
+     * Phase F integration patch -- v1 keeps the aggregator unwired
      * so the synchronous LAYOUTCOMMIT path stays bit-for-bit
      * identical for every inode regardless of HPC_SHARED. */
     uint32_t            layout_commit_aggregator_size;     /**< 0 = default 4096 buckets. */
     uint32_t            layout_commit_aggregator_flush_ms; /**< 0 = default 200 ms. */
     enum mds_hpc_getattr_mode hpc_getattr_mode;            /**< Default STRICT. */
 
-    /* Phase C of docs/hpc-nto1-plan.md — wide-stripe pre-warm.
+    /* Phase C of docs/hpc-nto1-plan.md -- wide-stripe pre-warm.
      *
      * hpc_max_stripe_count caps stripe_count for HPC-Shared CREATEs
      * regardless of how many ONLINE DSes the cluster has.  Default
@@ -736,19 +736,19 @@ struct mds_config {
 
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is
-     * skipped — in-memory tables are authoritative.  Safe for
+     * skipped -- in-memory tables are authoritative.  Safe for
      * single-MDS deployments.  Default: true. */
     bool                transient_state_cache;
 
-    /* Directory delegations (RFC 8881 §10.9, §18.39).
+    /* Directory delegations (RFC 8881 S10.9, S18.39).
      * When false (the default), GET_DIR_DELEGATION responds with
-     * NFS4ERR_DIRDELEG_UNAVAIL regardless of cluster state — the
+     * NFS4ERR_DIRDELEG_UNAVAIL regardless of cluster state -- the
      * same behaviour as Phase 8a.  When true, the MDS maintains a
      * dir_deleg_table and grants delegations for LOOKUPed
      * directories; concurrent mutations recall via CB_RECALL. */
     bool                dir_delegations_enabled;
 
-    /* File delegations (RFC 8881 §10.4).
+    /* File delegations (RFC 8881 S10.4).
      *
      * When true (the default), op_open() grants OPEN_DELEGATE_READ /
      * OPEN_DELEGATE_WRITE to clients that did not pass

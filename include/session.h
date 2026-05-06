@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * session.h — NFSv4.1 session and clientid management.
+ * session.h -- NFSv4.1 session and clientid management.
  *
  * Implements EXCHANGE_ID, CREATE_SESSION, DESTROY_SESSION, and
  * SEQUENCE (slot table exactly-once semantics) per RFC 8881
- * §§18.35–18.37, 18.46.
+ * SS18.35--18.37, 18.46.
  *
  * Each MDS node has its own clientid space:
  *   clientid = (mds_id << 48) | monotonic_counter
@@ -14,7 +14,7 @@
  * Session IDs are 16-byte values:
  *   [mds_id 4B][session_counter 8B][0-pad 4B]
  *
- * See docs/architecture.md §4.3 for design overview.
+ * See docs/architecture.md S4.3 for design overview.
  */
 
 #ifndef SESSION_H
@@ -24,7 +24,7 @@
 #include <stdbool.h>
 #include <time.h>
 
-#include "nfs4_cb_sec.h"  /* struct nfs4_cb_sec — callback security parms */
+#include "nfs4_cb_sec.h"  /* struct nfs4_cb_sec -- callback security parms */
 
 struct mds_catalogue;
 struct commit_queue;  /* Forward declaration for session_table_set_cq() */
@@ -36,14 +36,14 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
 
 #define SESSION_ID_SIZE      16
 #define SESSION_MAX_SLOTS    64   /* Max forechannel slots per session */
-#define CO_OWNERID_MAX       1024 /* RFC 8881 §18.35: co_ownerid<NFS4_OPAQUE_LIMIT> */
+#define CO_OWNERID_MAX       1024 /* RFC 8881 S18.35: co_ownerid<NFS4_OPAQUE_LIMIT> */
 #define NFS4_VERIFIER_SIZE   8
 
 /* Default lease time in seconds (overridable via config). */
 #define SESSION_DEFAULT_LEASE_SEC 90
 
 /* -----------------------------------------------------------------------
- * EXCHANGE_ID flags (RFC 8881 §18.35)
+ * EXCHANGE_ID flags (RFC 8881 S18.35)
  * ----------------------------------------------------------------------- */
 
 #define EXCHGID4_FLAG_SUPP_MOVED_REFER     0x00000001
@@ -55,13 +55,13 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
 #define EXCHGID4_FLAG_MASK_PNFS            0x00070000
 #define EXCHGID4_FLAG_UPD_CONFIRMED_REC_A  0x40000000
 /* CONFIRMED_R is a server-only response bit; clients that set it in
- * eia_flags MUST be rejected with NFS4ERR_INVAL (RFC 8881 §18.35.3,
+ * eia_flags MUST be rejected with NFS4ERR_INVAL (RFC 8881 S18.35.3,
  * pynfs EID7 testSupported1a). */
 #define EXCHGID4_FLAG_CONFIRMED_R          0x80000000
 
 /* All bits a client is allowed to set in eia_flags.  Anything else
  * (including CONFIRMED_R, which is server-only) yields NFS4ERR_INVAL
- * per RFC 8881 §18.35.3 — pynfs EID4 testBadFlags / EID7 testSupported1a. */
+ * per RFC 8881 S18.35.3 -- pynfs EID4 testBadFlags / EID7 testSupported1a. */
 #define EXCHGID4_VALID_CLIENT_MASK         (\
 	EXCHGID4_FLAG_SUPP_MOVED_REFER | \
 	EXCHGID4_FLAG_SUPP_MOVED_MIGR | \
@@ -80,7 +80,7 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
 #define SESSION_EID_PERM      -4   /* NFS4ERR_PERM (UPDATE + principal mismatch) */
 
 /* -----------------------------------------------------------------------
- * CREATE_SESSION flags (RFC 8881 §18.36)
+ * CREATE_SESSION flags (RFC 8881 S18.36)
  * ----------------------------------------------------------------------- */
 
 #define CREATE_SESSION4_FLAG_PERSIST        0x00000001
@@ -112,28 +112,28 @@ struct nfs4_session {
 	struct nfs4_slot    *slots;           /* [num_slots] */
 	struct nfs4_session *hash_next;       /* Session hash chain */
 	struct nfs4_session *client_next;     /* Per-client session list */
-	/* RFC 8881 §2.10.5 / §20.1 — NFSv4 minor version negotiated by
+	/* RFC 8881 S2.10.5 / S20.1 -- NFSv4 minor version negotiated by
 	 * the EXCHANGE_ID + CREATE_SESSION pair.  Stored on the session
 	 * so the CB_COMPOUND emitter (nfs4_cb.c) can echo it in the
-	 * `minorversion` field of every callback compound — RFC 8881
-	 * §20.1 requires the callback compound's minorversion to match
+	 * `minorversion` field of every callback compound -- RFC 8881
+	 * S20.1 requires the callback compound's minorversion to match
 	 * the session's negotiated value (a v4.2 client running pynfs
 	 * rejects v4.1 callbacks with NFS4ERR_MINOR_VERS_MISMATCH).
 	 *
 	 * Populated from cd->minorversion at op_create_session time.
 	 * 0 indicates v4.0 (no SESSION concept; field unused on the wire). */
 	uint32_t             minorversion;
-	/* RFC 8881 §18.36.4 negotiated forechannel attrs.  Stored at
+	/* RFC 8881 S18.36.4 negotiated forechannel attrs.  Stored at
 	 * session-create time as MIN(client_request, server_pref) and
 	 * enforced on every COMPOUND that carries a SEQUENCE on this
 	 * session.  Pynfs SEQ6 / SEQ7 rely on these caps. */
 	uint32_t             max_request_size;
 	uint32_t             max_operations;
-	/* Backchannel state (RFC 8881 §2.10.3.1) */
+	/* Backchannel state (RFC 8881 S2.10.3.1) */
 	uint32_t             cb_prog;         /* Callback program number */
 	uint32_t             cb_sec_flavor;   /* Callback security flavor (legacy alias for cb_sec.flavor) */
 	/*
-	 * RFC 8881 §2.10.8.3 / §18.36 — callback security parameters
+	 * RFC 8881 S2.10.8.3 / S18.36 -- callback security parameters
 	 * captured from CREATE_SESSION's csa_sec_parms<> array.  The
 	 * CB encoder uses this to populate the RPC credential body
 	 * (flavor + AUTH_SYS authsys_parms or AUTH_NONE void) of
@@ -159,9 +159,9 @@ struct nfs4_client {
 	bool                 confirmed;       /* Confirmed by CREATE_SESSION */
 	time_t               last_renewed;    /* Lease renewal timestamp */
 	uint32_t             create_seq;      /* Sequencing for CREATE_SESSION */
-	/* RFC 8881 §18.35.4 — principal identity captured at
+	/* RFC 8881 S18.35.4 -- principal identity captured at
 	 * EXCHANGE_ID time so subsequent EID + UPDATE flag checks can
-	 * detect principal mismatch (cases 8/9 → NFS4ERR_PERM /
+	 * detect principal mismatch (cases 8/9 -> NFS4ERR_PERM /
 	 * NFS4ERR_NOT_SAME).  auth_flavor==0 means "no principal
 	 * captured" (test/legacy path); cred matching is then
 	 * suppressed and only the verifier is consulted. */
@@ -177,10 +177,10 @@ struct nfs4_client {
  * Session table (top-level container)
  * ----------------------------------------------------------------------- */
 
-struct session_table;  /* Opaque — defined in session.c */
+struct session_table;  /* Opaque -- defined in session.c */
 
 /* -----------------------------------------------------------------------
- * API — Lifecycle
+ * API -- Lifecycle
  * ----------------------------------------------------------------------- */
 
 /**
@@ -241,32 +241,32 @@ struct mds_shard;
  * session_table_set_cq(st, shard->cq).
  *
  * @param st     Session table.
- * @param shard  Default shard (NULL tolerated — clears both).
+ * @param shard  Default shard (NULL tolerated -- clears both).
  */
 void session_table_set_shard(struct session_table *st,
 			     const struct mds_shard *shard);
 
 /* -----------------------------------------------------------------------
- * API — EXCHANGE_ID (RFC 8881 §18.35)
+ * API -- EXCHANGE_ID (RFC 8881 S18.35)
  * ----------------------------------------------------------------------- */
 
 /**
- * Process an EXCHANGE_ID request (RFC 8881 §18.35.4).
+ * Process an EXCHANGE_ID request (RFC 8881 S18.35.4).
  *
- * Implements the seven non-UPDATE / four UPDATE cases of §18.35.4 against
+ * Implements the seven non-UPDATE / four UPDATE cases of S18.35.4 against
  * the server's per-co_ownerid client record:
  *
- *   - No record + UPDATE flag                                 → NOENT.
- *   - No record + no UPDATE flag                              → case 1, fresh clientid.
- *   - Record exists + UPDATE flag + unconfirmed               → NOENT.
+ *   - No record + UPDATE flag                                 -> NOENT.
+ *   - No record + no UPDATE flag                              -> case 1, fresh clientid.
+ *   - Record exists + UPDATE flag + unconfirmed               -> NOENT.
  *   - Record exists + UPDATE flag + confirmed:
- *       verifier match + principal match                       → case 6, return existing.
- *       verifier mismatch                                       → NOT_SAME.
- *       verifier match + principal mismatch                     → PERM.
- *   - Record exists + no UPDATE + unconfirmed                 → case 4, replace (new clientid).
+ *       verifier match + principal match                       -> case 6, return existing.
+ *       verifier mismatch                                       -> NOT_SAME.
+ *       verifier match + principal mismatch                     -> PERM.
+ *   - Record exists + no UPDATE + unconfirmed                 -> case 4, replace (new clientid).
  *   - Record exists + no UPDATE + confirmed:
- *       verifier match + principal match                       → case 2, return existing (renew).
- *       otherwise                                              → case 3/5/7, replace (new clientid).
+ *       verifier match + principal match                       -> case 2, return existing (renew).
+ *       otherwise                                              -> case 3/5/7, replace (new clientid).
  *
  * The new client is "unconfirmed" until CREATE_SESSION succeeds.
  * Principal matching uses (auth_flavor, cred_uid, cred_gid).  When
@@ -302,7 +302,7 @@ int session_exchange_id(struct session_table *st,
 			uint32_t cred_gid);
 
 /* -----------------------------------------------------------------------
- * API — CREATE_SESSION (RFC 8881 §18.36)
+ * API -- CREATE_SESSION (RFC 8881 S18.36)
  * ----------------------------------------------------------------------- */
 
 /**
@@ -344,8 +344,8 @@ int session_create_session(struct session_table *st,
 
 /**
  * Look up the negotiated per-session forechannel limits.  Used by the
- * RPC layer to enforce RFC 8881 §15.1.10.5 (NFS4ERR_REQ_TOO_BIG) and
- * §15.1.10.4 (NFS4ERR_TOO_MANY_OPS) on every COMPOUND request that
+ * RPC layer to enforce RFC 8881 S15.1.10.5 (NFS4ERR_REQ_TOO_BIG) and
+ * S15.1.10.4 (NFS4ERR_TOO_MANY_OPS) on every COMPOUND request that
  * carries a SEQUENCE on this session.
  *
  * @param st            Session table.
@@ -361,7 +361,7 @@ int session_get_limits(struct session_table *st,
 		       uint32_t *out_max_ops);
 
 /* -----------------------------------------------------------------------
- * API — DESTROY_SESSION (RFC 8881 §18.37)
+ * API -- DESTROY_SESSION (RFC 8881 S18.37)
  * ----------------------------------------------------------------------- */
 
 /**
@@ -377,7 +377,7 @@ int session_destroy_session(struct session_table *st,
 			    const uint8_t session_id[SESSION_ID_SIZE]);
 
 /* -----------------------------------------------------------------------
- * API — SEQUENCE (RFC 8881 §18.46)
+ * API -- SEQUENCE (RFC 8881 S18.46)
  * ----------------------------------------------------------------------- */
 
 /**
@@ -426,7 +426,7 @@ int session_sequence_check(struct session_table *st,
 			   uint64_t *out_clientid);
 
 /* -----------------------------------------------------------------------
- * API — Backchannel connection binding
+ * API -- Backchannel connection binding
  * ----------------------------------------------------------------------- */
 
 /**
@@ -459,7 +459,7 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn);
 
 
 /* -----------------------------------------------------------------------
- * API — Callback target enumeration (layout recall support)
+ * API -- Callback target enumeration (layout recall support)
  *
  * The recall coordinator needs to send CB_LAYOUTRECALL to clients that
  * hold affected layouts.  Because cb_conn is a borrowed pointer whose
@@ -475,7 +475,7 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn);
  * session_for_each_with_cb() implements step 1: it iterates all sessions
  * that have a non-NULL cb_conn and invokes @cb for each, passing a
  * snapshot of the data needed for the callback call.  The callback
- * MUST NOT do network I/O — it should only copy data into a collector.
+ * MUST NOT do network I/O -- it should only copy data into a collector.
  * ----------------------------------------------------------------------- */
 
 /**
@@ -490,15 +490,15 @@ struct session_cb_snap {
     uint32_t cb_prog;
     uint32_t cb_sec_flavor;
     /*
-     * RFC 8881 §2.10.8.3 — captured callback security parameters.
+     * RFC 8881 S2.10.8.3 -- captured callback security parameters.
      * Snapped by value so the CB I/O thread doesn't need to take
      * the session-table lock when building the RPC credential.
      */
     struct nfs4_cb_sec cb_sec;
-    const struct rpc_conn *cb_conn; /**< Borrowed ptr — valid only during callback */
+    const struct rpc_conn *cb_conn; /**< Borrowed ptr -- valid only during callback */
     uint32_t slot_seq_id;    /**< Current seq_id for backchannel slot 0 */
     /*
-     * RFC 8881 §20.1 — negotiated NFSv4 minor version.  Carried in
+     * RFC 8881 S20.1 -- negotiated NFSv4 minor version.  Carried in
      * the snapshot so the CB encoder can populate the CB_COMPOUND
      * `minorversion` field with the value the client expects on
      * its callback receiver (a mismatch yields
@@ -532,7 +532,7 @@ typedef int (*session_cb_snap_fn)(const struct session_cb_snap *snap,
  * If @cb returns non-zero, iteration stops and that value is returned.
  * On success (all sessions visited), returns 0.
  *
- * @param st   Session table (NULL tolerated — returns 0 immediately).
+ * @param st   Session table (NULL tolerated -- returns 0 immediately).
  * @param cb   Callback invoked per session (must not do network I/O).
  * @param ctx  Opaque user context passed to @cb.
  * @return 0 on success, or the non-zero value returned by @cb.
@@ -567,9 +567,9 @@ int session_for_each_with_cb(struct session_table *st,
  * On @cb return == 1 (snap consumed), the slot-0 sequenceid is
  * advanced by 1 under the session-table lock so subsequent CBs on
  * the same session use a fresh, monotonic sa_sequenceid per RFC
- * 8881 §18.46.4.
+ * 8881 S18.46.4.
  *
- * @param st         Session table (NULL tolerated — returns 0).
+ * @param st         Session table (NULL tolerated -- returns 0).
  * @param clientid   Target client.
  * @param cb         Callback (must not do network I/O).
  * @param ctx        Opaque user context.
@@ -584,7 +584,7 @@ int session_for_each_with_cb_for_clientid(struct session_table *st,
 /**
  * Update the stored callback security parameters for a session.
  *
- * Used by op_create_session and op_backchannel_ctl (RFC 8881 §18.33).
+ * Used by op_create_session and op_backchannel_ctl (RFC 8881 S18.33).
  * The new parms replace the previous value verbatim under the session-
  * table lock.  Subsequent CB_COMPOUND calls use the new parms via
  * snap.cb_sec.
@@ -602,19 +602,19 @@ int session_set_cb_sec(struct session_table *st,
  * Update the callback program number for a session.
  *
  * Used by op_backchannel_ctl when the client supplies a new cb_prog
- * (RFC 8881 §18.33.1 bca_cb_program).
+ * (RFC 8881 S18.33.1 bca_cb_program).
  */
 int session_set_cb_prog(struct session_table *st,
                         const uint8_t session_id[SESSION_ID_SIZE],
                         uint32_t cb_prog);
 
 /**
- * RFC 8881 §18.50 DESTROY_CLIENTID — destroy a clientid record.
+ * RFC 8881 S18.50 DESTROY_CLIENTID -- destroy a clientid record.
  *
  * Looks up the clientid in the session table.  If absent, returns -1
  * so the caller can map to NFS4ERR_STALE_CLIENTID (pynfs DESCID3/4/8).
  * If present but the client still has confirmed sessions, returns -2
- * so the caller can map to NFS4ERR_CLIENTID_BUSY (pynfs DESCID5/6) —
+ * so the caller can map to NFS4ERR_CLIENTID_BUSY (pynfs DESCID5/6) --
  * the client must DESTROY_SESSION on each session first.
  *
  * Otherwise the client record (and any unconfirmed sessions, none in

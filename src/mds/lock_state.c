@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * lock_state.c — NFSv4.1 byte-range lock manager.
+ * lock_state.c -- NFSv4.1 byte-range lock manager.
  *
  * Maintains per-file linked lists of lock_entry, hashed by fileid.
- * Conflict detection follows RFC 8881 §18.10.4: read locks conflict
+ * Conflict detection follows RFC 8881 S18.10.4: read locks conflict
  * with write locks from different owners; write locks conflict with
  * everything from different owners.
  *
@@ -33,7 +33,7 @@
 
 /* ----------------------------------------------------------------------- */
 
-/** Per-stripe hash table sizing.  16 stripes × 32 = 512 effective buckets. */
+/** Per-stripe hash table sizing.  16 stripes x 32 = 512 effective buckets. */
 #define FILE_HASH_PER_STRIPE  32
 #define SID_HASH_PER_STRIPE   32
 #define LOCK_STRIPES          16
@@ -115,7 +115,7 @@ static uint32_t stateid_stripe(const uint8_t other[NFS4_OTHER_SIZE])
  *
  * Layout of stateid.other[12]:
  *   [0..3] : mds_id  (big-endian)
- *   [4]    : stripe index  (0–15)
+ *   [4]    : stripe index  (0--15)
  *   [5..11]: sequence counter (big-endian, high 7 bytes)
  *
  * Caller must hold the stripe lock (serialises next_seq access).
@@ -333,7 +333,7 @@ int lock_acquire(struct lock_table *lt,
         }
     }
 
-    /* No conflict — create lock entry. */
+    /* No conflict -- create lock entry. */
     new_entry = calloc(1, sizeof(*new_entry));
     if (new_entry == NULL) {
         pthread_mutex_unlock(&st->lock);
@@ -448,7 +448,7 @@ int lock_test(struct lock_table *lt,
  * Release a byte-range lock.
  *
  * The stripe is extracted from the stateid itself (byte other[4]),
- * so we lock the correct stripe BEFORE searching — eliminating the
+ * so we lock the correct stripe BEFORE searching -- eliminating the
  * previous use-after-free race where find_by_sid ran unlocked.
  */
 int lock_release(struct lock_table *lt,
@@ -468,7 +468,7 @@ int lock_release(struct lock_table *lt,
         return NFS4ERR_INVAL;
     }
 
-    /* Derive stripe from the stateid — no unprotected dereference. */
+    /* Derive stripe from the stateid -- no unprotected dereference. */
     s = stateid_stripe(lock_stateid->other);
     st = &lt->stripes[s];
     pthread_mutex_lock(&st->lock);

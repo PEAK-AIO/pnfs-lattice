@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_rondb.c — RonDB catalogue backend C wrapper.
+ * catalogue_rondb.c -- RonDB catalogue backend C wrapper.
  *
  * Implements the mds_cat_* API for the RonDB backend by calling
  * through to catalogue_rondb_shim.cpp via the extern "C" ABI.
@@ -11,7 +11,7 @@
  * Inode data crosses the C/C++ boundary as a fixed 137-byte buffer
  * (rondb_inode_serialize/deserialize from rondb_schema.h).
  *
- * See docs/architecture.md §4.4.3 and the RonDB catalogue plan.
+ * See docs/architecture.md S4.4.3 and the RonDB catalogue plan.
  */
 
 #ifdef HAVE_RONDB
@@ -341,7 +341,7 @@ enum mds_status mds_rondb_cleanup(struct mds_catalogue *cat)
 }
 
 /* -----------------------------------------------------------------------
- * Stage C — Catalogue operations
+ * Stage C -- Catalogue operations
  *
  * Each function validates inputs, calls the shim, and translates
  * return codes to mds_status.  Inode data is exchanged as 137-byte
@@ -379,7 +379,7 @@ enum mds_status catalogue_rondb_alloc_fileid(struct mds_catalogue *cat,
 	}
 	state = cat->backend_private;
 
-	/* Thread-local batch exhausted — refill from RonDB. */
+	/* Thread-local batch exhausted -- refill from RonDB. */
 	if (tl_fileid_remaining == 0) {
 		uint64_t base = 0;
 		uint32_t count = 0;
@@ -569,11 +569,11 @@ enum mds_status catalogue_rondb_ns_create(
 
 	/* Atomic create via shim (T2 transaction).
 	 * Parent nlink/change/mtime updated atomically at NDB data node
-	 * via interpretedUpdateTuple — immune to read-modify-write race.
+	 * via interpretedUpdateTuple -- immune to read-modify-write race.
 	 *
 	 * Retry on transient NDB errors (rc == -2): lock contention,
 	 * temporary resource exhaustion, node recovery.  Up to 3
-	 * attempts with 500µs backoff between retries. */
+	 * attempts with 500us backoff between retries. */
 	for (int attempt = 0; attempt < 3; attempt++) {
 		rc = rondb_shim_ns_create(h, parent_fileid, name,
 					  child_buf, RONDB_INODE_FIXED_SIZE,
@@ -585,7 +585,7 @@ enum mds_status catalogue_rondb_ns_create(
 		if (rc != -2) {
 			break; /* Success, EXISTS, or permanent error. */
 		}
-		usleep(500 * (uint32_t)(attempt + 1)); /* 500µs, 1ms, 1.5ms */
+		usleep(500 * (uint32_t)(attempt + 1)); /* 500us, 1ms, 1.5ms */
 	}
 	if (rc == 1) {
 		return MDS_ERR_EXISTS;
@@ -721,7 +721,7 @@ enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
 	inode.ctime = now;
 	inode.change++;
 
-	/* Write back atomically — exclusive-lock read + update in one
+	/* Write back atomically -- exclusive-lock read + update in one
 	 * NDB transaction prevents concurrent setattr lost-update race. */
 	if (rondb_inode_serialize(&inode, shard, buf, sizeof(buf)) < 0) {
 		return MDS_ERR_IO;
@@ -740,7 +740,7 @@ enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
 }
 
 /**
- * Full inode write — direct serialize + atomic write.
+ * Full inode write -- direct serialize + atomic write.
  *
  * Unlike ns_setattr (read-modify-write with mask), this replaces
  * the entire inode record atomically.  Used by mds_cat_inode_put()
@@ -749,7 +749,7 @@ enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
  * Implementation note: routes through rondb_shim_inode_put (writeTuple)
  * rather than rondb_shim_inode_setattr_atomic (exclusive-read +
  * updateTuple).  setattr_atomic returns NOT_FOUND on a fresh inode and
- * therefore cannot be used here — wide-stripe CREATE persists a brand
+ * therefore cannot be used here -- wide-stripe CREATE persists a brand
  * new inode through this path before any LOOKUP is possible.
  */
 enum mds_status catalogue_rondb_dirent_put(struct mds_catalogue *cat,
@@ -846,7 +846,7 @@ enum mds_status catalogue_rondb_inode_put(struct mds_catalogue *cat,
 	/* writeTuple semantics: insert-or-update.  Required for HPC
 	 * wide-stripe CREATE which persists a freshly minted inode that
 	 * has no prior row in mds_inodes.  Update-only paths (e.g.
-	 * rondb_shim_inode_setattr_atomic) cannot be used here — they
+	 * rondb_shim_inode_setattr_atomic) cannot be used here -- they
 	 * return NOT_FOUND on a brand-new fileid and surface as ENOENT
 	 * to the client. */
 	rc = rondb_shim_inode_put(h, inode->fileid, buf,
@@ -939,15 +939,15 @@ enum mds_status catalogue_rondb_ns_rename(
 	rc = rondb_shim_dirent_get(h, dst_parent, dst_name,
 				   &dst_fid, &dst_type, 0);
 	if (rc == 0) {
-		/* Destination exists — check type compatibility. */
+		/* Destination exists -- check type compatibility. */
 		dst_exists = 1;
 
 		if (dst_fid == src_fid) {
-			/* Same file — no-op. */
+			/* Same file -- no-op. */
 			return MDS_OK;
 		}
 
-		/* Type checks: dir→file = NOTDIR, file→dir = ISDIR. */
+		/* Type checks: dir->file = NOTDIR, file->dir = ISDIR. */
 		if (sc.type == MDS_FTYPE_DIR && dst_type != MDS_FTYPE_DIR) {
 			return MDS_ERR_NOTDIR;
 		}
@@ -1038,7 +1038,7 @@ enum mds_status catalogue_rondb_ns_rename(
 }
 
 /* -----------------------------------------------------------------------
- * Readdir — shim scan adapter
+ * Readdir -- shim scan adapter
  * ----------------------------------------------------------------------- */
 
 struct rondb_readdir_adapt {
@@ -1092,7 +1092,7 @@ enum mds_status catalogue_rondb_ns_readdir(
 }
 
 /* -----------------------------------------------------------------------
- * Readdir_plus — fused shim adapter (single NDB transaction).
+ * Readdir_plus -- fused shim adapter (single NDB transaction).
  * Delivers dirent + per-entry inode attrs through mds_readdir_plus_cb
  * without issuing a separate ns_getattr per entry.
  * ----------------------------------------------------------------------- */
@@ -1170,7 +1170,7 @@ enum mds_status catalogue_rondb_ns_readdir_plus(
 }
 
 /* -----------------------------------------------------------------------
- * Link — create dirent + bump target nlink atomically
+ * Link -- create dirent + bump target nlink atomically
  * ----------------------------------------------------------------------- */
 
 enum mds_status catalogue_rondb_ns_link(
@@ -1246,7 +1246,7 @@ enum mds_status catalogue_rondb_ns_link(
 }
 
 /* -----------------------------------------------------------------------
- * nlink_adjust — standalone atomic shim helper
+ * nlink_adjust -- standalone atomic shim helper
  * ----------------------------------------------------------------------- */
 
 enum mds_status catalogue_rondb_ns_nlink_adjust(
@@ -1290,10 +1290,10 @@ static enum mds_status catalogue_rondb_stripe_map_scan(
  * The buffer is a flat array of `stripe_count` RONDB_STRIPE_ENTRY_SIZE
  * records.  mirror_count is stored as a separate scalar in the
  * stripe_map row but the per-mirror DS entries are NOT serialized
- * here — the buffer length is sized strictly by stripe_count.  This
+ * here -- the buffer length is sized strictly by stripe_count.  This
  * matches today's HPC-Shared usage (mirror_count == 1, enforced by
  * hpc_shared_create_wide_layout's NOSUPPORT guard at
- * src/mds/hpc_shared.c:368) and the pre-HPC legacy 1×1 placement.
+ * src/mds/hpc_shared.c:368) and the pre-HPC legacy 1x1 placement.
  *
  * QA review Blocker 6: future support for mirror_count > 1 wide
  * layouts will need to widen this serialization to
@@ -1322,7 +1322,7 @@ enum mds_status catalogue_rondb_stripe_map_get(
 	}
 
 	/* Allocate buffer for worst case (MDS_MAX_STRIPES entries).
-	 * stripe_count entries, NOT stripe_count * mirror_count — see
+	 * stripe_count entries, NOT stripe_count * mirror_count -- see
 	 * the file-level note above (QA review Blocker 6). */
 	buflen = MDS_MAX_STRIPES * RONDB_STRIPE_ENTRY_SIZE;
 	buf = malloc(buflen);
@@ -1665,7 +1665,7 @@ enum mds_status catalogue_rondb_ds_list(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — DS provisioning
+ * Phase 8A C wrappers -- DS provisioning
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_ds_provision_get(
@@ -1722,7 +1722,7 @@ static enum mds_status catalogue_rondb_ds_provision_del(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — Quota
+ * Phase 8A C wrappers -- Quota
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_quota_rule_get(
@@ -1796,7 +1796,7 @@ static enum mds_status catalogue_rondb_quota_usage_put(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — GC queue
+ * Phase 8A C wrappers -- GC queue
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_gc_enqueue(
@@ -1888,7 +1888,7 @@ static enum mds_status catalogue_rondb_gc_peek_batch(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — Inline data via xattr table
+ * Phase 8A C wrappers -- Inline data via xattr table
  *
  * Symlink targets and other small metadata blobs are stored in the
  * mds_xattrs table under a reserved key that cannot collide with
@@ -1948,7 +1948,7 @@ static enum mds_status catalogue_rondb_inline_del(
 	}
 
 	rc = rondb_shim_xattr_del(h, fileid, RONDB_INLINE_XATTR_KEY);
-	/* Ignore NOTFOUND — deleting non-existent inline data is fine. */
+	/* Ignore NOTFOUND -- deleting non-existent inline data is fine. */
 	if (rc == 1) {
 		return MDS_OK;
 	}
@@ -1956,7 +1956,7 @@ static enum mds_status catalogue_rondb_inline_del(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — Shared 2PC journal (coordination ops)
+ * Phase 8A C wrappers -- Shared 2PC journal (coordination ops)
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_journal_put(
@@ -2030,7 +2030,7 @@ static enum mds_status catalogue_rondb_journal_scan(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — Layout state (coordination ops)
+ * Phase 8A C wrappers -- Layout state (coordination ops)
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_layout_grant(
@@ -2069,13 +2069,13 @@ enum mds_status catalogue_rondb_layoutget_fused(
 	uint64_t length, uint32_t mds_id)
 {
 	void *h = rondb_handle(cat);
-	/* Phase 2 of the QA plan — heap-back the stripe entry buffer.
+	/* Phase 2 of the QA plan -- heap-back the stripe entry buffer.
 	 * The legacy stack array `uint8_t buf[MDS_MAX_LAYOUT_DS *
 	 * RONDB_STRIPE_ENTRY_SIZE]` only provisioned 16 entries; for a
 	 * 1024-stripe HPC layout the shim could not return the full map.
 	 * Mirror the pattern in catalogue_rondb_stripe_map_get (line
 	 * ~1298): allocate MDS_MAX_STRIPES * MDS_MAX_MIRRORS *
-	 * RONDB_STRIPE_ENTRY_SIZE bytes (≈1 MiB worst case) on the
+	 * RONDB_STRIPE_ENTRY_SIZE bytes (~1 MiB worst case) on the
 	 * heap.  Allocation failure surfaces as MDS_ERR_NOMEM. */
 	uint8_t *buf = NULL;
 	size_t buf_cap = (size_t)MDS_MAX_STRIPES *
@@ -2370,7 +2370,7 @@ static enum mds_status catalogue_rondb_layout_del_all_for_client(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A+ C wrappers — ds_layout_idx_scan, layout_iter_file
+ * Phase 8A+ C wrappers -- ds_layout_idx_scan, layout_iter_file
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_ds_layout_idx_scan(
@@ -2430,7 +2430,7 @@ static enum mds_status catalogue_rondb_layout_iter_file(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A C wrappers — Client recovery (coordination ops)
+ * Phase 8A C wrappers -- Client recovery (coordination ops)
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_recovery_put(
@@ -2488,7 +2488,7 @@ static enum mds_status catalogue_rondb_recovery_get(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8B — Vtable wrappers matching authority_ops signature conventions
+ * Phase 8B -- Vtable wrappers matching authority_ops signature conventions
  *
  * The authority_ops vtable passes struct mds_cat_txn *txn as an extra
  * parameter.  For the RonDB backend each operation is self-contained
@@ -2633,10 +2633,10 @@ static enum mds_status rondb_auth_ds_del(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9B — Lock-aware namespace mutation wrappers
+ * Phase 9B -- Lock-aware namespace mutation wrappers
  *
- * Each wrapper: build lock entries → sort → acquire in order →
- * call underlying mutation → release in reverse order.
+ * Each wrapper: build lock entries -> sort -> acquire in order ->
+ * call underlying mutation -> release in reverse order.
  * On contention (acquire returns 1), return MDS_ERR_DELAY.
  * ----------------------------------------------------------------------- */
 
@@ -2715,13 +2715,13 @@ static void rondb_unlock_set(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9C — Delta emission helper
+ * Phase 9C -- Delta emission helper
  *
  * Called by each locked mutation wrapper after a successful mutation.
  * Builds a delta record and inserts it into mds_delta_broadcast.
  * Returns 0 on success, -1 on failure.  When changefeed is enabled,
  * a failed delta insert means the mutation must be reported as failed
- * to the caller — otherwise authority and image diverge permanently.
+ * to the caller -- otherwise authority and image diverge permanently.
  * ----------------------------------------------------------------------- */
 
 #define DELTA_PERSIST_INTERVAL 64
@@ -2744,7 +2744,7 @@ static int rondb_emit_delta(
         delta_type, payload, payload_len, now_ns);
     if (rc != 0) {
         (void)fprintf(stderr,
-            "ERROR: delta_insert failed for seqno=%llu type=%u — "
+            "ERROR: delta_insert failed for seqno=%llu type=%u -- "
             "mutation will be reported as failed\n",
             (unsigned long long)st->delta_seqno, (unsigned)delta_type);
         st->delta_seqno--; /* Roll back so the seqno can be reused. */
@@ -2836,7 +2836,7 @@ static enum mds_status rondb_locked_ns_rename(
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9C — Background delta broadcast poller thread
+ * Phase 9C -- Background delta broadcast poller thread
  *
  * Polls mds_delta_broadcast for foreign MDS streams and applies
  * INODE_UPSERT/DELETE + DIRENT_PUT/DELETE to the local catalog_image.
@@ -3031,7 +3031,7 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8B — RonDB authority vtable (single-MDS, no locking)
+ * Phase 8B -- RonDB authority vtable (single-MDS, no locking)
  * ----------------------------------------------------------------------- */
 
 static const struct mds_authority_ops rondb_authority_ops = {
@@ -3081,18 +3081,18 @@ static const struct mds_authority_ops rondb_authority_ops = {
 };
 
 /* -----------------------------------------------------------------------
- * Phase 8B — RonDB coordination vtable
+ * Phase 8B -- RonDB coordination vtable
  * ----------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------
- * Phase 12 — Multi-MDS authority vtable (Phase 3 of review plan)
+ * Phase 12 -- Multi-MDS authority vtable (Phase 3 of review plan)
  *
  * The earlier Phase-9B design routed every CREATE / REMOVE / LINK /
  * SETATTR in multi-MDS mode through an application-level lock
  * manager (mds_ns_locks + mds_ns_lock_holders, two NDB tables whose
  * rows are acquired and released around each mutation).  That layer
  * was a correctness belt-and-braces above what NDB already provides:
- *   - ns_create: the shim’s dirent insertTuple is the authoritative
+ *   - ns_create: the shim's dirent insertTuple is the authoritative
  *     uniqueness gate (ConstraintViolation on duplicate); parent
  *     nlink/mtime/change are updated via NDB interpretedUpdateTuple,
  *     which is atomic across all API nodes.
@@ -3104,10 +3104,10 @@ static const struct mds_authority_ops rondb_authority_ops = {
  *   - ns_link: dirent insertTuple + interpreted nlink bump, same
  *     pattern as ns_create.
  * NDB row locks already serialise concurrent writers from multiple
- * MDS daemons.  The app-level wrapper simply adds 3–5 extra NDB
+ * MDS daemons.  The app-level wrapper simply adds 3--5 extra NDB
  * round-trips per mutation and, under 16-way contention, livelocks
  * on its sort-before-acquire retry loop (see docs/benchmark-phase1.md
- * for the empirical evidence — 1,911 creates/sec baseline missed by
+ * for the empirical evidence -- 1,911 creates/sec baseline missed by
  * ~96%, 16-task mdtest deadlocks).
  *
  * Cross-directory RENAME is the one operation that genuinely needs
@@ -3235,7 +3235,7 @@ static enum mds_status catalogue_rondb_open_scan_client(
     return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-/* Remaining entity C wrappers — same pattern as open_* above. */
+/* Remaining entity C wrappers -- same pattern as open_* above. */
 
 #define RONDB_WRAP_PUT(name, type, shim_fn) \
 static enum mds_status catalogue_rondb_##name( \
@@ -3392,7 +3392,7 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 	.recovery_del            = catalogue_rondb_recovery_del,
 	.recovery_get            = catalogue_rondb_recovery_get,
 	.recovery_list           = catalogue_rondb_recovery_list,
-	/* Shared protocol state — all entities wired. */
+	/* Shared protocol state -- all entities wired. */
 	.open_put          = catalogue_rondb_open_put,
 	.open_get          = catalogue_rondb_open_get,
 	.open_del          = catalogue_rondb_open_del,
@@ -3421,7 +3421,7 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 };
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Node registry C wrappers
+ * Phase 9A -- Node registry C wrappers
  * ----------------------------------------------------------------------- */
 
 enum mds_status catalogue_rondb_mds_register(struct mds_catalogue *cat,

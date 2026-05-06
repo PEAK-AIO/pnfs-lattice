@@ -2,7 +2,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# nfs_client_test.sh — Real NFS client integration tests against pNFS MDS.
+# nfs_client_test.sh -- Real NFS client integration tests against pNFS MDS.
 #
 # Runs on the NFS client machine against a mounted pNFS MDS export.
 # Tests NFSv4.1/4.2 operations from the Linux kernel NFS client perspective.
@@ -23,8 +23,8 @@ YEL='\033[0;33m'
 RST='\033[0m'
 
 log_pass() { PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); printf "  ${GRN}PASS${RST}  %s\n" "$1"; }
-log_fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); printf "  ${RED}FAIL${RST}  %s — %s\n" "$1" "$2"; }
-log_skip() { SKIP=$((SKIP+1)); TOTAL=$((TOTAL+1)); printf "  ${YEL}SKIP${RST}  %s — %s\n" "$1" "$2"; }
+log_fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); printf "  ${RED}FAIL${RST}  %s -- %s\n" "$1" "$2"; }
+log_skip() { SKIP=$((SKIP+1)); TOTAL=$((TOTAL+1)); printf "  ${YEL}SKIP${RST}  %s -- %s\n" "$1" "$2"; }
 
 cleanup() {
     rm -rf "${MOUNT:?}/nfs_test_dir" 2>/dev/null
@@ -70,7 +70,7 @@ assert_fail() {
 # =====================================================================
 echo ""
 echo "======================================================================"
-echo "  pNFS MDS — Real NFS Client Integration Tests"
+echo "  pNFS MDS -- Real NFS Client Integration Tests"
 echo "  Mount: $MOUNT"
 echo "  Date:  $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo "======================================================================"
@@ -286,7 +286,7 @@ touch "${MOUNT}/nfs_test_lockfile"
 LOCK_PID=$!
 sleep 1
 
-# Try non-blocking exclusive lock — should fail
+# Try non-blocking exclusive lock -- should fail
 if flock -x -n 200 200>"${MOUNT}/nfs_test_lockfile" 2>/dev/null; then
     log_fail "T8.1 exclusive lock conflict" "second lock succeeded"
 else
@@ -302,22 +302,22 @@ echo "--- T9: Special error cases ---"
 # =====================================================================
 
 # T9.1 Open non-existent
-assert_fail "T9.1 cat non-existent → ENOENT" cat "${MOUNT}/nfs_test_no_such_file"
+assert_fail "T9.1 cat non-existent -> ENOENT" cat "${MOUNT}/nfs_test_no_such_file"
 
 # T9.2 Remove non-existent
-assert_fail "T9.2 rm non-existent → error" rm "${MOUNT}/nfs_test_no_such_file"
+assert_fail "T9.2 rm non-existent -> error" rm "${MOUNT}/nfs_test_no_such_file"
 
 # T9.3 Create in non-existent directory
-assert_fail "T9.3 touch in non-existent dir → error" touch "${MOUNT}/nfs_test_nodir/file"
+assert_fail "T9.3 touch in non-existent dir -> error" touch "${MOUNT}/nfs_test_nodir/file"
 
-# T9.4 rmdir on file → ENOTDIR
+# T9.4 rmdir on file -> ENOTDIR
 touch "${MOUNT}/nfs_test_notdir"
-assert_fail "T9.4 rmdir on regular file → error" rmdir "${MOUNT}/nfs_test_notdir"
+assert_fail "T9.4 rmdir on regular file -> error" rmdir "${MOUNT}/nfs_test_notdir"
 rm "${MOUNT}/nfs_test_notdir"
 
 # T9.5 Create duplicate
 mkdir "${MOUNT}/nfs_test_dupdir"
-assert_fail "T9.5 mkdir duplicate → EEXIST" mkdir "${MOUNT}/nfs_test_dupdir"
+assert_fail "T9.5 mkdir duplicate -> EEXIST" mkdir "${MOUNT}/nfs_test_dupdir"
 rmdir "${MOUNT}/nfs_test_dupdir"
 
 # =====================================================================

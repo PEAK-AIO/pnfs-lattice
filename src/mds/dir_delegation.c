@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * dir_delegation.c — NFSv4.1 directory delegation manager.
+ * dir_delegation.c -- NFSv4.1 directory delegation manager.
  *
  * Phase 8b scope:
  *   - In-memory hash table keyed on dir_fileid, with per-(dir,client)
@@ -14,8 +14,8 @@
  *   - Every namespace mutation that changes a directory's dirent set
  *     or a child's attrs must first call dir_deleg_recall_dir, which
  *     issues CB_RECALL best-effort to every other holder and revokes
- *     the grant locally (RFC 8881 §10.9.3).
- *   - No RonDB persistence in 8b — delegations are transient.  A
+ *     the grant locally (RFC 8881 S10.9.3).
+ *   - No RonDB persistence in 8b -- delegations are transient.  A
  *     client that reconnects after an MDS restart simply does not see
  *     the grant and re-issues GDD.  This matches the existing
  *     file-delegation transient_state_cache posture and keeps the 8b
@@ -621,7 +621,7 @@ struct ddt_cb_target {
 	uint32_t slot_seq_id;
 	uint32_t num_cb_slots;
 	uint32_t minorversion;
-	struct nfs4_cb_sec cb_sec; /* RFC 8881 §2.10.8.3 */
+	struct nfs4_cb_sec cb_sec; /* RFC 8881 S2.10.8.3 */
 };
 
 struct ddt_cb_snap_ctx {

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * delegation.c — NFSv4.1 file delegation manager.
+ * delegation.c -- NFSv4.1 file delegation manager.
  *
  * In-memory hash table of active delegations, keyed by fileid.
  * Each file can have multiple READ delegations (one per client)
@@ -13,7 +13,7 @@
  * backchannel is unavailable or times out, the delegation is
  * revoked immediately.
  *
- * See RFC 8881 §10.4.
+ * See RFC 8881 S10.4.
  */
 
 #include <stdlib.h>
@@ -44,7 +44,7 @@
 /*
  * Per-recall snapshot copied out of the bucket while the stripe lock
  * is held.  After the lock is dropped we use only this snapshot to
- * issue CB_RECALL — there is no chance of dereferencing a stale
+ * issue CB_RECALL -- there is no chance of dereferencing a stale
  * session pointer because we never read e->session outside the lock.
  */
 struct deleg_recall_target {
@@ -67,8 +67,8 @@ struct deleg_cb_lookup_ctx {
     uint32_t cb_prog;
     uint32_t slot_seq_id;
     uint32_t num_cb_slots;
-    uint32_t minorversion;  /* RFC 8881 §20.1 — echo session minor in CB */
-    struct nfs4_cb_sec cb_sec; /* RFC 8881 §2.10.8.3 — captured CB sec parms */
+    uint32_t minorversion;  /* RFC 8881 S20.1 -- echo session minor in CB */
+    struct nfs4_cb_sec cb_sec; /* RFC 8881 S2.10.8.3 -- captured CB sec parms */
     int      fd;            /* dup'd; caller closes */
 };
 
@@ -82,7 +82,7 @@ static int deleg_cb_lookup_cb(const struct session_cb_snap *snap, void *ctx)
         return 0;
     }
     if (c->found) {
-        return 1; /* stop — already snapshotted */
+        return 1; /* stop -- already snapshotted */
     }
     if (snap->clientid != c->want_clientid) {
         return 0;
@@ -384,7 +384,7 @@ int deleg_return(struct deleg_table *dt,
         return -1;
     }
 
-    /* Scan all buckets — stateid doesn't encode fileid.
+    /* Scan all buckets -- stateid doesn't encode fileid.
      * Acceptable cost: DELEGRETURN is infrequent. */
     for (i = 0; i < DELEG_HASH_SIZE; i++) {
         uint32_t stripe = i % DELEG_STRIPE_COUNT;
@@ -436,11 +436,11 @@ int deleg_check_conflict(struct deleg_table *dt,
         if (e->fileid != fileid) {
             continue;
         }
-        /* Same client: no conflict per RFC 8881 §10.4.1. */
+        /* Same client: no conflict per RFC 8881 S10.4.1. */
         if (e->clientid == clientid) {
             continue;
         }
-        /* Another client holds a delegation → conflict. */
+        /* Another client holds a delegation -> conflict. */
         *has_conflict = true;
         break;
     }
@@ -468,7 +468,7 @@ int deleg_recall_file(struct deleg_table *dt,
     }
 
     /*
-     * Phase 1 — under the stripe lock: snapshot every conflicting
+     * Phase 1 -- under the stripe lock: snapshot every conflicting
      * grant out of the bucket and unlink it.  We MUST NOT call into
      * the session table or send any CB while holding the stripe lock
      * (the session table has its own lock; nesting them creates a
@@ -525,10 +525,10 @@ int deleg_recall_file(struct deleg_table *dt,
     unlock_stripe(dt, fileid);
 
     /*
-     * Phase 2 — outside the stripe lock: for each detached snapshot,
+     * Phase 2 -- outside the stripe lock: for each detached snapshot,
      * find the holder's backchannel via the session table, dup() the
      * cb_conn fd under the session-table lock, then send CB_RECALL on
-     * the dup'd fd.  Per RFC 8881 §10.4, the recall is best-effort:
+     * the dup'd fd.  Per RFC 8881 S10.4, the recall is best-effort:
      * the authoritative contract with the caller is "this delegation
      * is gone", which is already true after Phase 1.  Any send error
      * (ENOTCONN / ETIMEDOUT / EIO / NFS4 status) is logged and
@@ -538,7 +538,7 @@ int deleg_recall_file(struct deleg_table *dt,
     recalled = (int)target_count;
     if (dt->st == NULL) {
         /*
-         * No session table wired — caller intentionally configured
+         * No session table wired -- caller intentionally configured
          * "revoke without CB" mode (the legacy path used by tests
          * and by deployments that have no backchannel).  All grants
          * are already gone from memory + RonDB; nothing more to do.
@@ -557,7 +557,7 @@ int deleg_recall_file(struct deleg_table *dt,
 
         (void)session_for_each_with_cb(dt->st, deleg_cb_lookup_cb, &lc);
         if (!lc.found) {
-            /* Holder has no bound backchannel — silent revoke is
+            /* Holder has no bound backchannel -- silent revoke is
              * the only correct outcome.  The client will discover
              * its delegation is gone on its next OPEN/READ/WRITE
              * via NFS4ERR_BAD_STATEID. */

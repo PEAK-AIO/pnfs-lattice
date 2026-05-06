@@ -2,12 +2,12 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_session.c — Unit tests for session/clientid management.
+ * test_session.c -- Unit tests for session/clientid management.
  *
  * Tests the session.h API directly (EXCHANGE_ID, CREATE_SESSION,
  * DESTROY_SESSION, SEQUENCE), plus a compound integration test
- * that exercises the full EXCHANGE_ID → CREATE_SESSION → SEQUENCE
- * → PUTROOTFH → GETATTR flow.
+ * that exercises the full EXCHANGE_ID -> CREATE_SESSION -> SEQUENCE
+ * -> PUTROOTFH -> GETATTR flow.
  */
 
 #include <stdio.h>
@@ -90,7 +90,7 @@ static const uint8_t owner_bob[] = "bob-mac-client";
 static const uint32_t owner_bob_len = sizeof(owner_bob) - 1;
 
 /* -----------------------------------------------------------------------
- * Test: EXCHANGE_ID — new client
+ * Test: EXCHANGE_ID -- new client
  * ----------------------------------------------------------------------- */
 
 static void test_exchange_id_new_client(void)
@@ -114,9 +114,9 @@ static void test_exchange_id_new_client(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: EXCHANGE_ID — confirmed record + same params returns same clientid
+ * Test: EXCHANGE_ID -- confirmed record + same params returns same clientid
  *
- * RFC 8881 §18.35.4 case 2 ("renewal"): a confirmed record matched on
+ * RFC 8881 S18.35.4 case 2 ("renewal"): a confirmed record matched on
  * co_ownerid + verifier + principal returns the same clientid.
  *
  * Note: prior to commit "compound: EXCHANGE_ID conformance ..." this
@@ -153,7 +153,7 @@ static void test_exchange_id_same_verifier(void)
 				      verifier_a, 0,
 				      &cid2, &seqid, NULL, 0, 0, 0), 0);
 
-	/* Confirmed record + same verifier + same (default) principal →
+	/* Confirmed record + same verifier + same (default) principal ->
 	 * same clientid (case 2). */
 	ASSERT_EQ(cid1, cid2);
 
@@ -161,7 +161,7 @@ static void test_exchange_id_same_verifier(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: EXCHANGE_ID — different verifier → new clientid
+ * Test: EXCHANGE_ID -- different verifier -> new clientid
  * ----------------------------------------------------------------------- */
 
 static void test_exchange_id_new_verifier(void)
@@ -179,14 +179,14 @@ static void test_exchange_id_new_verifier(void)
 				      verifier_b, 0,
 				      &cid2, &seqid, NULL, 0, 0, 0), 0);
 
-	/* Different verifier → new incarnation → different clientid. */
+	/* Different verifier -> new incarnation -> different clientid. */
 	ASSERT_NE(cid1, cid2);
 
 	session_table_destroy(st);
 }
 
 /* -----------------------------------------------------------------------
- * Test: EXCHANGE_ID — two distinct clients
+ * Test: EXCHANGE_ID -- two distinct clients
  * ----------------------------------------------------------------------- */
 
 static void test_exchange_id_two_clients(void)
@@ -210,7 +210,7 @@ static void test_exchange_id_two_clients(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: CREATE_SESSION — basic success
+ * Test: CREATE_SESSION -- basic success
  * ----------------------------------------------------------------------- */
 
 static void test_create_session_basic(void)
@@ -249,7 +249,7 @@ static void test_create_session_basic(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: CREATE_SESSION — invalid clientid
+ * Test: CREATE_SESSION -- invalid clientid
  * ----------------------------------------------------------------------- */
 
 static void test_create_session_stale_clientid(void)
@@ -260,7 +260,7 @@ static void test_create_session_stale_clientid(void)
 
 	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
 
-	/* Bogus clientid → NFS4ERR_STALE_CLIENTID (rc = -1). */
+	/* Bogus clientid -> NFS4ERR_STALE_CLIENTID (rc = -1). */
 	ASSERT_EQ(session_create_session(st, 0xDEADBEEF, 1,
 					 32, 4,
 					 0, 0,
@@ -272,7 +272,7 @@ static void test_create_session_stale_clientid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: CREATE_SESSION — bad seqid
+ * Test: CREATE_SESSION -- bad seqid
  * ----------------------------------------------------------------------- */
 
 static void test_create_session_bad_seqid(void)
@@ -289,7 +289,7 @@ static void test_create_session_bad_seqid(void)
 				      verifier_a, 0,
 				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
-	/* seqid should be 1; use 99 → NFS4ERR_SEQ_MISORDERED (rc = -2). */
+	/* seqid should be 1; use 99 -> NFS4ERR_SEQ_MISORDERED (rc = -2). */
 	ASSERT_EQ(session_create_session(st, clientid, 99,
 					 32, 4,
 					 0, 0,
@@ -301,7 +301,7 @@ static void test_create_session_bad_seqid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: CREATE_SESSION — slot count negotiation
+ * Test: CREATE_SESSION -- slot count negotiation
  * ----------------------------------------------------------------------- */
 
 static void test_create_session_slot_cap(void)
@@ -318,7 +318,7 @@ static void test_create_session_slot_cap(void)
 				      verifier_a, 0,
 				      &clientid, &seqid, NULL, 0, 0, 0), 0);
 
-	/* Request 9999 slots → capped at SESSION_MAX_SLOTS (64). */
+	/* Request 9999 slots -> capped at SESSION_MAX_SLOTS (64). */
 	ASSERT_EQ(session_create_session(st, clientid, seqid,
 					 9999, 4,
 					 0, 0,
@@ -332,7 +332,7 @@ static void test_create_session_slot_cap(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: DESTROY_SESSION — success
+ * Test: DESTROY_SESSION -- success
  * ----------------------------------------------------------------------- */
 
 static void test_destroy_session(void)
@@ -365,7 +365,7 @@ static void test_destroy_session(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: SEQUENCE — valid new request
+ * Test: SEQUENCE -- valid new request
  * ----------------------------------------------------------------------- */
 
 static void test_sequence_valid(void)
@@ -406,7 +406,7 @@ static void test_sequence_valid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: SEQUENCE — replay detection
+ * Test: SEQUENCE -- replay detection
  * ----------------------------------------------------------------------- */
 
 static void test_sequence_replay(void)
@@ -444,7 +444,7 @@ static void test_sequence_replay(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: SEQUENCE — misordered
+ * Test: SEQUENCE -- misordered
  * ----------------------------------------------------------------------- */
 
 static void test_sequence_misordered(void)
@@ -473,7 +473,7 @@ static void test_sequence_misordered(void)
 				    NULL, NULL, NULL, NULL);
 	ASSERT_EQ(rc, 0);
 
-	/* Skip to seq_id = 5 → misordered. */
+	/* Skip to seq_id = 5 -> misordered. */
 	rc = session_sequence_check(st, session_id, 0, 5, 15,
 				    NULL, NULL, NULL, NULL);
 	ASSERT_EQ(rc, -3);  /* NFS4ERR_SEQ_MISORDERED */
@@ -482,7 +482,7 @@ static void test_sequence_misordered(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: SEQUENCE — bad session ID
+ * Test: SEQUENCE -- bad session ID
  * ----------------------------------------------------------------------- */
 
 static void test_sequence_bad_session(void)
@@ -502,7 +502,7 @@ static void test_sequence_bad_session(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: SEQUENCE — bad slot ID
+ * Test: SEQUENCE -- bad slot ID
  * ----------------------------------------------------------------------- */
 
 static void test_sequence_bad_slot(void)
@@ -526,7 +526,7 @@ static void test_sequence_bad_slot(void)
 					 1, /* minorversion */
 					 session_id, &fore, &back, NULL, NULL), 0);
 
-	/* 4 slots → valid 0-3; slot 99 is out of range. */
+	/* 4 slots -> valid 0-3; slot 99 is out of range. */
 	rc = session_sequence_check(st, session_id, 99, 1, 3,
 				    NULL, NULL, NULL, NULL);
 	ASSERT_EQ(rc, -2);  /* NFS4ERR_BADSLOT */
@@ -535,8 +535,8 @@ static void test_sequence_bad_slot(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: Compound integration — full EXCHANGE_ID → CREATE_SESSION →
- *       SEQUENCE → PUTROOTFH → GETATTR flow
+ * Test: Compound integration -- full EXCHANGE_ID -> CREATE_SESSION ->
+ *       SEQUENCE -> PUTROOTFH -> GETATTR flow
  * ----------------------------------------------------------------------- */
 
 static char *make_temp_db_path(void)
@@ -616,7 +616,7 @@ static void test_compound_full_flow(void)
 
 		ASSERT_NE(clientid, 0);
 
-		/* Op 0: CREATE_SESSION (RFC 8881 §18.36 — channel attrs
+		/* Op 0: CREATE_SESSION (RFC 8881 S18.36 -- channel attrs
 		 * must be sized so op_create_session doesn't reject the
 		 * request with NFS4ERR_TOOSMALL).  Use the same defaults
 		 * as a healthy Linux client. */
@@ -689,7 +689,7 @@ static void test_compound_full_flow(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: Compound — SEQUENCE with bad session stops compound
+ * Test: Compound -- SEQUENCE with bad session stops compound
  * ----------------------------------------------------------------------- */
 
 static void test_compound_sequence_bad_session(void)
@@ -710,7 +710,7 @@ static void test_compound_sequence_bad_session(void)
 	cd.cat = db;
 	cd.st = st;
 
-	/* SEQUENCE with bogus session → error, compound stops. */
+	/* SEQUENCE with bogus session -> error, compound stops. */
 	memset(ops, 0, sizeof(ops));
 	ops[0].opnum = OP_SEQUENCE;
 	memset(ops[0].arg.sequence.session_id, 0xFF, SESSION_ID_SIZE);
@@ -734,13 +734,13 @@ static void test_compound_sequence_bad_session(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: Compound — replay returns NFS4ERR_RETRY_UNCACHED_REP
+ * Test: Compound -- replay returns NFS4ERR_RETRY_UNCACHED_REP
  *
- * RFC 5661 §15.1.10.2 / RFC 8881 §2.10.6.2: when the slot's reply is
+ * RFC 5661 S15.1.10.2 / RFC 8881 S2.10.6.2: when the slot's reply is
  * not cached, the server may either (a) reconstruct the reply or (b)
  * return NFS4ERR_RETRY_UNCACHED_REP.  The pnfs-mds session_sequence
  * path takes (b) (driven by pynfs SEQ10b in op_sequence's case 1).
- * NFS4ERR_SEQ_FALSE_RETRY (§15.1.10.6) is reserved for the case where
+ * NFS4ERR_SEQ_FALSE_RETRY (S15.1.10.6) is reserved for the case where
  * the replay's op-array differs from the cached one; we don't track
  * that distinction so we conservatively always return
  * NFS4ERR_RETRY_UNCACHED_REP for the no-cache replay path.
@@ -793,7 +793,7 @@ static void test_compound_replay_seq_false_retry(void)
 	ASSERT_EQ(nres, 3);
 	ASSERT_EQ(res[0].status, NFS4_OK);
 
-	/* Replay: same SEQUENCE(seq_id=1) — compound should stop. */
+	/* Replay: same SEQUENCE(seq_id=1) -- compound should stop. */
 	compound_init(&cd);
 	cd.cat = db;
 	cd.st = st;
@@ -809,10 +809,10 @@ static void test_compound_replay_seq_false_retry(void)
 }
 
 /* -----------------------------------------------------------------------
- * Commit 2 — session_destroy_client (RFC 8881 §18.50)
+ * Commit 2 -- session_destroy_client (RFC 8881 S18.50)
  * ----------------------------------------------------------------------- */
 
-/** DESTROY_CLIENTID on an unknown clientid → -1 (STALE_CLIENTID). */
+/** DESTROY_CLIENTID on an unknown clientid -> -1 (STALE_CLIENTID). */
 static void test_destroy_client_stale(void)
 {
 	struct session_table *st = NULL;
@@ -825,7 +825,7 @@ static void test_destroy_client_stale(void)
 	session_table_destroy(st);
 }
 
-/** DESTROY_CLIENTID on an unconfirmed client (EXCHANGE_ID only) → 0. */
+/** DESTROY_CLIENTID on an unconfirmed client (EXCHANGE_ID only) -> 0. */
 static void test_destroy_client_unconfirmed(void)
 {
 	struct session_table *st = NULL;
@@ -836,14 +836,14 @@ static void test_destroy_client_unconfirmed(void)
 	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
 				      verifier_a, 0,
 				      &clientid, &seqid, NULL, 0, 0, 0), 0);
-	/* Client exists but has no sessions — destroy is allowed. */
+	/* Client exists but has no sessions -- destroy is allowed. */
 	ASSERT_EQ(session_destroy_client(st, clientid), 0);
-	/* Second destroy → STALE_CLIENTID (DESCID8 semantics). */
+	/* Second destroy -> STALE_CLIENTID (DESCID8 semantics). */
 	ASSERT_EQ(session_destroy_client(st, clientid), -1);
 	session_table_destroy(st);
 }
 
-/** DESTROY_CLIENTID with a confirmed session → -2 (CLIENTID_BUSY). */
+/** DESTROY_CLIENTID with a confirmed session -> -2 (CLIENTID_BUSY). */
 static void test_destroy_client_busy(void)
 {
 	struct session_table *st = NULL;
@@ -863,7 +863,7 @@ static void test_destroy_client_busy(void)
 					 1,
 					 session_id, &fore, &back,
 					 NULL, NULL), 0);
-	/* Confirmed client owns the session → BUSY (DESCID5/6). */
+	/* Confirmed client owns the session -> BUSY (DESCID5/6). */
 	ASSERT_EQ(session_destroy_client(st, clientid), -2);
 	/* Tear down the session, then destroy succeeds. */
 	ASSERT_EQ(session_destroy_session(st, session_id), 0);
@@ -873,12 +873,12 @@ static void test_destroy_client_busy(void)
 }
 
 /* -----------------------------------------------------------------------
- * Commit 3 — op_create_session argument validation (RFC 8881 §18.36.3)
+ * Commit 3 -- op_create_session argument validation (RFC 8881 S18.36.3)
  *
  * The compound-level handler must reject:
- *   - csa_flags reserved bits (§18.36.1)        → NFS4ERR_INVAL
- *   - too-small ca_max{request,response}size  → NFS4ERR_TOOSMALL
- *   - zero ca_max{operations,requests}        → NFS4ERR_TOOSMALL
+ *   - csa_flags reserved bits (S18.36.1)        -> NFS4ERR_INVAL
+ *   - too-small ca_max{request,response}size  -> NFS4ERR_TOOSMALL
+ *   - zero ca_max{operations,requests}        -> NFS4ERR_TOOSMALL
  * BEFORE calling session_create_session, so a rejected request leaves
  * the slot table untouched (CSESS29 sends 10000 of these in a row).
  * ----------------------------------------------------------------------- */
@@ -987,7 +987,7 @@ static void test_create_session_fore_maxops_zero(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test: Compound — session-bound op without SEQUENCE
+ * Test: Compound -- session-bound op without SEQUENCE
  * ----------------------------------------------------------------------- */
 
 static void test_compound_op_without_sequence(void)
@@ -1004,9 +1004,9 @@ static void test_compound_op_without_sequence(void)
 	db = open_test_catalogue(); VERIFY(db != NULL);
 	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
 
-	/* Send PUTROOTFH without preceding SEQUENCE — should be rejected.
+	/* Send PUTROOTFH without preceding SEQUENCE -- should be rejected.
 	 * The dispatch's session-binding rule fires only when
-	 * minorversion >= 1 (RFC 8881 §2.10.6.2 is v4.1-only); set it
+	 * minorversion >= 1 (RFC 8881 S2.10.6.2 is v4.1-only); set it
 	 * explicitly since compound_init zero-initialises minorversion. */
 	compound_init(&cd);
 	cd.cat = db;
@@ -1058,12 +1058,12 @@ int main(void)
 	RUN_TEST(test_compound_replay_seq_false_retry);
 	RUN_TEST(test_compound_op_without_sequence);
 
-	/* Commit 2 — session_destroy_client (RFC 8881 §18.50) */
+	/* Commit 2 -- session_destroy_client (RFC 8881 S18.50) */
 	RUN_TEST(test_destroy_client_stale);
 	RUN_TEST(test_destroy_client_unconfirmed);
 	RUN_TEST(test_destroy_client_busy);
 
-	/* Commit 3 — op_create_session validation (RFC 8881 §18.36.3) */
+	/* Commit 3 -- op_create_session validation (RFC 8881 S18.36.3) */
 	RUN_TEST(test_create_session_reserved_flags);
 	RUN_TEST(test_create_session_fore_maxreq_too_small);
 	RUN_TEST(test_create_session_back_maxreq_too_small);

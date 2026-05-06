@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout.c — LAYOUTGET / LAYOUTRETURN / LAYOUTCOMMIT handlers.
+ * layout.c -- LAYOUTGET / LAYOUTRETURN / LAYOUTCOMMIT handlers.
  *
  * Returns flex file layouts (RFC 8435) to pNFS clients.
- * See docs/architecture.md §8 for layout encoding details.
+ * See docs/architecture.md S8 for layout encoding details.
  */
 
 #include <stdlib.h>
@@ -57,8 +57,8 @@ enum mds_status layout_return(uint64_t fileid,
     /* TODO: implement
      * 1. Lookup layout_state record
      * 2. Process layoutreturn body:
-     *    - If ff_ioerr4 present → handle DS errors
-     *    - If ff_iostats4 present → update stats
+     *    - If ff_ioerr4 present -> handle DS errors
+     *    - If ff_iostats4 present -> update stats
      * 3. Remove layout_state record from catalogue
      * 4. Replicated commit
      */

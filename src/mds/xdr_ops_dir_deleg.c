@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * xdr_ops_dir_deleg.c — RFC 8881 §18.39 GET_DIR_DELEGATION codec.
+ * xdr_ops_dir_deleg.c -- RFC 8881 S18.39 GET_DIR_DELEGATION codec.
  *
  * Phase 8a: wire-format only.  The dispatch handler returns
  * NFS4ERR_DIRDELEG_UNAVAIL unconditionally, so the OK-branch of the
@@ -12,7 +12,7 @@
  *
  * The argument decoder must consume *every* byte of the GDD arg list
  * even when we intend to fail; otherwise the compound decoder cannot
- * continue to the next op (RFC 8881 §2.10.6.4).
+ * continue to the next op (RFC 8881 S2.10.6.4).
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -23,7 +23,7 @@
 #include "compound.h"
 
 /* -----------------------------------------------------------------------
- * Decoder — RFC 8881 §18.39.1
+ * Decoder -- RFC 8881 S18.39.1
  *
  *   struct GET_DIR_DELEGATION4args {
  *       -- CURRENT_FH: delegated directory --
@@ -72,7 +72,7 @@ bool decode_op_get_dir_delegation(XDR *xdrs, struct nfs4_op *op)
 }
 
 /* -----------------------------------------------------------------------
- * Result encoder — RFC 8881 §18.39.2.
+ * Result encoder -- RFC 8881 S18.39.2.
  *
  * Wire layout when the outer op status is NFS4_OK (the only path
  * this encoder handles; other outer statuses get a status-only body
@@ -91,7 +91,7 @@ bool decode_op_get_dir_delegation(XDR *xdrs, struct nfs4_op *op)
  *   }
  *
  * The outer op status stays NFS4_OK in both cases so the compound
- * does not halt — halting would strip any trailing GETATTR the
+ * does not halt -- halting would strip any trailing GETATTR the
  * kernel bundled after GDD and surface as EIO on the client.
  * ----------------------------------------------------------------------- */
 bool encode_res_get_dir_delegation(XDR *xdrs, const struct nfs4_result *r)

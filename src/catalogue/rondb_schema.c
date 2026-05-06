@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rondb_schema.c — RonDB serialisation implementations.
+ * rondb_schema.c -- RonDB serialisation implementations.
  *
  * Pure C, no NDB dependency.  Reuses FDB endian helpers for
  * big-endian wire format.

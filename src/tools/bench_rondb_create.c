@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * bench_rondb_create.c — Micro-benchmark: raw RonDB file create latency.
+ * bench_rondb_create.c -- Micro-benchmark: raw RonDB file create latency.
  *
  * Creates N files directly via the RonDB catalogue layer (no NFS, no XDR,
  * no RPC, no compound dispatch).  Measures the bare NDB transaction cost

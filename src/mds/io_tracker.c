@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * io_tracker.c — Per-file I/O frequency tracker.
+ * io_tracker.c -- Per-file I/O frequency tracker.
  *
  * Open-addressing hash table with atomic per-bucket counters.
  * record()/bump() take a read lock (concurrent updates OK via atomics).
@@ -100,7 +100,7 @@ static struct iot_bucket *find_or_insert(struct io_tracker *iot,
                                            memory_order_relaxed);
                 return b;
             }
-            /* Someone else claimed it — re-check. */
+            /* Someone else claimed it -- re-check. */
             if (atomic_load_explicit(&b->fileid,
                                       memory_order_relaxed) == fileid) {
                 return b;
@@ -108,7 +108,7 @@ static struct iot_bucket *find_or_insert(struct io_tracker *iot,
         }
         idx = (idx + 1) & iot->mask;
     }
-    return NULL; /* Table full — should not happen. */
+    return NULL; /* Table full -- should not happen. */
 }
 
 /* ----------------------------------------------------------------------- *
@@ -201,7 +201,7 @@ void io_tracker_record(struct io_tracker *iot, uint64_t fileid,
 
     pthread_rwlock_rdlock(&iot->lock);
 
-    /* Check load factor — if near limit, upgrade to write lock and resize. */
+    /* Check load factor -- if near limit, upgrade to write lock and resize. */
     uint32_t cnt = atomic_load_explicit(&iot->count, memory_order_relaxed);
     if (cnt * 100 >= iot->capacity * IOT_LOAD_FACTOR) {
         pthread_rwlock_unlock(&iot->lock);

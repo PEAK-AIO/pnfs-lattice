@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * quota.h — User/Group quota enforcement (architecture.md §4.5 V1).
+ * quota.h -- User/Group quota enforcement (architecture.md S4.5 V1).
  *
  * V1 scope: per-UID and per-GID quotas.  Directory (subtree) quotas
  * are deferred to V2 (hard-link 1:N and rename subtree rescan).
@@ -34,7 +34,7 @@ struct mds_catalogue;
 #define MDS_QUOTA_DEFAULT_GRACE_SEC  (7U * 24U * 3600U)
 
 /* -----------------------------------------------------------------------
- * Quota rule — persisted in catalogue (40 bytes)
+ * Quota rule -- persisted in catalogue (40 bytes)
  * ----------------------------------------------------------------------- */
 
 struct mds_quota_rule {
@@ -47,7 +47,7 @@ struct mds_quota_rule {
 };
 
 /* -----------------------------------------------------------------------
- * Quota usage — persisted in catalogue (32 bytes)
+ * Quota usage -- persisted in catalogue (32 bytes)
  * ----------------------------------------------------------------------- */
 
 struct mds_quota_usage {
@@ -58,7 +58,7 @@ struct mds_quota_usage {
 };
 
 /* -----------------------------------------------------------------------
- * Quota context (stateless — wraps catalogue handle)
+ * Quota context (stateless -- wraps catalogue handle)
  * ----------------------------------------------------------------------- */
 
 struct mds_quota_ctx;
@@ -165,7 +165,7 @@ enum mds_status mds_quota_del(struct mds_quota_ctx *ctx,
  * @param avail  Receives available bytes (total - used).
  * @param free   Receives free bytes (same as avail for V1).
  * @param total  Receives total quota bytes.
- * @return MDS_OK (always succeeds; unlimited → UINT64_MAX).
+ * @return MDS_OK (always succeeds; unlimited -> UINT64_MAX).
  */
 enum mds_status mds_quota_space_avail(struct mds_quota_ctx *ctx,
                                       uint64_t uid, uint64_t gid,

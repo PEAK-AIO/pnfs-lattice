@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_open_state.c — Unit tests for OPEN/CLOSE state management.
+ * test_open_state.c -- Unit tests for OPEN/CLOSE state management.
  *
  * Part 1: Direct open_state.h API tests (stateid alloc, share conflict,
  *          close, double-close, stateid lookup).
@@ -229,7 +229,7 @@ static struct nfs4_op mk_close(const struct nfs4_stateid *sid)
  * Part 1: Direct open_state.h API tests
  * ----------------------------------------------------------------------- */
 
-/** Basic open — allocates a valid stateid. */
+/** Basic open -- allocates a valid stateid. */
 static void test_api_open_basic(void)
 {
 	struct open_state_table *ot = NULL;
@@ -248,7 +248,7 @@ static void test_api_open_basic(void)
 	open_state_table_destroy(ot);
 }
 
-/** Two opens on the same file with DENY_NONE — no conflict. */
+/** Two opens on the same file with DENY_NONE -- no conflict. */
 static void test_api_open_no_conflict(void)
 {
 	struct open_state_table *ot = NULL;
@@ -287,7 +287,7 @@ static void test_api_share_conflict_deny_write(void)
 			     OPEN4_SHARE_DENY_WRITE, &sid1);
 	ASSERT_EQ(rc, 0);
 
-	/* Second open tries to write — conflicts with deny_write. */
+	/* Second open tries to write -- conflicts with deny_write. */
 	rc = open_state_open(ot, 200, NULL, 0, 42,
 			     OPEN4_SHARE_ACCESS_WRITE,
 			     OPEN4_SHARE_DENY_NONE, &sid2);
@@ -310,7 +310,7 @@ static void test_api_share_conflict_deny_read(void)
 			     OPEN4_SHARE_DENY_NONE, &sid1);
 	ASSERT_EQ(rc, 0);
 
-	/* Second open denies read — conflicts with first's access_read. */
+	/* Second open denies read -- conflicts with first's access_read. */
 	rc = open_state_open(ot, 200, NULL, 0, 42,
 			     OPEN4_SHARE_ACCESS_WRITE,
 			     OPEN4_SHARE_DENY_READ, &sid2);
@@ -319,7 +319,7 @@ static void test_api_share_conflict_deny_read(void)
 	open_state_table_destroy(ot);
 }
 
-/** Different files — no conflict even with DENY_BOTH. */
+/** Different files -- no conflict even with DENY_BOTH. */
 static void test_api_no_conflict_different_files(void)
 {
 	struct open_state_table *ot = NULL;
@@ -333,7 +333,7 @@ static void test_api_no_conflict_different_files(void)
 			     OPEN4_SHARE_DENY_BOTH, &sid1);
 	ASSERT_EQ(rc, 0);
 
-	/* Different fileid — no conflict. */
+	/* Different fileid -- no conflict. */
 	rc = open_state_open(ot, 200, NULL, 0, 99,
 			     OPEN4_SHARE_ACCESS_BOTH,
 			     OPEN4_SHARE_DENY_BOTH, &sid2);
@@ -342,7 +342,7 @@ static void test_api_no_conflict_different_files(void)
 	open_state_table_destroy(ot);
 }
 
-/** Close — returns seqid+1 stateid. */
+/** Close -- returns seqid+1 stateid. */
 static void test_api_close_basic(void)
 {
 	struct open_state_table *ot = NULL;
@@ -364,7 +364,7 @@ static void test_api_close_basic(void)
 	open_state_table_destroy(ot);
 }
 
-/** Close invalid stateid — returns error. */
+/** Close invalid stateid -- returns error. */
 static void test_api_close_invalid_stateid(void)
 {
 	struct open_state_table *ot = NULL;
@@ -380,7 +380,7 @@ static void test_api_close_invalid_stateid(void)
 	open_state_table_destroy(ot);
 }
 
-/** Double close — second close fails. */
+/** Double close -- second close fails. */
 static void test_api_double_close(void)
 {
 	struct open_state_table *ot = NULL;
@@ -397,14 +397,14 @@ static void test_api_double_close(void)
 	rc = open_state_close(ot, 100, &sid, &close_sid);
 	ASSERT_EQ(rc, 0);
 
-	/* Second close with original stateid — state gone. */
+	/* Second close with original stateid -- state gone. */
 	rc = open_state_close(ot, 100, &sid, &close_sid);
 	ASSERT_EQ(rc, -1);
 
 	open_state_table_destroy(ot);
 }
 
-/** Close with wrong seqid — returns error. */
+/** Close with wrong seqid -- returns error. */
 static void test_api_close_wrong_seqid(void)
 {
 	struct open_state_table *ot = NULL;
@@ -431,7 +431,7 @@ static void test_api_close_wrong_seqid(void)
 	open_state_table_destroy(ot);
 }
 
-/** Close removes share reservation — re-open should succeed. */
+/** Close removes share reservation -- re-open should succeed. */
 static void test_api_close_releases_share(void)
 {
 	struct open_state_table *ot = NULL;
@@ -446,7 +446,7 @@ static void test_api_close_releases_share(void)
 			     OPEN4_SHARE_DENY_BOTH, &sid1);
 	ASSERT_EQ(rc, 0);
 
-	/* Second open — blocked. */
+	/* Second open -- blocked. */
 	rc = open_state_open(ot, 200, NULL, 0, 42,
 			     OPEN4_SHARE_ACCESS_READ,
 			     OPEN4_SHARE_DENY_NONE, &sid2);
@@ -465,7 +465,7 @@ static void test_api_close_releases_share(void)
 	open_state_table_destroy(ot);
 }
 
-/** open_state_find — copies state for open, returns -1 after close. */
+/** open_state_find -- copies state for open, returns -1 after close. */
 static void test_api_find(void)
 {
 	struct open_state_table *ot = NULL;
@@ -493,7 +493,7 @@ static void test_api_find(void)
 	open_state_table_destroy(ot);
 }
 
-/** Close with wrong clientid (different owner) — returns error. */
+/** Close with wrong clientid (different owner) -- returns error. */
 static void test_api_close_wrong_owner(void)
 {
 	struct open_state_table *ot = NULL;
@@ -507,7 +507,7 @@ static void test_api_close_wrong_owner(void)
 			     OPEN4_SHARE_DENY_NONE, &sid);
 	ASSERT_EQ(rc, 0);
 
-	/* Close with different clientid — wrong owner. */
+	/* Close with different clientid -- wrong owner. */
 	rc = open_state_close(ot, 999, &sid, &close_sid);
 	ASSERT_EQ(rc, -1); /* NFS4ERR_BAD_STATEID */
 
@@ -565,8 +565,8 @@ static void test_api_different_open_owners(void)
 	open_state_table_destroy(ot);
 }
 
-/** Bug 2 regression — same-owner re-OPEN MUST bump seqid and merge share
- * modes (RFC 8881 §8.2.2 + §9.1.4 + §18.16.4).
+/** Bug 2 regression -- same-owner re-OPEN MUST bump seqid and merge share
+ * modes (RFC 8881 S8.2.2 + S9.1.4 + S18.16.4).
  *
  * Prior behaviour was to issue a fresh stateid each time, leaking server
  * state and breaking pynfs OPEN2 (testOpenAgain), which validates that
@@ -589,7 +589,7 @@ static void test_api_reopen_same_owner_bumps_seqid(void)
 	ASSERT_EQ(rc, 0);
 	ASSERT_EQ(sid1.seqid, (uint32_t)1);
 
-	/* Same {clientid, open_owner, fileid} — RFC mandates we return the
+	/* Same {clientid, open_owner, fileid} -- RFC mandates we return the
 	 * existing stateid (same `other`) with seqid bumped. */
 	rc = open_state_open(ot, 100, owner, sizeof(owner) - 1, 42,
 			     OPEN4_SHARE_ACCESS_WRITE,
@@ -625,7 +625,7 @@ static void test_api_reopen_same_owner_bumps_seqid(void)
  * Part 2: Compound integration tests
  * ----------------------------------------------------------------------- */
 
-/** OPEN (CLAIM_NULL, create) + GETATTR + CLOSE — full flow. */
+/** OPEN (CLAIM_NULL, create) + GETATTR + CLOSE -- full flow. */
 static void test_compound_open_create_close(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -743,7 +743,7 @@ static void test_compound_open_existing(void)
 	free(path);
 }
 
-/** OPEN nonexistent file without create — NFS4ERR_NOENT. */
+/** OPEN nonexistent file without create -- NFS4ERR_NOENT. */
 static void test_compound_open_noent(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -777,7 +777,7 @@ static void test_compound_open_noent(void)
 	free(path);
 }
 
-/** OPEN guarded create on existing file — NFS4ERR_EXIST. */
+/** OPEN guarded create on existing file -- NFS4ERR_EXIST. */
 static void test_compound_open_guarded_exist(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -817,7 +817,7 @@ static void test_compound_open_guarded_exist(void)
 		ASSERT_EQ(n, (uint32_t)1);
 	}
 
-	/* Guarded create on same name — should fail. */
+	/* Guarded create on same name -- should fail. */
 	compound_init(&cd);
 	cd.cat = db;
 	cd.ot = ot;
@@ -849,9 +849,9 @@ static void test_compound_open_guarded_exist(void)
 	free(path);
 }
 
-/** Share conflict via compound — deny_write blocks write access.
+/** Share conflict via compound -- deny_write blocks write access.
  *
- * RFC 8881 §8.2.2 / §9.1.4: a same-owner re-OPEN merges share modes
+ * RFC 8881 S8.2.2 / S9.1.4: a same-owner re-OPEN merges share modes
  * rather than conflicting.  The two compounds below carry the same
  * test-default clientid (0) and an empty open_owner, so to exercise
  * the share-conflict path between *distinct* openers we patch the
@@ -888,7 +888,7 @@ static void test_compound_share_conflict(void)
 	ASSERT_EQ(n, (uint32_t)3);
 	ASSERT_EQ(res[2].status, NFS4_OK);
 
-	/* Second open: write, deny_none, owner B — distinct opener,
+	/* Second open: write, deny_none, owner B -- distinct opener,
 	 * so the file's existing DENY_WRITE applies and this MUST
 	 * return NFS4ERR_SHARE_DENIED. */
 	compound_init(&cd);
@@ -911,7 +911,7 @@ static void test_compound_share_conflict(void)
 	free(path);
 }
 
-/** OPEN CLAIM_FH — open by current file handle. */
+/** OPEN CLAIM_FH -- open by current file handle. */
 static void test_compound_open_claim_fh(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -968,7 +968,7 @@ static void test_compound_open_claim_fh(void)
 	free(path);
 }
 
-/** CLOSE with bad stateid — NFS4ERR_BAD_STATEID. */
+/** CLOSE with bad stateid -- NFS4ERR_BAD_STATEID. */
 static void test_compound_close_bad_stateid(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -1003,7 +1003,7 @@ static void test_compound_close_bad_stateid(void)
 	free(path);
 }
 
-/** OPEN + CLOSE + re-OPEN — share released, new open succeeds. */
+/** OPEN + CLOSE + re-OPEN -- share released, new open succeeds. */
 static void test_compound_reopen_after_close(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -1064,7 +1064,7 @@ static void test_compound_reopen_after_close(void)
 	free(path);
 }
 
-/** OPEN on directory — NFS4ERR_ISDIR. */
+/** OPEN on directory -- NFS4ERR_ISDIR. */
 static void test_compound_open_directory(void)
 {
 	struct mds_catalogue *db = NULL;
@@ -1089,7 +1089,7 @@ static void test_compound_open_directory(void)
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
 
-	/* Try to OPEN the directory — should fail. */
+	/* Try to OPEN the directory -- should fail. */
 	compound_init(&cd);
 	cd.cat = db;
 	cd.ot = ot;

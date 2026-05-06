@@ -2,13 +2,13 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_shard.c — Request-local shard routing for metadata operations.
+ * mds_shard.c -- Request-local shard routing for metadata operations.
  *
  * Implements the shard map: an array of heap-allocated mds_shard pointers
  * sorted by descending path length for longest-prefix-first lookup.
  * Shard pointers are stable across add/remove of other shards.
  *
- * See docs/architecture.md §4.7.7 for design context.
+ * See docs/architecture.md S4.7.7 for design context.
  */
 
 #include <stdlib.h>
@@ -160,7 +160,7 @@ static void free_shard(struct mds_shard *s)
 		commit_queue_destroy(s->cq);
 		s->cq = NULL;
 	}
-	/* Free catalogue wrapper (struct only — db is freed above or
+	/* Free catalogue wrapper (struct only -- db is freed above or
 	 * by the caller for non-owned shards). */
 	free(s->cat);
 	s->cat = NULL;
@@ -395,7 +395,7 @@ const struct mds_shard *mds_shard_map_lookup(const struct mds_shard_map *map,
 
 	pthread_rwlock_rdlock((pthread_rwlock_t *)&map->lock);
 
-	/* Linear scan — entries are sorted longest-first, so the first
+	/* Linear scan -- entries are sorted longest-first, so the first
 	 * match is the longest-prefix match. */
 	for (i = 0; i < map->count; i++) {
 		if (is_path_prefix(map->shards[i]->subtree_path, path)) {
@@ -518,7 +518,7 @@ static int local_mig_inode_cb(const struct mig_inode_chunk *chunk, void *arg)
 		return -1;
 	}
 
-	/* Record fileid → shard mapping in root-global index. */
+	/* Record fileid -> shard mapping in root-global index. */
 	if (ctx->root_cat != NULL) {
 		(void)mds_cat_shard_fileid_put(ctx->root_cat, NULL,
 					      chunk->fileid,

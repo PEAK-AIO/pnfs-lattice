@@ -2,8 +2,8 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_layout_recall.c — Tests for layout recall coordinator and
- * LAYOUTERROR XDR decode (RFC 7862 §15.6).
+ * test_layout_recall.c -- Tests for layout recall coordinator and
+ * LAYOUTERROR XDR decode (RFC 7862 S15.6).
  *
  * Covers:
  *   1. Recall coordinator init/destroy lifecycle.
@@ -266,7 +266,7 @@ static void test_layouterror_struct(void)
 }
 
 /* -----------------------------------------------------------------------
- * Mock CB server thread — reads one RPC record, sends a success reply
+ * Mock CB server thread -- reads one RPC record, sends a success reply
  * ----------------------------------------------------------------------- */
 
 struct mock_cb_server_args {
@@ -438,7 +438,7 @@ static void *mock_cb_server_thread(void *arg)
      */
     uint8_t reply[40];
     uint32_t *rp = (uint32_t *)reply;
-    rp[0] = xid;                    /* xid — network order from client */
+    rp[0] = xid;                    /* xid -- network order from client */
     rp[1] = htonl(1);               /* msg_type = REPLY */
     rp[2] = htonl(0);               /* reply_stat = MSG_ACCEPTED */
     rp[3] = htonl(0);               /* auth flavor = AUTH_NONE */
@@ -594,7 +594,7 @@ static void test_recall_cb_fail_still_revokes(void)
                                      1, /* minorversion */
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
-    /* No bind_conn — cb_conn is NULL, so CB will be skipped. */
+    /* No bind_conn -- cb_conn is NULL, so CB will be skipped. */
 
     layout_recall_set_session_table(lr, st);
 
@@ -610,7 +610,7 @@ static void test_recall_cb_fail_still_revokes(void)
     ASSERT_EQ(mst, MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    /* Fire recall — CB will fail (no cb_conn), but revoke must succeed. */
+    /* Fire recall -- CB will fail (no cb_conn), but revoke must succeed. */
     ASSERT_EQ(layout_recall_for_ds(lr, 8), 0);
 
     /* Layout must be revoked. */
@@ -833,11 +833,11 @@ static void test_byte_range_recall_dedupes_clientid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 12: Byte-range conflict recall — transient CB status skips
+ * Test 12: Byte-range conflict recall -- transient CB status skips
  * the preemptive revoke, leaving the layout-state row intact so the
  * client's natural LAYOUTRETURN cleans up.
  *
- * RFC 5661 §20.4.2.1 / §15.1.10.10 — NFS4ERR_RECALLCONFLICT (10061)
+ * RFC 5661 S20.4.2.1 / S15.1.10.10 -- NFS4ERR_RECALLCONFLICT (10061)
  * means "client has I/O in flight, will return on completion";
  * NFS4ERR_DELAY (10008) is the equivalent generic "server please retry"
  * status.  The MDS MUST NOT revoke on either, or it will race the
@@ -916,7 +916,7 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
 
     /*
      * Critical assertion: the layout-state row MUST still exist on
-     * the catalogue.  RFC 5661 §20.4.2.1 says the client will send
+     * the catalogue.  RFC 5661 S20.4.2.1 says the client will send
      * LAYOUTRETURN once its I/O drains; if we revoked here the
      * subsequent LAYOUTRETURN would hit NFS4ERR_BAD_STATEID and the
      * client would spin retransmitting.
@@ -940,9 +940,9 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 13: Byte-range conflict recall — NFS4ERR_DELAY also skips
+ * Test 13: Byte-range conflict recall -- NFS4ERR_DELAY also skips
  * revoke (transient sibling of NFS4ERR_RECALLCONFLICT, RFC 5661
- * §20.4.2.1).
+ * S20.4.2.1).
  * ----------------------------------------------------------------------- */
 
 static void test_byte_range_recall_skip_revoke_on_delay(void)
@@ -1006,7 +1006,7 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
     ASSERT_EQ(recalled, 1);
     ASSERT_EQ(mock.received, 1);
 
-    /* Layout MUST survive the recall — NFS4ERR_DELAY is transient. */
+    /* Layout MUST survive the recall -- NFS4ERR_DELAY is transient. */
     {
         bool has_layout = false;
         enum mds_status mst;
@@ -1026,7 +1026,7 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 14: Byte-range conflict recall — a TERMINAL CB error (e.g.
+ * Test 14: Byte-range conflict recall -- a TERMINAL CB error (e.g.
  * NFS4ERR_BADSESSION) still triggers the authoritative revoke.  This
  * is the negative complement of the two transient-skip tests above.
  * ----------------------------------------------------------------------- */
@@ -1096,7 +1096,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
      * With the send-only CB model (no recv on the shared fd), the
      * recall coordinator never sees the client's terminal status.
      * cb_status == 0 ("send succeeded") is treated as transient,
-     * so the layout row is preserved — the client's natural
+     * so the layout row is preserved -- the client's natural
      * LAYOUTRETURN cleans it up.  The unlink path has its own
      * forced-revoke logic that does not depend on CB status.
      */
@@ -1118,7 +1118,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     printf("  PASS: test_byte_range_recall_revokes_on_terminal_status\n");
 }
 /* -----------------------------------------------------------------------
- * Test 15: Byte-range conflict recall — NFS4ERR_NOMATCHING_LAYOUT is
+ * Test 15: Byte-range conflict recall -- NFS4ERR_NOMATCHING_LAYOUT is
  * terminal and must not be confused with NFS4ERR_RECALLCONFLICT.
  * RFC 5661/RFC 8881 assign NOMATCHING_LAYOUT=10060 and
  * RECALLCONFLICT=10061; a regression in the enum used 10060 for

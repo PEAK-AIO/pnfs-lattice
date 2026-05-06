@@ -2,12 +2,12 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_prealloc_batch.c — Phase C of docs/hpc-nto1-plan.md.
+ * test_ds_prealloc_batch.c -- Phase C of docs/hpc-nto1-plan.md.
  *
  * Tests the wide pre-warm batch API (ds_prealloc_batch + result
- * destroy).  Coverage matches the master plan §8 unit-test list:
+ * destroy).  Coverage matches the master plan S8 unit-test list:
  *
- *   - happy path 1×1, 4×1, 8×1
+ *   - happy path 1x1, 4x1, 8x1
  *   - strict_unique_ds rejects when online_count < stripe_count
  *     and creates ZERO DS files (no rollback work needed)
  *   - FH capture failure (no proxy + synthetic FH disabled) returns
@@ -157,7 +157,7 @@ static void test_invalid_args(void)
 }
 
 /* -------------------------------------------------------------------
- * Test 2: happy path 1×1 with synthetic FH
+ * Test 2: happy path 1x1 with synthetic FH
  * ------------------------------------------------------------------- */
 
 static void test_happy_1x1(void)
@@ -188,7 +188,7 @@ static void test_happy_1x1(void)
 }
 
 /* -------------------------------------------------------------------
- * Test 3: happy path 4×1 — verifies parallel FH capture and the
+ * Test 3: happy path 4x1 -- verifies parallel FH capture and the
  * deterministic spread (no two stripes on the same DS when
  * compat_count >= stripe_count).
  * ------------------------------------------------------------------- */
@@ -249,7 +249,7 @@ static void test_strict_unique_underflow(void)
 
 /* -------------------------------------------------------------------
  * Test 5: FH-capture failure rolls back.  No proxy attached and
- * synthetic-FH knob disabled — every worker hits the !proxy branch
+ * synthetic-FH knob disabled -- every worker hits the !proxy branch
  * and signals first_error, so the batch must return NOSPC and free
  * the entries buffer (no leak; valgrind exercises this in qa-check).
  * ------------------------------------------------------------------- */
@@ -274,7 +274,7 @@ static void test_fh_capture_failure_rolls_back(void)
 }
 
 /* -------------------------------------------------------------------
- * Test 6: back-to-back batches — second call with the same key
+ * Test 6: back-to-back batches -- second call with the same key
  * still returns deterministic placements because the plan cache
  * preserves the ds_id ordering.  We don't assert on the literal
  * cache hit (no metric exposed), but the spread must be consistent
@@ -301,7 +301,7 @@ static void test_repeat_same_key(void)
     for (uint32_t i = 0; i < 4; i++) {
         ASSERT_EQ(r1.entries[i].ds_id, r2.entries[i].ds_id);
     }
-    /* Fileids must differ — every batch allocates a fresh one. */
+    /* Fileids must differ -- every batch allocates a fresh one. */
     ASSERT_NE(r1.fileid, r2.fileid);
 
     ds_prealloc_batch_result_destroy(&r1);

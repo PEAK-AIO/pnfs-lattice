@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * subtree_map.h — Subtree ownership map and fs_locations referrals.
+ * subtree_map.h -- Subtree ownership map and fs_locations referrals.
  */
 
 #ifndef SUBTREE_MAP_H
@@ -55,7 +55,7 @@ struct mds_tls_ctx;
  * Subtree change callback
  *
  * Fired by the etcd watch handler on PUT/DELETE of subtree entries.
- * Informational — must not call back into subtree_map (deadlock).
+ * Informational -- must not call back into subtree_map (deadlock).
  * ----------------------------------------------------------------------- */
 
 typedef void (*subtree_change_cb)(const char *path, bool exists, void *arg);
@@ -310,7 +310,7 @@ enum mds_status subtree_map_take_over(struct subtree_map *map,
 /* -----------------------------------------------------------------------
  * Per-subtree operation counters (advisory)
  *
- * Counters are advisory — they track resolved subtree ownership,
+ * Counters are advisory -- they track resolved subtree ownership,
  * not transient path strings.  Approximate due to concurrent access.
  * ----------------------------------------------------------------------- */
 

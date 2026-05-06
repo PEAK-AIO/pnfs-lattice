@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * open_state.c — NFSv4.1 open state and stateid management.
+ * open_state.c -- NFSv4.1 open state and stateid management.
  *
  * Data structures:
  *   - Stateid hash table: chained, indexed by the 12-byte "other" field.
@@ -41,7 +41,7 @@
 #define OPEN_STATE_LOCK_STRIPES 16
 
 /* -----------------------------------------------------------------------
- * Per-file head node — tracks all opens on a given fileid
+ * Per-file head node -- tracks all opens on a given fileid
  * ----------------------------------------------------------------------- */
 
 struct file_opens {
@@ -214,7 +214,7 @@ static void maybe_free_file_opens(struct open_state_table *ot,
 /* -----------------------------------------------------------------------
  * Internal: share reservation conflict check
  *
- * RFC 8881 §9.1.1: A new OPEN conflicts if:
+ * RFC 8881 S9.1.1: A new OPEN conflicts if:
  *   (new share_access) & (existing share_deny) != 0, OR
  *   (existing share_access) & (new share_deny) != 0.
  * ----------------------------------------------------------------------- */
@@ -247,9 +247,9 @@ static bool share_conflict(const struct file_opens *fo,
  * upgraded merged reservation against it would be a self-conflict
  * (e.g. existing access=WRITE/deny=READ + new access=READ/deny=NONE
  * merges to access=READ|WRITE/deny=READ, and the chain's existing
- * deny=READ would alias the merged access=READ).  RFC 5661 §9.1.1
+ * deny=READ would alias the merged access=READ).  RFC 5661 S9.1.1
  * defines share-conflict over distinct opens; same-owner upgrades are
- * scoped per RFC 8881 §8.2.2 / §9.1.4. */
+ * scoped per RFC 8881 S8.2.2 / S9.1.4. */
 static bool share_conflict_excluding(const struct file_opens *fo,
                                      const struct nfs4_open_state *skip,
                                      uint32_t new_access,
@@ -460,7 +460,7 @@ static int rondb_share_check_cb(const struct mds_coord_open_row *row,
 {
     struct rondb_share_check_ctx *ctx = arg;
 
-    /* RFC 8881 §9.1: deny modes vs access modes. */
+    /* RFC 8881 S9.1: deny modes vs access modes. */
     if ((row->share_deny & OPEN4_SHARE_DENY_READ) &&
         (ctx->share_access & OPEN4_SHARE_ACCESS_READ)) {
         ctx->conflict = true;
@@ -516,7 +516,7 @@ int open_state_open(struct open_state_table *ot,
     file_lock_idx = lock_stripe(fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
 
-    /* RFC 8881 §8.2.2 + §9.1.4 + §18.16.4: a subsequent OPEN by the
+    /* RFC 8881 S8.2.2 + S9.1.4 + S18.16.4: a subsequent OPEN by the
      * same {clientid, open_owner} for the same file MUST return the
      * existing open stateid with seqid bumped and share_access /
      * share_deny upgraded to the union of all OPENs by that owner.
@@ -563,7 +563,7 @@ int open_state_open(struct open_state_table *ot,
         pthread_rwlock_wrlock(
             &ot->stateid_locks[stateid_lock_idx]);
 
-        /* RFC 8881 §8.2.2: bump seqid by one; the value 0 is
+        /* RFC 8881 S8.2.2: bump seqid by one; the value 0 is
          * reserved, so 0xFFFFFFFF wraps to 1 (not 0). */
         uint32_t next_seqid = existing->stateid.seqid + 1U;
         if (next_seqid == 0U) {
@@ -723,19 +723,19 @@ int open_state_close(struct open_state_table *ot,
         goto out;
     }
     if (os->clientid != clientid) {
-        rc = -1;  /* NFS4ERR_BAD_STATEID — not owner */
+        rc = -1;  /* NFS4ERR_BAD_STATEID -- not owner */
         goto out;
     }
 
     /*
-     * Validate seqid (RFC 5661 §8.2.1, RFC 8881 §8.2.2):
-     * - seqid == 0   → "current" / "don't care"; server uses its
+     * Validate seqid (RFC 5661 S8.2.1, RFC 8881 S8.2.2):
+     * - seqid == 0   -> "current" / "don't care"; server uses its
      *                  own stored seqid and skips the comparison.
      *                  Standard pynfs convention; some Linux
      *                  client paths (LOCKU, OPEN_DOWNGRADE) also
      *                  emit zero-seqid stateids per RFC.
-     * - seqid <  current → NFS4ERR_OLD_STATEID (rc = -4)
-     * - seqid >  current → NFS4ERR_BAD_STATEID (rc = -1)
+     * - seqid <  current -> NFS4ERR_OLD_STATEID (rc = -4)
+     * - seqid >  current -> NFS4ERR_BAD_STATEID (rc = -1)
      */
     if (stateid->seqid != 0 &&
         stateid->seqid != os->stateid.seqid) {
@@ -892,8 +892,8 @@ int open_state_downgrade(struct open_state_table *ot,
         return -2;
     }
     /*
-     * Zero-seqid: per RFC 5661 §8.2.2 the server MUST treat a
-     * zero seqid as "current" — use its own stored seqid and
+     * Zero-seqid: per RFC 5661 S8.2.2 the server MUST treat a
+     * zero seqid as "current" -- use its own stored seqid and
      * skip the strict equality check.  See open_state_close()
      * for the matching CLOSE-path comment.
      */

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_subtree_split.c — Unit tests for subtree split/merge.
+ * test_subtree_split.c -- Unit tests for subtree split/merge.
  *
  * Tests cover: valid split/merge, all rejection cases, migration
  * rollback, depth limits, and no duplicates after split+merge cycle.
@@ -168,7 +168,7 @@ static void seed_file_inode(struct mds_catalogue *db, uint64_t fileid)
  * Tests
  * ------------------------------------------------------------------- */
 
-/* 1. Split creates child subtree — both parent and child in map. */
+/* 1. Split creates child subtree -- both parent and child in map. */
 static void test_split_creates_child_subtree(void)
 {
     struct subtree_map *map = NULL;
@@ -251,7 +251,7 @@ static void test_split_child_is_local(void)
     free(db_path);
 }
 
-/* 3. Merge removes child — only parent remains. */
+/* 3. Merge removes child -- only parent remains. */
 static void test_merge_removes_child(void)
 {
     struct subtree_map *map = NULL;
@@ -420,11 +420,11 @@ static void test_split_rejects_depth_exceeded(void)
                          SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* "/data/a/b/c/d" has depth 4 — exceeds max_depth=3. */
+    /* "/data/a/b/c/d" has depth 4 -- exceeds max_depth=3. */
     st = subtree_map_validate_split(map, "/data", "/data/a/b/c/d", 3);
     ASSERT_EQ(st, MDS_ERR_INVAL);
 
-    /* "/data/a" has depth 1 — within default max. */
+    /* "/data/a" has depth 1 -- within default max. */
     st = subtree_map_validate_split(map, "/data", "/data/a", 0);
     ASSERT_EQ(st, MDS_OK);
 
@@ -476,7 +476,7 @@ static void test_migration_failure_rolls_back(void)
 
     seed_dir_inode(db, 700);
 
-    /* Split to remote MDS (id=3) with NULL transport → must fail
+    /* Split to remote MDS (id=3) with NULL transport -> must fail
      * and rollback the child entry. */
     st = subtree_split_execute(map, cat, "/data", "/data/hot",
                                700, 3, NULL, 0);
@@ -746,12 +746,12 @@ static void test_evaluator_identifies_hot_subtree(void)
     int rc = split_evaluator_start(map, NULL, NULL, &cfg, &eval);
     ASSERT_EQ(rc, 0);
 
-    /* First hot interval — creates tracking entry but not yet PENDING
+    /* First hot interval -- creates tracking entry but not yet PENDING
      * (default sustained_intervals = 2). */
     split_evaluator_run_once(eval);
     ASSERT_EQ(split_evaluator_proposal_count(eval), 0ULL);
 
-    /* Second hot interval — promote to PENDING. */
+    /* Second hot interval -- promote to PENDING. */
     for (int j = 0; j < 20000; j++) {
         subtree_map_inc_ops(map, "/data");
     }
@@ -1079,7 +1079,7 @@ static void test_proposal_decay(void)
     ASSERT_EQ(rc, 0);
     split_evaluator_run_once(eval);
 
-    /* Second pass: cold — hot_intervals should decay. */
+    /* Second pass: cold -- hot_intervals should decay. */
     split_evaluator_run_once(eval);
 
     struct split_proposal *arr = NULL;

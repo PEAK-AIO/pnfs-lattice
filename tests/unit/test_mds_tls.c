@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mds_tls.c — Unit tests for TLS helper.
+ * test_mds_tls.c -- Unit tests for TLS helper.
  */
 
 #include <stdio.h>
@@ -38,7 +38,7 @@ static void test_ctx_create_no_certs(void)
 {
     fprintf(stdout, "  test_ctx_create_no_certs:          ");
     struct mds_tls_ctx *ctx = NULL;
-    /* Create with no cert files — should succeed (for testing). */
+    /* Create with no cert files -- should succeed (for testing). */
     int rc = mds_tls_ctx_create("", "", "", false, false, &ctx);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(ctx != NULL);
@@ -75,7 +75,7 @@ static void test_wrap_invalid_fd(void)
 static void test_pending_null(void)
 {
     fprintf(stdout, "  test_pending_null:                 ");
-    /* NULL conn → 0 pending bytes. */
+    /* NULL conn -> 0 pending bytes. */
     ASSERT_EQ(mds_tls_pending(NULL), (size_t)0);
     fprintf(stdout, "PASS\n");
     passed++;

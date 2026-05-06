@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalog_image.h — Materialized in-memory catalog image.
+ * catalog_image.h -- Materialized in-memory catalog image.
  *
  * The image is a read-only accelerator populated by replaying the
  * semantic journal (catalog_delta records).  It is NOT the source
- * of truth — authority is.
+ * of truth -- authority is.
  *
  * Initial scope: inodes + dirents.  Stripe maps, xattr metadata,
  * DS registry snapshots can follow if profiling shows they matter.
@@ -158,9 +158,9 @@ int catalog_image_readdir(const struct catalog_image *img,
 /**
  * Apply a single semantic delta record to the image.
  *
- * Dispatches on record type: INODE_UPSERT → inode_put,
- * INODE_DELETE → inode_del, DIRENT_PUT → dirent_put,
- * DIRENT_DELETE → dirent_del.  Other types are ignored
+ * Dispatches on record type: INODE_UPSERT -> inode_put,
+ * INODE_DELETE -> inode_del, DIRENT_PUT -> dirent_put,
+ * DIRENT_DELETE -> dirent_del.  Other types are ignored
  * (not in the initial image scope).
  *
  * Updates the per-stream applied_high_water.

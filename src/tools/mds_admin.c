@@ -2,18 +2,18 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_admin.c — Administrative CLI tool.
+ * mds_admin.c -- Administrative CLI tool.
  *
  * Usage: mds-admin <command> [options]
  *
  * Commands:
- *   subtree list           — List subtree→MDS assignments
+ *   subtree list           -- List subtree->MDS assignments
  *   subtree migrate <path> <dest_mds>
- *   ds list                — List data servers and status
- *   ds add <host:port>     — Add a data server
- *   resilver <ds_id>       — Trigger resilvering for a DS
- *   rebalance <src> <tgt>  — Move mirrors from source to target DS
- *   status                 — Cluster health summary
+ *   ds list                -- List data servers and status
+ *   ds add <host:port>     -- Add a data server
+ *   resilver <ds_id>       -- Trigger resilvering for a DS
+ *   rebalance <src> <tgt>  -- Move mirrors from source to target DS
+ *   status                 -- Cluster health summary
  */
 
 #include <stdio.h>
@@ -207,7 +207,7 @@ static int cmd_subtree_list(int argc, char *const argv[])
 }
 
 /**
- * cmd_subtree_migrate — sends an admin migration request to the
+ * cmd_subtree_migrate -- sends an admin migration request to the
  * running MDS daemon via its cluster transport port.
  *
  * The daemon performs path resolution, transport setup, and
@@ -636,7 +636,7 @@ static int cmd_node_drain(int argc, char *const argv[])
         return EXIT_FAILURE;
     }
 
-    (void)fprintf(stdout, "Drain complete — node is now DRAINED.\n");
+    (void)fprintf(stdout, "Drain complete -- node is now DRAINED.\n");
     return EXIT_SUCCESS;
 }
 
@@ -906,7 +906,7 @@ static int cmd_node_set_lifecycle(int argc, char *argv[])
 }
 
 /**
- * cmd_subtree_split — sends a split admin request to the running MDS
+ * cmd_subtree_split -- sends a split admin request to the running MDS
  * daemon.  The daemon validates, resolves the child path to fileid,
  * registers the new child subtree, and migrates if remote.
  */
@@ -969,7 +969,7 @@ static int cmd_subtree_split(int argc, char *argv[])
 }
 
 /**
- * cmd_subtree_assign — migrate an exact subtree root to a new owner.
+ * cmd_subtree_assign -- migrate an exact subtree root to a new owner.
  * Unlike 'subtree migrate', this requires the path to already be a
  * registered subtree root.  If not, the daemon returns an error.
  */
@@ -1485,7 +1485,7 @@ static int cmd_rebalance_status(int argc, char *const argv[])
 }
 
 /* -----------------------------------------------------------------------
- * Tiering CLI commands (§3.9 storage tiering V1)
+ * Tiering CLI commands (S3.9 storage tiering V1)
  * ----------------------------------------------------------------------- */
 
 static const char *tiering_state_name(uint32_t state)
@@ -1862,7 +1862,7 @@ static int dispatch_resilver(int argc, char *argv[])
 
 
 /* -----------------------------------------------------------------------
- * Backup commands (deprecated — returns NOSUPPORT)
+ * Backup commands (deprecated -- returns NOSUPPORT)
  * ----------------------------------------------------------------------- */
 
 /** Default map size for admin tool (deprecated). */
@@ -2781,7 +2781,7 @@ static int cmd_config_show(int argc, const char *const argv[])
         mds_host, mds_port, filter, &text);
     if (st != MDS_OK) {
         (void)fprintf(stderr,
-            "Error: config show failed (%d) — is the daemon "
+            "Error: config show failed (%d) -- is the daemon "
             "running and has --mds-port right?\n", (int)st);
         return 1;
     }
@@ -2835,7 +2835,7 @@ static int cmd_ds_set_weight(int argc, const char *const argv[])
     if (st != MDS_OK) {
         (void)fprintf(stderr,
             "Error: ds set-weight failed (%d)%s\n", (int)st,
-            st == MDS_ERR_NOTFOUND ? " — ds_id not in DS cache" : "");
+            st == MDS_ERR_NOTFOUND ? " -- ds_id not in DS cache" : "");
         return 1;
     }
     (void)printf("DS %lu weight set to %lu (runtime only; "

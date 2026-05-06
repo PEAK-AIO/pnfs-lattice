@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_subtree_map.c — Unit tests for the subtree ownership map,
+ * test_subtree_map.c -- Unit tests for the subtree ownership map,
  *                      referral_build, and related APIs.
  */
 
@@ -148,19 +148,19 @@ static void test_lookup_subtree(void)
 
     struct subtree_entry entry;
 
-    /* /home/alice → matches /home, owned by MDS 0. */
+    /* /home/alice -> matches /home, owned by MDS 0. */
     st = subtree_map_lookup(map, "/home/alice", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/home");
     ASSERT_EQ(entry.owner_mds_id, 0U);
 
-    /* /data/shared → matches /data, owned by MDS 1. */
+    /* /data/shared -> matches /data, owned by MDS 1. */
     st = subtree_map_lookup(map, "/data/shared", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/data");
     ASSERT_EQ(entry.owner_mds_id, 1U);
 
-    /* /etc → matches / (root fallback), owned by MDS 0. */
+    /* /etc -> matches / (root fallback), owned by MDS 0. */
     st = subtree_map_lookup(map, "/etc", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/");
@@ -191,19 +191,19 @@ static void test_longest_prefix(void)
 
     struct subtree_entry entry;
 
-    /* /home/alice/file → matches /home/alice (longer prefix). */
+    /* /home/alice/file -> matches /home/alice (longer prefix). */
     st = subtree_map_lookup(map, "/home/alice/file", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/home/alice");
     ASSERT_EQ(entry.owner_mds_id, 2U);
 
-    /* /home/bob → matches /home (not /home/alice). */
+    /* /home/bob -> matches /home (not /home/alice). */
     st = subtree_map_lookup(map, "/home/bob", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/home");
     ASSERT_EQ(entry.owner_mds_id, 0U);
 
-    /* /homework → should NOT match /home (different word boundary). */
+    /* /homework -> should NOT match /home (different word boundary). */
     st = subtree_map_lookup(map, "/homework", &entry);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(entry.path, "/");  /* Falls back to root. */
@@ -229,11 +229,11 @@ static void test_is_local(void)
                          SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* / is owned by self (MDS 0) → local. */
+    /* / is owned by self (MDS 0) -> local. */
     ASSERT_TRUE(subtree_map_is_local(map, "/"));
     ASSERT_TRUE(subtree_map_is_local(map, "/etc/foo"));
 
-    /* /data is owned by MDS 1 → not local. */
+    /* /data is owned by MDS 1 -> not local. */
     ASSERT_TRUE(!subtree_map_is_local(map, "/data"));
     ASSERT_TRUE(!subtree_map_is_local(map, "/data/shared/file"));
 
@@ -296,7 +296,7 @@ static void test_set_state(void)
     st = subtree_map_add(map, "/home", 0, NULL, SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Transition ACTIVE → MIGRATING. */
+    /* Transition ACTIVE -> MIGRATING. */
     st = subtree_map_set_state(map, "/home", SUBTREE_MIGRATING, 1);
     ASSERT_EQ(st, MDS_OK);
 
@@ -306,7 +306,7 @@ static void test_set_state(void)
     ASSERT_EQ(entry.state, SUBTREE_MIGRATING);
     ASSERT_EQ(entry.version, 2ULL);
 
-    /* Transition MIGRATING → FROZEN. */
+    /* Transition MIGRATING -> FROZEN. */
     st = subtree_map_set_state(map, "/home", SUBTREE_FROZEN, 2);
     ASSERT_EQ(st, MDS_OK);
 
@@ -343,13 +343,13 @@ static void test_referral_build(void)
     struct mds_fs_location loc;
     memset(&loc, 0, sizeof(loc));
 
-    /* Build referral for /data/shared → should resolve to MDS 1. */
+    /* Build referral for /data/shared -> should resolve to MDS 1. */
     st = referral_build(map, "/data/shared", &loc);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(loc.server, "mds1.remote");
     ASSERT_STREQ(loc.rootpath, "/"); /* target serves at its root */
 
-    /* Build referral for / → should resolve to self (MDS 0). */
+    /* Build referral for / -> should resolve to self (MDS 0). */
     st = referral_build(map, "/etc/foo", &loc);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(loc.server, "mds0.local");
@@ -372,7 +372,7 @@ static void test_referral_build(void)
  * test_fs_locations_encode
  * ------------------------------------------------------------------- */
 
-/* Forward declaration — defined in referral.c */
+/* Forward declaration -- defined in referral.c */
 enum mds_status referral_encode_fs_locations(
     const struct mds_fs_location *loc,
     void *xdr_out, size_t *out_len);
@@ -487,7 +487,7 @@ static void test_take_over_local_mode(void)
     ASSERT_EQ(subtree_map_add(map, "/other", 2, "host2", SUBTREE_ACTIVE, 1),
               MDS_OK);
 
-    /* take_over MDS 2 → MDS 1 in local mode: should succeed */
+    /* take_over MDS 2 -> MDS 1 in local mode: should succeed */
     uint32_t taken = 0;
     ASSERT_EQ(subtree_map_take_over(map, 2, 1, &taken), MDS_OK);
     ASSERT_EQ(taken, (uint32_t)1);
@@ -510,7 +510,7 @@ static void test_take_over_local_mode(void)
  * Blocker-regression: path-based writes survive index shifts.
  *
  * After removing an entry (which compacts the internal array), subsequent
- * set_owner / set_state must still target the correct path — not a stale
+ * set_owner / set_state must still target the correct path -- not a stale
  * array index that now points at a different subtree.
  * ----------------------------------------------------------------------- */
 
@@ -532,10 +532,10 @@ static void test_subtree_write_stable_path(void)
     /* Mutate /beta (middle entry) */
     ASSERT_EQ(subtree_map_set_owner(map, "/beta", 0, 1), MDS_OK);
 
-    /* Remove /alpha — shifts internal array indices */
+    /* Remove /alpha -- shifts internal array indices */
     ASSERT_EQ(subtree_map_remove_subtree(map, "/alpha"), MDS_OK);
 
-    /* set_state on /gamma — must hit /gamma, not /beta */
+    /* set_state on /gamma -- must hit /gamma, not /beta */
     ASSERT_EQ(subtree_map_set_state(map, "/gamma",
                                     SUBTREE_MIGRATING, 1), MDS_OK);
 
@@ -549,7 +549,7 @@ static void test_subtree_write_stable_path(void)
     ASSERT_EQ(entry.state, SUBTREE_ACTIVE);
     ASSERT_EQ(entry.owner_mds_id, (uint32_t)0);
 
-    /* Add /delta — shifts indices again */
+    /* Add /delta -- shifts indices again */
     ASSERT_EQ(subtree_map_add(map, "/delta", 3, "mds3.local",
                               SUBTREE_ACTIVE, 1), MDS_OK);
 
@@ -643,7 +643,7 @@ static void test_transfer_owner_requires_migrating(void)
  * test_set_owner_still_works_for_failover
  *
  * Verify the unmodified subtree_map_set_owner() still works on
- * ACTIVE subtrees — proving the failover path is not broken.
+ * ACTIVE subtrees -- proving the failover path is not broken.
  * ------------------------------------------------------------------- */
 static void test_set_owner_still_works_for_failover(void)
 {
@@ -701,7 +701,7 @@ static void test_set_owner_still_works_for_failover(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — get_node_subtrees returns multiple
+ * Seq 10 -- get_node_subtrees returns multiple
  * ----------------------------------------------------------------------- */
 
 static void test_get_node_subtrees_multiple(void)
@@ -725,7 +725,7 @@ static void test_get_node_subtrees_multiple(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — get_node_subtrees empty for unknown owner
+ * Seq 10 -- get_node_subtrees empty for unknown owner
  * ----------------------------------------------------------------------- */
 
 static void test_get_node_subtrees_empty(void)
@@ -745,7 +745,7 @@ static void test_get_node_subtrees_empty(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — list_snapshot returns all entries
+ * Seq 10 -- list_snapshot returns all entries
  * ----------------------------------------------------------------------- */
 
 static void test_list_snapshot_all(void)
@@ -770,7 +770,7 @@ static void test_list_snapshot_all(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — list after take_over reflects new owner
+ * Seq 10 -- list after take_over reflects new owner
  * ----------------------------------------------------------------------- */
 
 static void test_subtree_list_after_takeover(void)
@@ -781,7 +781,7 @@ static void test_subtree_list_after_takeover(void)
     assert(subtree_map_add(map, "/d1", 2, NULL, SUBTREE_ACTIVE, 0) == MDS_OK);
     assert(subtree_map_add(map, "/d2", 2, NULL, SUBTREE_ACTIVE, 0) == MDS_OK);
 
-    /* Take over from owner 2 → owner 1. */
+    /* Take over from owner 2 -> owner 1. */
     uint32_t takeover_count = 0;
     assert(subtree_map_take_over(map, 2, 1, &takeover_count) == MDS_OK);
 

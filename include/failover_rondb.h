@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * failover_rondb.h — Partner-liveness watchdog (RonDB backend).
+ * failover_rondb.h -- Partner-liveness watchdog (RonDB backend).
  *
  * Starts a background thread on the standby MDS that polls
  * mds_node_registry.last_heartbeat_ns and triggers failover_promote()

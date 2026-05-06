@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_types.h — Flex file layout structures (RFC 8435).
+ * layout_types.h -- Flex file layout structures (RFC 8435).
  */
 
 #ifndef LAYOUT_TYPES_H
@@ -21,14 +21,14 @@ enum layout_iomode {
     LAYOUTIOMODE4_ANY  = 3,
 };
 
-/* Flex file flags (RFC 8435 §5.1) */
+/* Flex file flags (RFC 8435 S5.1) */
 #define FF_FLAGS_NO_LAYOUTCOMMIT   0x00000001
 #define FF_FLAGS_NO_IO_THRU_MDS    0x00000002
 #define FF_FLAGS_NO_READ_IO        0x00000004
 #define FF_FLAGS_WRITE_ONE_MIRROR  0x00000008
 
 /* -----------------------------------------------------------------------
- * Device ID — identifies a set of DS addresses
+ * Device ID -- identifies a set of DS addresses
  * ----------------------------------------------------------------------- */
 
 #define DEVICEID4_SIZE 16
@@ -45,7 +45,7 @@ struct mds_ds_addr {
     uint32_t ds_id;
     char     host[256];
     uint16_t port;
-    bool     rdma;          /* true → netid "rdma", false → "tcp" */
+    bool     rdma;          /* true -> netid "rdma", false -> "tcp" */
 };
 
 /* -----------------------------------------------------------------------
@@ -58,7 +58,7 @@ struct mds_stateid {
 };
 
 /* -----------------------------------------------------------------------
- * Layout record — persisted in catalogue for crash recovery
+ * Layout record -- persisted in catalogue for crash recovery
  * ----------------------------------------------------------------------- */
 
 struct mds_layout_record {
@@ -116,7 +116,7 @@ enum mds_status layout_return(uint64_t fileid,
                               uint64_t length);
 
 /**
- * @brief Process LAYOUTCOMMIT — update file size if needed.
+ * @brief Process LAYOUTCOMMIT -- update file size if needed.
  * @param fileid     File.
  * @param stateid    Layout stateid.
  * @param new_offset New last-write offset reported by client.

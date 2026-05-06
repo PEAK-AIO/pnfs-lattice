@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mountd_compat.h — Compatibility responder for `showmount -e`.
+ * mountd_compat.h -- Compatibility responder for `showmount -e`.
  *
  * The MDS is an NFSv4.1 / pNFS server: it does NOT speak the NFSv3
  * MOUNT protocol and does NOT serve NFSv3 data.  However, many
@@ -14,8 +14,8 @@
  * This module starts a tiny ONC-RPC listener that answers MOUNT3
  * (program 100005, version 3) procedures NULL, EXPORT and DUMP with
  * a synthetic, MDS-defined response, and rejects every other
- * procedure with PROC_UNAVAIL.  Specifically, MNT (proc 1) — the
- * only procedure that would yield a usable v3 file handle — is
+ * procedure with PROC_UNAVAIL.  Specifically, MNT (proc 1) -- the
+ * only procedure that would yield a usable v3 file handle -- is
  * always rejected at the RPC layer, so a client cannot accidentally
  * mount the MDS over NFSv3.
  *
@@ -52,7 +52,7 @@ struct mountd_compat_ctx;
  * @a cfg->mountd_compat_register_rpcbind is true, sends a best-effort
  * PMAPPROC_SET to 127.0.0.1:111 so that `showmount -e <host>` can
  * discover the bound port via the local portmapper.  Failure to
- * register is logged but does not fail startup — clients with a
+ * register is logged but does not fail startup -- clients with a
  * fixed-port out-of-band discovery still work.
  *
  * The export list and other configuration values are snapshotted at
@@ -78,7 +78,7 @@ int mountd_compat_start(const struct mds_config *cfg,
 void mountd_compat_stop(struct mountd_compat_ctx *ctx);
 
 /* -----------------------------------------------------------------------
- * Test-only interface — see tests/unit/test_mountd_compat.c.
+ * Test-only interface -- see tests/unit/test_mountd_compat.c.
  *
  * The dispatcher is exposed as a pure function so unit tests can
  * exercise every error and success path with synthetic RPC packets,
@@ -110,7 +110,7 @@ struct mountd_compat_exports {
  * record marker) is written to @a out and its length is stored in
  * @a *out_len.  On a -1 return the call must be silently dropped:
  * the input was so malformed that no XID could be extracted and no
- * RPC reply is appropriate (RFC 5531 §10).
+ * RPC reply is appropriate (RFC 5531 S10).
  *
  * The function is pure with respect to its inputs and never
  * allocates, blocks, or reads I/O.  All state is in @a exports

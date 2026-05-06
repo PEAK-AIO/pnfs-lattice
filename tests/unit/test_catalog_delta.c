@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_catalog_delta.c — Unit tests for catalog delta builder and
+ * test_catalog_delta.c -- Unit tests for catalog delta builder and
  * serialization/deserialization.
  *
  * RonDB-native: no raw catalogue access.  Tests the backend-neutral

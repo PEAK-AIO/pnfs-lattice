@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_xdr_layout_form.c — Phase C / Step 6 of docs/hpc-nto1-plan.md.
+ * test_xdr_layout_form.c -- Phase C / Step 6 of docs/hpc-nto1-plan.md.
  *
  * Round-trips the flex-files LAYOUTGET body in both wire forms
  * (LEGACY one-DS-per-mirror, STRIPED multi-DS-per-mirror) and
@@ -17,7 +17,7 @@
  * caught here, not at runtime.
  *
  * The test deliberately does not depend on the catalogue, the proxy,
- * or any compound state — it talks directly to encode_res_layoutget
+ * or any compound state -- it talks directly to encode_res_layoutget
  * (declared extern below) so that unit-test isolation matches
  * test_layout.c.
  */

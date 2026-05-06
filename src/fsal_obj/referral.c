@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * referral.c — Junction directory and fs_locations management.
+ * referral.c -- Junction directory and fs_locations management.
  *
  * Subtree boundaries are marked with junction directories (sticky-bit).
  * When a client accesses a junction, we return NFS4ERR_MOVED +
@@ -27,7 +27,7 @@
  * Junction inode helpers
  *
  * A junction is a directory with the sticky bit (S_ISVTX, 01000)
- * set in its mode.  This is an in-band marker — no extra catalogue DBI
+ * set in its mode.  This is an in-band marker -- no extra catalogue DBI
  * is needed.
  * ----------------------------------------------------------------------- */
 
@@ -89,7 +89,7 @@ enum mds_status referral_check(struct mds_catalogue *cat, uint64_t fileid)
  * @param cat             Catalogue handle.
  * @param parent_fileid   Parent directory.
  * @param name            Junction directory name.
- * @param target_mds_id   Target MDS ID (informational — stored in
+ * @param target_mds_id   Target MDS ID (informational -- stored in
  *                        subtree map, not in the inode).
  * @return MDS_OK on success.
  */
@@ -128,7 +128,7 @@ enum mds_status referral_create_junction(struct mds_catalogue *cat,
  * @brief Encode fs_locations4 into a caller-provided buffer.
  *
  * Produces a minimal XDR-like encoding of the referral information.
- * This is a simplified encoding for the compound layer — the full
+ * This is a simplified encoding for the compound layer -- the full
  * XDR encoding is handled by xdr_codec.c when available.
  *
  * Format: [server_len u32][server bytes][rootpath_len u32][rootpath bytes]

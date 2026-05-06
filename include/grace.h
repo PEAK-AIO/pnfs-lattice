@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * grace.h — NFSv4.1 grace period management.
+ * grace.h -- NFSv4.1 grace period management.
  *
  * Thread-safe: all public functions are protected by an internal mutex.
  */
@@ -37,7 +37,7 @@ void grace_enter(uint32_t duration_sec);
  * @param duration_sec  Maximum grace duration in seconds.
  * @param recs          Array of client recovery records (copied internally).
  * @param count         Number of records.  0 is valid (grace with no
- *                      tracked clients — timeout only).
+ *                      tracked clients -- timeout only).
  */
 void grace_enter_with_clients(uint32_t duration_sec,
                               const struct client_recovery_rec *recs,

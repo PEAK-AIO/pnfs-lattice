@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * health_stub.c — no-op stub implementations of the replication
+ * health_stub.c -- no-op stub implementations of the replication
  * health monitor API.
  *
  * Linked into pnfs_mds_core when ENABLE_REPLICATION=OFF (community

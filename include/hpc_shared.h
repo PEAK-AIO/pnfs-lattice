@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * hpc_shared.h — Phase B helpers for the HPC-Shared file mode.
+ * hpc_shared.h -- Phase B helpers for the HPC-Shared file mode.
  *
  * Two entry points:
  *
@@ -23,7 +23,7 @@
  *     a round-trippable knob ("0" or "1"), without an underlying
  *     stored xattr.
  *
- * Master design: docs/hpc-nto1-plan.md §5 Phase B.
+ * Master design: docs/hpc-nto1-plan.md S5 Phase B.
  *
  * Operator note on the client-side xattr cache: the Linux NFS
  * xattr support (fs/nfs/nfs42xattr.c) marks freshly-created inodes
@@ -54,7 +54,7 @@
  * Note on namespace choice: trusted.* would be the Linux convention
  * for an admin-only knob, but the upstream Linux NFS xattr support
  * (RFC 8276 / fs/nfs/nfs42xattr.c) only forwards the `user.*`
- * namespace over the wire — trusted.* is handled locally by the
+ * namespace over the wire -- trusted.* is handled locally by the
  * client and never reaches the MDS.  Using `user.pnfs.hpc_shared`
  * lets operators toggle HPC mode with a normal `setfattr` from any
  * mounted client.  The privilege gate is enforced server-side by
@@ -115,7 +115,7 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
                                                   uint32_t *out_len);
 
 /* -----------------------------------------------------------------------
- * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md — wide HPC create.
+ * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md -- wide HPC create.
  *
  * Creates a regular file under @p parent_fileid with a fully wired
  * wide stripe map and the @c MDS_IFLAG_HPC_SHARED flag set on the
@@ -123,23 +123,23 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
  *
  *   1. Allocate a new fileid via mds_cat_alloc_fileid().
  *   2. In one catalogue write transaction:
- *      • Insert the child inode (HPC_SHARED flag set).
- *      • Insert the parent dirent.
- *      • Touch the parent (mtime / change).
+ *      * Insert the child inode (HPC_SHARED flag set).
+ *      * Insert the parent dirent.
+ *      * Touch the parent (mtime / change).
  *   3. ds_prealloc_batch(fileid_hint = child fileid) captures DS file
  *      handles in parallel for stripe_count * mirror_count slots.
  *   4. mds_cat_stripe_map_put() persists the wide stripe map.
  *
  * Failure handling:
- *   • Steps 1–2 failure: the catalogue stays clean (txn abort).
- *   • Step 3 failure: ds_prealloc_batch's internal rollback already
+ *   * Steps 1--2 failure: the catalogue stays clean (txn abort).
+ *   * Step 3 failure: ds_prealloc_batch's internal rollback already
  *     GC-enqueued any DS-side state it created; the inode + dirent
  *     are removed via mds_cat_ns_remove() so the catalogue stays
  *     consistent.
- *   • Step 4 failure: any FH-captured DS file is GC-enqueued
+ *   * Step 4 failure: any FH-captured DS file is GC-enqueued
  *     here, then the inode + dirent are removed.
  *
- * Strict per master plan §5 “all-or-nothing”: a successful return
+ * Strict per master plan S5 "all-or-nothing": a successful return
  * means the file exists with a complete wide stripe map; any error
  * leaves no orphan rows or DS files reachable from the namespace.
  *
@@ -180,7 +180,7 @@ enum mds_status hpc_shared_create_wide_layout(
     struct mds_inode       *out);
 
 /* -----------------------------------------------------------------------
- * Phase G of docs/hpc-nto1-plan.md — client striping hint consumption.
+ * Phase G of docs/hpc-nto1-plan.md -- client striping hint consumption.
  *
  * The MDS-side wire body for the HPC striping hint is a fixed 16-byte
  * tuple, big-endian on the wire.  All three fields are unsigned:
@@ -200,7 +200,7 @@ enum mds_status hpc_shared_create_wide_layout(
  * (rank-affinity) extend the hint body without touching placement
  * code.
  *
- * Geometry selection tiers (master plan §5 Phase G):
+ * Geometry selection tiers (master plan S5 Phase G):
  *
  *   tier 1: expected_file_size    >= 1 TiB (1ULL << 40)
  *           OR expected_client_count >= 1024
@@ -218,7 +218,7 @@ enum mds_status hpc_shared_create_wide_layout(
 
 /**
  * Decode an XDR-encoded pnfs_hpc_hint body (HPC_HINT_BODY_SIZE bytes,
- * big-endian).  Validates length only — unknown @c flags bits stay in
+ * big-endian).  Validates length only -- unknown @c flags bits stay in
  * @p out->flags so callers can introspect them; the geometry helper
  * ignores unknown bits.
  *

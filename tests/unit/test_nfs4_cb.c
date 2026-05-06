@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_nfs4_cb.c — Tests for NFSv4.1 callback channel infrastructure.
+ * test_nfs4_cb.c -- Tests for NFSv4.1 callback channel infrastructure.
  *
  * Covers:
  *   1. session_create_session preserves cb_prog and allocates cb_slots.
@@ -142,7 +142,7 @@ static void test_cb_prog_preserved(void)
  * Test 2: session_bind_conn / session_unbind_conn
  * ----------------------------------------------------------------------- */
 
-/* Fake rpc_conn — we only need an addressable pointer. */
+/* Fake rpc_conn -- we only need an addressable pointer. */
 struct fake_rpc_conn {
     int fd;
 };
@@ -301,7 +301,7 @@ static void test_unbind_null_safe(void)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8c — CB_NOTIFY argument validation
+ * Phase 8c -- CB_NOTIFY argument validation
  *
  * Verifies the same lazy I/O discipline as CB_RECALL: argument
  * validation must happen before any socket work so a caller that
@@ -358,7 +358,7 @@ int main(void)
     test_zero_back_slots();
     test_unbind_null_safe();
 
-    /* Phase 8c — CB_NOTIFY argument validation. */
+    /* Phase 8c -- CB_NOTIFY argument validation. */
     test_cb_notify_null_session();
     test_cb_notify_null_args();
     test_cb_notify_bad_type_rejected();

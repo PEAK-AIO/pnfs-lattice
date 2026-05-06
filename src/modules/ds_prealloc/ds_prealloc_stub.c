@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_prealloc_stub.c — no-op stubs for the DS placement pre-allocation
+ * ds_prealloc_stub.c -- no-op stubs for the DS placement pre-allocation
  * pool.
  *
  * Linked into pnfs_mds_core when ENABLE_DS_PREALLOC=OFF (community
@@ -11,16 +11,16 @@
  * Semantics: pre-allocation is unavailable.
  *   - init() / init_ex() return success with a NULL handle so callers'
  *     null-checks short-circuit.
- *   - pop() / peek() return -1 (pool empty) — every CREATE falls
+ *   - pop() / peek() return -1 (pool empty) -- every CREATE falls
  *     back to synchronous placement, which is the documented "slow
  *     path" of the real implementation.
  *   - select_any_online() returns MDS_ERR_NOSPC.
  *   - ensure() returns 0 (no-op; the proxy has nothing to ensure).
- *   - batch() returns MDS_ERR_INVAL — wide pre-warm is unavailable;
+ *   - batch() returns MDS_ERR_INVAL -- wide pre-warm is unavailable;
  *     callers must use single-file CREATE+LAYOUTGET.
  *
  * The community daemon therefore performs synchronous placement on
- * every CREATE — correct, just measurably slower for fan-in
+ * every CREATE -- correct, just measurably slower for fan-in
  * workloads.
  */
 #include "ds_prealloc.h"

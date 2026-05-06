@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_metrics.c — Daemon-native metrics registry.
+ * mds_metrics.c -- Daemon-native metrics registry.
  */
 
 #include <stdio.h>

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_recall.c — Layout recall / revocation coordinator.
+ * layout_recall.c -- Layout recall / revocation coordinator.
  *
  * DS-failure path: best-effort CB_LAYOUTRECALL, authoritative revoke.
  *
@@ -14,10 +14,10 @@
  *   4. Regardless of CB outcome, revoke all affected layouts.
  *
  * Callback failure (no backchannel, send error, timeout) is non-fatal.
- * The revoke is authoritative — clients discover revocation on their
+ * The revoke is authoritative -- clients discover revocation on their
  * next SEQUENCE or LAYOUTGET.
  *
- * See include/layout_recall.h for API and docs/architecture.md §15.
+ * See include/layout_recall.h for API and docs/architecture.md S15.
  */
 
 #include <stdlib.h>
@@ -26,7 +26,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <limits.h>  /* INT_MIN — sentinel for cb_status "not sent" */
+#include <limits.h>  /* INT_MIN -- sentinel for cb_status "not sent" */
 
 #include "layout_recall.h"
 #include "compound_internal.h" /* layout_seqid_* */
@@ -39,7 +39,7 @@
 #include "rpc_server.h"
 #include "mds_shard.h"
 
-/* Default revoke timeout — used as CB send timeout per client. */
+/* Default revoke timeout -- used as CB send timeout per client. */
 #define DEFAULT_REVOKE_MS  30000
 
 /* Maximum entries collected per DS scan. */
@@ -60,8 +60,8 @@ struct layout_recall {
      * path).  The catalogue does not persist per-grant layout_type,
      * so we need a coordinator-level default in homogeneous
      * deployments.  Initialised to LAYOUT4_FLEX_FILES at
-     * layout_recall_init() time — production deployments grant
-     * flexfiles layouts (RFC 8435 §5) and the prior hard-coded
+     * layout_recall_init() time -- production deployments grant
+     * flexfiles layouts (RFC 8435 S5) and the prior hard-coded
      * LAYOUT4_NFSV4_1_FILES value caused Linux flexfiles clients to
      * reject the recall.
      */
@@ -69,7 +69,7 @@ struct layout_recall {
 };
 
 /* -----------------------------------------------------------------------
- * Scan context — collects (clientid, fileid) pairs from ds_layout_idx
+ * Scan context -- collects (clientid, fileid) pairs from ds_layout_idx
  * ----------------------------------------------------------------------- */
 
 struct recall_entry {
@@ -89,7 +89,7 @@ static int recall_scan_cb(uint64_t clientid, uint64_t fileid, void *ctx)
     struct recall_scan_ctx *sc = ctx;
 
     if (sc->count >= sc->capacity) {
-        return 1; /* stop scan — capacity reached */
+        return 1; /* stop scan -- capacity reached */
     }
 
     sc->entries[sc->count].clientid = clientid;
@@ -99,7 +99,7 @@ static int recall_scan_cb(uint64_t clientid, uint64_t fileid, void *ctx)
 }
 
 /* -----------------------------------------------------------------------
- * Callback target snapshot — collected under session table lock
+ * Callback target snapshot -- collected under session table lock
  * ----------------------------------------------------------------------- */
 
 struct cb_target {
@@ -107,10 +107,10 @@ struct cb_target {
     uint8_t  session_id[SESSION_ID_SIZE];
     uint32_t cb_prog;
     uint32_t cb_sec_flavor;
-    int      fd;             /* dup'd fd — caller must close */
+    int      fd;             /* dup'd fd -- caller must close */
     uint32_t slot_seq_id;
-    uint32_t minorversion;   /* RFC 8881 §20.1 — CB_COMPOUND minor */
-    struct nfs4_cb_sec cb_sec; /* RFC 8881 §2.10.8.3 — captured sec parms */
+    uint32_t minorversion;   /* RFC 8881 S20.1 -- CB_COMPOUND minor */
+    struct nfs4_cb_sec cb_sec; /* RFC 8881 S2.10.8.3 -- captured sec parms */
 };
 
 struct cb_target_list {
@@ -121,7 +121,7 @@ struct cb_target_list {
 };
 
 /**
- * Session enumeration callback — runs under session table lock.
+ * Session enumeration callback -- runs under session table lock.
  * Extracts fd via rpc_conn_get_fd() and dup()s it so it survives
  * after the lock is released.
  */
@@ -132,7 +132,7 @@ static int snap_cb_target(const struct session_cb_snap *snap, void *ctx)
     int fd;
 
     if (tl->count >= MAX_RECALL_CLIENTS) {
-        return 1; /* stop — full */
+        return 1; /* stop -- full */
     }
 
     /* Only snapshot sessions for clientids we care about. */
@@ -142,17 +142,17 @@ static int snap_cb_target(const struct session_cb_snap *snap, void *ctx)
         }
     }
     if (i >= tl->filter_count) {
-        return 0; /* not in our filter set — skip */
+        return 0; /* not in our filter set -- skip */
     }
 
     fd = rpc_conn_get_fd(snap->cb_conn);
     if (fd < 0) {
-        return 0; /* no valid fd — skip */
+        return 0; /* no valid fd -- skip */
     }
 
     int dup_fd = dup(fd);
     if (dup_fd < 0) {
-        return 0; /* resource exhaustion — skip */
+        return 0; /* resource exhaustion -- skip */
     }
 
     struct cb_target *t = &tl->targets[tl->count];
@@ -189,10 +189,10 @@ static void attempt_cb_for_target(const struct cb_target *t,
 {
     struct nfs4_cb_layoutrecall_args args;
 
-    /* Send LAYOUTRECALL4_ALL — the DS is offline, recall everything.
-     * RFC 8881 §20.3.4 still requires clora_type even for ALL/FSID;
+    /* Send LAYOUTRECALL4_ALL -- the DS is offline, recall everything.
+     * RFC 8881 S20.3.4 still requires clora_type even for ALL/FSID;
      * the value MUST match the holder's layout type or the kernel
-     * client will reject the CB — see Mark's two-client harness
+     * client will reject the CB -- see Mark's two-client harness
      * report (bugs from mark/STRICT_ANALYSIS.md).  We therefore
      * advertise the coordinator's default layout_type rather than
      * the previous hard-coded LAYOUT4_NFSV4_1_FILES (1). */
@@ -413,7 +413,7 @@ int layout_recall_init(const struct mds_catalogue *cat,
     lr->cq = cq;
     lr->st = NULL;
     lr->revoke_ms = (revoke_ms > 0) ? revoke_ms : DEFAULT_REVOKE_MS;
-    /* Production deployments grant flexfiles layouts (RFC 8435 §5).
+    /* Production deployments grant flexfiles layouts (RFC 8435 S5).
      * Operators with a files-layout deployment can override via
      * layout_recall_set_default_layout_type(). */
     lr->default_layout_type = LAYOUT4_FLEX_FILES;
@@ -493,7 +493,7 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
      *
      * If a session table is available, collect unique clientids,
      * snapshot callback targets, and attempt CB_LAYOUTRECALL.
-     * Failures are non-fatal — we always proceed to revoke.
+     * Failures are non-fatal -- we always proceed to revoke.
      */
     if (lr->st != NULL) {
         struct cb_target_list tl;
@@ -516,7 +516,7 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
     }
 
     /*
-     * Step 3: Authoritative revoke — delete all affected layouts.
+     * Step 3: Authoritative revoke -- delete all affected layouts.
      *
      * This runs regardless of whether CB_LAYOUTRECALL succeeded.
      * Clients that acknowledged the recall will have already
@@ -524,7 +524,7 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
      * Clients that did not respond discover revocation on their
      * next SEQUENCE or LAYOUTGET.
      */
-    /* Resolve stateids for RonDB path — ds_layout_idx only has
+    /* Resolve stateids for RonDB path -- ds_layout_idx only has
      * (clientid, fileid), not stateid_other. */
     if (lr->cat != NULL && lr->cq == NULL) {
         resolve_stateids_for_ds_entries(lr->cat, entries, sc.count);
@@ -540,7 +540,7 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
     return 0;
 }
 
-/* Callback for mds_coord_layout_iter_file — collects holders with stateids. */
+/* Callback for mds_coord_layout_iter_file -- collects holders with stateids. */
 static int file_holder_cb(uint64_t clientid,
                           const struct nfs4_stateid *stateid,
                           uint32_t iomode, void *ctx)
@@ -583,13 +583,13 @@ static int file_holder_cb(uint64_t clientid,
  *
  * v1 conservative behaviour: full-revoke the holder's grant when the
  * intersection is non-empty.  RFC permits emitting a byte-range CB
- * even when the server tracks whole-file granularity — the kernel
+ * even when the server tracks whole-file granularity -- the kernel
  * client invalidates only the recalled sub-range of its cache, which
  * is what Slice 3 needs.  Splitting the layout-state row into two
  * adjacent ranges is a Phase 2 follow-up.
  * ----------------------------------------------------------------------- */
 
-/* RFC 8881 §12.4.4: layout iomode constants (mirrored from
+/* RFC 8881 S12.4.4: layout iomode constants (mirrored from
  * include/compound.h to avoid pulling that header here). */
 #define LAYOUTIOMODE4_READ  1
 #define LAYOUTIOMODE4_RW    2
@@ -598,7 +598,7 @@ static int file_holder_cb(uint64_t clientid,
 static bool iomode_conflicts(uint32_t holder_iomode, uint32_t requester_iomode)
 {
     /*
-     * RFC 8881 §12.5.5: a layout conflicts with another if at least
+     * RFC 8881 S12.5.5: a layout conflicts with another if at least
      * one side has write semantics (RW).  Two READs do not conflict.
      * ANY behaves as RW for safety.
      */
@@ -611,8 +611,8 @@ static bool iomode_conflicts(uint32_t holder_iomode, uint32_t requester_iomode)
 
 /*
  * Compute [out_off, out_off + out_len) = [a_off, a_off + a_len)
- *                                       ∩ [b_off, b_off + b_len).
- * Length values of UINT64_MAX mean "to EOF" per RFC 8881 §12.5.5.
+ *                                       n [b_off, b_off + b_len).
+ * Length values of UINT64_MAX mean "to EOF" per RFC 8881 S12.5.5.
  * Returns false on empty intersection (caller skips the recall).
  */
 static bool range_intersect(uint64_t a_off, uint64_t a_len,
@@ -657,7 +657,7 @@ struct byte_range_holder {
      * Layout type echoed in CB_LAYOUTRECALL.clora_type for this
      * holder.  The catalogue layer does not persist per-grant
      * layout_type, so we copy the requesting LAYOUTGET's
-     * a->layout_type into every holder — op_layoutget validates
+     * a->layout_type into every holder -- op_layoutget validates
      * that value against { LAYOUT4_NFSV4_1_FILES, LAYOUT4_FLEX_FILES }
      * before reaching this scan, and our grant policy never mixes
      * layout types within the same fileid (compound_layout.c
@@ -722,7 +722,7 @@ static int byte_range_collect_cb(uint64_t clientid,
         iomode, c->req_iomode);
     if (c->skip_req_client && clientid == c->req_clientid) {
         (void)fprintf(stderr, "DBG-RECALL:  -> SKIP self\n");
-        return 0; /* self — skip */
+        return 0; /* self -- skip */
     }
     if (c->require_iomode_conflict &&
         !iomode_conflicts(iomode, c->req_iomode)) {
@@ -743,7 +743,7 @@ static int byte_range_collect_cb(uint64_t clientid,
                                               &hold_off, &hold_len,
                                               &scratch_seqid);
         if (st != MDS_OK) {
-            /* Stale or partially-persisted state — fall back to
+            /* Stale or partially-persisted state -- fall back to
              * whole-file recall to be safe. */
             hold_off = 0;
             hold_len = UINT64_MAX;
@@ -774,7 +774,7 @@ static int byte_range_collect_cb(uint64_t clientid,
                               hold_off, hold_len,
                               &inter_off, &inter_len)) {
             (void)fprintf(stderr, "DBG-RECALL:  -> SKIP disjoint range\n");
-            return 0; /* disjoint ranges — no conflict */
+            return 0; /* disjoint ranges -- no conflict */
         }
     } else {
         inter_off = c->req_offset;
@@ -796,7 +796,7 @@ static int byte_range_collect_cb(uint64_t clientid,
      * / NFS4ERR_BAD_STATEID).
      *
      * Behaviour: if a holder entry already exists for this clientid,
-     * keep the row with the highest stateid->seqid — most recent
+     * keep the row with the highest stateid->seqid -- most recent
      * grant.  Discard older rows: their stateids are dead from the
      * client's perspective.
      */
@@ -851,14 +851,14 @@ static int byte_range_collect_cb(uint64_t clientid,
 
 /*
  * Per-holder CB context.  Only one holder is sent per
- * session_for_each_with_cb_for_clientid() invocation — the iterator
+ * session_for_each_with_cb_for_clientid() invocation -- the iterator
  * stops at the first session it visits for the holder's clientid.
  *
- * RFC 5661 §20.4.2.1 / §15.1.10.10 — the kernel client may answer a
+ * RFC 5661 S20.4.2.1 / S15.1.10.10 -- the kernel client may answer a
  * CB_LAYOUTRECALL with NFS4ERR_DELAY or NFS4ERR_RECALLCONFLICT to mean
  * "I have I/O in flight, I will send LAYOUTRETURN as soon as it
  * drains."  These are transient responses, NOT terminal failures, and
- * the server MUST NOT preemptively revoke the layout-state row — if
+ * the server MUST NOT preemptively revoke the layout-state row -- if
  * it does, the client's subsequent LAYOUTCOMMIT/LAYOUTRETURN hits
  * NFS4ERR_BAD_STATEID and the kernel can spin on retransmits (this is
  * exactly the P05_disjoint_ranges hang in Mark's harness).  cb_status
@@ -866,20 +866,20 @@ static int byte_range_collect_cb(uint64_t clientid,
  * skip the revoke on those transient codes.
  *
  * Encoding:
- *   cb_status == 0          — client accepted the recall (NFS4_OK);
+ *   cb_status == 0          -- client accepted the recall (NFS4_OK);
  *                              the client will send LAYOUTRETURN.
  *                              Skip revoke.
- *   cb_status > 0           — NFS4ERR_* status from the client.
+ *   cb_status > 0           -- NFS4ERR_* status from the client.
  *                              Skip revoke for DELAY (10008) and
  *                              RECALLCONFLICT (10061); revoke for any
  *                              other terminal status (e.g. BADSESSION,
  *                              NOMATCHING_LAYOUT, BADHANDLE,
  *                              BAD_STATEID, OLD_STATEID).
- *   cb_status < 0           — negative errno from the transport
+ *   cb_status < 0           -- negative errno from the transport
  *                              (-EIO, -ETIMEDOUT, -ENOTCONN, -EINVAL):
  *                              the CB never reached the client or the
  *                              reply was malformed.  Revoke.
- *   cb_status == CB_NOT_SENT — sentinel set by the iterator when
+ *   cb_status == CB_NOT_SENT -- sentinel set by the iterator when
  *                              there is no live backchannel for this
  *                              clientid (no session, no cb_conn, dup
  *                              failed).  Revoke.
@@ -914,7 +914,7 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
         (void*)snap->cb_conn);
     /* Defensive: per-clientid iterator already filters by clientid,
      * but a same-process race could in theory invoke this from the
-     * global iterator path — keep the explicit check. */
+     * global iterator path -- keep the explicit check. */
     if (c->holder->clientid != snap->clientid) {
         (void)fprintf(stderr, "DBG-RECALL:  -> SKIP clientid mismatch\n");
         return 0;
@@ -923,7 +923,7 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     (void)fprintf(stderr, "DBG-RECALL:  -> rpc_conn_get_fd = %d\n", fd);
     if (fd < 0) {
         (void)fprintf(stderr, "DBG-RECALL:  -> SKIP no backchannel fd\n");
-        /* No live backchannel — caller must revoke; we cannot
+        /* No live backchannel -- caller must revoke; we cannot
          * deliver the recall.  The kernel will discover the
          * revoke on its next op against the layout stateid. */
         c->cb_status = CB_NOT_SENT;
@@ -936,7 +936,7 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
         return 0;
     }
     /*
-     * RFC 8881 §12.5.3: CB_LAYOUTRECALL is one of the operations
+     * RFC 8881 S12.5.3: CB_LAYOUTRECALL is one of the operations
      * that advances the layout stateid seqid.  The holder row carries
      * the latest seqid issued by LAYOUTGET/LAYOUTRETURN; the recall
      * itself must send the next value, otherwise Linux rejects the CB
@@ -993,7 +993,7 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
      * commits the slot-0 sequenceid advance before releasing the
      * session-table lock.  Without this, a second CB on the same
      * session would reuse sa_sequenceid and the kernel would treat
-     * it as a slot replay (RFC 8881 §18.46.4).  We commit even on
+     * it as a slot replay (RFC 8881 S18.46.4).  We commit even on
      * CB send failure: the kernel's contract is +1 per CB attempt,
      * not per CB success.
      */
@@ -1238,7 +1238,7 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
         return -EINVAL;
     }
     if (lr->cat == NULL) {
-        /* No catalogue — no holders to query; treat as no-conflict. */
+        /* No catalogue -- no holders to query; treat as no-conflict. */
         return 0;
     }
 
@@ -1276,7 +1276,7 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
      * Track each holder's CB outcome in a parallel array so the
      * revoke loop below can suppress the preemptive row-delete on
      * transient client responses (NFS4_OK, NFS4ERR_DELAY,
-     * NFS4ERR_RECALLCONFLICT) per RFC 5661 §20.4.2.1.  When the
+     * NFS4ERR_RECALLCONFLICT) per RFC 5661 S20.4.2.1.  When the
      * client agrees to (or is mid-way through) returning the layout
      * the natural LAYOUTRETURN cleans up the row; revoking here
      * before the LAYOUTRETURN arrives would race with that op and
@@ -1286,20 +1286,20 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     byte_range_dispatch_cb_each(lr, holders, holder_count, cb_status);
 
     /*
-     * Conditional revoke (RFC 5661 §20.4.2.1).
+     * Conditional revoke (RFC 5661 S20.4.2.1).
      *
      * Drop the holder's layout-state row only when the recall did
      * NOT land cleanly:
-     *   – CB_NOT_SENT (no backchannel / dup fail / lr->st == NULL)
-     *   – negative errno (transport-level failure: -EIO, -ETIMEDOUT,
+     *   -- CB_NOT_SENT (no backchannel / dup fail / lr->st == NULL)
+     *   -- negative errno (transport-level failure: -EIO, -ETIMEDOUT,
      *     -ENOTCONN, -EINVAL)
-     *   – a non-transient NFS4ERR_* (BADSESSION, BAD_STATEID,
+     *   -- a non-transient NFS4ERR_* (BADSESSION, BAD_STATEID,
      *     OLD_STATEID, BADHANDLE, etc.)
      *
      * Skip the revoke on transient successes:
-     *   – NFS4_OK            — client agreed to return
-     *   – NFS4ERR_DELAY      — client busy, will return shortly
-     *   – NFS4ERR_RECALLCONFLICT — client has I/O in flight, will
+     *   -- NFS4_OK            -- client agreed to return
+     *   -- NFS4ERR_DELAY      -- client busy, will return shortly
+     *   -- NFS4ERR_RECALLCONFLICT -- client has I/O in flight, will
      *                                send LAYOUTRETURN when it drains
      *
      * In the skip path, the natural LAYOUTRETURN drops the row; the
@@ -1378,7 +1378,7 @@ int layout_recall_for_file(struct layout_recall *lr, uint64_t fileid)
     }
 
     /*
-     * Step 3: Authoritative revoke — delete all layouts for this file.
+     * Step 3: Authoritative revoke -- delete all layouts for this file.
      */
     for (uint32_t ri = 0; ri < scan.count; ri++) {
         revoke_layout_for_file_entry(lr, &entries[ri]);

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_drain.h — Donor-local drain orchestrator (Seq 8).
+ * cluster_drain.h -- Donor-local drain orchestrator (Seq 8).
  *
  * Evacuates all owned subtrees from the local node and transitions
  * to NODE_DRAINED.  Must be invoked on the node being drained.
@@ -23,7 +23,7 @@ struct mds_catalogue;
 /**
  * @brief Drain all subtrees from the local node.
  *
- * Transitions self from ACTIVE_SERVING → DRAINING, migrates each
+ * Transitions self from ACTIVE_SERVING -> DRAINING, migrates each
  * owned subtree to @p dest_mds_id, verifies zero remaining, and
  * transitions to NODE_DRAINED.
  *

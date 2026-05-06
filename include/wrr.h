@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * wrr.h — Weighted-round-robin and capacity-derived placement
+ * wrr.h -- Weighted-round-robin and capacity-derived placement
  * selection kernels.
  *
  * These two routines are the policy-aware decision functions
@@ -15,7 +15,7 @@
  * over the online DS set.
  *
  * The plain-RR path in placement_select() stays in placement.c
- * unconditionally — it is the always-available baseline.
+ * unconditionally -- it is the always-available baseline.
  */
 
 #ifndef WRR_H
@@ -25,13 +25,13 @@
 
 /**
  * Weighted random selection over @a n online DSes by free-byte
- * weight.  Larger free_bytes → higher selection probability.
+ * weight.  Larger free_bytes -> higher selection probability.
  *
  * @param free_bytes  Per-online-DS free-byte (or weight) values.
  * @param n           Number of online DSes (length of free_bytes).
  * @return Index in [0, n) of the chosen DS.  When n == 0 returns 0.
  *
- * Stub semantics (community build): always returns 0 — the
+ * Stub semantics (community build): always returns 0 -- the
  * surrounding logic walks forward to the next free slot, which
  * gives an RR-equivalent placement.
  */

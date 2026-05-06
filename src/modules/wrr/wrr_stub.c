@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * wrr_stub.c — no-op stub for WRR + capacity placement kernels.
+ * wrr_stub.c -- no-op stub for WRR + capacity placement kernels.
  *
  * Linked into pnfs_mds_core when ENABLE_WRR=OFF (community build).
  *
@@ -11,7 +11,7 @@
  * advances to the next free slot when 0 is already taken, which
  * gives an RR-equivalent placement across stripes.  WEIGHTED_RR
  * and CAPACITY policies therefore degrade gracefully to plain RR
- * on community builds — operators that explicitly request a
+ * on community builds -- operators that explicitly request a
  * weighted policy still get a valid placement, just not weighted.
  */
 

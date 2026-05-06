@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * compound_namespace.c — NFSv4.1 namespace ops (FH, lookup, attrs, dir).
+ * compound_namespace.c -- NFSv4.1 namespace ops (FH, lookup, attrs, dir).
  */
 
 #include <stdint.h>
@@ -45,7 +45,7 @@
 #define ACCESS4_EXTEND  0x00000008
 #define ACCESS4_DELETE  0x00000010
 #define ACCESS4_EXECUTE 0x00000020
-/* RFC 8276 §8.5: extended ACCESS bits for xattr operations. */
+/* RFC 8276 S8.5: extended ACCESS bits for xattr operations. */
 #define ACCESS4_XAREAD  0x00000040
 #define ACCESS4_XALIST  0x00000080
 #define ACCESS4_XAWRITE 0x00000100
@@ -112,7 +112,7 @@ enum nfs4_status op_access(struct compound_data *cd,
 		/*
 		 * POSIX permission check against caller credentials.
 		 *
-		 * RFC 8881 §18.1.3: the server SHOULD return all
+		 * RFC 8881 S18.1.3: the server SHOULD return all
 		 * access rights that the caller has, not only the
 		 * requested subset.  This ensures the client can
 		 * cache the full permission set in a single RPC.
@@ -144,7 +144,7 @@ enum nfs4_status op_access(struct compound_data *cd,
 			}
 
 			/*
-			 * RFC 8276 §8.5: map POSIX perms to xattr access.
+			 * RFC 8276 S8.5: map POSIX perms to xattr access.
 			 * XAREAD/XALIST follow READ; XAWRITE follows WRITE.
 			 */
 			if (allowed & ACCESS4_READ) {
@@ -161,7 +161,7 @@ enum nfs4_status op_access(struct compound_data *cd,
 
 			/*
 			 * Return the intersection of requested AND
-			 * all rights the caller actually has — this
+			 * all rights the caller actually has -- this
 			 * tells the client everything it can do.
 			 */
 			r->access = allowed & ACCESS4_ALL;
@@ -201,12 +201,12 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 	 * No referral check on PUTFH.  Junction dir inodes are local
 	 * metadata owned by this MDS.  The NFS4ERR_MOVED referral fires
 	 * on LOOKUP into the junction (op_lookup), not on PUTFH of the
-	 * junction dir itself.  This allows the RFC 8881 §8.5.1 flow:
-	 *   LOOKUP(junction) → MOVED → PUTFH(junction_fh) + GETATTR(fs_locations)
+	 * junction dir itself.  This allows the RFC 8881 S8.5.1 flow:
+	 *   LOOKUP(junction) -> MOVED -> PUTFH(junction_fh) + GETATTR(fs_locations)
 	 */
 
 	/*
-	 * RFC 8881 §18.19.4 — PUTFH must return NFS4ERR_BADHANDLE when
+	 * RFC 8881 S18.19.4 -- PUTFH must return NFS4ERR_BADHANDLE when
 	 * the supplied filehandle is not in this server's recognised
 	 * format.  The decoder uses fileid==0 as the malformed-FH
 	 * sentinel (root is fileid 2, no real object lives at 0), so
@@ -220,7 +220,7 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 
 	cd->current_fh = op->arg.putfh.fh;
 	cd->current_fh_set = true;
-	/* PUTFH with raw fileid — path unknown, clear it. */
+	/* PUTFH with raw fileid -- path unknown, clear it. */
 	cd->current_path[0] = '\0';
 
 	/* Route first, then validate in the resolved shard.
@@ -260,13 +260,13 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 		 * inode cache on repeat references to the same fileid.
 		 * Previously this was cat_getattr which always issued an
 		 * NDB PK read; mdtest-style flows do 3 PUTFHs per file
-		 * (OPEN, CLOSE, REMOVE) — 2 of those are now icache hits.
+		 * (OPEN, CLOSE, REMOVE) -- 2 of those are now icache hits.
 		 * compound_inode_get itself seeds cd->current_inode on
 		 * success. */
 		st = compound_inode_get(cd, op->arg.putfh.fh.fileid,
 					&inode);
 		if (st == MDS_ERR_NOTFOUND) {
-			/* RFC 8881 §18.19.4: an unrecognised filehandle is
+			/* RFC 8881 S18.19.4: an unrecognised filehandle is
 			 * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Linux NFSD
 			 * has the same convention (fs/nfsd/nfs4proc.c
 			 * nfsd4_putfh).  Pynfs PUTFH2 expects this code. */
@@ -358,12 +358,12 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 5661 §16.4.5 / RFC 8881 §18.16.5 + §12.7 — component4
-	 * validation.  Empty name → NFS4ERR_INVAL (pynfs SEQ9c).
-	 * "." / ".." → NFS4ERR_BADNAME (pynfs RNM10 family for
-	 * RENAME, same rule applies to LOOKUP per RFC 8881 §12.7
+	 * RFC 5661 S16.4.5 / RFC 8881 S18.16.5 + S12.7 -- component4
+	 * validation.  Empty name -> NFS4ERR_INVAL (pynfs SEQ9c).
+	 * "." / ".." -> NFS4ERR_BADNAME (pynfs RNM10 family for
+	 * RENAME, same rule applies to LOOKUP per RFC 8881 S12.7
 	 * "the dot and dot-dot conventions are not used in NFSv4").
-	 * Invalid UTF-8 / embedded NUL / '/' → NFS4ERR_INVAL
+	 * Invalid UTF-8 / embedded NUL / '/' -> NFS4ERR_INVAL
 	 * (pynfs RNM8/9 testBadutf8*).  Decoder NUL-terminates
 	 * op->arg.lookup.name so strlen() inside the helper is safe.
 	 */
@@ -423,7 +423,7 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 						 * the target inode's generation here
 						 * (the ext_dirent path returns no inode),
 						 * leave it 0 so the encoder treats it as
-						 * unspecified — consistent with v0
+						 * unspecified -- consistent with v0
 						 * legacy behaviour for these synthetic
 						 * cross-shard handles. */
 						cd->current_fh.owner_mds_id = cd->mds_id;
@@ -469,7 +469,7 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 		    !(cd->smap != NULL &&
 		      compound_next_op_requests_fs_locations(cd))) {
 			/* Don't return MOVED for junctions owned by
-			 * this MDS — that would cause a referral loop. */
+			 * this MDS -- that would cause a referral loop. */
 			if (cd->smap != NULL) {
 				char jpath[MDS_MAX_PATH];
 				size_t pl = strlen(cd->current_path);
@@ -502,7 +502,7 @@ not_junction: ;
 	 * and the cross-MDS routing block (compound.c MOVED dispatch) can
 	 * recover ownership directly from the FH instead of relying on
 	 * compound-local path tracking that does not survive across
-	 * COMPOUND boundaries.  Local LOOKUP — owner is this MDS.  The
+	 * COMPOUND boundaries.  Local LOOKUP -- owner is this MDS.  The
 	 * child's generation comes from the catalogue read above. */
 	cd->current_fh.owner_mds_id = cd->mds_id;
 	cd->current_fh.generation = child.generation;
@@ -510,7 +510,7 @@ not_junction: ;
 	 * dirent path (NOT ext_dirent synthetic inodes). */
 	cd->current_inode = child;
 	cd->current_inode_valid = true;
-	/* Update path tracking — check for truncation. */
+	/* Update path tracking -- check for truncation. */
 	{
 		size_t plen = strlen(cd->current_path);
 		int n;
@@ -535,7 +535,7 @@ not_junction: ;
 }
 
 /*
- * Phase F of docs/hpc-nto1-plan.md, integration part B — coherence
+ * Phase F of docs/hpc-nto1-plan.md, integration part B -- coherence
  * handshake with the LAYOUTCOMMIT aggregator for op_getattr.
  *
  * Only HPC-Shared inodes can have an aggregate (the synchronous
@@ -569,14 +569,14 @@ op_getattr_apply_lca_coherence(struct compound_data *cd,
 		int frc = layout_commit_aggregator_flush_fileid(
 			cd->lcommit_agg, cd->current_fh.fileid);
 		if (frc == 1) {
-			/* Bucket miss — nothing aggregated for this
+			/* Bucket miss -- nothing aggregated for this
 			 * fileid; the persisted inode already reflects
 			 * the latest known state.  Return what we read. */
 			return NFS4_OK;
 		}
 		if (frc < 0) {
 			/* QA review Blocker 4: STRICT promises POSIX-ish
-			 * stat semantics — the persisted inode MUST reflect
+			 * stat semantics -- the persisted inode MUST reflect
 			 * any pending aggregate before we reply.  The
 			 * pre-fix path swallowed callback failures and
 			 * served stale data; that contradicted the
@@ -655,7 +655,7 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	 *   1. Quota limits for the inode's owner uid/gid (when a
 	 *      quota context is wired and rules are installed).
 	 *      The no-rules fast path returns UINT64_MAX from
-	 *      mds_quota_space_avail() — a sentinel that means
+	 *      mds_quota_space_avail() -- a sentinel that means
 	 *      "unlimited from quota's perspective".
 	 *   2. Physical aggregate of all online DSes (sum of the
 	 *      live statvfs probes in ds_cache).  This bounds the
@@ -688,8 +688,8 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 			/*
 			 * Staleness gate: skip per-DS observations
 			 * older than this many wall-clock seconds.
-			 * Default tuned to 5 × the 60 s probe interval
-			 * — large enough to ride out a single missed
+			 * Default tuned to 5 x the 60 s probe interval
+			 * -- large enough to ride out a single missed
 			 * probe cycle but small enough that a stopped
 			 * MDS's frozen reading falls out of df within
 			 * minutes.  Hardcoded for now; a config knob
@@ -759,7 +759,7 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 		 * the client, which makes rmdir / rm -rf fail with
 		 * EBUSY (the RMDIR RPC is rejected by vfs_rmdir before
 		 * it ever reaches the server).  Self-owned junctions
-		 * need no client-side redirect — we are already the
+		 * need no client-side redirect -- we are already the
 		 * authoritative MDS for the subtree. */
 		if (rp_st == MDS_OK &&
 		    subtree_map_lookup(cd->smap, jpath, &jse) == MDS_OK &&
@@ -807,7 +807,7 @@ static void setattr_quota_post(struct compound_data *cd,
 		return;
 	}
 
-	/* 1. chown/chgrp: transfer pre-inode bytes from old→new owner. */
+	/* 1. chown/chgrp: transfer pre-inode bytes from old->new owner. */
 	if ((m & MDS_ATTR_UID) || (m & MDS_ATTR_GID)) {
 		uint64_t old_uid = pre->uid;
 		uint64_t old_gid = pre->gid;
@@ -907,7 +907,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 		return nst;
 }
 
-	/* Validate open stateid if supplied (RFC 8881 §18.30). */
+	/* Validate open stateid if supplied (RFC 8881 S18.30). */
 	if (op->arg.setattr.has_stateid && cd->ot != NULL) {
 		nst = validate_io_stateid(cd, &op->arg.setattr.stateid,
 					  OPEN4_SHARE_ACCESS_WRITE);
@@ -956,7 +956,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	/*
 	 * Phase 8b: a SETATTR on a directory changes its attrs,
 	 * which dir delegations must be notified about.  We only
-	 * recall if the current FH is a directory — file setattrs
+	 * recall if the current FH is a directory -- file setattrs
 	 * do not affect any directory delegation.
 	 */
 	if (sa_pre_valid && sa_pre_inode.type == MDS_FTYPE_DIR) {
@@ -970,7 +970,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	if (st == MDS_OK) {
 		compound_inode_invalidate(cd, cd->current_fh.fileid);
 	}
-	/* Phase D of docs/hpc-nto1-plan.md — a shrinking SETATTR(size)
+	/* Phase D of docs/hpc-nto1-plan.md -- a shrinking SETATTR(size)
 	 * may turn previously valid file ranges into truncated holes,
 	 * so any cached stripe-map snapshot for this fileid must be
 	 * dropped before the next LAYOUTGET serves it back to a
@@ -979,7 +979,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	 * anyway, so non-HPC SETATTRs amortise to a cheap shard-mutex
 	 * hash miss.  NULL-safe.
 	 *
-	 * Phase F of docs/hpc-nto1-plan.md — mirror the same drop on
+	 * Phase F of docs/hpc-nto1-plan.md -- mirror the same drop on
 	 * the LAYOUTCOMMIT aggregator: an explicit SETATTR(size) wins
 	 * over any in-memory aggregate, and leaving a stale bucket
 	 * around would let the next periodic flush silently restore
@@ -994,9 +994,9 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 					      cd->current_fh.fileid);
 	}
 	/*
-	 * Mark Q5 P03 — layout-recall on truncate.
+	 * Mark Q5 P03 -- layout-recall on truncate.
 	 *
-	 * RFC 8881 §12.5.5 / §18.30: a SETATTR that changes the file
+	 * RFC 8881 S12.5.5 / S18.30: a SETATTR that changes the file
 	 * size invalidates outstanding layouts on that file (a shrink
 	 * removes ranges; a grow can only add zeroed bytes, but
 	 * holders' caches still need to learn the new size).  We
@@ -1014,7 +1014,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	 *     we can confirm the mutation targeted a regular file and
 	 *     the size actually changed (the setattr_is_noop check
 	 *     above already short-circuits identical-size SETATTRs)
-	 *   - cd->lr is wired (NULL-safe — unit-test path leaves it
+	 *   - cd->lr is wired (NULL-safe -- unit-test path leaves it
 	 *     unset)
 	 *
 	 * The byte-range helper's same-client filter
@@ -1035,7 +1035,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 			cd->clientid,
 			LAYOUTIOMODE4_RW,    /* recall ANY holder */
 			0, UINT64_MAX,        /* whole file */
-			0,                    /* layout_type → default */
+			0,                    /* layout_type -> default */
 			NULL);
 	}
 	if (st == MDS_OK && sa_pre_valid) {
@@ -1058,9 +1058,9 @@ enum nfs4_status op_create(struct compound_data *cd,
 		return nst;
 }
 	/*
-	 * RFC 8881 §18.4.4 / §12.7 — component4 validation.  Empty
-	 * name → NFS4ERR_INVAL; "." / ".." → NFS4ERR_BADNAME; bad
-	 * UTF-8 → NFS4ERR_INVAL.  Validate BEFORE the freeze /
+	 * RFC 8881 S18.4.4 / S12.7 -- component4 validation.  Empty
+	 * name -> NFS4ERR_INVAL; "." / ".." -> NFS4ERR_BADNAME; bad
+	 * UTF-8 -> NFS4ERR_INVAL.  Validate BEFORE the freeze /
 	 * health checks so a malformed argument cannot mask state
 	 * with a transient DELAY.  Same precedence as op_lookup /
 	 * op_rename above.
@@ -1172,7 +1172,7 @@ enum nfs4_status op_create(struct compound_data *cd,
 	compound_maybe_enqueue_ds_prepare(cd, &res->res.create.inode);
 
 	/* Phase B HPC-Shared: propagate the bit from the parent to the
-	 * new child (file or directory).  Best-effort — a transient
+	 * new child (file or directory).  Best-effort -- a transient
 	 * catalogue error here is non-fatal for the CREATE itself. */
 	hpc_shared_inherit_from_parent(cd, cd->current_fh.fileid,
 				       &res->res.create.inode);
@@ -1236,7 +1236,7 @@ enum nfs4_status op_create(struct compound_data *cd,
 	/* Per RFC 8881: CREATE changes the current FH to the new object. */
 	cd->current_fh.fileid = res->res.create.inode.fileid;
 	/* FH-encoded subtree ownership: the just-created inode lives on
-	 * this MDS — stamp owner_mds_id and copy the freshly-allocated
+	 * this MDS -- stamp owner_mds_id and copy the freshly-allocated
 	 * generation so the FH we emit on a subsequent GETFH carries
 	 * full v1 routing/freshness metadata. */
 	cd->current_fh.owner_mds_id = cd->mds_id;
@@ -1272,13 +1272,13 @@ enum nfs4_status op_create(struct compound_data *cd,
  *
  * Strategy: enqueue one GC entry per UNIQUE ds_id observed in the
  * stripe map (the worker brute-forces stripe/mirror coordinates,
- * bounded by MDS_MAX_STRIPES * MDS_MAX_MIRRORS — currently 4096
+ * bounded by MDS_MAX_STRIPES * MDS_MAX_MIRRORS -- currently 4096
  * cheap unlinks per DS, most ENOENT, with an early-out in ds_gc.c
  * once the stripe count is exhausted).  Drop the stripe map after
  * enqueue so the next iteration does not re-enter.  All steps are
  * best-effort: a failure here only forfeits this round of cleanup;
  * the GC table will catch the next pass.  We never propagate the
- * failure back to the client — the unlink semantics from the user's
+ * failure back to the client -- the unlink semantics from the user's
  * point of view are already satisfied.
  *
  * Caller contract: invoke ONLY after cat_remove() returns MDS_OK,
@@ -1298,7 +1298,7 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 	/* De-dup buffer: at most stripe_count*mirror_count unique IDs.
 	 * Heap-allocated (Phase A of docs/hpc-nto1-plan.md): with
 	 * MDS_MAX_STRIPES at 1024 the worst-case 4096-uint32 buffer is
-	 * 16 KiB — still OK on the stack, but tomorrow's MDS_MAX_MIRRORS
+	 * 16 KiB -- still OK on the stack, but tomorrow's MDS_MAX_MIRRORS
 	 * bump or a future structurally larger entry would push it past
 	 * the 64 KiB stack-safety threshold.  Keep it on the heap so the
 	 * scaling axis is never load-bearing on the stack again. */
@@ -1329,7 +1329,7 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 
 	seen = calloc(total, sizeof(*seen));
 	if (seen == NULL) {
-		/* Out of memory — skip GC scheduling for this unlink.
+		/* Out of memory -- skip GC scheduling for this unlink.
 		 * The stripe_map row stays around; a later cleanup pass
 		 * (admin or restart-time scan) will pick it up. */
 		free(entries);
@@ -1354,7 +1354,7 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 		seen[seen_count++] = ds_id;
 
 		/* fh_len may legitimately be 0 (DS file never came
-		 * online — the create raced with a layout-pending
+		 * online -- the create raced with a layout-pending
 		 * client).  We still enqueue: the worker uses ds_id
 		 * + fileid + stripe/mirror sweep to drive the
 		 * unlink, so the FH is informational only.  Clamp
@@ -1368,16 +1368,16 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 	}
 
 	/* Best-effort: drop the now-orphaned stripe map.  Idempotent
-	 * on the catalogue — a NOTFOUND on a re-run is not an error. */
+	 * on the catalogue -- a NOTFOUND on a re-run is not an error. */
 	(void)mds_cat_stripe_map_del(cd->cat, NULL, fileid);
 
-	/* Phase D of docs/hpc-nto1-plan.md — keep the per-MDS HPC
+	/* Phase D of docs/hpc-nto1-plan.md -- keep the per-MDS HPC
 	 * layout cache coherent with the catalogue.  NULL-safe; the
 	 * cache itself only holds entries for HPC-Shared inodes, so
 	 * for plain inodes this is a cheap shard-mutex hash miss. */
 	layout_cache_invalidate(cd->lcache, fileid);
 
-	/* Phase F of docs/hpc-nto1-plan.md — the file is gone, so any
+	/* Phase F of docs/hpc-nto1-plan.md -- the file is gone, so any
 	 * pending size/mtime aggregate is meaningless.  Drop the
 	 * bucket without flushing so the timer thread does not race
 	 * the unlink and try to setattr a deleted fileid.  NULL-safe. */
@@ -1400,8 +1400,8 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		return nst;
 }
 	/*
-	 * RFC 8881 §18.25.4 / §12.7 — component4 validation.  Empty
-	 * → NFS4ERR_INVAL; "." / ".." → NFS4ERR_BADNAME; bad UTF-8 →
+	 * RFC 8881 S18.25.4 / S12.7 -- component4 validation.  Empty
+	 * -> NFS4ERR_INVAL; "." / ".." -> NFS4ERR_BADNAME; bad UTF-8 ->
 	 * NFS4ERR_INVAL.  Same shape and precedence as op_lookup,
 	 * op_create, op_rename above.
 	 */
@@ -1454,7 +1454,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	 * unlink of a regular file: nlink == 1 + type == REG means
 	 * the very next cat_remove() will drop the inode to zero
 	 * links and orphan its DS-side data files.  We capture the
-	 * answer here — BEFORE the mutation — so we can schedule
+	 * answer here -- BEFORE the mutation -- so we can schedule
 	 * GC against a still-coherent stripe map after a successful
 	 * remove. */
 	struct mds_inode rm_inode;
@@ -1473,7 +1473,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 				      op->arg.remove.name, NULL);
 	if (rm_final_data_unlink && rm_fileid != 0) {
 		/*
-		 * Mark Q5 P04 — layout-recall on final unlink.
+		 * Mark Q5 P04 -- layout-recall on final unlink.
 		 *
 		 * Revoke layouts BEFORE cat_remove() drops the final
 		 * namespace entry.  Linux answers CB_LAYOUTRECALL by
@@ -1530,7 +1530,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		}
 
 		/* Final unlink of a regular file: schedule DS-side
-		 * data cleanup via the GC queue.  Best-effort —
+		 * data cleanup via the GC queue.  Best-effort --
 		 * failures here do not affect the client-visible
 		 * remove status; the next pass picks up any rows
 		 * we miss. */
@@ -1583,16 +1583,16 @@ enum nfs4_status op_rename(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 8881 §18.26.4 / §12.7 — component4 validation for both
-	 * names.  Empty → NFS4ERR_INVAL (pynfs SEQ9d).  "." / ".." →
+	 * RFC 8881 S18.26.4 / S12.7 -- component4 validation for both
+	 * names.  Empty -> NFS4ERR_INVAL (pynfs SEQ9d).  "." / ".." ->
 	 * NFS4ERR_BADNAME (pynfs RNM10 testDotsOldname / RNM11
-	 * testDotsNewname).  Invalid UTF-8 → NFS4ERR_INVAL (pynfs
+	 * testDotsNewname).  Invalid UTF-8 -> NFS4ERR_INVAL (pynfs
 	 * RNM8/9 testBadutf8*).  Both names live in NUL-terminated
 	 * fixed buffers so the helper can use strlen() safely.
 	 * Validation runs BEFORE the freeze / health checks: a
 	 * malformed argument is a client bug that deserves an
 	 * immediate error regardless of subtree state, matching the
-	 * precedence implied by RFC 8881 §2.6.3.1.
+	 * precedence implied by RFC 8881 S2.6.3.1.
 	 */
 	nst = compound_validate_name(op->arg.rename.src_name);
 	if (nst != NFS4_OK) {
@@ -1671,8 +1671,8 @@ enum nfs4_status op_rename(struct compound_data *cd,
 			 * metadata store; it is retained today only for
 			 * hypothetical future multi-cluster deployments and for
 			 * the test_rename_2pc unit coverage.  The runtime path
-			 * now goes through cat_rename — ~6 gRPC RTs collapse to
-			 * one NDB commit (~10-15 ms → ~2-3 ms per cross-subtree
+			 * now goes through cat_rename -- ~6 gRPC RTs collapse to
+			 * one NDB commit (~10-15 ms -> ~2-3 ms per cross-subtree
 			 * rename on the lab).  See
 			 * docs/design-post-phase3-candidates.md Candidate 3. */
 			if (cd->cat == NULL) {
@@ -1696,7 +1696,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 			return mds_status_to_nfs4(st);
 		}
 		if (!src_local && dst_local) {
-			/* Remote source, local destination — the remote
+			/* Remote source, local destination -- the remote
 			 * MDS should be the coordinator.  Refuse here. */
 			return NFS4ERR_XDEV;
 		}
@@ -1708,12 +1708,12 @@ enum nfs4_status op_rename(struct compound_data *cd,
 			 * cat_rename) this is NOT cross-device: every MDS
 			 * sees the same NDB metadata, and the shard map
 			 * is purely an ownership hint for routing.  An
-			 * unmapped path — e.g. the pynfs default test root
+			 * unmapped path -- e.g. the pynfs default test root
 			 * `/pynfs-test/...`, which is not configured as
-			 * any shard — is reachable by every node.
+			 * any shard -- is reachable by every node.
 			 *
 			 * Returning NFS4ERR_XDEV here was over-conservative
-			 * and broke RFC 5661 §18.26 same-directory rename
+			 * and broke RFC 5661 S18.26 same-directory rename
 			 * for any client whose mount path was not pre-
 			 * declared in the shard map (pynfs SEQ10b
 			 * testReplayCache007).  Fall through to the normal
@@ -1721,7 +1721,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 			 * handles atomicity even if src and dst happened
 			 * to live on different shards. */
 		}
-		/* Both local — cross-shard rename (Phase 4). */
+		/* Both local -- cross-shard rename (Phase 4). */
 		if (cd->current_shard != NULL &&
 		    cd->saved_shard != NULL &&
 		    cd->current_shard->shard_id != cd->saved_shard->shard_id) {
@@ -1738,7 +1738,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	}
 
 	/*
-	 * Cycle detection for directory renames (RFC 8881 §18.26.4):
+	 * Cycle detection for directory renames (RFC 8881 S18.26.4):
 	 * reject if the source path is a prefix of the destination
 	 * path, which would create a disconnected namespace cycle.
 	 */
@@ -1752,7 +1752,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §18.26.4 — RENAME of a file to itself MUST be a
+	 * RFC 8881 S18.26.4 -- RENAME of a file to itself MUST be a
 	 * no-op.  This covers two flavours both required by pynfs:
 	 *
 	 *   RNM19 (testSelfRenameFile): src_name == dst_name in the
@@ -1760,7 +1760,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	 *
 	 *   RNM20 (testLinkRename): src_name != dst_name (possibly in
 	 *   different directories) but both names resolve to the same
-	 *   inode — i.e. the destination is a hard link to the source.
+	 *   inode -- i.e. the destination is a hard link to the source.
 	 *
 	 * In both cases the source and target change_info4 values MUST
 	 * have before == after; mutating the catalogue would bump the
@@ -1893,9 +1893,9 @@ enum nfs4_status op_link(struct compound_data *cd,
 		return nst;
 }
 	/*
-	 * RFC 8881 §18.20.4 / §12.7 — component4 validation on the
-	 * link's new name.  Empty → NFS4ERR_INVAL; "." / ".." →
-	 * NFS4ERR_BADNAME; bad UTF-8 → NFS4ERR_INVAL.  Same shape
+	 * RFC 8881 S18.20.4 / S12.7 -- component4 validation on the
+	 * link's new name.  Empty -> NFS4ERR_INVAL; "." / ".." ->
+	 * NFS4ERR_BADNAME; bad UTF-8 -> NFS4ERR_INVAL.  Same shape
 	 * and precedence as the other namespace ops above.
 	 */
 	nst = compound_validate_name(op->arg.link.name);
@@ -2044,7 +2044,7 @@ enum nfs4_status op_link(struct compound_data *cd,
 		 * sees the same catalogue, so an unmapped path (e.g. the
 		 * pynfs default test root /pynfs-test/...) is reachable
 		 * here even though it falls outside any configured subtree
-		 * — mirror the op_rename precedent that allows the
+		 * -- mirror the op_rename precedent that allows the
 		 * `!src_local && !dst_local` case to fall through to
 		 * cat_link.  The historical NFS4ERR_XDEV here was
 		 * over-conservative and broke pynfs RNM20 (testLinkRename)
@@ -2102,8 +2102,8 @@ struct readdir_fill {
  * resolves both in a single NDB transaction.
  *
  * Entries for which the inode read race-missed (dangling dirent, i.e.
- * inode_valid==false) are still emitted — the kernel client wants the
- * name for plain readdir — but their entry_attrs_valid flag is left
+ * inode_valid==false) are still emitted -- the kernel client wants the
+ * name for plain readdir -- but their entry_attrs_valid flag is left
  * false so the GETATTR path falls back to the caller-issued read.
  */
 static int readdir_plus_cat_cb(const struct mds_cat_dirent *entry,
@@ -2117,14 +2117,14 @@ static int readdir_plus_cat_cb(const struct mds_cat_dirent *entry,
 	if (entry == NULL) { return 0; }
 
 	/*
-	 * RFC 5661 §3.2: a component4 name is a utf8str_cs and the
+	 * RFC 5661 S3.2: a component4 name is a utf8str_cs and the
 	 * specification implicitly requires non-zero length for any
 	 * directory entry (zero-length names are explicitly rejected
-	 * by LOOKUP / RENAME / CREATE / REMOVE per §16.4.5 /
-	 * §18.26.4).  Pre-existing zero-length dirents in the
-	 * catalogue — e.g. created by an older codepath that did not
+	 * by LOOKUP / RENAME / CREATE / REMOVE per S16.4.5 /
+	 * S18.26.4).  Pre-existing zero-length dirents in the
+	 * catalogue -- e.g. created by an older codepath that did not
 	 * validate the name, or by a backend repair that left a
-	 * sentinel row — must therefore be hidden from the wire so
+	 * sentinel row -- must therefore be hidden from the wire so
 	 * conformant clients (pynfs's clean_dir, Linux's getdents)
 	 * don't choke trying to LOOKUP("").  This is a defensive
 	 * filter only; CREATE/OPEN at the handler level should be
@@ -2181,7 +2181,7 @@ static int readdir_plus_cat_cb(const struct mds_cat_dirent *entry,
 	return 0;
 }
 
-/* Xattr READDIR callback — fills readdir entries with xattr names. */
+/* Xattr READDIR callback -- fills readdir entries with xattr names. */
 struct xattr_readdir_ctx {
 	struct nfs4_res_readdir *rd;
 };
@@ -2195,8 +2195,8 @@ static int xattr_readdir_cb(const char *name, size_t name_len, void *arg)
 		return -1;
 }
 
-	/* Same RFC 5661 §3.2 component4 rule applies to xattr names
-	 * (RFC 8276 §4 — xattr names are component4): zero-length
+	/* Same RFC 5661 S3.2 component4 rule applies to xattr names
+	 * (RFC 8276 S4 -- xattr names are component4): zero-length
 	 * entries cannot exist on the wire, so skip any such row that
 	 * may have leaked into the catalogue. */
 	if (name == NULL || name_len == 0) {
@@ -2289,7 +2289,7 @@ enum nfs4_status op_readdir(struct compound_data *cd,
  * ----------------------------------------------------------------------- */
 
 /**
- * op_open — NFSv4.1 OPEN operation (RFC 8881 §18.16).
+ * op_open -- NFSv4.1 OPEN operation (RFC 8881 S18.16).
  *
  * Supports CLAIM_NULL (open/create by name in current_fh directory)
  * and CLAIM_FH (open current_fh directly).
@@ -2310,7 +2310,7 @@ enum nfs4_status op_readdir(struct compound_data *cd,
 
 
 /* -----------------------------------------------------------------------
- * LOOKUPP handler (RFC 8881 §18.14)
+ * LOOKUPP handler (RFC 8881 S18.14)
  *
  * Sets current_fh to the parent directory of the current filehandle.
  * ----------------------------------------------------------------------- */
@@ -2336,7 +2336,7 @@ enum nfs4_status op_lookupp(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §18.14: if the current filehandle is the root
+	 * RFC 8881 S18.14: if the current filehandle is the root
 	 * of the server's namespace, return NFS4ERR_NOENT.
 	 */
 	if (inode.parent_fileid == 0 ||
@@ -2403,9 +2403,9 @@ enum nfs4_status op_lookupp(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * READLINK handler (RFC 8881 §18.24)
+ * READLINK handler (RFC 8881 S18.24)
  *
- * Returns the target of a symbolic link.  Currently not supported —
+ * Returns the target of a symbolic link.  Currently not supported --
  * the MDS does not store symlinks.
  * ----------------------------------------------------------------------- */
 
@@ -2429,7 +2429,7 @@ enum nfs4_status op_readlink(struct compound_data *cd,
 		return mds_status_to_nfs4(st);
 	}
 
-	/* RFC 8881 §18.24: must be a symbolic link. */
+	/* RFC 8881 S18.24: must be a symbolic link. */
 	if (inode.type != MDS_FTYPE_SYMLINK) {
 		return NFS4ERR_INVAL;
 	}
@@ -2437,7 +2437,7 @@ enum nfs4_status op_readlink(struct compound_data *cd,
 	/*
 	 * Symlink targets are stored in the inline_data table,
 	 * keyed by fileid (same table used for small-file inline
-	 * data — the file type distinguishes the purpose).
+	 * data -- the file type distinguishes the purpose).
 	 */
 	st = cat_inline_get(cd, cd->current_fh.fileid,
 				  r->target, sizeof(r->target) - 1,

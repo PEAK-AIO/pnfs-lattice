@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * xdr_ops_core.c — NFSv4.1 per-op XDR decoders and result encoders.
+ * xdr_ops_core.c -- NFSv4.1 per-op XDR decoders and result encoders.
  */
 
 #include <stdint.h>
@@ -14,7 +14,7 @@
 #include "xdr_internal.h"
 #include "delegation.h"  /* OPEN_DELEGATE_NONE/READ/WRITE */
 
-/* From xdr_codec.c — needed for READDIR inline attr encoding. */
+/* From xdr_codec.c -- needed for READDIR inline attr encoding. */
 extern uint32_t mds_type_to_nfs4(enum mds_file_type t);
 
 /* -----------------------------------------------------------------------
@@ -32,7 +32,7 @@ bool decode_op_sequence(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_opaque_decode(xdrs, (char *)a->session_id, SESSION_ID_SIZE)) {
         return false;
 }
-    /* RFC 8881 §18.46.1: sa_sequenceid before sa_slotid on wire. */
+    /* RFC 8881 S18.46.1: sa_sequenceid before sa_slotid on wire. */
     if (!xdr_uint32_t(xdrs, &a->seq_id)) {
         return false;
 }
@@ -86,7 +86,7 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
         /* We accept SP4_NONE only; other values we'd skip. */
     }
 
-    /* nfs_impl_id4<1> array (optional, max 1 per RFC 8881 §18.35.1).
+    /* nfs_impl_id4<1> array (optional, max 1 per RFC 8881 S18.35.1).
      * pynfs EID3 testLongArray sends 2 entries expecting NFS4ERR_BADXDR
      * (or RPC GARBAGE_ARGS).  Returning false from the decoder here
      * yields BADXDR/GARBAGE_ARGS via the existing decode-failure path. */
@@ -161,13 +161,13 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
 
-    /* fore_chan_attrs (RFC 8881 §18.36.1 channel_attrs4):
+    /* fore_chan_attrs (RFC 8881 S18.36.1 channel_attrs4):
      *   ca_headerpadsize, ca_maxrequestsize, ca_maxresponsesize,
      *   ca_maxresponsesize_cached, ca_maxoperations, ca_maxrequests,
      *   ca_rdma_ird<1>.
      * Capture every field into a-> so op_create_session can apply the
      * NFS4ERR_TOOSMALL / NFS4ERR_INVAL semantics required by
-     * §18.36.3.  Pynfs CSESS25/28/29 and SEQ6/SEQ7 drive these. */
+     * S18.36.3.  Pynfs CSESS25/28/29 and SEQ6/SEQ7 drive these. */
     {
         uint32_t pad, maxreq, maxresp, maxcached, maxops;
 
@@ -193,7 +193,7 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
             return false;
         }
         /* ca_rdma_ird<1>: XDR upper-bound 1.  ird_count > 1 is an
-         * XDR violation — pynfs CSESS19 (testRdmaArray2) sends
+         * XDR violation -- pynfs CSESS19 (testRdmaArray2) sends
          * length 2 expecting NFS4ERR_BADXDR / GARBAGE_ARGS, both
          * of which our decode-failure path produces. */
         {
@@ -209,7 +209,7 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
 
     /* back_chan_attrs: same 7 fields.  We capture all of them into
      * a-> so op_create_session can apply the same TOOSMALL floor as
-     * for the fore channel — pynfs CSESS29 (testDRCMemLeak) sets the
+     * for the fore channel -- pynfs CSESS29 (testDRCMemLeak) sets the
      * back channel's ca_maxrequestsize=10 and expects TOOSMALL. */
     {
         uint32_t pad, maxreq, maxresp, maxcached, maxops;
@@ -250,13 +250,13 @@ bool decode_op_create_session(XDR *xdrs, struct nfs4_op *op)
         }
     }
 
-    /* cb_program — store in arg for backchannel use. */
+    /* cb_program -- store in arg for backchannel use. */
     if (!xdr_uint32_t(xdrs, &a->cb_prog)) {
         return false;
 }
 
     /*
-     * RFC 8881 §2.10.8.3 / §18.36.3 — callback_sec_parms<> is an
+     * RFC 8881 S2.10.8.3 / S18.36.3 -- callback_sec_parms<> is an
      * array of callback_sec_parms4 entries, one per security flavor
      * the client is willing to receive callbacks under.  We capture
      * the FIRST entry (AUTH_NONE or AUTH_SYS) into a->cb_sec; the
@@ -457,7 +457,7 @@ bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
 }
     a->name[name_len] = '\0';
 
-    /* createattrs4 (fattr4) — we parse mode from it. */
+    /* createattrs4 (fattr4) -- we parse mode from it. */
     {
         struct mds_inode attrs;
         uint32_t mask;
@@ -596,7 +596,7 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
 
-    /* open_owner4: clientid + owner<> — store for per-owner state. */
+    /* open_owner4: clientid + owner<> -- store for per-owner state. */
     {
         uint64_t clientid_wire;
         uint32_t owner_len;
@@ -635,7 +635,7 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
 
             if (createmode == CREATEMODE_EXCLUSIVE4) {
                 /*
-                 * EXCLUSIVE4 (RFC 8881 §18.16.3): 8-byte create
+                 * EXCLUSIVE4 (RFC 8881 S18.16.3): 8-byte create
                  * verifier for replay detection.  No fattr.
                  */
                 if (!xdr_uint64_t(xdrs, &a->create_verf)) {
@@ -647,7 +647,7 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
                 a->gid = 0;
             } else if (createmode == CREATEMODE_EXCLUSIVE4_1) {
                 /*
-                 * EXCLUSIVE4_1 (RFC 8881 §18.16.3): 8-byte verifier
+                 * EXCLUSIVE4_1 (RFC 8881 S18.16.3): 8-byte verifier
                  * + fattr4.  Store verifier, then decode attrs.
                  */
                 if (!xdr_uint64_t(xdrs, &a->create_verf)) {
@@ -779,7 +779,7 @@ bool decode_op_write(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &stable_how)) {
         return false;
 }
-    /* stable_how: UNSTABLE4=0, DATA_SYNC4=1, FILE_SYNC4=2 — consumed. */
+    /* stable_how: UNSTABLE4=0, DATA_SYNC4=1, FILE_SYNC4=2 -- consumed. */
 
     /* data: length-prefixed opaque. */
     if (!xdr_uint32_t(xdrs, &data_len)) {
@@ -820,7 +820,7 @@ bool encode_res_sequence(XDR *xdrs, const struct nfs4_result *r)
                            SESSION_ID_SIZE)) {
         return false;
 }
-    /* RFC 8881 §18.46.3: sr_sequenceid before sr_slotid */
+    /* RFC 8881 S18.46.3: sr_sequenceid before sr_slotid */
     if (!xdr_uint32_t(xdrs, (uint32_t *)&s->seq_id)) {
         return false;
 }
@@ -884,7 +884,7 @@ bool encode_res_exchange_id(XDR *xdrs, const struct nfs4_result *r)
 }
     }
 
-    /* server_impl_id (array of nfs_impl_id4 — we return 0 entries). */
+    /* server_impl_id (array of nfs_impl_id4 -- we return 0 entries). */
     {
         uint32_t count = 0;
 
@@ -907,7 +907,7 @@ bool encode_res_create_session(XDR *xdrs,
         return false;
 }
 
-    /* csr_sequence: RFC 8881 §18.36.3 — the sequence ID used for
+    /* csr_sequence: RFC 8881 S18.36.3 -- the sequence ID used for
      * this CREATE_SESSION (echoed back to the client). */
     {
         uint32_t csr_seq = cs->csr_sequence;
@@ -924,7 +924,7 @@ bool encode_res_create_session(XDR *xdrs,
      * Emit the negotiated maxrequestsize / maxoperations from the
      * compound result struct (already MIN(client, server)) so the
      * client knows the effective per-session caps.  RFC 8881
-     * §18.36.4 / pynfs SEQ6+SEQ7. */
+     * S18.36.4 / pynfs SEQ6+SEQ7. */
     {
         uint32_t pad = 0;
         uint32_t maxreq = (cs->fore_max_request_size > 0)
@@ -1063,7 +1063,7 @@ bool encode_res_create(XDR *xdrs, const struct nfs4_result *r)
      * would emit a nonsensical change_info4 (we observed values
      * like before=fileid, after=mode<<32|type pre-fix).  op_create
      * populates parent_change_before/after from the directory
-     * inode, which is what RFC 8881 §18.4 requires. */
+     * inode, which is what RFC 8881 S18.4 requires. */
     if (!encode_change_info(xdrs,
         r->res.create.parent_change_before,
         r->res.create.parent_change_after)) {
@@ -1192,26 +1192,26 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
 {
     const struct nfs4_res_open *o = &r->res.open;
     /*
-     * RFC 5661 / RFC 8881 §18.16.4 OPEN4resok.rflags.
+     * RFC 5661 / RFC 8881 S18.16.4 OPEN4resok.rflags.
      *
      * OPEN4_RESULT_LOCKTYPE_POSIX is advisory but load-bearing for
      * Linux: fs/nfs/nfs4proc.c::nfs4_proc_lock() short-circuits every
      * fcntl(F_SETLK) byte-range request to ENOLCK when this bit is
      * clear in the OPEN reply, never sending the LOCK RPC.  Since
-     * this daemon implements RFC 8881 §18.10 LOCK/LOCKT/LOCKU
-     * end-to-end (compound.c::OP_LOCK → lock_state.c with full
+     * this daemon implements RFC 8881 S18.10 LOCK/LOCKT/LOCKU
+     * end-to-end (compound.c::OP_LOCK -> lock_state.c with full
      * conflict detection and grace-period reclaim), advertise the
      * bit unconditionally so Linux clients enable their POSIX-lock
      * code path.
      *
      * Other rflags bits intentionally not set:
-     *   OPEN4_RESULT_CONFIRM           — v4.0 OPEN_CONFIRM, deprecated
+     *   OPEN4_RESULT_CONFIRM           -- v4.0 OPEN_CONFIRM, deprecated
      *                                    by RFC 8881 sessions; never
      *                                    set on a v4.1+ server.
-     *   OPEN4_RESULT_PRESERVE_UNLINKED — silly-rename is client-side
+     *   OPEN4_RESULT_PRESERVE_UNLINKED -- silly-rename is client-side
      *                                    on Linux; we don't promise
      *                                    server-side preservation.
-     *   OPEN4_RESULT_MAY_NOTIFY_LOCK   — we don't implement
+     *   OPEN4_RESULT_MAY_NOTIFY_LOCK   -- we don't implement
      *                                    CB_NOTIFY_LOCK upcalls.
      */
     uint32_t rflags = OPEN4_RESULT_LOCKTYPE_POSIX;
@@ -1237,7 +1237,7 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
 }
 
     /*
-     * open_delegation4 (RFC 8881 §18.16.4) is a discriminated union
+     * open_delegation4 (RFC 8881 S18.16.4) is a discriminated union
      * keyed on open_delegation_type4:
      *   case OPEN_DELEGATE_NONE     (0): void  (v4.0 / v4.1 fallback)
      *   case OPEN_DELEGATE_READ     (1): open_read_delegation4
@@ -1307,7 +1307,7 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
         }
 
         /* Common to both READ and WRITE bodies: stateid + recall
-         * (RFC 8881 §18.16.4).  recall=false on grant; the server
+         * (RFC 8881 S18.16.4).  recall=false on grant; the server
          * sets it true only inside CB_RECALL bodies. */
         if (!xdr_nfs4_stateid_encode(xdrs, &o->deleg_stateid)) {
             return false;
@@ -1323,7 +1323,7 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
             /*
              * nfs_space_limit4: union switch (limitby4 limitby).
              * NFS_LIMIT_SIZE = 1 (uint64 filesize); we advertise
-             * an effectively unlimited cap.  RFC 8881 §18.16.4. */
+             * an effectively unlimited cap.  RFC 8881 S18.16.4. */
             uint32_t limitby = 1; /* NFS_LIMIT_SIZE */
             uint64_t filesize = (uint64_t)INT64_MAX;
 
@@ -1341,7 +1341,7 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
          *   aceflag4   = 0
          *   acemask4   = ACE4_READ_DATA (0x1) for READ deleg,
          *                ACE4_WRITE_DATA|ACE4_READ_DATA (0x3) for WRITE
-         *   utf8str_mixed who = "EVERYONE@" (RFC 7530 §6.2.1.5)
+         *   utf8str_mixed who = "EVERYONE@" (RFC 7530 S6.2.1.5)
          *
          * The Linux client only consults this for cache-policy
          * hints; "EVERYONE@" is the broadest valid grant. */

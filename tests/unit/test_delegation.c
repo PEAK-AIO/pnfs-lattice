@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_delegation.c — file-delegation table unit tests.
+ * test_delegation.c -- file-delegation table unit tests.
  *
  * Focused on deleg_revoke_file(): the leak-plug for the
  * open/unlink workload that retains struct deleg_entry once
@@ -80,10 +80,10 @@ static void test_revoke_file_empty(void)
  * Drop only the targeted fileid; grants for other files survive.
  *
  * Layout:
- *   sid_a1 — clientA / file1 / READ
- *   sid_b1 — clientB / file1 / READ   (same file, different client)
- *   sid_a2 — clientA / file2 / WRITE
- *   sid_a3 — clientA / file3 / READ
+ *   sid_a1 -- clientA / file1 / READ
+ *   sid_b1 -- clientB / file1 / READ   (same file, different client)
+ *   sid_a2 -- clientA / file2 / WRITE
+ *   sid_a3 -- clientA / file3 / READ
  *
  * After deleg_revoke_file(file1): a1 and b1 must be gone, a2/a3 must
  * survive.  After a second deleg_revoke_file(file2): only a3 remains.
@@ -137,12 +137,12 @@ static void test_revoke_file_targets_correct_grants(void)
     ASSERT_TRUE(deleg_stateid_exists(dt, sid_a2.other));
     ASSERT_TRUE(deleg_stateid_exists(dt, sid_a3.other));
 
-    /* Revoke file2 — only file3's grant should remain. */
+    /* Revoke file2 -- only file3's grant should remain. */
     deleg_revoke_file(dt, file2);
     ASSERT_TRUE(!deleg_stateid_exists(dt, sid_a2.other));
     ASSERT_TRUE(deleg_stateid_exists(dt, sid_a3.other));
 
-    /* Revoke file3 — table is empty. */
+    /* Revoke file3 -- table is empty. */
     deleg_revoke_file(dt, file3);
     ASSERT_TRUE(!deleg_stateid_exists(dt, sid_a3.other));
 

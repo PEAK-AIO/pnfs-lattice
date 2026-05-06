@@ -2,14 +2,14 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_client_lifecycle.c — Full client lifecycle integration test.
+ * test_client_lifecycle.c -- Full client lifecycle integration test.
  *
  * Exercises the entire Phase 1 stack end-to-end in a single realistic
  * client workflow:
  *
- *   EXCHANGE_ID → CREATE_SESSION → SEQUENCE
- *   → mkdir, touch (CREATE), OPEN/CLOSE, READDIR, RENAME, REMOVE
- *   → DESTROY_SESSION
+ *   EXCHANGE_ID -> CREATE_SESSION -> SEQUENCE
+ *   -> mkdir, touch (CREATE), OPEN/CLOSE, READDIR, RENAME, REMOVE
+ *   -> DESTROY_SESSION
  *
  * All subsystems are wired together:
  *   - catalogue backend (metadata persistence)
@@ -155,7 +155,7 @@ static struct nfs4_op mk_create_session(uint64_t clientid, uint32_t seqid,
 	op.arg.create_session.fore_slots = slots;
 	op.arg.create_session.back_slots = slots;
 	/*
-	 * RFC 8881 §18.36 channel attributes — op_create_session now
+	 * RFC 8881 S18.36 channel attributes -- op_create_session now
 	 * enforces NFS4ERR_TOOSMALL on too-small ca_max{request,response}
 	 * size and zero ca_maxoperations / ca_maxrequests, so populate
 	 * realistic values here so the integration test exercises a
@@ -335,7 +335,7 @@ static struct nfs4_op mk_setattr(uint32_t mask, uint32_t mode)
 /* -----------------------------------------------------------------------
  * Test 1: Full client lifecycle
  *
- * Simulates: mount → mkdir → touch → ls → chmod → rename → rm → umount
+ * Simulates: mount -> mkdir -> touch -> ls -> chmod -> rename -> rm -> umount
  * ----------------------------------------------------------------------- */
 
 static void test_full_client_lifecycle(void)
@@ -510,7 +510,7 @@ static void test_full_client_lifecycle(void)
 	ASSERT_EQ(res[3].res.readdir.count, (uint32_t)3);
 	ASSERT_TRUE(res[3].res.readdir.eof);
 	/* Catalogue ordering across backends is intentionally
-	 * unspecified — RonDB returns rows in NDB scan order, the
+	 * unspecified -- RonDB returns rows in NDB scan order, the
 	 * memdb test backend returns them in hash-bucket order, and
 	 * neither matches the lexicographic ordering this test
 	 * originally assumed.  Verify the entry set instead of the
@@ -569,7 +569,7 @@ static void test_full_client_lifecycle(void)
 		ASSERT_EQ(res[0].status, NFS4_OK);
 	}
 
-	/* ===== Phase 8: mv /workspace/file2.txt → /workspace/renamed.txt ===== */
+	/* ===== Phase 8: mv /workspace/file2.txt -> /workspace/renamed.txt ===== */
 
 	compound_init(&cd);
 	cd.cat = db;
@@ -617,7 +617,7 @@ static void test_full_client_lifecycle(void)
 	ASSERT_EQ(res[3].status, NFS4_OK);
 	ASSERT_EQ(res[4].res.getattr.inode.type, MDS_FTYPE_REG);
 
-	/* ===== Phase 9: rm — remove all files and dirs ===== */
+	/* ===== Phase 9: rm -- remove all files and dirs ===== */
 
 	/* rm /workspace/file1.txt */
 	compound_init(&cd);
@@ -716,7 +716,7 @@ static void test_full_client_lifecycle(void)
  * Test 2: Share conflict across opens
  *
  * Simulates: client A opens file with DENY_WRITE, client B tries to
- * open for write → conflict. Client A closes → client B retries → OK.
+ * open for write -> conflict. Client A closes -> client B retries -> OK.
  * ----------------------------------------------------------------------- */
 
 static void test_share_conflict_lifecycle(void)
@@ -768,7 +768,7 @@ static void test_share_conflict_lifecycle(void)
 
 	/* Create and OPEN file with DENY_WRITE.
 	 *
-	 * RFC 8881 §8.2.2 + §9.1.4: same-owner re-OPEN merges share modes
+	 * RFC 8881 S8.2.2 + S9.1.4: same-owner re-OPEN merges share modes
 	 * rather than conflicting.  We therefore tag the two OPENs with
 	 * distinct open_owner byte strings so the second one represents
 	 * a different opener under the same NFS client and the file's
@@ -795,7 +795,7 @@ static void test_share_conflict_lifecycle(void)
 		ASSERT_EQ(res[2].status, NFS4_OK);
 		sid_a = res[2].res.open.stateid;
 
-		/* Second OPEN by a *different* opener for write — should fail
+		/* Second OPEN by a *different* opener for write -- should fail
 		 * with SHARE_DENIED because owner A still holds DENY_WRITE. */
 		compound_init(&cd);
 		cd.cat = db;
@@ -827,7 +827,7 @@ static void test_share_conflict_lifecycle(void)
 		ASSERT_EQ(n, (uint32_t)4);
 		ASSERT_EQ(res[3].status, NFS4_OK);
 
-		/* Retry as owner B — should succeed now. */
+		/* Retry as owner B -- should succeed now. */
 		compound_init(&cd);
 		cd.cat = db;
 		cd.st = st;
@@ -988,7 +988,7 @@ static void test_nested_directory_lifecycle(void)
 	n = compound_process(&cd, ops, res, 6);
 	ASSERT_EQ(res[5].status, NFS4_OK);
 
-	/* Verify deep path traversal: LOOKUP a → b → c → deep.txt */
+	/* Verify deep path traversal: LOOKUP a -> b -> c -> deep.txt */
 	compound_init(&cd);
 	cd.cat = db;
 	cd.st = st;

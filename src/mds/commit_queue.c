@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * commit_queue.c — Catalogue-dispatch commit pipeline.
+ * commit_queue.c -- Catalogue-dispatch commit pipeline.
  *
  * Request threads build immutable operation descriptors and submit
  * them to commit_queue_submit().  Each op is dispatched directly
- * through the catalogue vtable on the caller's thread — no writer
+ * through the catalogue vtable on the caller's thread -- no writer
  * thread, no queue, no serialization.
  *
  * The commit pipeline (writer thread, ring buffer,
@@ -83,7 +83,7 @@ int commit_queue_create(struct mds_catalogue *cat,
 	struct commit_queue *cq;
 	bool owns_cat = false;
 
-	/* Batch parameters are accepted for API compat but ignored —
+	/* Batch parameters are accepted for API compat but ignored --
 	 * each op is dispatched immediately via the catalogue vtable. */
 	(void)batch_size;
 	(void)batch_max_bytes;
@@ -121,7 +121,7 @@ int commit_queue_create(struct mds_catalogue *cat,
  * Synchronous catalogue-dispatch submit.
  *
  * Each op is dispatched directly through the catalogue vtable on
- * the caller's thread — no writer thread, no queue, no serialization.
+ * the caller's thread -- no writer thread, no queue, no serialization.
  *
  * Borrowed-pointer lifetime contract
  * ---------------------------------
@@ -133,7 +133,7 @@ int commit_queue_create(struct mds_catalogue *cat,
  * vtable backends that store the array deep-copy before returning
  * (see tests/catalogue_memdb.c::mem_layout_grant; the RonDB shim
  * re-encodes via the row writer), callers may borrow stack-locals
- * or transient buffers — see e.g. layout_recall.c::revoke_layout
+ * or transient buffers -- see e.g. layout_recall.c::revoke_layout
  * and compound_data_io.c::op_open's pre_create_ds_id path.  If
  * commit_queue_submit is ever made asynchronous the contract has
  * to flip to copy-on-submit; track every callsite that takes the
@@ -419,7 +419,7 @@ void commit_queue_destroy(struct commit_queue *cq)
 	}
 
 	if (cq->owns_cat && cq->cat != NULL) {
-		/* Shallow free only — the underlying catalogue handle is
+		/* Shallow free only -- the underlying catalogue handle is
 		 * owned by the caller who passed it to
 		 * commit_queue_create().  mds_catalogue_close() would
 		 * invoke the backend close which closes the db,

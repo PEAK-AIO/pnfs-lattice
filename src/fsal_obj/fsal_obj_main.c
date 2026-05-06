@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * fsal_obj_main.c — FSAL_OBJ plugin initialisation and export ops.
+ * fsal_obj_main.c -- FSAL_OBJ plugin initialisation and export ops.
  *
  * This module registers the FSAL, creates exports, and provides
  * the obj_ops vtable (lookup, create, getattr, setattr, etc.).
@@ -14,7 +14,7 @@
 
 #include "pnfs_mds.h"
 
-/* FSAL method vtable — function pointers for every metadata op */
+/* FSAL method vtable -- function pointers for every metadata op */
 struct fsal_obj_ops {
     /* cppcheck-suppress unusedStructMember */
     /* cppcheck-suppress unusedStructMember */
@@ -42,7 +42,7 @@ struct fsal_obj_ops {
     /* cppcheck-suppress unusedStructMember */
 };
 
-/* Global FSAL ops instance — wired to namespace.c functions */
+/* Global FSAL ops instance -- wired to namespace.c functions */
 static struct fsal_obj_ops g_obj_ops;
 
 __attribute__((unused))

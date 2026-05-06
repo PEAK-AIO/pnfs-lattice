@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_drain.c — Unit tests for Seq 8 drain helpers and orchestrator.
+ * test_drain.c -- Unit tests for Seq 8 drain helpers and orchestrator.
  */
 
 #include <stdio.h>
@@ -193,7 +193,7 @@ static void test_drain_self_rejects_null_db(void)
     assert(subtree_map_init(NULL, NULL, 1, "mds1.local", NULL, &smap) == MDS_OK);
     assert(cluster_membership_init(&cfg, smap, NULL, &ctx) == MDS_OK);
 
-    /* db == NULL → MDS_ERR_INVAL from the NULL-parameter guard. */
+    /* db == NULL -> MDS_ERR_INVAL from the NULL-parameter guard. */
     assert(cluster_drain_self(ctx, smap, NULL, 2) == MDS_ERR_INVAL);
 
     cluster_membership_destroy(ctx);
@@ -224,7 +224,7 @@ static void test_drain_self_rejects_root_owner(void)
     /* Add node 2 as a valid ACTIVE_SERVING destination. */
     join_serving_peer(ctx, 2, "mds2.local", 50052);
 
-    /* Self owns "/" — drain must reject. */
+    /* Self owns "/" -- drain must reject. */
     assert(cluster_drain_self(ctx, smap, cat, 2) == MDS_ERR_PERM);
 
     /* Verify lifecycle was restored to ACTIVE_SERVING (undrain). */
@@ -294,7 +294,7 @@ static void test_drain_self_rejects_dest_is_self(void)
     assert(subtree_map_init(NULL, NULL, 1, "mds1.local", NULL, &smap) == MDS_OK);
     assert(cluster_membership_init(&cfg, smap, NULL, &ctx) == MDS_OK);
 
-    /* dest == self → MDS_ERR_INVAL. */
+    /* dest == self -> MDS_ERR_INVAL. */
     assert(cluster_drain_self(ctx, smap, cat, 1) == MDS_ERR_INVAL);
 
     mds_catalogue_close(db);
@@ -334,7 +334,7 @@ static void test_drain_self_rejects_dest_not_serving(void)
     m2.grpc_port = 50052;
     assert(cluster_node_join(ctx, &m2) == MDS_OK);
 
-    /* dest is not serving → MDS_ERR_PERM from preflight. */
+    /* dest is not serving -> MDS_ERR_PERM from preflight. */
     assert(cluster_drain_self(ctx, smap, cat, 2) == MDS_ERR_PERM);
 
     mds_catalogue_close(db);

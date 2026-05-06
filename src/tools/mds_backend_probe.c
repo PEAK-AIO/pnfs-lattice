@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_backend_probe.c — Backend connectivity and health probe tool.
+ * mds_backend_probe.c -- Backend connectivity and health probe tool.
  *
  * MDS-local tool for validating catalogue backend runtime:
  *   --probe      Health check (canary read/write)

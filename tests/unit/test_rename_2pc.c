@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rename_2pc.c — Unit tests for cross-subtree rename 2PC state
+ * test_rename_2pc.c -- Unit tests for cross-subtree rename 2PC state
  *                      machine with in-process loopback transport.
  *
  * RonDB-native: uses coordination journal API for verification
@@ -147,7 +147,7 @@ static uint64_t create_test_dir(struct mds_catalogue *db, const char *name)
 }
 
 /* -------------------------------------------------------------------
- * Journal scan helper — counts entries matching a txn_id
+ * Journal scan helper -- counts entries matching a txn_id
  * ------------------------------------------------------------------- */
 
 struct journal_scan_ctx {
@@ -329,7 +329,7 @@ static void test_2pc_recover(void)
     enum mds_status st = rename_2pc_recover(cat, NULL, NULL);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Entry should be gone — verify via coordination API. */
+    /* Entry should be gone -- verify via coordination API. */
     struct mds_coord_journal_record got;
     st = mds_coord_journal_get(cat, NULL, 9999, 0, &got);
     ASSERT_EQ(st, MDS_ERR_NOTFOUND);
@@ -409,7 +409,7 @@ static void test_2pc_commit_delivery_failure(void)
         MDS_FILEID_ROOT, "lostfile",
         MDS_FILEID_ROOT, "lostfile_dst", 1);
 
-    /* Must NOT return MDS_OK — commit delivery failed. */
+    /* Must NOT return MDS_OK -- commit delivery failed. */
     ASSERT_EQ(st, MDS_ERR_IO);
 
     /* RonDB mode: source is kept until commit delivery succeeds.
@@ -421,7 +421,7 @@ static void test_2pc_commit_delivery_failure(void)
                             &child, &type);
     ASSERT_EQ(st, MDS_OK);
 
-    /* COMMITTED journal entry MUST still exist — scan via coord API. */
+    /* COMMITTED journal entry MUST still exist -- scan via coord API. */
     struct journal_scan_ctx sc;
     memset(&sc, 0, sizeof(sc));
     sc.target_txn_id = lc.last_txn_id;

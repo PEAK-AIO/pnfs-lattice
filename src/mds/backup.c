@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * backup.c — Online backup stubs (RonDB-native).
+ * backup.c -- Online backup stubs (RonDB-native).
  *
  * Backup module stub.  RonDB backup uses NDB Backup API
  * (not yet implemented).  All operations return MDS_ERR_NOSUPPORT.

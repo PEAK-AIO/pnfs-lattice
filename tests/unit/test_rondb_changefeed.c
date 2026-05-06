@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rondb_changefeed.c — Live RonDB test for Phase 9C changefeed.
+ * test_rondb_changefeed.c -- Live RonDB test for Phase 9C changefeed.
  *
  * Tests delta_insert, delta_poll, delta_trim, delta_seqno_load/save
  * against a real RonDB cluster.  Set PNFS_MDS_RONDB_TEST_CONF to enable.
@@ -185,7 +185,7 @@ static void test_delta_seqno_save_load(void)
 /* -----------------------------------------------------------------------
  * test_delta_duplicate_insert_is_idempotent
  *
- * Insert the same (source_mds_id, seqno) twice — should succeed
+ * Insert the same (source_mds_id, seqno) twice -- should succeed
  * (constraint violation treated as success).
  * ----------------------------------------------------------------------- */
 
@@ -197,7 +197,7 @@ static void test_delta_duplicate_insert(void)
     uint8_t payload[] = { 0x01 };
     ASSERT_EQ(rondb_shim_delta_insert(g_handle, 77, 1, 2000, 1,
                                        payload, 1, 100), 0);
-    /* Duplicate — should return 0 (idempotent). */
+    /* Duplicate -- should return 0 (idempotent). */
     ASSERT_EQ(rondb_shim_delta_insert(g_handle, 77, 1, 2000, 1,
                                        payload, 1, 100), 0);
 

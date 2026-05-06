@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_commit_aggregator.h — Phase F of docs/hpc-nto1-plan.md
+ * layout_commit_aggregator.h -- Phase F of docs/hpc-nto1-plan.md
  * (v1 foundation).
  *
  * In-memory write-back aggregator for LAYOUTCOMMIT updates issued by
@@ -15,7 +15,7 @@
  * persisted before the next observer sees it.
  *
  * v1 scope (this file).  Pure data-structure module + timer thread.
- * No callers inside the MDS yet — wiring into op_layoutcommit /
+ * No callers inside the MDS yet -- wiring into op_layoutcommit /
  * op_getattr / op_remove lands in a follow-up patch.  This matches
  * the v1 / integration split used for Phase D (layout_cache) and
  * Phase G (hpc_hint).
@@ -28,7 +28,7 @@
  *   - Per-shard capacity = ceil(max_buckets / 16), with a per-shard
  *     floor of 4.  When the shard reaches capacity the LRU dirty
  *     bucket is force-flushed inline so a slow flush callback can
- *     never starve a hot bucket.  v1 keeps this simple — eviction
+ *     never starve a hot bucket.  v1 keeps this simple -- eviction
  *     of a clean bucket is also allowed because the next submit
  *     will rebuild its state.
  *
@@ -57,7 +57,7 @@
  *
  *   - Crash recovery.  The aggregator is purely in-memory; on
  *     daemon restart any unflushed updates are lost.  Phase F's
- *     master plan documents this — recovery is a DS-side scan
+ *     master plan documents this -- recovery is a DS-side scan
  *     against MDS_IFLAG_HPC_SHARED inodes (deferred to a focused
  *     follow-up).  v1 ships the aggregator behind an opt-in inode
  *     flag (HPC_SHARED) so non-HPC files continue to take the
@@ -83,7 +83,7 @@
 #define LCA_SHARDS 16
 
 /** Default periodic flush interval in milliseconds.  Master plan
- *  §5 Phase F recommends 200 ms — small enough that a `cp` from a
+ *  S5 Phase F recommends 200 ms -- small enough that a `cp` from a
  *  GETATTR-issuing tool sees a near-current size, large enough to
  *  amortise hundreds of LAYOUTCOMMITs per file per second across
  *  one NDB write per flush. */
@@ -100,7 +100,7 @@ struct layout_commit_aggregator;
  * Aggregated counters.  Read via layout_commit_aggregator_stats_get.
  * All fields are monotonic counters except @c entry_count, which is
  * the live bucket population summed across all shards.  Snapshot
- * semantics — values are not transactionally consistent across
+ * semantics -- values are not transactionally consistent across
  * shards.
  */
 struct layout_commit_aggregator_stats {
@@ -119,7 +119,7 @@ struct layout_commit_aggregator_stats {
  *
  * Called WITHOUT any aggregator-internal mutex held.  Caller MUST
  * NOT call any layout_commit_aggregator_* function from within the
- * callback against the same fileid — that would attempt to acquire
+ * callback against the same fileid -- that would attempt to acquire
  * the same shard mutex and deadlock.
  *
  * @return 0 on success (bucket is marked clean).  Non-zero on
@@ -136,14 +136,14 @@ typedef int (*layout_commit_flush_fn)(uint64_t fileid,
  * Create an aggregator.
  *
  * @param max_buckets        Total bucket capacity across all shards.
- *                           0 → use LCA_DEFAULT_MAX_BUCKETS.
- * @param flush_interval_ms  Periodic timer interval in ms.  0 → use
+ *                           0 -> use LCA_DEFAULT_MAX_BUCKETS.
+ * @param flush_interval_ms  Periodic timer interval in ms.  0 -> use
  *                           LCA_DEFAULT_FLUSH_INTERVAL_MS.
  * @param out                Receives the aggregator handle.
  * @return 0 on success, -1 on bad args / allocation failure.
  *
  * The timer thread is NOT started until layout_commit_aggregator_start
- * is called — letting the caller wire the flush callback first.
+ * is called -- letting the caller wire the flush callback first.
  */
 int layout_commit_aggregator_init(uint32_t max_buckets,
                                    uint32_t flush_interval_ms,
@@ -151,7 +151,7 @@ int layout_commit_aggregator_init(uint32_t max_buckets,
 
 /**
  * Destroy the aggregator.  Implicitly stops the timer thread if it
- * is still running, but does NOT flush remaining dirty buckets —
+ * is still running, but does NOT flush remaining dirty buckets --
  * callers that need at-shutdown durability must call
  * layout_commit_aggregator_flush_all_dirty() first.  Safe with NULL.
  */
@@ -188,7 +188,7 @@ void layout_commit_aggregator_stop(struct layout_commit_aggregator *agg);
  *   - bucket.dirty        = true
  *
  * @return 0 on success, -1 on bad args / allocation failure under
- *         capacity pressure (eviction itself never fails — but
+ *         capacity pressure (eviction itself never fails -- but
  *         the new bucket allocation can OOM).
  */
 int layout_commit_aggregator_submit(struct layout_commit_aggregator *agg,
@@ -203,7 +203,7 @@ int layout_commit_aggregator_submit(struct layout_commit_aggregator *agg,
  * @p out_dirty.  On miss, returns -1; outputs are not touched.
  *
  * Used by op_getattr to satisfy `hpc_getattr_mode = optimistic`
- * — a strict GETATTR forces a flush instead via flush_fileid.
+ * -- a strict GETATTR forces a flush instead via flush_fileid.
  */
 int layout_commit_aggregator_peek(struct layout_commit_aggregator *agg,
                                    uint64_t fileid,
@@ -237,7 +237,7 @@ uint32_t layout_commit_aggregator_flush_all_dirty(
 
 /**
  * Drop the bucket for @p fileid without flushing.  Used by
- * op_remove (final unlink) — the size becomes meaningless once the
+ * op_remove (final unlink) -- the size becomes meaningless once the
  * file is gone, so the in-memory state is discarded.  Idempotent
  * and NULL-safe.
  */

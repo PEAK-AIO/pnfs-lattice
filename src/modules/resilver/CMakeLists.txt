@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# resilver — background resilvering for degraded mirrored files.
+# resilver -- background resilvering for degraded mirrored files.
 #
 # Enterprise build (ENABLE_RESILVER=ON, the default): links the real
 # implementation in resilver.c.
@@ -17,5 +17,5 @@ if(ENABLE_RESILVER)
 else()
     target_sources(pnfs_mds_core PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/resilver_stub.c)
-    message(STATUS "resilver: disabled (community build) — using stubs")
+    message(STATUS "resilver: disabled (community build) -- using stubs")
 endif()

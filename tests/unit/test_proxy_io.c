@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_proxy_io.c — Unit tests for non-pNFS client proxy I/O.
+ * test_proxy_io.c -- Unit tests for non-pNFS client proxy I/O.
  *
  * Uses temporary directories as simulated DS mounts so that the
  * proxy_read / proxy_write code exercises the full stripe-aware
@@ -176,7 +176,7 @@ static void setup_mirrored_stripe(struct mds_catalogue *db,
 }
 
 /* -----------------------------------------------------------------------
- * test_proxy_read_write — basic write then read round-trip
+ * test_proxy_read_write -- basic write then read round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_proxy_read_write(void)
@@ -221,7 +221,7 @@ static void test_proxy_read_write(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_proxy_read_eof — read past end of file
+ * test_proxy_read_eof -- read past end of file
  * ----------------------------------------------------------------------- */
 
 static void test_proxy_read_eof(void)
@@ -250,7 +250,7 @@ static void test_proxy_read_eof(void)
     ASSERT_EQ(mds_proxy_write(proxy, (struct mds_catalogue *)db, fileid, 0,
               test_data, data_len, &bytes), MDS_OK);
 
-    /* Read 256 bytes — should get 5 + eof. */
+    /* Read 256 bytes -- should get 5 + eof. */
     memset(buf, 0, sizeof(buf));
     ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid, 0, 256,
               buf, &bytes, &eof), MDS_OK);
@@ -258,7 +258,7 @@ static void test_proxy_read_eof(void)
     ASSERT_TRUE(eof);
     ASSERT_EQ(memcmp(buf, test_data, data_len), 0);
 
-    /* Read at offset past end — 0 bytes + eof. */
+    /* Read at offset past end -- 0 bytes + eof. */
     ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid, 1000, 64,
               buf, &bytes, &eof), MDS_OK);
     ASSERT_EQ(bytes, (uint32_t)0);
@@ -270,7 +270,7 @@ static void test_proxy_read_eof(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_proxy_mirror_write — 2-mirror write, both files get data
+ * test_proxy_mirror_write -- 2-mirror write, both files get data
  * ----------------------------------------------------------------------- */
 
 static void test_proxy_mirror_write(void)
@@ -301,7 +301,7 @@ static void test_proxy_mirror_write(void)
     ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 10, fileid, 0, 0), MDS_OK);
     ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 20, fileid, 0, 1), MDS_OK);
 
-    /* Write — should go to both mirrors. */
+    /* Write -- should go to both mirrors. */
     ASSERT_EQ(mds_proxy_write(proxy, (struct mds_catalogue *)db, fileid, 0,
               test_data, data_len, &bytes), MDS_OK);
     ASSERT_EQ(bytes, data_len);
@@ -345,7 +345,7 @@ int main(void)
      * Generic-only DS mode needs live NFS proxy mounts for
      * FH capture.  Skip until integration test harness
      * provides actual DS mounts. */
-    fprintf(stdout, "  (all skipped — requires DS proxy mounts)\n");
+    fprintf(stdout, "  (all skipped -- requires DS proxy mounts)\n");
 
     fprintf(stdout, "\n%d/%d tests passed.\n", 0, 0);
     return 0;

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_inode_cache.c — Unit tests for the in-memory inode LRU cache.
+ * test_inode_cache.c -- Unit tests for the in-memory inode LRU cache.
  */
 
 #include <stdio.h>
@@ -63,7 +63,7 @@ static struct mds_inode make_inode(uint64_t fileid, uint64_t size)
 }
 
 /* -----------------------------------------------------------------------
- * test_init_destroy — basic lifecycle
+ * test_init_destroy -- basic lifecycle
  * ----------------------------------------------------------------------- */
 
 static void test_init_destroy(void)
@@ -85,7 +85,7 @@ static void test_init_destroy(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_put_get — round-trip insert and retrieval
+ * test_put_get -- round-trip insert and retrieval
  * ----------------------------------------------------------------------- */
 
 static void test_put_get(void)
@@ -112,7 +112,7 @@ static void test_put_get(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_update — put same fileid twice updates data
+ * test_update -- put same fileid twice updates data
  * ----------------------------------------------------------------------- */
 
 static void test_update(void)
@@ -141,7 +141,7 @@ static void test_update(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_invalidate — remove an entry
+ * test_invalidate -- remove an entry
  * ----------------------------------------------------------------------- */
 
 static void test_invalidate(void)
@@ -170,7 +170,7 @@ static void test_invalidate(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_lru_eviction — exceeding capacity evicts oldest
+ * test_lru_eviction -- exceeding capacity evicts oldest
  * ----------------------------------------------------------------------- */
 
 static void test_lru_eviction(void)
@@ -190,7 +190,7 @@ static void test_lru_eviction(void)
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	ASSERT_EQ(inode_cache_count(ic), (uint32_t)3);
 
-	/* Insert fileid 4 — should evict fileid 1 (LRU tail). */
+	/* Insert fileid 4 -- should evict fileid 1 (LRU tail). */
 	in = make_inode(4, 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	ASSERT_EQ(inode_cache_count(ic), (uint32_t)3);
@@ -204,7 +204,7 @@ static void test_lru_eviction(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_lru_promote_on_get — get promotes entry, saving it from eviction
+ * test_lru_promote_on_get -- get promotes entry, saving it from eviction
  * ----------------------------------------------------------------------- */
 
 static void test_lru_promote_on_get(void)
@@ -222,10 +222,10 @@ static void test_lru_promote_on_get(void)
 	in = make_inode(3, 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
-	/* Touch fileid 1 — promotes it to MRU. LRU: 1-MRU ... 2-LRU. */
+	/* Touch fileid 1 -- promotes it to MRU. LRU: 1-MRU ... 2-LRU. */
 	ASSERT_EQ(inode_cache_get(ic, 1, &out), 0);
 
-	/* Insert fileid 4 — now fileid 2 is LRU and should be evicted. */
+	/* Insert fileid 4 -- now fileid 2 is LRU and should be evicted. */
 	in = make_inode(4, 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
@@ -238,7 +238,7 @@ static void test_lru_promote_on_get(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_lru_promote_on_put — updating an entry promotes it
+ * test_lru_promote_on_put -- updating an entry promotes it
  * ----------------------------------------------------------------------- */
 
 static void test_lru_promote_on_put(void)
@@ -259,7 +259,7 @@ static void test_lru_promote_on_put(void)
 	in = make_inode(1, 99);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
-	/* Insert fileid 4 — fileid 2 is now LRU tail. */
+	/* Insert fileid 4 -- fileid 2 is now LRU tail. */
 	in = make_inode(4, 40);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
@@ -271,7 +271,7 @@ static void test_lru_promote_on_put(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_many_entries — bulk insert and retrieval
+ * test_many_entries -- bulk insert and retrieval
  * ----------------------------------------------------------------------- */
 
 static void test_many_entries(void)
@@ -306,7 +306,7 @@ static void test_many_entries(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_single_entry_cache — edge case: max_entries = 1
+ * test_single_entry_cache -- edge case: max_entries = 1
  * ----------------------------------------------------------------------- */
 
 static void test_single_entry_cache(void)

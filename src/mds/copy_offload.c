@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * copy_offload.c — NFSv4.2 asynchronous COPY offload tracker.
+ * copy_offload.c -- NFSv4.2 asynchronous COPY offload tracker.
  *
  * Each async COPY spawns a worker thread that reads from the source
  * file and writes to the destination file via proxy I/O in 1 MiB

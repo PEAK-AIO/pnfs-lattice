@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_commit_queue.c — Unit tests for the RonDB-native commit queue.
+ * test_commit_queue.c -- Unit tests for the RonDB-native commit queue.
  *
  * The commit queue is a thin dispatch wrapper: each op is routed
  * through the catalogue vtable on the caller's thread.  These tests
@@ -47,7 +47,7 @@ static int tests_passed = 0;
 } while (0)
 
 /* -----------------------------------------------------------------------
- * test_cq_null_safety — NULL args must not crash
+ * test_cq_null_safety -- NULL args must not crash
  * ----------------------------------------------------------------------- */
 
 static void test_cq_null_safety(void)
@@ -62,7 +62,7 @@ static void test_cq_null_safety(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_create_requires_cat — NULL cat + NULL db = EINVAL
+ * test_cq_create_requires_cat -- NULL cat + NULL db = EINVAL
  * ----------------------------------------------------------------------- */
 
 static void test_cq_create_requires_cat(void)
@@ -75,7 +75,7 @@ static void test_cq_create_requires_cat(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_create_null_out — NULL out pointer = EINVAL
+ * test_cq_create_null_out -- NULL out pointer = EINVAL
  * ----------------------------------------------------------------------- */
 
 static void test_cq_create_null_out(void)
@@ -87,7 +87,7 @@ static void test_cq_create_null_out(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_get_repl_null — get_repl on NULL CQ returns NULL
+ * test_cq_get_repl_null -- get_repl on NULL CQ returns NULL
  * ----------------------------------------------------------------------- */
 
 static void test_cq_get_repl_null(void)
@@ -96,7 +96,7 @@ static void test_cq_get_repl_null(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_get_repl_mode_null — get_repl_mode on NULL CQ returns 0
+ * test_cq_get_repl_mode_null -- get_repl_mode on NULL CQ returns 0
  * ----------------------------------------------------------------------- */
 
 static void test_cq_get_repl_mode_null(void)
@@ -105,7 +105,7 @@ static void test_cq_get_repl_mode_null(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_set_ds_cache_null — set_ds_cache on NULL CQ must not crash
+ * test_cq_set_ds_cache_null -- set_ds_cache on NULL CQ must not crash
  * ----------------------------------------------------------------------- */
 
 static void test_cq_set_ds_cache_null(void)
@@ -114,7 +114,7 @@ static void test_cq_set_ds_cache_null(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_cq_lifecycle_with_catalogue — create + destroy with real catalogue
+ * test_cq_lifecycle_with_catalogue -- create + destroy with real catalogue
  *
  * Uses mds_catalogue_open() if available; skipped in minimal builds.
  * ----------------------------------------------------------------------- */
@@ -130,10 +130,10 @@ static void test_cq_lifecycle_with_catalogue(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.catalogue_backend = MDS_BACKEND_RONDB;
 
-    /* Try to open catalogue — may fail if no RonDB available. */
+    /* Try to open catalogue -- may fail if no RonDB available. */
     st = mds_catalogue_open(&cfg, &cat);
     if (st != MDS_OK) {
-        /* No RonDB cluster available — skip gracefully. */
+        /* No RonDB cluster available -- skip gracefully. */
         fprintf(stdout, "(skipped: no RonDB) ");
         return;
     }

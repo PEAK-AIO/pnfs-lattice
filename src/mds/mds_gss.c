@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_gss.c — RPCSEC_GSS context management.
+ * mds_gss.c -- RPCSEC_GSS context management.
  */
 
 #include <stdlib.h>

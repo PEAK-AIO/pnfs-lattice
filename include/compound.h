@@ -2,13 +2,13 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * compound.h — NFSv4.1/4.2 COMPOUND request dispatch types and API.
+ * compound.h -- NFSv4.1/4.2 COMPOUND request dispatch types and API.
  *
  * This is the internal dispatch layer.  Operations use typed C structs
  * rather than XDR-encoded buffers; the XDR codec translates between
  * the wire format and these types.
  *
- * See docs/architecture.md §4.2 for design overview.
+ * See docs/architecture.md S4.2 for design overview.
  */
 
 #ifndef COMPOUND_H
@@ -45,7 +45,7 @@ struct mds_shard;
 struct dir_deleg_table;
 
 /* -----------------------------------------------------------------------
- * NFSv4.1 status codes (RFC 8881 §15)
+ * NFSv4.1 status codes (RFC 8881 S15)
  * ----------------------------------------------------------------------- */
 
 enum nfs4_status {
@@ -62,17 +62,17 @@ enum nfs4_status {
 	NFS4ERR_NOSPC        = 28,
 	NFS4ERR_NOTEMPTY     = 66,
 	NFS4ERR_STALE        = 70,
-	/* RFC 8881 §15.1 numeric values are authoritative.  Earlier
+	/* RFC 8881 S15.1 numeric values are authoritative.  Earlier
 	 * revisions of this enum aliased NFS4ERR_DENIED and
 	 * NFS4ERR_STALE_CLIENTID to 10012, which is in fact
-	 * NFS4ERR_LOCKED on the wire — pynfs DESCID3/4/8 caught the
+	 * NFS4ERR_LOCKED on the wire -- pynfs DESCID3/4/8 caught the
 	 * mis-numbering by reporting "got NFS4ERR_LOCKED" when the
 	 * server thought it was sending NFS4ERR_STALE_CLIENTID. */
 	NFS4ERR_DENIED       = 10010,
 	NFS4ERR_EXPIRED      = 10011,
 	NFS4ERR_LOCKED       = 10012,
 	NFS4ERR_GRACE        = 10013,
-	/* RFC 8881 §15.1.16.5 / §18.35.4 — EXCHANGE_ID UPDATE with a
+	/* RFC 8881 S15.1.16.5 / S18.35.4 -- EXCHANGE_ID UPDATE with a
 	 * verifier that does not match the existing record's verifier.
 	 * pynfs EID6f testUpdate101. */
 	NFS4ERR_NOT_SAME     = 10027,
@@ -88,11 +88,11 @@ enum nfs4_status {
 	NFS4ERR_SERVERFAULT  = 10006,
 	NFS4ERR_DELAY        = 10008,
 	NFS4ERR_NO_GRACE     = 10033,
-	NFS4ERR_TOOSMALL     = 10005,  /* RFC 8881 §15 — reply > maxcount. */
+	NFS4ERR_TOOSMALL     = 10005,  /* RFC 8881 S15 -- reply > maxcount. */
 	NFS4ERR_OP_NOT_IN_SESSION = 10071,
 	NFS4ERR_OLD_STATEID       = 10024,
 	NFS4ERR_BAD_STATEID       = 10025,
-	/* RFC 8881 §15.1 — FREE_STATEID called against a stateid that
+	/* RFC 8881 S15.1 -- FREE_STATEID called against a stateid that
 	 * still has locks (or, per Linux NFSD's interpretation, an open
 	 * stateid that has not been CLOSEd).  Pynfs CSID9. */
 	NFS4ERR_LOCKS_HELD        = 10037,
@@ -101,26 +101,26 @@ enum nfs4_status {
 	NFS4ERR_BADSESSION        = 10052,
 	NFS4ERR_BADSLOT           = 10053,
 	NFS4ERR_SEQ_MISORDERED    = 10063,
-	/* RFC 5661 §15.1.10.2 — the slot's reply was not cached so the
+	/* RFC 5661 S15.1.10.2 -- the slot's reply was not cached so the
 	 * server cannot replay it.  Returned when the client retries
 	 * a request that was originally sent with sa_cachethis = FALSE
-	 * (RFC 5661 §2.10.6.2 permits the server to either reconstruct
+	 * (RFC 5661 S2.10.6.2 permits the server to either reconstruct
 	 * the reply or return this code; we choose the simpler path).
 	 * Drives pynfs SEQ10b. */
 	NFS4ERR_RETRY_UNCACHED_REP = 10068,
 	NFS4ERR_SEQ_FALSE_RETRY   = 10076,
 	NFS4ERR_LAYOUTUNAVAILABLE = 10058,
-	/* RFC 5661 §15.1.10.10 — client CB_LAYOUTRECALL response indicating
+	/* RFC 5661 S15.1.10.10 -- client CB_LAYOUTRECALL response indicating
 	 * I/O in flight; server must NOT preemptively revoke. */
 	NFS4ERR_RECALLCONFLICT    = 10061,
-	/* RFC 5661 §15.1 numeric values are authoritative.  Earlier
+	/* RFC 5661 S15.1 numeric values are authoritative.  Earlier
 	 * revisions of this enum used the wrong codes for NAMETOOLONG
-	 * (was 10110) and REQ_TOO_BIG (was 10041 — which is actually
+	 * (was 10110) and REQ_TOO_BIG (was 10041 -- which is actually
 	 * NFS4ERR_BADNAME on the wire).  pynfs SEQ6 caught the
 	 * REQ_TOO_BIG mis-numbering by reporting "got NFS4ERR_BADNAME"
 	 * when the server thought it was sending REQ_TOO_BIG. */
 	NFS4ERR_NAMETOOLONG       = 63,
-	/* RFC 5661 §15.1.1 — wire-format errors used by the COMPOUND
+	/* RFC 5661 S15.1.1 -- wire-format errors used by the COMPOUND
 	 * decode-failure path (rpc_server.c).  These MUST be carried in
 	 * a synthesised SEQUENCE result so the resarray is non-empty. */
 	NFS4ERR_BADXDR            = 10036,
@@ -128,19 +128,19 @@ enum nfs4_status {
 	NFS4ERR_BADNAME           = 10041,
 	NFS4ERR_REQ_TOO_BIG       = 10065,
 	NFS4ERR_TOO_MANY_OPS      = 10070,
-	/* RFC 8881 §15.1.16.4 — DESTROY_CLIENTID called against a clientid
+	/* RFC 8881 S15.1.16.4 -- DESTROY_CLIENTID called against a clientid
 	 * that still has confirmed sessions or has not finished cleanup.
 	 * pynfs DESCID5/6 (testDestroyCIDSessionB / testDestroyCIDCSession). */
 	NFS4ERR_CLIENTID_BUSY     = 10074,
-	/* RFC 8881 §15.1.10.10 — a session/clientid management op was
+	/* RFC 8881 S15.1.10.10 -- a session/clientid management op was
 	 * combined with another op in violation of the per-op compound
-	 * placement rules (§2.10.6.4 / §18.36.3 / §18.37.3 / §18.50.3).
+	 * placement rules (S2.10.6.4 / S18.36.3 / S18.37.3 / S18.50.3).
 	 * pynfs CSESS23, DSESS9004/9005, DESCID7. */
 	NFS4ERR_NOT_ONLY_OP       = 10081,
-	/* RFC 8881 §15.1.1.4 / §18.46.3 — SEQUENCE must be the first op
+	/* RFC 8881 S15.1.1.4 / S18.46.3 -- SEQUENCE must be the first op
 	 * in every COMPOUND that uses session-state.  pynfs SEQ2. */
 	NFS4ERR_SEQUENCE_POS      = 10064,
-	/* RFC 8881 §15.1.10.4 — directory delegation not available. */
+	/* RFC 8881 S15.1.10.4 -- directory delegation not available. */
 	NFS4ERR_DIRDELEG_UNAVAIL  = 10084,
 	/* NFSv4.2 status codes (RFC 7862) */
 	NFS4ERR_UNION_NOTSUPP     = 10090,
@@ -156,7 +156,7 @@ enum nfs4_status {
  * ----------------------------------------------------------------------- */
 
 enum nfs_opnum4 {
-	/* NFSv4.1 operations (RFC 8881 §18) */
+	/* NFSv4.1 operations (RFC 8881 S18) */
 	OP_ACCESS           = 3,
 	OP_CLOSE            = 4,
 	OP_COMMIT           = 5,
@@ -188,13 +188,13 @@ enum nfs_opnum4 {
 	OP_CREATE_SESSION   = 43,
 	OP_DESTROY_SESSION  = 44,
 	OP_GETDEVICEINFO    = 47,
-	/* RFC 8881 §18.39 — GET_DIR_DELEGATION (wire op 46). */
+	/* RFC 8881 S18.39 -- GET_DIR_DELEGATION (wire op 46). */
 	OP_GET_DIR_DELEGATION = 46,
 	OP_LAYOUTCOMMIT     = 49,
 	OP_LAYOUTGET        = 50,
 	OP_LAYOUTRETURN     = 51,
 	OP_SEQUENCE         = 53,
-	OP_BACKCHANNEL_CTL  = 40,  /* RFC 8881 §18.33 */
+	OP_BACKCHANNEL_CTL  = 40,  /* RFC 8881 S18.33 */
 	OP_BIND_CONN_TO_SESSION = 41,
 	OP_FREE_STATEID     = 45,
 	OP_TEST_STATEID     = 55,
@@ -224,10 +224,10 @@ enum nfs_opnum4 {
 	OP_LISTXATTRS       = 74,
 	OP_REMOVEXATTR      = 75,
 
-	/* RFC 8881 §18.41: illegal operation sentinel */
+	/* RFC 8881 S18.41: illegal operation sentinel */
 	OP_ILLEGAL          = 10044,
 
-	/* Callback operations (RFC 8881 §20) */
+	/* Callback operations (RFC 8881 S20) */
 	OP_CB_GETATTR       = 3,
 	OP_CB_RECALL        = 4,
 	OP_CB_LAYOUTRECALL  = 5,
@@ -236,7 +236,7 @@ enum nfs_opnum4 {
 };
 
 /* -----------------------------------------------------------------------
- * notify_type4 (RFC 8881 §3.3.15) — directory notification event
+ * notify_type4 (RFC 8881 S3.3.15) -- directory notification event
  * numbers.  Bits in the GDD / CB_NOTIFY mask are (1U << notify_type).
  * ----------------------------------------------------------------------- */
 #define NOTIFY4_CHANGE_CHILD_ATTRS 0
@@ -251,10 +251,10 @@ enum nfs_opnum4 {
  * ----------------------------------------------------------------------- */
 
 struct nfs4_arg_access {
-	uint32_t access;  /**< ACCESS4 bit mask (RFC 8881 §6.3.1) */
+	uint32_t access;  /**< ACCESS4 bit mask (RFC 8881 S6.3.1) */
 };
 
-/** Filehandle descriptor — local or cluster-global identity. */
+/** Filehandle descriptor -- local or cluster-global identity. */
 struct nfs4_fh_desc {
 	uint64_t fileid;
 	uint32_t owner_mds_id;  /**< 0 = local (this MDS) */
@@ -355,7 +355,7 @@ struct nfs4_arg_create_session {
 	uint32_t cb_prog;        /**< Callback program number. */
 	uint32_t cb_sec_flavor;  /**< Callback security flavor (legacy alias). */
 	/*
-	 * RFC 8881 §2.10.8.3 / §18.36 — callback_sec_parms4 entry
+	 * RFC 8881 S2.10.8.3 / S18.36 -- callback_sec_parms4 entry
 	 * captured by the decoder for the FIRST entry of csa_sec_parms<>.
 	 * Stored on the new session by op_create_session via
 	 * session_set_cb_sec() so the CB encoder can emit the right RPC
@@ -364,19 +364,19 @@ struct nfs4_arg_create_session {
 	 * received CB_RECALLs by inspecting this on the wire.
 	 */
 	struct nfs4_cb_sec cb_sec;
-	/* RFC 8881 §18.36.4 client-requested forechannel attrs.  The
+	/* RFC 8881 S18.36.4 client-requested forechannel attrs.  The
 	 * server emits MIN(client_request, server_pref) in the reply
 	 * and stores the negotiated values on the session for enforcement
 	 * at SEQUENCE-receive time.  Pynfs SEQ6 (testRequestTooBig) +
 	 * SEQ7 (testTooManyOps). */
 	uint32_t fore_max_request_size;
 	uint32_t fore_max_operations;
-	/* RFC 8881 §18.36.4 channel_attrs4 fields kept for
+	/* RFC 8881 S18.36.4 channel_attrs4 fields kept for
 	 * NFS4ERR_TOOSMALL validation in op_create_session.  Decoded
 	 * verbatim from the wire; never used by session bookkeeping.
 	 * Pynfs CSESS25 (fore maxresponsesize=0), CSESS28 (fore
 	 * maxrequestsize=20), CSESS29 (back maxrequestsize=10) all
-	 * expect NFS4ERR_TOOSMALL — see op_create_session for the
+	 * expect NFS4ERR_TOOSMALL -- see op_create_session for the
 	 * floor we apply (>= 256 bytes for max{request,response}size
 	 * and >= 1 for max{operations,requests}). */
 	uint32_t fore_max_response_size;
@@ -391,7 +391,7 @@ struct nfs4_arg_destroy_session {
 };
 
 /**
- * RFC 8881 §18.33.1 — BACKCHANNEL_CTL arguments.
+ * RFC 8881 S18.33.1 -- BACKCHANNEL_CTL arguments.
  *
  *   struct BACKCHANNEL_CTL4args {
  *       uint32_t            bca_cb_program;
@@ -428,19 +428,19 @@ struct nfs4_arg_sequence {
 	bool     cache_this;
 };
 
-/** RFC 8881 §18.51 — RECLAIM_COMPLETE arguments. */
+/** RFC 8881 S18.51 -- RECLAIM_COMPLETE arguments. */
 struct nfs4_arg_reclaim_complete {
 	bool rca_one_fs;  /**< true = per-fs reclaim; false = global */
 };
 
-/** RFC 8881 §18.45 — SECINFO_NO_NAME arguments. */
+/** RFC 8881 S18.45 -- SECINFO_NO_NAME arguments. */
 #define SECINFO_STYLE4_CURRENT_FH 0
 #define SECINFO_STYLE4_PARENT     1
 struct nfs4_arg_secinfo_no_name {
 	uint32_t style;  /**< SECINFO_STYLE4_CURRENT_FH or SECINFO_STYLE4_PARENT */
 };
 
-/** RFC 5661 §18.48 — TEST_STATEID arguments (count preserved for result). */
+/** RFC 5661 S18.48 -- TEST_STATEID arguments (count preserved for result). */
 struct nfs4_arg_test_stateid {
 	uint32_t count;
 	struct nfs4_stateid stateids[64];
@@ -450,11 +450,11 @@ struct nfs4_arg_test_stateid {
  * NFSv4.2 constants (RFC 7862)
  * ----------------------------------------------------------------------- */
 
-/** SEEK what values (RFC 7862 §15.11.1). */
+/** SEEK what values (RFC 7862 S15.11.1). */
 #define NFS4_CONTENT_DATA  0
 #define NFS4_CONTENT_HOLE  1
 
-/** IO_ADVISE4 hint bits (RFC 7862 §15.5.3). */
+/** IO_ADVISE4 hint bits (RFC 7862 S15.5.3). */
 #define IO_ADVISE4_NORMAL           0x00
 #define IO_ADVISE4_SEQUENTIAL       0x01
 #define IO_ADVISE4_SEQUENTIAL_BACK  0x02
@@ -548,7 +548,7 @@ struct nfs4_arg_write_same {
 	uint8_t             data[MDS_XATTR_VAL_MAX]; /**< Pattern data. */
 };
 
-/** Device ID size (RFC 8881 §3.3.14 — 16 bytes). */
+/** Device ID size (RFC 8881 S3.3.14 -- 16 bytes). */
 #ifndef NFS4_DEVICEID4_SIZE
 #define NFS4_DEVICEID4_SIZE  16
 #endif
@@ -574,14 +574,14 @@ struct nfs4_arg_layoutstats {
 };
 
 /* -----------------------------------------------------------------------
- * pNFS layout constants (RFC 8881 §3.3.13, §12)
+ * pNFS layout constants (RFC 8881 S3.3.13, S12)
  * ----------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------
  * RFC 8276 extended attribute constants
  * ----------------------------------------------------------------------- */
 
-/** SETXATTR option values (RFC 8276 §4.2.3). */
+/** SETXATTR option values (RFC 8276 S4.2.3). */
 #define SETXATTR4_EITHER  0  /**< Create or replace unconditionally. */
 #define SETXATTR4_CREATE  1  /**< Create only; fail if xattr exists. */
 #define SETXATTR4_REPLACE 2  /**< Replace only; fail if xattr absent. */
@@ -589,24 +589,24 @@ struct nfs4_arg_layoutstats {
 /** Maximum xattr names in a single LISTXATTRS response. */
 #define NFS4_LISTXATTRS_MAX  256
 
-/** Xattr filehandle flag — high bit marks xattr-namespace handles. */
+/** Xattr filehandle flag -- high bit marks xattr-namespace handles. */
 #define XATTR_FH_FLAG  (1ULL << 63)
 
-/** Layout types (RFC 8881 §3.3.13). */
+/** Layout types (RFC 8881 S3.3.13). */
 #define LAYOUT4_NFSV4_1_FILES  1
 #define LAYOUT4_FLEX_FILES     4   /* RFC 8435 */
 
-/** Layout iomode (RFC 8881 §3.3.20). */
+/** Layout iomode (RFC 8881 S3.3.20). */
 #define LAYOUTIOMODE4_READ     1
 #define LAYOUTIOMODE4_RW       2
 #define LAYOUTIOMODE4_ANY      3
 
-/** Layout return type (RFC 8881 §18.44). */
+/** Layout return type (RFC 8881 S18.44). */
 #define LAYOUTRETURN4_FILE   1
 #define LAYOUTRETURN4_FSID   2
 #define LAYOUTRETURN4_ALL    3
 
-/** Device ID size (RFC 8881 §3.3.14 — 16 bytes). */
+/** Device ID size (RFC 8881 S3.3.14 -- 16 bytes). */
 #ifndef NFS4_DEVICEID4_SIZE
 #define NFS4_DEVICEID4_SIZE  16
 #endif
@@ -626,12 +626,12 @@ struct nfs4_arg_openattr {
  * RFC 8276 per-operation argument structures
  * ----------------------------------------------------------------------- */
 
-/** RFC 8276 §4.2.2 — GETXATTR arguments. */
+/** RFC 8276 S4.2.2 -- GETXATTR arguments. */
 struct nfs4_arg_getxattr {
 	char name[MDS_XATTR_NAME_MAX + 1];
 };
 
-/** RFC 8276 §4.2.3 — SETXATTR arguments. */
+/** RFC 8276 S4.2.3 -- SETXATTR arguments. */
 struct nfs4_arg_setxattr {
 	uint32_t option;  /**< SETXATTR4_EITHER/CREATE/REPLACE */
 	char     name[MDS_XATTR_NAME_MAX + 1];
@@ -639,13 +639,13 @@ struct nfs4_arg_setxattr {
 	uint8_t  value[MDS_XATTR_VAL_MAX];
 };
 
-/** RFC 8276 §4.2.4 — LISTXATTRS arguments. */
+/** RFC 8276 S4.2.4 -- LISTXATTRS arguments. */
 struct nfs4_arg_listxattrs {
 	uint64_t cookie;
 	uint32_t maxcount;
 };
 
-/** RFC 8276 §4.2.5 — REMOVEXATTR arguments. */
+/** RFC 8276 S4.2.5 -- REMOVEXATTR arguments. */
 struct nfs4_arg_removexattr {
 	char name[MDS_XATTR_NAME_MAX + 1];
 };
@@ -708,13 +708,13 @@ struct nfs4_arg_getattr {
 };
 
 /**
- * RFC 8881 §18.39.1 — GET_DIR_DELEGATION arguments.
+ * RFC 8881 S18.39.1 -- GET_DIR_DELEGATION arguments.
  *
  * The current filehandle identifies the directory the client wants
  * a delegation for.  All bitmaps use the 3-word NFS4_BITMAP_WORDS
  * representation shared with fattr4.  `child_attr_delay` and
- * `dir_attr_delay` are `attr_notice4` (RFC 5661 §3.3.7, typedef of
- * nfstime4) — how long the server may coalesce change notifications
+ * `dir_attr_delay` are `attr_notice4` (RFC 5661 S3.3.7, typedef of
+ * nfstime4) -- how long the server may coalesce change notifications
  * before delivering them.
  */
 struct nfs4_arg_get_dir_delegation {
@@ -876,7 +876,7 @@ struct nfs4_res_getattr {
 struct nfs4_res_create {
 	struct mds_inode inode;
 	/* Parent-directory change attribute captured by op_create()
-	 * before and after the mutation (RFC 8881 §18.4 change_info4).
+	 * before and after the mutation (RFC 8881 S18.4 change_info4).
 	 * These two fields are NOT aliased by the surrounding union
 	 * (they live inside the same union member as `inode`), so
 	 * unlike struct nfs4_res_change_info they are safe to use from
@@ -900,13 +900,13 @@ struct nfs4_res_open {
 	struct nfs4_stateid stateid;
 	struct mds_inode    inode;    /* Opened/created file attributes */
 	/*
-	 * Delegation grant (RFC 8881 §18.16.4).
+	 * Delegation grant (RFC 8881 S18.16.4).
 	 *
 	 * delegation_type is one of:
-	 *   OPEN_DELEGATE_NONE      — v4.0-style "no delegation" (void body).
-	 *   OPEN_DELEGATE_READ      — READ delegation; deleg_stateid valid.
-	 *   OPEN_DELEGATE_WRITE     — WRITE delegation; deleg_stateid valid.
-	 *   OPEN_DELEGATE_NONE_EXT  — v4.1+ "declined" with reason; reads
+	 *   OPEN_DELEGATE_NONE      -- v4.0-style "no delegation" (void body).
+	 *   OPEN_DELEGATE_READ      -- READ delegation; deleg_stateid valid.
+	 *   OPEN_DELEGATE_WRITE     -- WRITE delegation; deleg_stateid valid.
+	 *   OPEN_DELEGATE_NONE_EXT  -- v4.1+ "declined" with reason; reads
 	 *                             none_reason from the why_no_delegation4
 	 *                             bag.  WND4_NOT_WANTED is the typical
 	 *                             reason when the client set
@@ -915,7 +915,7 @@ struct nfs4_res_open {
 	 * none_reason is consulted only when delegation_type is
 	 * OPEN_DELEGATE_NONE_EXT.  none_will_push / none_will_signal apply
 	 * to WND4_CONTENTION / WND4_RESOURCE respectively per RFC 8881
-	 * §18.16.4.  None of these tails are populated by op_open today
+	 * S18.16.4.  None of these tails are populated by op_open today
 	 * (we never promise to push/signal); the fields are zero-init in
 	 * the result and consumed by encode_res_open as the union tail.
 	 */
@@ -960,14 +960,14 @@ struct nfs4_res_sequence {
 };
 
 
-/** RFC 5661 §18.48 — TEST_STATEID result (per-stateid statuses). */
+/** RFC 5661 S18.48 -- TEST_STATEID result (per-stateid statuses). */
 struct nfs4_res_test_stateid {
 	uint32_t count;
 	uint32_t status_codes[64]; /**< Per-stateid NFS4 status. */
 };
 
 /**
- * RFC 8881 §18.39.2 — GET_DIR_DELEGATION result.
+ * RFC 8881 S18.39.2 -- GET_DIR_DELEGATION result.
  *
  * The XDR has an outer union keyed on `nfsstat4 gdrd_status` and an
  * inner union keyed on `gdd4_status gddrnf_status`:
@@ -983,9 +983,9 @@ struct nfs4_res_test_stateid {
  *   };
  *
  * The outer status stays NFS4_OK both for "granted" and for "not
- * granted right now" — that is what keeps the kernel's bundled
+ * granted right now" -- that is what keeps the kernel's bundled
  * GETATTR from being stripped out of the compound (a non-OK outer
- * status halts the compound per RFC 8881 §2.6.3.1.1, producing EIO
+ * status halts the compound per RFC 8881 S2.6.3.1.1, producing EIO
  * when a following op would have supplied the attrs the client
  * needed).  The inner `gddrnf_status` selects between the granted
  * body and the "will_signal_deleg_avail" non-fatal body.
@@ -1042,7 +1042,7 @@ struct nfs4_res_io_advise {
 	uint32_t hints;   /**< Acknowledged IO_ADVISE4 bitmask. */
 };
 
-/** READ_PLUS content segment (RFC 7862 §15.10). */
+/** READ_PLUS content segment (RFC 7862 S15.10). */
 struct nfs4_read_plus_content {
 	uint32_t content_type;  /**< NFS4_CONTENT_DATA or NFS4_CONTENT_HOLE */
 	uint64_t offset;
@@ -1070,19 +1070,19 @@ struct nfs4_res_read_plus {
  * RFC 8276 per-operation result structures
  * ----------------------------------------------------------------------- */
 
-/** RFC 8276 §4.2.2 — GETXATTR result. */
+/** RFC 8276 S4.2.2 -- GETXATTR result. */
 struct nfs4_res_getxattr {
 	uint32_t value_len;
 	uint8_t  value[MDS_XATTR_VAL_MAX];
 };
 
-/** RFC 8276 §4.2.3 — SETXATTR result. */
+/** RFC 8276 S4.2.3 -- SETXATTR result. */
 struct nfs4_res_setxattr {
 	uint64_t change_before;
 	uint64_t change_after;
 };
 
-/** RFC 8276 §4.2.4 — LISTXATTRS result. */
+/** RFC 8276 S4.2.4 -- LISTXATTRS result. */
 struct nfs4_res_listxattrs {
 	uint64_t cookie;
 	uint32_t name_count;
@@ -1090,7 +1090,7 @@ struct nfs4_res_listxattrs {
 	bool     eof;
 };
 
-/** RFC 8276 §4.2.5 — REMOVEXATTR result. */
+/** RFC 8276 S4.2.5 -- REMOVEXATTR result. */
 struct nfs4_res_removexattr {
 	uint64_t change_before;
 	uint64_t change_after;
@@ -1108,7 +1108,7 @@ struct nfs4_layout_ds {
 	uint8_t  deviceid[NFS4_DEVICEID4_SIZE];
 };
 
-/** SECINFO result (RFC 8881 §18.29). */
+/** SECINFO result (RFC 8881 S18.29). */
 /** change_info4 for REMOVE, RENAME, LINK (RFC 8881). */
 struct nfs4_res_change_info {
 	uint64_t before;
@@ -1122,12 +1122,12 @@ struct nfs4_res_secinfo {
 	uint32_t flavors[4];  /**< Security flavor values. */
 };
 
-/** COMMIT result (RFC 8881 §18.3). */
+/** COMMIT result (RFC 8881 S18.3). */
 struct nfs4_res_commit {
 	uint64_t write_verf; /**< Server write verifier (boot epoch). */
 };
 
-/** READLINK result (RFC 8881 §18.24). */
+/** READLINK result (RFC 8881 S18.24). */
 struct nfs4_res_readlink {
 	char     target[1024]; /**< Symlink target string. */
 	uint32_t target_len;   /**< Byte length of target. */
@@ -1159,7 +1159,7 @@ struct nfs4_ff_ds {
 };
 
 /*
- * Phase C / Step 1 of docs/hpc-nto1-plan.md — wire-buffer
+ * Phase C / Step 1 of docs/hpc-nto1-plan.md -- wire-buffer
  * heap-ification.  The inner DS array of an ff_mirror was previously
  * a fixed-size [MDS_MAX_LAYOUT_DS] inline buffer; now a heap pointer
  * sized by the producer at alloc time.  Lifetime is owned by the
@@ -1176,15 +1176,15 @@ struct nfs4_ff_mirror {
 };
 
 /*
- * Phase C / Step 6 of docs/hpc-nto1-plan.md — flex-files XDR wire
+ * Phase C / Step 6 of docs/hpc-nto1-plan.md -- flex-files XDR wire
  * form selector.  Two RFC 8435-conformant shapes:
  *
- *   LEGACY  — N ff_mirror4 entries, each with ds_count = mirror_count.
+ *   LEGACY  -- N ff_mirror4 entries, each with ds_count = mirror_count.
  *             Pre-6.18 Linux flex-files clients consume this form;
  *             they treat each ff_mirror4 as one stripe and pick one
  *             DS per stripe (effectively single-DS per layout
  *             segment when mirror_count == 1).
- *   STRIPED — 1 ff_mirror4 entry whose ds_count == stripe_count,
+ *   STRIPED -- 1 ff_mirror4 entry whose ds_count == stripe_count,
  *             listing all DSes in the layout.  Linux 6.18+ clients
  *             consume this as the per-stripe DS dispatch table
  *             (dss_id = offset / stripe_unit).  Yields true
@@ -1210,7 +1210,7 @@ struct nfs4_res_layoutget {
 	uint64_t            length;
 	uint32_t            stripe_unit;
 	/*
-	 * Outer DS array — used by both files-layout and the legacy
+	 * Outer DS array -- used by both files-layout and the legacy
 	 * flex-files form.  Heap-allocated by
 	 * nfs4_res_layoutget_alloc(); sized to ds_count.
 	 */
@@ -1229,7 +1229,7 @@ struct nfs4_res_layoutget {
 	uint32_t              ff_flags;
 
 	/*
-	 * Phase C / Step 6 — wire-form selector.  Default LEGACY (= 0)
+	 * Phase C / Step 6 -- wire-form selector.  Default LEGACY (= 0)
 	 * preserves the pre-feature wire shape.  The populator sets
 	 * STRIPED only after building the multi-DS-per-mirror form
 	 * (single ff_mirror4 with ds_count == stripe_count).  See enum
@@ -1405,7 +1405,7 @@ struct compound_data {
 	struct copy_offload_table *cot;  /* NULL = COPY returns sync-only */
 	struct health_monitor    *hm;   /* NULL = repl health check disabled */
 	struct rpc_conn          *conn; /* Live client RPC connection (NULL in tests) */
-	/* Cluster — NULL = cluster features disabled (single-node mode). */
+	/* Cluster -- NULL = cluster features disabled (single-node mode). */
 	struct subtree_map               *smap;
 	const struct rename_2pc_transport *transport;
 	const struct cluster_membership  *membership; /* NULL = no peer resolution */
@@ -1418,7 +1418,7 @@ struct compound_data {
 	struct ds_cache          *ds_cache;   /* NULL = fall back to catalogue reads */
 	struct inode_cache       *icache;     /* NULL = no cross-compound caching */
 	struct dirent_cache      *dcache;     /* NULL = no dirent/negative caching */
-	/* Phase D of docs/hpc-nto1-plan.md — per-inode stripe-map cache.
+	/* Phase D of docs/hpc-nto1-plan.md -- per-inode stripe-map cache.
 	 * Populated and consumed only for inodes with MDS_IFLAG_HPC_SHARED;
 	 * NULL means "no cache" (every LAYOUTGET reads the catalogue).
 	 * Cache contents must be invalidated by op_remove (final unlink)
@@ -1426,7 +1426,7 @@ struct compound_data {
 	 * into a layout grant for a later (post-shrink / post-recreate)
 	 * file at the same fileid. */
 	struct layout_cache      *lcache;     /* NULL = no HPC layout cache */
-	/* Phase F of docs/hpc-nto1-plan.md — per-fileid LAYOUTCOMMIT
+	/* Phase F of docs/hpc-nto1-plan.md -- per-fileid LAYOUTCOMMIT
 	 * aggregator.  When non-NULL, op_layoutcommit on HPC-Shared
 	 * inodes routes through the aggregator instead of writing
 	 * synchronously, op_getattr coalesces with the aggregator
@@ -1471,7 +1471,7 @@ struct compound_data {
 	uint32_t                  cfg_default_stripe_count;
 	uint32_t                  cfg_default_mirror_count;
 	/*
-	 * Phase F of docs/hpc-nto1-plan.md — GETATTR consistency mode
+	 * Phase F of docs/hpc-nto1-plan.md -- GETATTR consistency mode
 	 * for HPC-Shared inodes.  STRICT (default) forces a flush of
 	 * the LAYOUTCOMMIT aggregator before serving GETATTR;
 	 * OPTIMISTIC peeks the bucket and overlays max(size) /
@@ -1481,7 +1481,7 @@ struct compound_data {
 	 */
 	enum mds_hpc_getattr_mode cfg_hpc_getattr_mode;
 	/*
-	 * Phase C / Step 5 of docs/hpc-nto1-plan.md — wide pre-warm
+	 * Phase C / Step 5 of docs/hpc-nto1-plan.md -- wide pre-warm
 	 * stripe-count cap for HPC-Shared CREATEs.  0 selects the
 	 * compile-time default (128, matches src/common/config.c).
 	 * Consumed by op_open(CREATE) when the parent inode carries
@@ -1490,7 +1490,7 @@ struct compound_data {
 	 */
 	uint32_t                  cfg_hpc_max_stripe_count;
 	/*
-	 * Phase C of docs/hpc-nto1-plan.md — flex-files layout XDR
+	 * Phase C of docs/hpc-nto1-plan.md -- flex-files layout XDR
 	 * wire form for HPC-Shared inodes.  Consumed by op_layoutget()
 	 * when populating the response: AUTO selects striped iff the
 	 * inode is HPC-Shared with mirror_count == 1 && stripe_count > 1;
@@ -1505,7 +1505,7 @@ struct compound_data {
 	/* Path tracking for subtree ownership checks. */
 	char                      current_path[MDS_MAX_PATH];
 	char                      saved_path[MDS_MAX_PATH];
-	/* Xattr state — set by OPENATTR+LOOKUP for READ/WRITE on xattr objects. */
+	/* Xattr state -- set by OPENATTR+LOOKUP for READ/WRITE on xattr objects. */
 	char                      xattr_name[MDS_XATTR_NAME_MAX + 1];
 	bool                      xattr_obj_set;  /* xattr_name is valid */
 
@@ -1538,7 +1538,7 @@ struct compound_data {
 	uint32_t                  stripe_cached_stripe_unit;
 
 	/*
-	 * Layout pre-grant — fused CREATE + LAYOUTGET CQ commit.
+	 * Layout pre-grant -- fused CREATE + LAYOUTGET CQ commit.
 	 *
 	 * When op_open(CREATE) detects a following LAYOUTGET in the
 	 * same compound and the writer thread successfully persists
@@ -1557,13 +1557,13 @@ struct compound_data {
 	 * transient_state_cache flag. */
 	bool                      skip_transient_ndb;
 
-	/* RFC 8881 §16.2.4 — current stateid tracking.
+	/* RFC 8881 S16.2.4 -- current stateid tracking.
 	 *
 	 * Updated by ops that PRODUCE a stateid (OPEN, OPEN_DOWNGRADE,
 	 * CLOSE, LOCK, LOCKU, LAYOUTGET, LAYOUTRETURN).  Read by ops that
 	 * CONSUME a stateid when the wire stateid is the special
 	 * CURRENT_STATEID4 marker (seqid==1, other==all-zeros, RFC 8881
-	 * §16.2.3.1.2).  Cleared by FH-mutating ops (PUTFH, PUTROOTFH,
+	 * S16.2.3.1.2).  Cleared by FH-mutating ops (PUTFH, PUTROOTFH,
 	 * LOOKUP, LOOKUPP).  Saved/restored by SAVEFH/RESTOREFH alongside
 	 * the current FH.
 	 *
@@ -1606,12 +1606,12 @@ struct compound_data {
 void compound_init(struct compound_data *cd);
 
 /**
- * RFC 8881 §1.7 / §14.4 — UTF-8 well-formedness check.
+ * RFC 8881 S1.7 / S14.4 -- UTF-8 well-formedness check.
  *
  * Returns true iff @a buf points at @a len bytes that form a valid
  * UTF-8 sequence: no overlong encodings, no surrogates, no codepoints
  * above U+10FFFF, no isolated continuation bytes.  An embedded NUL
- * (0x00) is treated as valid UTF-8 here — callers that need to
+ * (0x00) is treated as valid UTF-8 here -- callers that need to
  * forbid it (component4 names, compound tag) check for it separately.
  *
  * Used by compound_validate_name() (compound_internal.h) and the
@@ -1627,7 +1627,7 @@ bool compound_is_valid_utf8(const char *buf, size_t len);
  * opnum values are no-ops.  NULL-safe.
  *
  * Callers MUST invoke this on every result after the response has
- * been encoded and sent — typically immediately before reusing the
+ * been encoded and sent -- typically immediately before reusing the
  * thread-local result array on the next compound.  compound_process
  * itself does not call this because the heap buffers are still
  * needed by the encoder after the function returns.
@@ -1638,7 +1638,7 @@ void nfs4_result_destroy(struct nfs4_result *r);
  * Process a single NFSv4.1 COMPOUND request.
  *
  * Operations are executed sequentially.  Processing stops on the first
- * error (per RFC 8881 §2.6.3.1.1.4).  The result array must have room
+ * error (per RFC 8881 S2.6.3.1.1.4).  The result array must have room
  * for @count entries.
  *
  * NOTE: this function is designed for single-COMPOUND-per-init use.

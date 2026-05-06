@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mds_gss.c — Unit tests for GSS module + auth gate.
+ * test_mds_gss.c -- Unit tests for GSS module + auth gate.
  */
 
 #include <stdio.h>
@@ -274,7 +274,7 @@ static void test_validate_short_handle(void)
 }
 
 /* -------------------------------------------------------
- * Test: AUTH_SYS in krb5 mode — flavor 1 must not
+ * Test: AUTH_SYS in krb5 mode -- flavor 1 must not
  * reach a COMPOUND decoder (regression).
  *
  * We test this at the XDR level: if the server gate checks

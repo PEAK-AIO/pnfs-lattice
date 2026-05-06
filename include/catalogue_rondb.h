@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_rondb.h — RonDB backend configuration + C ABI shim interface.
+ * catalogue_rondb.h -- RonDB backend configuration + C ABI shim interface.
  *
  * The RonDB native API is C++.  All C++ code is contained in
  * catalogue_rondb_shim.cpp which exports extern "C" functions.
@@ -34,7 +34,7 @@ enum mds_status mds_rondb_config_load(const char *path,
                                       struct mds_rondb_config *out);
 
 /* -----------------------------------------------------------------------
- * C ABI shim — implemented in catalogue_rondb_shim.cpp
+ * C ABI shim -- implemented in catalogue_rondb_shim.cpp
  *
  * These functions hide the C++ NDB API behind a narrow C boundary.
  * The shim is compiled only when ENABLE_RONDB is active.
@@ -89,7 +89,7 @@ int rondb_shim_bench_create(void *handle, uint32_t n_ops,
                             uint64_t *elapsed_us, uint32_t *errors);
 
 /* -----------------------------------------------------------------------
- * Stage B shim — metadata table lifecycle + row-level CRUD
+ * Stage B shim -- metadata table lifecycle + row-level CRUD
  *
  * Each function is one NDB transaction unless documented otherwise.
  * read_mode: 0=COMMITTED, 1=SHARED, 2=EXCLUSIVE (NDB LockMode).
@@ -238,7 +238,7 @@ int rondb_shim_ns_remove_full(void *handle,
                               uint8_t *out_child_type,
                               uint32_t *out_old_nlink);
 
-/** Readdir callback for shim — called per dirent found.
+/** Readdir callback for shim -- called per dirent found.
  *  Return 0 to continue, non-zero to stop. */
 typedef int (*rondb_readdir_cb)(uint64_t child_fileid,
                                 uint8_t child_type,
@@ -255,13 +255,13 @@ int rondb_shim_ns_readdir(void *handle,
                           const char *start_after,
                           rondb_readdir_cb cb, void *ctx);
 
-/** READDIR_PLUS shim callback — called once per dirent with both the
+/** READDIR_PLUS shim callback -- called once per dirent with both the
  *  dirent columns and the fused child-inode read.
  *
  *  The `inode_buf` / `inode_len` pair uses the same 137-byte
  *  rondb_inode serialisation as rondb_shim_inode_get; when the inode
- *  read returned NDB NOT_FOUND (626) — the race where a dirent points
- *  at an inode that was concurrently deleted — `inode_valid` is 0,
+ *  read returned NDB NOT_FOUND (626) -- the race where a dirent points
+ *  at an inode that was concurrently deleted -- `inode_valid` is 0,
  *  `inode_buf` is NULL, `inode_len` is 0 and the caller should treat
  *  the entry's attributes as unavailable rather than failing the
  *  whole RPC.
@@ -306,7 +306,7 @@ int rondb_shim_ns_nlink_adjust(void *handle,
                                int32_t delta);
 
 /* -----------------------------------------------------------------------
- * Phase 1 shim — inline data, xattr, DS registry, quota, GC, layout,
+ * Phase 1 shim -- inline data, xattr, DS registry, quota, GC, layout,
  *                client recovery.
  * ----------------------------------------------------------------------- */
 
@@ -361,7 +361,7 @@ int rondb_shim_ds_registry_list(void *handle,
                                 uint32_t *count_out);
 
 /* -----------------------------------------------------------------------
- * Phase 8A shim — DS provisioning, quota, GC queue, layout state,
+ * Phase 8A shim -- DS provisioning, quota, GC queue, layout state,
  *                 client recovery.
  * ----------------------------------------------------------------------- */
 
@@ -551,7 +551,7 @@ int rondb_shim_lock_test(void *handle,
                          uint64_t *owner_epoch_out);
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Node registry, range allocation, lock reaping
+ * Phase 9A -- Node registry, range allocation, lock reaping
  * ----------------------------------------------------------------------- */
 
 /** Register this MDS in mds_node_registry (writeTuple = insert or update). */
@@ -594,7 +594,7 @@ int rondb_shim_lock_reap_by_owner(void *handle,
                                   uint32_t *reaped_count);
 
 /* -----------------------------------------------------------------------
- * Phase 9C — Delta broadcast shim
+ * Phase 9C -- Delta broadcast shim
  * ----------------------------------------------------------------------- */
 
 /** Callback for delta_poll.  Return 0 to continue, non-zero to stop. */
@@ -630,7 +630,7 @@ int rondb_shim_delta_seqno_save(void *handle, uint32_t mds_id,
                                 uint64_t seqno);
 
 /* -----------------------------------------------------------------------
- * Phase 9C — Background image poller
+ * Phase 9C -- Background image poller
  * ----------------------------------------------------------------------- */
 
 struct catalog_image;
@@ -643,7 +643,7 @@ struct catalog_image;
  *
  * @param cat              Catalogue handle (RonDB backend).
  * @param img              Catalog image to apply deltas to.
- * @param self_mds_id      This MDS’s ID (skip own deltas).
+ * @param self_mds_id      This MDS's ID (skip own deltas).
  * @param poll_interval_ms Polling cadence (default 50).
  * @return 0 on success, -1 on error.
  */
@@ -659,7 +659,7 @@ int catalogue_rondb_poller_start(struct mds_catalogue *cat,
 void catalogue_rondb_poller_stop(struct mds_catalogue *cat);
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Node registry C wrappers
+ * Phase 9A -- Node registry C wrappers
  * ----------------------------------------------------------------------- */
 
 /** Register this MDS in the node registry. */

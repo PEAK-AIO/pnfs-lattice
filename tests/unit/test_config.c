@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_config.c — Unit tests for MDS configuration parsing.
+ * test_config.c -- Unit tests for MDS configuration parsing.
  *
  * RonDB-native: default backend is MDS_BACKEND_RONDB.
  */
@@ -168,7 +168,7 @@ static void test_promoted_knob_defaults(void)
 {
     char path[128];
     struct mds_config cfg;
-    /* Empty INI — every promoted knob must land at its
+    /* Empty INI -- every promoted knob must land at its
      * documented default. */
     ASSERT_EQ(write_tmp_ini("", path), 0);
     ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
@@ -209,14 +209,14 @@ static void test_mountd_compat_defaults(void)
     struct mds_config cfg;
     ASSERT_EQ(write_tmp_ini("", path), 0);
     ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
-    /* Enabled by default — a fresh install gets `showmount -e`
+    /* Enabled by default -- a fresh install gets `showmount -e`
      * working out-of-the-box.  Operators who want it off set
      * mountd_compat_enabled = false in mds.conf. */
     ASSERT_EQ((int)cfg.mountd_compat_enabled, 1);
     ASSERT_EQ((int)cfg.mountd_compat_port, 20048);
     ASSERT_EQ((int)cfg.mountd_compat_register_rpcbind, 1);
     ASSERT_TRUE(strcmp(cfg.mountd_compat_bind_addr, "0.0.0.0") == 0);
-    /* Empty INI — no exports parsed; runtime falls back to "/". */
+    /* Empty INI -- no exports parsed; runtime falls back to "/". */
     ASSERT_EQ((int)cfg.mountd_compat_export_count, 0);
     unlink(path);
 }
@@ -225,7 +225,7 @@ static void test_mountd_compat_can_be_disabled(void)
 {
     char path[128];
     struct mds_config cfg;
-    /* Verify the override path — operators can opt out. */
+    /* Verify the override path -- operators can opt out. */
     ASSERT_EQ(write_tmp_ini(
         "mountd_compat_enabled = false\n",
         path), 0);
@@ -261,7 +261,7 @@ static void test_mountd_compat_export_overflow(void)
 {
     char path[128];
     struct mds_config cfg;
-    /* 17 entries — the limit is 16, so the last one is dropped. */
+    /* 17 entries -- the limit is 16, so the last one is dropped. */
     ASSERT_EQ(write_tmp_ini(
         "mountd_compat_exports = /a,/b,/c,/d,/e,/f,/g,/h,"
         "/i,/j,/k,/l,/m,/n,/o,/p,/q\n",

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * hardlink_2pc.h — Cross-subtree hard link two-phase commit API.
+ * hardlink_2pc.h -- Cross-subtree hard link two-phase commit API.
  *
  * Modeled on rename_2pc: coordinator journal on directory-owning MDS,
  * participant journal on inode-owning MDS. Crash-safe and idempotent.

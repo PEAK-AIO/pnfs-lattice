@@ -2,14 +2,14 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * proxy_io.h — Non-pNFS client proxy I/O API.
+ * proxy_io.h -- Non-pNFS client proxy I/O API.
  *
  * Provides stripe-aware READ and mirror-aware WRITE through the MDS
  * for clients that do not support pNFS (no LAYOUTGET).  The MDS
  * forwards I/O to DS data files via its private NFS mounts (or any
  * local mount path in testing).
  *
- * See docs/architecture.md §14 for design overview.
+ * See docs/architecture.md S14 for design overview.
  */
 
 #ifndef PROXY_IO_H
@@ -203,7 +203,7 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
  *                     when it was already gone (ENOENT).  Lets the
  *                     GC worker short-circuit its (s, m) sweep once
  *                     it has walked off the end of the layout, so a
- *                     1×1 file does not pay the full 64-unlink probe
+ *                     1x1 file does not pay the full 64-unlink probe
  *                     cost.
  * @return MDS_OK on success or ENOENT,
  *         MDS_ERR_NOTFOUND if the DS is not mounted on the MDS,
@@ -427,7 +427,7 @@ enum mds_status mds_proxy_clone_range(struct mds_proxy_ctx *ctx,
                                       uint64_t count);
 
 /**
- * Set DS file ownership to synthetic uid/gid per RFC 8435 §2.2.1.
+ * Set DS file ownership to synthetic uid/gid per RFC 8435 S2.2.1.
  *
  * Derives uid/gid from HMAC(secret, fileid||stripe||mirror) and
  * calls chown() on the DS data file.  Required for the loosely
@@ -443,7 +443,7 @@ enum mds_status mds_proxy_clone_range(struct mds_proxy_ctx *ctx,
  * @param secret_len Length of secret.
  * @return MDS_OK on success.
  */
-/** RFC 8435 §14: Fence client by chowning DS file to neutral uid. */
+/** RFC 8435 S14: Fence client by chowning DS file to neutral uid. */
 enum mds_status mds_proxy_fence_ds_file(const struct mds_proxy_ctx *ctx,
                                          uint32_t ds_id, uint64_t fileid,
                                          uint32_t stripe, uint32_t mirror);

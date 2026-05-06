@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mover_util.h — Shared file relocation helper for rebalance/tiering.
+ * mover_util.h -- Shared file relocation helper for rebalance/tiering.
  *
- * Performs: revalidate stripe map → fencing checks → proxy copy →
- * completeness verify → atomic COMMIT_OP_REBALANCE_MOVE.
+ * Performs: revalidate stripe map -> fencing checks -> proxy copy ->
+ * completeness verify -> atomic COMMIT_OP_REBALANCE_MOVE.
  */
 
 #ifndef MOVER_UTIL_H

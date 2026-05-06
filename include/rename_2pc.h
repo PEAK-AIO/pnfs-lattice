@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rename_2pc.h — Cross-subtree rename two-phase commit API.
+ * rename_2pc.h -- Cross-subtree rename two-phase commit API.
  */
 
 #ifndef RENAME_2PC_H
@@ -52,7 +52,7 @@ int rename_2pc_on_prepare(struct mds_catalogue *cat,
  * @brief Handle CommitRename on the participant side.
  *
  * Reads the inode snapshot from the PREPARE journal entry.
- * No inode_data parameter needed — it is persisted in the journal.
+ * No inode_data parameter needed -- it is persisted in the journal.
  */
 enum mds_status rename_2pc_on_commit(struct mds_catalogue *cat,
                                      uint64_t txn_id);

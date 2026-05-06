@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_cache.h — In-memory DS registry cache.
+ * ds_cache.h -- In-memory DS registry cache.
  *
  * Eliminates per-request catalogue reads for DS info and provisioning
  * data on hot paths (LAYOUTGET, CREATE, ds_prealloc, ds_prepare).
@@ -98,7 +98,7 @@ int ds_cache_invalidate(struct ds_cache *cache, struct mds_catalogue *cat);
  * Called from main.c after ds_cache_create() to stamp per-DS
  * placement weights from `struct mds_config.ds_weight_by_id`.  The
  * weight field is runtime-only (not persisted in RonDB), so each
- * MDS re-applies its own config on start — safe because the array
+ * MDS re-applies its own config on start -- safe because the array
  * is keyed by ds_id and every MDS sees the same ds_id namespace.
  *
  * @param cache    Cache handle (NULL-safe).
@@ -120,7 +120,7 @@ void ds_cache_apply_weights(struct ds_cache *cache,
  * Entries whose ds_id is not in the cache are left untouched
  * (weight stays zero, i.e. fall back to free-bytes heuristics).
  *
- * @param cache  Cache handle (NULL-safe — no-op).
+ * @param cache  Cache handle (NULL-safe -- no-op).
  * @param list   DS list to patch.
  * @param count  Number of entries in @list.
  */
@@ -191,7 +191,7 @@ enum mds_status ds_cache_get_weights(const struct ds_cache *cache,
  * @param cache   Cache handle.
  * @param ids     Caller-provided buffer.
  * @param cap     Capacity of @p ids (in elements).
- * @return Number of IDs written (≤ min(cap, MDS_MAX_DS_NODES)).
+ * @return Number of IDs written (<= min(cap, MDS_MAX_DS_NODES)).
  */
 uint32_t ds_cache_snapshot_ids(const struct ds_cache *cache,
 			       uint32_t *ids, uint32_t cap);
@@ -202,7 +202,7 @@ uint32_t ds_cache_snapshot_ids(const struct ds_cache *cache,
  * Iterates the cached DS set and sums total/used bytes for entries
  * whose state == DS_ONLINE and whose capacity probe has produced a
  * non-zero total (i.e. the statvfs probe has actually run).  Any
- * DS without live capacity data is skipped — it must not contribute
+ * DS without live capacity data is skipped -- it must not contribute
  * a phantom 0 to the sum.
  *
  * Staleness gate: entries whose last in-memory observation is older
@@ -220,7 +220,7 @@ uint32_t ds_cache_snapshot_ids(const struct ds_cache *cache,
  * below this; the clamp is purely defensive against pathological
  * configurations.
  *
- * @param cache         Cache handle (NULL-safe — returns zero counts).
+ * @param cache         Cache handle (NULL-safe -- returns zero counts).
  * @param stale_sec     Maximum age (wall-clock seconds) of the most
  *                      recent observation before the entry is
  *                      ignored.  0 = no staleness gate.
@@ -246,7 +246,7 @@ void ds_cache_aggregate_capacity(const struct ds_cache *cache,
  * "last observed" wall-clock timestamp to NOW so the staleness gate
  * in ds_cache_aggregate_capacity treats the merged value as fresh.
  *
- * Rows whose total_bytes is zero in @p list are NOT merged — a zero
+ * Rows whose total_bytes is zero in @p list are NOT merged -- a zero
  * means the source MDS has not yet probed the DS, and we don't want
  * to overwrite a fresher local observation with a phantom zero.
  *
@@ -254,7 +254,7 @@ void ds_cache_aggregate_capacity(const struct ds_cache *cache,
  * so MDSes that don't proxy-mount a given DS still see the latest
  * observation written by an MDS that does.
  *
- * @param cache  Cache handle (NULL-safe — no-op).
+ * @param cache  Cache handle (NULL-safe -- no-op).
  * @param list   DS list freshly read from the catalogue.
  * @param count  Number of entries in @p list.
  */

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# qa-check.sh — Daily QA gate runner.
+# qa-check.sh -- Daily QA gate runner.
 #
 # Runs every quality check defined in CONTRIBUTING.md.
 # Exit code 0 = all clear for review. Non-zero = fix before submitting.
@@ -13,14 +13,14 @@
 #   ./scripts/qa-check.sh --gate NAME  # Run only the named gate
 #
 # Gates (in order):
-#   1. style        — Code style checks (tabs, line length, comments)
-#   2. build-gcc    — Build with gcc, all warnings as errors
-#   3. build-clang  — Build with clang, all warnings as errors
-#   4. cppcheck     — Static analysis via cppcheck
-#   5. clang-tidy   — Static analysis via clang-tidy
-#   6. unit-tests   — Run unit tests
-#   7. valgrind     — Run unit tests under valgrind (slow)
-#   8. integration  — Run integration tests (requires running MDS)
+#   1. style        -- Code style checks (tabs, line length, comments)
+#   2. build-gcc    -- Build with gcc, all warnings as errors
+#   3. build-clang  -- Build with clang, all warnings as errors
+#   4. cppcheck     -- Static analysis via cppcheck
+#   5. clang-tidy   -- Static analysis via clang-tidy
+#   6. unit-tests   -- Run unit tests
+#   7. valgrind     -- Run unit tests under valgrind (slow)
+#   8. integration  -- Run integration tests (requires running MDS)
 #
 # The script stops at the first gate failure unless --continue is given.
 
@@ -70,18 +70,18 @@ done
 # ---------------------------------------------------------------------------
 log_header() {
     echo ""
-    echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}==========================================================${NC}"
     echo -e "${CYAN}  GATE: $1${NC}"
-    echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}==========================================================${NC}"
 }
 
 gate_pass() {
-    echo -e "  ${GREEN}✓ PASS${NC}: $1"
+    echo -e "  ${GREEN}[x] PASS${NC}: $1"
     PASSED=$((PASSED + 1))
 }
 
 gate_fail() {
-    echo -e "  ${RED}✗ FAIL${NC}: $1"
+    echo -e "  ${RED}[ ] FAIL${NC}: $1"
     FAILED=$((FAILED + 1))
     FAILED_GATES+=("$1")
     if [[ ${CONTINUE_ON_FAIL} -eq 0 ]]; then
@@ -91,7 +91,7 @@ gate_fail() {
 }
 
 gate_skip() {
-    echo -e "  ${YELLOW}— SKIP${NC}: $1 ($2)"
+    echo -e "  ${YELLOW}-- SKIP${NC}: $1 ($2)"
     SKIPPED=$((SKIPPED + 1))
 }
 
@@ -104,9 +104,9 @@ should_run() {
 
 summary() {
     echo ""
-    echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}==========================================================${NC}"
     echo -e "${CYAN}  QA SUMMARY${NC}"
-    echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}==========================================================${NC}"
     echo -e "  Passed:  ${GREEN}${PASSED}${NC}"
     echo -e "  Failed:  ${RED}${FAILED}${NC}"
     echo -e "  Skipped: ${YELLOW}${SKIPPED}${NC}"
@@ -114,13 +114,13 @@ summary() {
         echo ""
         echo -e "  ${RED}Failed gates:${NC}"
         for g in "${FAILED_GATES[@]}"; do
-            echo -e "    ${RED}✗${NC} ${g}"
+            echo -e "    ${RED}[ ]${NC} ${g}"
         done
         echo ""
-        echo -e "  ${RED}QA FAILED — do not submit for review.${NC}"
+        echo -e "  ${RED}QA FAILED -- do not submit for review.${NC}"
     else
         echo ""
-        echo -e "  ${GREEN}All gates passed — ready for review.${NC}"
+        echo -e "  ${GREEN}All gates passed -- ready for review.${NC}"
     fi
 }
 
@@ -291,7 +291,7 @@ if should_run "unit-tests"; then
             > "${TEST_OUT}" 2>&1) || true
 
         if grep -q "No tests were found" "${TEST_OUT}"; then
-            # No labeled tests — run all tests as fallback.
+            # No labeled tests -- run all tests as fallback.
             (cd "${BUILD_DIR_GCC}" && ctest --output-on-failure \
                 > "${TEST_OUT}" 2>&1) || true
         fi
@@ -313,7 +313,7 @@ if should_run "unit-tests"; then
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 7: Valgrind (slow — skipped with --quick)
+# Gate 7: Valgrind (slow -- skipped with --quick)
 # ---------------------------------------------------------------------------
 if should_run "valgrind"; then
     log_header "valgrind"
@@ -350,10 +350,10 @@ if should_run "valgrind"; then
                 "${VALGRIND_SUPP_ARGS[@]}" \
                 --log-file="${vg_log}" \
                 "${test_bin}" > /dev/null 2>&1; then
-                echo -e "    ${RED}✗${NC} ${test_name} — see ${vg_log}"
+                echo -e "    ${RED}[ ]${NC} ${test_name} -- see ${vg_log}"
                 VALGRIND_FAIL=1
             else
-                echo -e "    ${GREEN}✓${NC} ${test_name} — clean"
+                echo -e "    ${GREEN}[x]${NC} ${test_name} -- clean"
             fi
         done < <(find "${BUILD_DIR_GCC}" -name 'test_*' -executable -type f -print0)
 
@@ -366,7 +366,7 @@ if should_run "valgrind"; then
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 8: Integration tests (optional — requires running infrastructure)
+# Gate 8: Integration tests (optional -- requires running infrastructure)
 # ---------------------------------------------------------------------------
 if should_run "integration"; then
     log_header "integration"

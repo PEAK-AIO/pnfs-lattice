@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_cluster_membership.c — Unit tests for cluster membership module.
+ * test_cluster_membership.c -- Unit tests for cluster membership module.
  *
  * 19 test cases covering:
  *   - Membership core (1-10)
@@ -351,7 +351,7 @@ static void test_callback_not_on_dup_join(void)
     reset_cb_state();
     cluster_membership_set_change_cb(ctx, test_change_cb, NULL);
 
-    /* Duplicate join — should fail. */
+    /* Duplicate join -- should fail. */
     assert(cluster_node_join(ctx, &m2) == MDS_ERR_EXISTS);
 
     /* Callback must NOT have fired. */
@@ -474,7 +474,7 @@ static void test_leave_owns_subtrees(void)
     assert(subtree_map_add(smap, "/data", 2, "mds2.local",
                            SUBTREE_ACTIVE, 1) == MDS_OK);
 
-    /* Leave should be rejected — node 2 still owns /data. */
+    /* Leave should be rejected -- node 2 still owns /data. */
     assert(cluster_node_leave(ctx, 2) == MDS_ERR_PERM);
 
     /* Drain the subtree, then leave should succeed. */
@@ -679,7 +679,7 @@ static void test_transport_cluster_status(void)
 }
 
 /* -----------------------------------------------------------------------
- * Sequence 0 — API stabilisation
+ * Sequence 0 -- API stabilisation
  * ----------------------------------------------------------------------- */
 
 static void test_is_authoritative_local(void)
@@ -706,7 +706,7 @@ static void test_is_authoritative_local(void)
 
 static void test_fail_loud_etcd_multinode(void)
 {
-    /* etcd path removed — multi-node uses RonDB node_registry.
+    /* etcd path removed -- multi-node uses RonDB node_registry.
      * Verify that cluster_size > 1 still succeeds (local mode
      * is populated by cluster_membership_populate_rondb later). */
     struct subtree_map *smap = NULL;
@@ -727,7 +727,7 @@ static void test_fail_loud_etcd_multinode(void)
 }
 
 /* -----------------------------------------------------------------------
- * Sequence 1 — Role, lifecycle, topology
+ * Sequence 1 -- Role, lifecycle, topology
  * ----------------------------------------------------------------------- */
 
 /** Self-registered node should have NODE_ACTIVE + NODE_IDLE. */
@@ -1094,7 +1094,7 @@ static void test_transport_status_topology_fields(void)
     cluster_transport_server_set_membership(srv, ctx);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Query status — topology fields must survive the wire. */
+    /* Query status -- topology fields must survive the wire. */
     struct cluster_member *members = NULL;
     uint32_t count = 0;
     assert(cluster_transport_request_cluster_status(
@@ -1135,7 +1135,7 @@ static void test_transport_status_topology_fields(void)
  * ----------------------------------------------------------------------- */
 
 
-/* etcd tests removed — coordination is RonDB-native. */
+/* etcd tests removed -- coordination is RonDB-native. */
 
 static void _unused_etcd_placeholder(void)
 {
@@ -1158,7 +1158,7 @@ static void test_etcd_restart_self_registration(void)
         "\"role\":0,\"lifecycle\":0,"
         "\"partner_id\":0,\"cluster_addr\":\"\"}";
 
-    /* Clean up then create the stale key (no lease → persistent). */
+    /* Clean up then create the stale key (no lease -> persistent). */
     etcd_kv_delete(setup_client, node_key);
     assert(etcd_kv_put(setup_client, node_key, stale_json, 0) == MDS_OK);
 
@@ -1206,7 +1206,7 @@ static void test_etcd_restart_self_registration(void)
     assert(strstr(val, "stale-host") == NULL);
     free(val);
 
-    /* 4. Destroy membership (revokes lease → key should disappear). */
+    /* 4. Destroy membership (revokes lease -> key should disappear). */
     cluster_membership_destroy(ctx);
 
     /* Give etcd a moment to process the lease revocation. */
@@ -1224,7 +1224,7 @@ static void test_etcd_restart_self_registration(void)
 #endif  /* etcd test removed */
 
 /* -------------------------------------------------------------------
- * Sequence 5 — resolve_peer tests
+ * Sequence 5 -- resolve_peer tests
  * ------------------------------------------------------------------- */
 
 static void test_resolve_peer_found(void)
@@ -1299,7 +1299,7 @@ static void test_resolve_peer_prefers_cluster_addr_but_skips_wildcard(void)
     st = cluster_membership_init(&cfg, smap, NULL, &cm);
     assert(st == MDS_OK);
 
-    /* Register peer with wildcard cluster_addr — should fall back. */
+    /* Register peer with wildcard cluster_addr -- should fall back. */
     struct cluster_member peer = make_member(2, "node2.local", 2049, 9800);
     snprintf(peer.cluster_addr, sizeof(peer.cluster_addr), "0.0.0.0");
     st = cluster_node_join(cm, &peer);
@@ -1317,7 +1317,7 @@ static void test_resolve_peer_prefers_cluster_addr_but_skips_wildcard(void)
 }
 
 /* -------------------------------------------------------------------
- * Sequence 6 — Lifecycle ownership guard tests
+ * Sequence 6 -- Lifecycle ownership guard tests
  * ------------------------------------------------------------------- */
 
 /** IDLE node cannot own subtrees. */
@@ -1413,7 +1413,7 @@ static void test_unknown_mds_cannot_own_subtrees(void)
     assert(cluster_membership_init(&cfg, smap, NULL, &ctx) == MDS_OK);
     subtree_map_set_membership(smap, ctx);
 
-    /* mds_id 99 is not registered — cannot own. */
+    /* mds_id 99 is not registered -- cannot own. */
     assert(subtree_map_add(smap, "/data", 99, "unknown.local",
                            SUBTREE_ACTIVE, 1) == MDS_ERR_PERM);
 
@@ -1468,7 +1468,7 @@ static void test_join_lifecycle_chain_ownership(void)
 }
 
 /* -----------------------------------------------------------------------
- * Sequence 8 — Drain, detach, force-remove, role-aware leave
+ * Sequence 8 -- Drain, detach, force-remove, role-aware leave
  * ----------------------------------------------------------------------- */
 
 /** DRAINING -> DRAINED is a valid lifecycle transition. */
@@ -1494,7 +1494,7 @@ static void test_lifecycle_draining_to_drained(void)
     subtree_map_destroy(smap);
 }
 
-/** DRAINED is terminal — no transitions out. */
+/** DRAINED is terminal -- no transitions out. */
 static void test_lifecycle_drained_terminal(void)
 {
     struct mds_config cfg;
@@ -1537,7 +1537,7 @@ static void test_leave_rejects_active_serving(void)
     assert(cluster_membership_set_lifecycle(ctx, 2, NODE_ACTIVE_SERVING)
            == MDS_OK);
 
-    /* Raw leave should fail — ACTIVE_SERVING not allowed. */
+    /* Raw leave should fail -- ACTIVE_SERVING not allowed. */
     assert(cluster_node_leave(ctx, 2) == MDS_ERR_PERM);
 
     cluster_membership_destroy(ctx);
@@ -1610,7 +1610,7 @@ static void test_leave_drained_active_succeeds(void)
     assert(cluster_membership_set_lifecycle(ctx, 2, NODE_DRAINED)
            == MDS_OK);
 
-    /* DRAINED + no subtrees → leave succeeds. */
+    /* DRAINED + no subtrees -> leave succeeds. */
     assert(cluster_node_leave(ctx, 2) == MDS_OK);
     assert(cluster_membership_count(ctx) == 1);
 
@@ -1642,7 +1642,7 @@ static void test_standby_detach_safe(void)
     subtree_map_destroy(smap);
 }
 
-/** Detach standby when partner is not serving — rejected. */
+/** Detach standby when partner is not serving -- rejected. */
 static void test_standby_detach_unsafe(void)
 {
     struct mds_config cfg;
@@ -1656,14 +1656,14 @@ static void test_standby_detach_unsafe(void)
     /* Add active node 2 and its standby 3. */
     struct cluster_member m2 = make_member(2, "mds2.local", 2049, 50052);
     assert(cluster_node_join(ctx, &m2) == MDS_OK);
-    /* Node 2 is IDLE — not ACTIVE_SERVING. */
+    /* Node 2 is IDLE -- not ACTIVE_SERVING. */
 
     struct cluster_member sb = make_member(3, "mds3.local", 2049, 50053);
     sb.role = NODE_STANDBY;
     sb.failover_partner_id = 2;
     assert(cluster_node_join(ctx, &sb) == MDS_OK);
 
-    /* Partner (2) is IDLE, not ACTIVE_SERVING — unsafe to detach. */
+    /* Partner (2) is IDLE, not ACTIVE_SERVING -- unsafe to detach. */
     assert(cluster_standby_detach(ctx, 3) == MDS_ERR_PERM);
 
     cluster_membership_destroy(ctx);
@@ -1707,7 +1707,7 @@ static void test_force_remove_active_zero_subtrees(void)
     struct cluster_member m2 = make_member(2, "mds2.local", 2049, 50052);
     assert(cluster_node_join(ctx, &m2) == MDS_OK);
 
-    /* Node 2 is IDLE, owns no subtrees — force-remove works. */
+    /* Node 2 is IDLE, owns no subtrees -- force-remove works. */
     assert(cluster_force_remove_node(ctx, 2) == MDS_OK);
     assert(cluster_membership_count(ctx) == 1);
 
@@ -1736,7 +1736,7 @@ static void test_force_remove_active_with_subtrees_rejected(void)
     assert(subtree_map_add(smap, "/data", 2, "mds2.local",
                            SUBTREE_ACTIVE, 1) == MDS_OK);
 
-    /* Force-remove blocked — active with subtrees. */
+    /* Force-remove blocked -- active with subtrees. */
     assert(cluster_force_remove_node(ctx, 2) == MDS_ERR_PERM);
 
     cluster_membership_destroy(ctx);
@@ -1745,7 +1745,7 @@ static void test_force_remove_active_with_subtrees_rejected(void)
 
 
 /* -----------------------------------------------------------------------
- * Sequence 9 — Failover: promote_standby, partner-loss observer
+ * Sequence 9 -- Failover: promote_standby, partner-loss observer
  * ----------------------------------------------------------------------- */
 
 /** promote_standby transitions standby to ACTIVE+ACTIVE_SERVING. */
@@ -1795,7 +1795,7 @@ static void test_promote_standby_rejects_active(void)
     struct cluster_membership *ctx = NULL;
     assert(cluster_membership_init(&cfg, smap, NULL, &ctx) == MDS_OK);
 
-    /* Self is ACTIVE — cannot promote. */
+    /* Self is ACTIVE -- cannot promote. */
     assert(cluster_membership_promote_standby(ctx, 1) == MDS_ERR_PERM);
 
     cluster_membership_destroy(ctx);
@@ -1823,7 +1823,7 @@ static void test_promote_standby_no_change_cb(void)
     reset_cb_state();
     cluster_membership_set_change_cb(ctx, test_change_cb, NULL);
 
-    /* Promote — should NOT fire change_cb. */
+    /* Promote -- should NOT fire change_cb. */
     assert(cluster_membership_promote_standby(ctx, 2) == MDS_OK);
     assert(g_cb_count == 0);
 
@@ -1891,7 +1891,7 @@ static void test_self_role_from_config_standby(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — resolve peer after re-join with new address
+ * Seq 10 -- resolve peer after re-join with new address
  * ----------------------------------------------------------------------- */
 
 static void test_resolve_peer_after_rejoin_new_addr(void)
@@ -1932,7 +1932,7 @@ static void test_resolve_peer_after_rejoin_new_addr(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — resolve peer prefers cluster_addr
+ * Seq 10 -- resolve peer prefers cluster_addr
  * ----------------------------------------------------------------------- */
 
 static void test_resolve_peer_membership_unit_only(void)
@@ -1963,7 +1963,7 @@ static void test_resolve_peer_membership_unit_only(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — standby→active promotion enables subtree ownership
+ * Seq 10 -- standby->active promotion enables subtree ownership
  * ----------------------------------------------------------------------- */
 
 static void test_role_transition_standby_to_active_via_promote(void)
@@ -1997,7 +1997,7 @@ static void test_role_transition_standby_to_active_via_promote(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — lifecycle undrain: DRAINING → ACTIVE_SERVING
+ * Seq 10 -- lifecycle undrain: DRAINING -> ACTIVE_SERVING
  * ----------------------------------------------------------------------- */
 
 static void test_lifecycle_undrain_transition(void)
@@ -2017,11 +2017,11 @@ static void test_lifecycle_undrain_transition(void)
     peer.lifecycle = NODE_IDLE;
     assert(cluster_node_join(ctx, &peer) == MDS_OK);
 
-    /* IDLE → ACTIVE_SERVING → DRAINING. */
+    /* IDLE -> ACTIVE_SERVING -> DRAINING. */
     assert(cluster_membership_set_lifecycle(ctx, 2, NODE_ACTIVE_SERVING) == MDS_OK);
     assert(cluster_membership_set_lifecycle(ctx, 2, NODE_DRAINING) == MDS_OK);
 
-    /* Undrain: DRAINING → ACTIVE_SERVING. */
+    /* Undrain: DRAINING -> ACTIVE_SERVING. */
     assert(cluster_membership_set_lifecycle(ctx, 2, NODE_ACTIVE_SERVING) == MDS_OK);
 
     cluster_membership_destroy(ctx);
@@ -2029,7 +2029,7 @@ static void test_lifecycle_undrain_transition(void)
 }
 
 /* -----------------------------------------------------------------------
- * Seq 10 — membership list snapshot atomicity during concurrent join
+ * Seq 10 -- membership list snapshot atomicity during concurrent join
  * ----------------------------------------------------------------------- */
 
 static void test_membership_list_snapshot_during_join(void)
@@ -2096,11 +2096,11 @@ int main(void)
     RUN_TEST(test_transport_node_leave);
     RUN_TEST(test_transport_cluster_status);
 
-    /* Sequence 0 — API stabilisation */
+    /* Sequence 0 -- API stabilisation */
     RUN_TEST(test_is_authoritative_local);
     RUN_TEST(test_fail_loud_etcd_multinode);
 
-    /* Sequence 1 — Role, lifecycle, topology */
+    /* Sequence 1 -- Role, lifecycle, topology */
     RUN_TEST(test_self_role_lifecycle_defaults);
     RUN_TEST(test_join_role_lifecycle_defaults);
     RUN_TEST(test_set_lifecycle_valid);
@@ -2108,7 +2108,7 @@ int main(void)
     RUN_TEST(test_set_lifecycle_not_found);
     RUN_TEST(test_set_lifecycle_joining_to_idle);
 
-    /* Sequence 1 QA — Role enforcement, topology */
+    /* Sequence 1 QA -- Role enforcement, topology */
     RUN_TEST(test_transport_join_topology_fields);
     RUN_TEST(test_transport_status_topology_fields);
     RUN_TEST(test_standby_cannot_serve);
@@ -2118,19 +2118,19 @@ int main(void)
 
 
 
-    /* Sequence 5 — resolve_peer */
+    /* Sequence 5 -- resolve_peer */
     RUN_TEST(test_resolve_peer_found);
     RUN_TEST(test_resolve_peer_not_found);
     RUN_TEST(test_resolve_peer_prefers_cluster_addr_but_skips_wildcard);
 
 
-    /* Sequence 6 — Lifecycle ownership guard */
+    /* Sequence 6 -- Lifecycle ownership guard */
     RUN_TEST(test_idle_cannot_own_subtrees);
     RUN_TEST(test_joining_cannot_own_subtrees);
     RUN_TEST(test_serving_can_own_subtrees);
     RUN_TEST(test_unknown_mds_cannot_own_subtrees);
     RUN_TEST(test_join_lifecycle_chain_ownership);
-    /* Sequence 8 — Drain, detach, force-remove, role-aware leave */
+    /* Sequence 8 -- Drain, detach, force-remove, role-aware leave */
     RUN_TEST(test_lifecycle_draining_to_drained);
     RUN_TEST(test_lifecycle_drained_terminal);
     RUN_TEST(test_leave_rejects_active_serving);
@@ -2143,7 +2143,7 @@ int main(void)
     RUN_TEST(test_force_remove_active_zero_subtrees);
     RUN_TEST(test_force_remove_active_with_subtrees_rejected);
 
-    /* Sequence 9 — Failover: promote_standby, partner-loss */
+    /* Sequence 9 -- Failover: promote_standby, partner-loss */
     RUN_TEST(test_promote_standby_local);
     RUN_TEST(test_promote_standby_rejects_active);
     RUN_TEST(test_promote_standby_no_change_cb);

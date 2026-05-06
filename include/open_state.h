@@ -2,16 +2,16 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * open_state.h — NFSv4.1 open state and stateid management.
+ * open_state.h -- NFSv4.1 open state and stateid management.
  *
  * Implements OPEN/CLOSE stateid tracking and share reservation
- * conflict detection per RFC 8881 §§8.2, 9.1, 18.16, 18.2.
+ * conflict detection per RFC 8881 SS8.2, 9.1, 18.16, 18.2.
  *
  * Each OPEN allocates a stateid.  Share reservations are enforced:
  * a new OPEN that conflicts with an existing share_deny is rejected
  * with NFS4ERR_SHARE_DENIED.
  *
- * See docs/architecture.md §4.3 for design overview.
+ * See docs/architecture.md S4.3 for design overview.
  */
 
 #ifndef OPEN_STATE_H
@@ -21,7 +21,7 @@
 #include <stdbool.h>
 
 /* -----------------------------------------------------------------------
- * Stateid (RFC 8881 §8.2)
+ * Stateid (RFC 8881 S8.2)
  *
  *   0          3  4          15
  *   +----------+--+----------+
@@ -35,7 +35,7 @@
 #define NFS4_STATEID_SIZE   16
 #define NFS4_OTHER_SIZE     12
 
-/** Maximum open-owner opaque bytes (RFC 8881 §18.16.2). */
+/** Maximum open-owner opaque bytes (RFC 8881 S18.16.2). */
 #define NFS4_OPEN_OWNER_MAX 128
 
 struct nfs4_stateid {
@@ -43,19 +43,19 @@ struct nfs4_stateid {
     uint8_t  other[NFS4_OTHER_SIZE];
 };
 
-/* Special stateids (RFC 8881 §8.2.3). */
+/* Special stateids (RFC 8881 S8.2.3). */
 #define NFS4_STATEID_ANON_SEQID  0
 #define NFS4_STATEID_ANON_OTHER  "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
 /* -----------------------------------------------------------------------
- * Share access and deny modes (RFC 8881 §18.16.3)
+ * Share access and deny modes (RFC 8881 S18.16.3)
  * ----------------------------------------------------------------------- */
 
 #define OPEN4_SHARE_ACCESS_READ    0x0001U
 #define OPEN4_SHARE_ACCESS_WRITE   0x0002U
 #define OPEN4_SHARE_ACCESS_BOTH    0x0003U
 
-/* RFC 8881 §18.16.3 share_access3 — mask to extract the basic
+/* RFC 8881 S18.16.3 share_access3 -- mask to extract the basic
  * READ/WRITE bits from the full share_access field on the wire.  The
  * remaining bits encode delegation hints (WANT_*) and when-to-deliver
  * hints (SIGNAL/PUSH); they MUST be masked off before comparison
@@ -64,7 +64,7 @@ struct nfs4_stateid {
 #define OPEN4_SHARE_ACCESS_BASIC_MASK   0x0003U
 
 /*
- * RFC 8881 §18.16.3 OPEN4_SHARE_ACCESS_WANT_* hints — client preference
+ * RFC 8881 S18.16.3 OPEN4_SHARE_ACCESS_WANT_* hints -- client preference
  * for the kind of delegation it wants (or doesn't want) on this OPEN.
  * Encoded in bits 8-11 of the share_access field.  Server-side semantics:
  *
@@ -86,7 +86,7 @@ struct nfs4_stateid {
  * the bit values so a future revision can surface them via OPEN4_RESULT.
  */
 /*
- * RFC 7863 §2 (NFSv4.2 XDR) — the canonical mask spans bits 8-15:
+ * RFC 7863 S2 (NFSv4.2 XDR) -- the canonical mask spans bits 8-15:
  *   const OPEN4_SHARE_ACCESS_WANT_DELEG_MASK = 0xFF00;
  * In current use only the low nibble is populated (NO_PREFERENCE,
  * READ_DELEG, WRITE_DELEG, ANY_DELEG, NO_DELEG, CANCEL = 0x0..0x500),
@@ -110,7 +110,7 @@ struct nfs4_stateid {
 #define OPEN4_SHARE_DENY_BOTH      0x0003U
 
 /* -----------------------------------------------------------------------
- * OPEN4 response flags (RFC 5661 §18.16.4 / RFC 8881 §18.16.4)
+ * OPEN4 response flags (RFC 5661 S18.16.4 / RFC 8881 S18.16.4)
  *
  * Carried in the rflags field of the OPEN4resok body.  Hint to the
  * client about server capabilities for the just-opened file.  All
@@ -120,7 +120,7 @@ struct nfs4_stateid {
  * Linux specifically gates fcntl(F_SETLK) on LOCKTYPE_POSIX: when
  * the bit is clear, fs/nfs/nfs4proc.c short-circuits every byte-range
  * lock request to ENOLCK without sending a LOCK RPC.  This MDS
- * implements RFC 8881 §18.10 LOCK/LOCKT/LOCKU end-to-end (see
+ * implements RFC 8881 S18.10 LOCK/LOCKT/LOCKU end-to-end (see
  * compound.c::OP_LOCK and src/mds/lock_state.c), so the bit is set
  * unconditionally in encode_res_open.
  * ----------------------------------------------------------------------- */
@@ -131,7 +131,7 @@ struct nfs4_stateid {
 #define OPEN4_RESULT_MAY_NOTIFY_LOCK     0x00000020U
 
 /* -----------------------------------------------------------------------
- * OPEN claim types (RFC 8881 §18.16.2)
+ * OPEN claim types (RFC 8881 S18.16.2)
  * ----------------------------------------------------------------------- */
 
 enum nfs4_claim_type {
@@ -141,7 +141,7 @@ enum nfs4_claim_type {
 };
 
 /* -----------------------------------------------------------------------
- * OPEN create modes (RFC 8881 §18.16.3)
+ * OPEN create modes (RFC 8881 S18.16.3)
  * ----------------------------------------------------------------------- */
 
 enum nfs4_createmode {
@@ -171,11 +171,11 @@ struct nfs4_open_state {
  * Open state table (top-level container)
  * ----------------------------------------------------------------------- */
 
-struct open_state_table;  /* Opaque — defined in open_state.c */
+struct open_state_table;  /* Opaque -- defined in open_state.c */
 struct mds_catalogue;     /* Forward for open_state_table_set_cat() */
 
 /* -----------------------------------------------------------------------
- * API — Lifecycle
+ * API -- Lifecycle
  * ----------------------------------------------------------------------- */
 
 /**
@@ -216,7 +216,7 @@ void open_state_table_set_cat(struct open_state_table *ot,
 /**
  * Skip NDB persistence for open/close state.
  *
- * When set, open_state_open/close do not write to RonDB — the
+ * When set, open_state_open/close do not write to RonDB -- the
  * in-memory hash tables are authoritative.  Safe for single-MDS
  * deployments where crash recovery rebuilds from client reclaim.
  *
@@ -226,11 +226,11 @@ void open_state_table_set_cat(struct open_state_table *ot,
 void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
 
 /* -----------------------------------------------------------------------
- * API — OPEN (RFC 8881 §18.16)
+ * API -- OPEN (RFC 8881 S18.16)
  * ----------------------------------------------------------------------- */
 
 /**
- * Process an OPEN request — allocate a stateid and enforce share
+ * Process an OPEN request -- allocate a stateid and enforce share
  * reservations.
  *
  * The caller has already resolved the target fileid (via CLAIM_NULL
@@ -260,11 +260,11 @@ int open_state_open(struct open_state_table *ot,
                     struct nfs4_stateid *out_stateid);
 
 /* -----------------------------------------------------------------------
- * API — CLOSE (RFC 8881 §18.2)
+ * API -- CLOSE (RFC 8881 S18.2)
  * ----------------------------------------------------------------------- */
 
 /**
- * Process a CLOSE request — remove the open state and invalidate
+ * Process a CLOSE request -- remove the open state and invalidate
  * the stateid.
  *
  * On success, @out_stateid is set to the stateid with seqid incremented
@@ -285,7 +285,7 @@ int open_state_close(struct open_state_table *ot,
                      struct nfs4_stateid *out_stateid);
 
 /* -----------------------------------------------------------------------
- * API — Lookup (for stateid validation in future READ/WRITE/LOCK ops)
+ * API -- Lookup (for stateid validation in future READ/WRITE/LOCK ops)
  * ----------------------------------------------------------------------- */
 
 /**

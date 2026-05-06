@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * failover_rondb.c — RonDB-native partner-liveness watchdog.
+ * failover_rondb.c -- RonDB-native partner-liveness watchdog.
  *
  * Replaces the removed LMDB-delta-shipping health signal that used
  * to tell the standby when its partner died.  RonDB already has a
@@ -21,7 +21,7 @@
  *     interval so a dead partner is observed within ~5-15 s end-to-end).
  *   - Stale threshold defaults to 15 seconds = 3 missed heartbeats.
  *     Configurable via failover_watchdog_cfg.stale_timeout_ms.
- *   - After a successful promotion, the thread self-exits — there is
+ *   - After a successful promotion, the thread self-exits -- there is
  *     nothing left to watch (a promoted node is the primary and has
  *     no partner).
  *   - Uses the existing catalogue_rondb_mds_scan_stale(threshold_ns)

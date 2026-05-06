@@ -178,14 +178,14 @@ target_include_directories(test_catalogue PRIVATE
     ${PROJECT_SOURCE_DIR}/src/mds
 )
 
-# Shard test pulls in compound.h → nfs4_cb → ntirpc
+# Shard test pulls in compound.h -> nfs4_cb -> ntirpc
 target_link_libraries(test_mds_shard PRIVATE ${NTIRPC_LIB})
 
 
 # Layout test needs ntirpc for XDR encode verification
 target_link_libraries(test_layout PRIVATE ${NTIRPC_LIB})
 
-# Phase C / Step 6 — wire-form XDR test needs ntirpc + the
+# Phase C / Step 6 -- wire-form XDR test needs ntirpc + the
 # pnfs_mds_core static library that owns encode_res_layoutget.
 target_include_directories(test_xdr_layout_form PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -302,7 +302,7 @@ target_link_libraries(test_rpc_server PRIVATE
 add_test(NAME test_rpc_server COMMAND test_rpc_server)
 set_tests_properties(test_rpc_server PROPERTIES LABELS "unit")
 
-# Daemon integration test — Item 52: lifecycle, compound, multi-listener
+# Daemon integration test -- Item 52: lifecycle, compound, multi-listener
 # add_executable(test_daemon_integration unit/test_daemon_integration.c
 #                                        ${PROJECT_SOURCE_DIR}/src/mds/rpc_server.c)
 # target_include_directories(test_daemon_integration PRIVATE ...)

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * metrics_http_stub.c — no-op stub for the Prometheus HTTP server.
+ * metrics_http_stub.c -- no-op stub for the Prometheus HTTP server.
  *
  * Linked into pnfs_mds_core when ENABLE_OBSERVABILITY=OFF (community
  * build). The full implementation is in metrics_http.c in this same

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_helpers.h — Shared test utilities.
+ * test_helpers.h -- Shared test utilities.
  *
  * Provides helper functions for unit and integration tests that
  * bypass production-path constraints (e.g., pNFS DS requirement
@@ -20,7 +20,7 @@
 /**
  * Open a test catalogue backed by the in-memory memdb backend.
  *
- * Always succeeds — no external dependencies required.
+ * Always succeeds -- no external dependencies required.
  * Each call returns a fresh, independent catalogue with a
  * pre-seeded root inode (fileid 2).
  *
@@ -38,7 +38,7 @@ static inline struct mds_catalogue *open_test_catalogue(void)
  *
  * Bypasses the pNFS DS requirement (prealloc != NULL) by writing
  * the inode and dirent directly through the low-level catalogue
- * operations.  The file has no flags (no INLINE, no DS_PENDING) —
+ * operations.  The file has no flags (no INLINE, no DS_PENDING) --
  * it exists in the namespace but has no data backing.  Suitable
  * for tests that only need an inode in the namespace for LOOKUP,
  * GETATTR, RENAME, LINK, etc.

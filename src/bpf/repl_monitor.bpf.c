@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * repl_monitor.bpf.c — eBPF programs for replication monitoring.
+ * repl_monitor.bpf.c -- eBPF programs for replication monitoring.
  *
  * Attaches to kernel TCP send/recv paths and catalogue commit to
  * measure replication latency and throughput.
@@ -13,7 +13,7 @@
 /* TODO: when building, this needs vmlinux.h or libbpf CO-RE headers.
  * For now this is a structural placeholder. */
 
-#if 0  /* Placeholder — uncomment when libbpf/BTF is available */
+#if 0  /* Placeholder -- uncomment when libbpf/BTF is available */
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

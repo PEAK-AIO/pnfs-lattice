@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * xdr_ops_nfsv42.c — NFSv4.2 per-op XDR decoders and result encoders.
+ * xdr_ops_nfsv42.c -- NFSv4.2 per-op XDR decoders and result encoders.
  *
  * These functions were extracted from inline case blocks in
  * decode_one_op() / encode_one_result() in xdr_codec.c.
@@ -138,7 +138,7 @@ bool encode_res_io_advise(XDR *xdrs, const struct nfs4_result *r)
 {
     const struct nfs4_res_io_advise *ra = &r->res.io_advise;
     uint32_t hints = ra->hints;
-    /* bitmap4 = uint32<> — must encode as variable-length array. */
+    /* bitmap4 = uint32<> -- must encode as variable-length array. */
     uint32_t bm_count = 1;
     if (!xdr_uint32_t(xdrs, &bm_count)) { return false; }
     return xdr_uint32_t(xdrs, &hints);
@@ -214,7 +214,7 @@ bool encode_res_copy(XDR *xdrs, const struct nfs4_result *r)
     int32_t consec = rc->consecutive ? 1 : 0;
     int32_t sync = rc->synchronous ? 1 : 0;
     /*
-     * RFC 7862 §15.2.3  write_response4:
+     * RFC 7862 S15.2.3  write_response4:
      *   stateid4 *wr_callback_id<1>;  -- array count first
      *   length4 wr_count;
      *   stable_how4 wr_committed;
@@ -247,9 +247,9 @@ bool encode_res_copy(XDR *xdrs, const struct nfs4_result *r)
 bool encode_res_copy_notify(XDR *xdrs, const struct nfs4_result *r)
 {
     const struct nfs4_res_copy_notify *rcn = &r->res.copy_notify;
-    uint32_t src_count = 0; /* cnr_source_server<> — empty */
+    uint32_t src_count = 0; /* cnr_source_server<> -- empty */
     /*
-     * RFC 7862 §15.3.3  COPY_NOTIFY4resok:
+     * RFC 7862 S15.3.3  COPY_NOTIFY4resok:
      *   nfstime4 cnr_lease_time  {int64 sec, uint32 nsec}
      *   stateid4 cnr_stateid
      *   netloc4  cnr_source_server<>
@@ -374,7 +374,7 @@ bool encode_res_listxattrs(XDR *xdrs, const struct nfs4_result *r)
     uint32_t i;
 
     /*
-     * RFC 8276 §8.4.3 / Linux kernel decode_listxattrs:
+     * RFC 8276 S8.4.3 / Linux kernel decode_listxattrs:
      *   cookie(8) + count(4) + [per-name: len(4)+data] + eof(4)
      */
     if (!xdr_uint64_t(xdrs, &cookie)) { return false; }

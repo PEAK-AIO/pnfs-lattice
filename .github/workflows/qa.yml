@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# Daily QA pipeline — runs all gates from CONTRIBUTING.md.
+# Daily QA pipeline -- runs all gates from CONTRIBUTING.md.
 # Triggers on every push, every PR, and daily at 06:00 UTC.
 
 name: QA Gate
@@ -18,7 +18,7 @@ on:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Gate 1: Style checks (fast — no build needed)
+  # Gate 1: Style checks (fast -- no build needed)
   # -----------------------------------------------------------------------
   style:
     name: Code Style
@@ -178,7 +178,7 @@ jobs:
         run: cd build && ctest --output-on-failure
 
   # -----------------------------------------------------------------------
-  # Gate 7: Valgrind (daily only — too slow for every push)
+  # Gate 7: Valgrind (daily only -- too slow for every push)
   # -----------------------------------------------------------------------
   valgrind:
     name: Valgrind Memory Check
@@ -225,7 +225,7 @@ jobs:
           exit ${FAIL}
 
   # -----------------------------------------------------------------------
-  # Summary gate — blocks merge if any job failed
+  # Summary gate -- blocks merge if any job failed
   # -----------------------------------------------------------------------
   qa-passed:
     name: QA Passed

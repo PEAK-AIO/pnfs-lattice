@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rondb_schema.c — Layer 1 RonDB schema + serialisation tests.
+ * test_rondb_schema.c -- Layer 1 RonDB schema + serialisation tests.
  *
  * Pure encoding round-trip tests.  No RonDB cluster needed.
  */
@@ -270,7 +270,7 @@ static void test_lock_res_topology(void)
 static void test_table_count(void)
 {
 	/* Verify RONDB_TABLE_COUNT matches the number of table name macros.
-	 * Not automated — just a sanity check that the constant is right. */
+	 * Not automated -- just a sanity check that the constant is right. */
 	ASSERT_EQ(RONDB_TABLE_COUNT, 35);
 	/* Original 9 tables. */
 	ASSERT_TRUE(RONDB_TBL_META[0] != '\0');
@@ -282,7 +282,7 @@ static void test_table_count(void)
 	ASSERT_TRUE(RONDB_TBL_NS_LOCKS[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_NS_LOCK_HOLDERS[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_PARTITION_MAP[0] != '\0');
-	/* Phase 1: 11 new tables (no inline_data — pNFS routes data via DS). */
+	/* Phase 1: 11 new tables (no inline_data -- pNFS routes data via DS). */
 	ASSERT_TRUE(RONDB_TBL_XATTRS[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_DS_REGISTRY[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_DS_PROVISION[0] != '\0');

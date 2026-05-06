@@ -2,12 +2,12 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * nfs4_cb.h — NFSv4.1 callback channel sender (CB_COMPOUND).
+ * nfs4_cb.h -- NFSv4.1 callback channel sender (CB_COMPOUND).
  *
  * Sends server-initiated callback operations to clients on their
- * existing forechannel TCP connection (RFC 8881 §2.10.3.1).
+ * existing forechannel TCP connection (RFC 8881 S2.10.3.1).
  *
- * See docs/architecture.md §15 for DS failure detection design.
+ * See docs/architecture.md S15 for DS failure detection design.
  */
 
 #ifndef NFS4_CB_H
@@ -18,7 +18,7 @@
 #include "open_state.h" /* struct nfs4_stateid */
 
 /**
- * layoutrecall_type4 (RFC 8881 §20.3).
+ * layoutrecall_type4 (RFC 8881 S20.3).
  */
 enum layoutrecall_type {
     LAYOUTRECALL4_FILE = 1,
@@ -89,7 +89,7 @@ int nfs4_cb_layoutrecall_fd(int fd,
                             uint32_t timeout_ms);
 
 /**
- * Arguments for a single CB_RECALL (RFC 8881 §20.2).
+ * Arguments for a single CB_RECALL (RFC 8881 S20.2).
  *
  * Used to ask a client to return a delegation.  The wire form is
  * stateid + truncate flag + filehandle.
@@ -151,12 +151,12 @@ int nfs4_cb_recall_fd(int fd,
 		      uint32_t timeout_ms);
 
 /**
- * Arguments for a single CB_NOTIFY (RFC 8881 §20.4).
+ * Arguments for a single CB_NOTIFY (RFC 8881 S20.4).
  *
  * v8c supports three structural event types:
- *   - NOTIFY4_REMOVE_ENTRY — old_name is the removed child.
- *   - NOTIFY4_ADD_ENTRY    — new_name is the added child.
- *   - NOTIFY4_RENAME_ENTRY — old_name → new_name within the dir.
+ *   - NOTIFY4_REMOVE_ENTRY -- old_name is the removed child.
+ *   - NOTIFY4_ADD_ENTRY    -- new_name is the added child.
+ *   - NOTIFY4_RENAME_ENTRY -- old_name -> new_name within the dir.
  *
  * Phase 8d extends this with NOTIFY4_CHANGE_CHILD_ATTRS and
  * NOTIFY4_CHANGE_DIR_ATTRS once fattr4 payloads are supported.
@@ -176,7 +176,7 @@ struct nfs4_cb_notify_args {
  *
  * Builds a CB_COMPOUND { CB_SEQUENCE, CB_NOTIFY } message, XDR-encodes
  * it, sends it on the session's backchannel connection, and reads
- * the reply.  The wire format matches RFC 8881 §20.4.
+ * the reply.  The wire format matches RFC 8881 S20.4.
  *
  * @param session    Session with a bound backchannel (cb_conn != NULL).
  * @param args       Notification payload.
@@ -195,7 +195,7 @@ int nfs4_cb_notify(struct nfs4_session *session,
 /**
  * Send CB_NOTIFY on a raw file descriptor.
  *
- * Parallels nfs4_cb_layoutrecall_fd — used by the dir_notify
+ * Parallels nfs4_cb_layoutrecall_fd -- used by the dir_notify
  * emitter which snapshots callback-channel metadata under the
  * session-table lock and then performs I/O outside the lock using
  * a dup'd fd (to avoid rpc_conn lifetime issues).

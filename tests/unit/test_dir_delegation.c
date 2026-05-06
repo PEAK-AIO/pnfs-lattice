@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_dir_delegation.c — Phase 8b unit tests for dir_deleg_table.
+ * test_dir_delegation.c -- Phase 8b unit tests for dir_deleg_table.
  *
  * Exercises grant / conflict check / recall / return / revoke /
  * stateid exists.  CB_RECALL delivery is not exercised (session
@@ -68,7 +68,7 @@ static void test_ddt_empty(void)
     dir_deleg_table_destroy(ddt);
 }
 
-/** Grant → stateid_exists → recall by *other* client → grant gone. */
+/** Grant -> stateid_exists -> recall by *other* client -> grant gone. */
 static void test_ddt_grant_and_recall(void)
 {
     struct dir_deleg_table *ddt = NULL;
@@ -124,7 +124,7 @@ static void test_ddt_return(void)
     ASSERT_EQ(dir_deleg_return(ddt, &sid, cid), 0);
     ASSERT_TRUE(!dir_deleg_stateid_exists(ddt, sid.other));
 
-    /* Double-return is a no-op per RFC 8881 §10.11.1 \u2014 the state
+    /* Double-return is a no-op per RFC 8881 S10.11.1 \u2014 the state
      * is gone, so return() returns -1 which the caller swallows. */
     ASSERT_EQ(dir_deleg_return(ddt, &sid, cid), -1);
 
@@ -174,7 +174,7 @@ static void test_ddt_notify_falls_back_to_recall(void)
     struct dir_deleg_counters c;
 
     ASSERT_EQ(dir_deleg_table_init(1, &ddt), 0);
-    /* client A subscribes to REMOVE only — an ADD event will not
+    /* client A subscribes to REMOVE only -- an ADD event will not
      * match the mask and must trigger the recall fallback. */
     ASSERT_EQ(dir_deleg_grant(ddt, client_a, dir_fid,
                               1u << NOTIFY4_REMOVE_ENTRY,
@@ -220,7 +220,7 @@ static void test_ddt_notify_same_client_noop(void)
 
 /**
  * notify_dir: unsupported event type (CHANGE_DIR_ATTRS in 8d) is
- * rejected with -1 — Phase 8e will add attr payload support.
+ * rejected with -1 -- Phase 8e will add attr payload support.
  */
 static void test_ddt_notify_unsupported_event_rejected(void)
 {

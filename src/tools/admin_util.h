@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * admin_util.h — Shared helpers for the mds-admin CLI tool.
+ * admin_util.h -- Shared helpers for the mds-admin CLI tool.
  *
  * NOT a public API header.  Only included by mds_admin.c and
  * test_mds_admin.c.
@@ -61,7 +61,7 @@ int parse_dest_endpoint(int argc, const char *const *argv,
  * Escape a string for JSON output per RFC 8259.
  *
  * Escapes \, ", and control characters (U+0000..U+001F).
- * The output is NOT wrapped in quotes — the caller adds those.
+ * The output is NOT wrapped in quotes -- the caller adds those.
  *
  * @param in   Input NUL-terminated string.
  * @param out  Output buffer.

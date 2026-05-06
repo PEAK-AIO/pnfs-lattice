@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_layout.c — Unit tests for flex file layout XDR encoding
+ * test_layout.c -- Unit tests for flex file layout XDR encoding
  * and DELEGRETURN dispatch.
  */
 
@@ -37,7 +37,7 @@ static int tests_passed;
 } while (0)
 
 /* -------------------------------------------------------------------
- * Test 1: encode_res_layoutget — single-stripe layout
+ * Test 1: encode_res_layoutget -- single-stripe layout
  * ------------------------------------------------------------------- */
 static void test_layout_encode_single_stripe(void)
 {
@@ -90,7 +90,7 @@ static void test_layout_encode_single_stripe(void)
 }
 
 /* -------------------------------------------------------------------
- * Test 2: encode_res_layoutget — mirrored (2 DS)
+ * Test 2: encode_res_layoutget -- mirrored (2 DS)
  * ------------------------------------------------------------------- */
 static void test_layout_encode_mirrored(void)
 {

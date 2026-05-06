@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * repl_monitor.c — Userspace eBPF loader and metrics exporter.
+ * repl_monitor.c -- Userspace eBPF loader and metrics exporter.
  *
  * Loads repl_monitor.bpf.o, attaches programs, reads ring buffer,
  * and exports replication latency metrics.

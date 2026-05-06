@@ -2,16 +2,16 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * migration.c — Subtree migration state machine.
+ * migration.c -- Subtree migration state machine.
  *
  * Moves metadata ownership of a directory subtree from one MDS to
- * another.  See docs/architecture.md §13 for the full protocol.
+ * another.  See docs/architecture.md S13 for the full protocol.
  *
  * Protocol phases:
- *   1. Freeze   — set subtree to MIGRATING, drain mutations
- *   2. Stream   — DFS-iterate subtree, send each inode to dest
- *   3. Commit   — dest confirms, subtree_map ownership transferred
- *   4. Unfreeze — dest serves subtree, source creates junction
+ *   1. Freeze   -- set subtree to MIGRATING, drain mutations
+ *   2. Stream   -- DFS-iterate subtree, send each inode to dest
+ *   3. Commit   -- dest confirms, subtree_map ownership transferred
+ *   4. Unfreeze -- dest serves subtree, source creates junction
  */
 
 #include <stdlib.h>
@@ -892,7 +892,7 @@ enum mds_status migration_cleanup(struct mds_catalogue *cat,
         /* Delete inline data (if any). */
         (void)mds_cat_inline_del(cat, NULL, fid);
 
-        /* Delete inode — but KEEP the subtree root (junction marker). */
+        /* Delete inode -- but KEEP the subtree root (junction marker). */
         if (!is_root) {
             (void)mds_cat_inode_del(cat, NULL, fid);
         }

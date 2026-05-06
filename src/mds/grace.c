@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * grace.c — NFSv4.1 grace period management.
+ * grace.c -- NFSv4.1 grace period management.
  *
  * After startup or failover, the MDS enters a grace period during
  * which only reclaim operations (OPEN with CLAIM_PREVIOUS,

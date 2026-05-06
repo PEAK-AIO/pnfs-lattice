@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_daemon_integration.c — Item 52 tests: RPC listener lifecycle,
+ * test_daemon_integration.c -- Item 52 tests: RPC listener lifecycle,
  * real COMPOUND (PUTROOTFH + GETATTR), multi-listener SO_REUSEPORT.
  */
 
@@ -210,7 +210,7 @@ static uint32_t build_compound_putrootfh_getattr(uint8_t *buf,
 }
 
 /* ===================================================================
- * Test 1: Lifecycle smoke — create, start, stop, destroy.
+ * Test 1: Lifecycle smoke -- create, start, stop, destroy.
  * =================================================================== */
 static void test_lifecycle_smoke(void)
 {
@@ -243,7 +243,7 @@ static void test_lifecycle_smoke(void)
 }
 
 /* ===================================================================
- * Test 2: Real COMPOUND — PUTROOTFH + GETATTR over live server.
+ * Test 2: Real COMPOUND -- PUTROOTFH + GETATTR over live server.
  * =================================================================== */
 static void test_compound_putrootfh_getattr(void)
 {
@@ -337,12 +337,12 @@ static void test_compound_putrootfh_getattr(void)
 }
 
 /* ===================================================================
- * Test 3: Multi-listener — two listeners on same port (SO_REUSEPORT).
+ * Test 3: Multi-listener -- two listeners on same port (SO_REUSEPORT).
  * =================================================================== */
 static void test_multi_listener(void)
 {
 #ifndef SO_REUSEPORT
-    /* SO_REUSEPORT not available — skip. */
+    /* SO_REUSEPORT not available -- skip. */
     fprintf(stdout, "  %-55s SKIP (no SO_REUSEPORT)\n",
             "test_multi_listener");
     return;
@@ -355,7 +355,7 @@ static void test_multi_listener(void)
     struct rpc_server_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.bind_addr = "127.0.0.1";
-    cfg.port = 0; /* ephemeral — OS picks */
+    cfg.port = 0; /* ephemeral -- OS picks */
     cfg.db = db;
 
     /* Listener 1: ephemeral port. */

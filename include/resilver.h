@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * resilver.h — Background resilvering for degraded mirrored files.
+ * resilver.h -- Background resilvering for degraded mirrored files.
  *
  * Rebuilds data on a replacement data server by copying from healthy
  * mirrors.  Admin-triggered via mds-admin CLI.  V1 constraints:
@@ -11,7 +11,7 @@
  *   - no active layouts/writers (skipped if layout_state or open_state exists)
  *   - dense files only (sparse files skipped)
  *
- * See docs/architecture.md §15.3 for design.
+ * See docs/architecture.md S15.3 for design.
  */
 
 #ifndef RESILVER_H
@@ -112,7 +112,7 @@ void resilver_status(const struct resilver_worker *rw,
 /**
  * Query extended resilver status including skip reasons.
  *
- * @param rw    Resilver worker (NULL tolerated — zeroed output).
+ * @param rw    Resilver worker (NULL tolerated -- zeroed output).
  * @param info  Receives all status fields.
  */
 void resilver_status_ext(const struct resilver_worker *rw,

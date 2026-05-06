@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_cache.h — Phase D of docs/hpc-nto1-plan.md (v1 foundation).
+ * layout_cache.h -- Phase D of docs/hpc-nto1-plan.md (v1 foundation).
  *
  * Per-inode in-memory cache of the stripe map keyed by fileid.  The
  * cache is intended to short-circuit `cat_stripe_map_get` on the
@@ -11,7 +11,7 @@
  * underlying stripe map is stable for the file's lifetime.
  *
  * v1 scope (this file).  Pure data-structure module.  No callers
- * inside the MDS yet — the integration into op_layoutget /
+ * inside the MDS yet -- the integration into op_layoutget /
  * op_remove / op_setattr lands in a follow-up patch alongside the
  * supporting unit-test scaffolding for those code paths.  Landing
  * the cache as an isolated, well-tested module first matches the
@@ -31,7 +31,7 @@
  *   - The cache stores a heap-allocated copy of the caller's
  *     `mds_ds_map_entry[]` array.  `layout_cache_get` allocates a
  *     fresh copy for the caller, who then owns it and must free()
- *     it — this matches the convention used by `cat_stripe_map_get`
+ *     it -- this matches the convention used by `cat_stripe_map_get`
  *     and lets the cache mutate its own internal entry without
  *     racing with downstream readers.
  *
@@ -112,10 +112,10 @@ void layout_cache_destroy(struct layout_cache *lc);
  * On hit, the entry is promoted to the MRU end of its shard's LRU
  * list, and the four output parameters are populated:
  *
- *   *stripe_count  — number of stripes
- *   *stripe_unit   — stripe unit in bytes
- *   *mirror_count  — mirrors per stripe
- *   *entries       — heap-allocated array of size
+ *   *stripe_count  -- number of stripes
+ *   *stripe_unit   -- stripe unit in bytes
+ *   *mirror_count  -- mirrors per stripe
+ *   *entries       -- heap-allocated array of size
  *                    (stripe_count * mirror_count); CALLER OWNS,
  *                    must free().  On miss this is left as NULL.
  *

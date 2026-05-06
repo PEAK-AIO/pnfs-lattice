@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * endian_helpers.h — Big-endian wire-format serialization helpers.
+ * endian_helpers.h -- Big-endian wire-format serialization helpers.
  *
  * Portable inline put/get for u8, u32, u64, i64 in big-endian byte
  * order.  Used by RonDB inode/stripe serialization.

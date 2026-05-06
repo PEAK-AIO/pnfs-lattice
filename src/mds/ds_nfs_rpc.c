@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_nfs_rpc.c — Minimal NFS3 RPC client for DS file handle capture.
+ * ds_nfs_rpc.c -- Minimal NFS3 RPC client for DS file handle capture.
  *
  * Performs MOUNT3 + NFS3 LOOKUP (or CREATE) over a single TCP
  * connection to obtain the raw server file handle for a DS data
@@ -70,7 +70,7 @@
 static _Atomic uint32_t g_xid = 1000;
 
 /* -----------------------------------------------------------------------
- * Per-DS FH cache — caches the "data/" directory FH so that
+ * Per-DS FH cache -- caches the "data/" directory FH so that
  * subsequent LAYOUTGET calls only need a single LOOKUP RPC
  * instead of portmapper + MOUNT + LOOKUP("data") + LOOKUP(file).
  * ----------------------------------------------------------------------- */
@@ -365,7 +365,7 @@ static const uint8_t *validate_rpc_reply(const uint8_t *buf, int len,
 }
 
 /* -----------------------------------------------------------------------
- * Portmapper — resolve mountd TCP port
+ * Portmapper -- resolve mountd TCP port
  * ----------------------------------------------------------------------- */
 
 /**
@@ -409,7 +409,7 @@ static uint16_t pmap_getport_mount(const char *host, uint32_t timeout_ms)
 }
 
 /* -----------------------------------------------------------------------
- * MOUNT3 MNT — obtain root file handle for an export
+ * MOUNT3 MNT -- obtain root file handle for an export
  * ----------------------------------------------------------------------- */
 
 /**
@@ -454,7 +454,7 @@ static int mount3_mnt(int fd, const char *export_path,
 }
 
 /* -----------------------------------------------------------------------
- * NFS3 LOOKUP — resolve a single path component
+ * NFS3 LOOKUP -- resolve a single path component
  * ----------------------------------------------------------------------- */
 
 /**
@@ -506,7 +506,7 @@ static int nfs3_lookup(int fd,
 }
 
 /* -----------------------------------------------------------------------
- * NFS3 MKDIR — create a directory
+ * NFS3 MKDIR -- create a directory
  * ----------------------------------------------------------------------- */
 
 /**
@@ -570,7 +570,7 @@ static int nfs3_mkdir(int fd,
 }
 
 /* -----------------------------------------------------------------------
- * NFS3 CREATE — create a regular file
+ * NFS3 CREATE -- create a regular file
  * ----------------------------------------------------------------------- */
 
 /**

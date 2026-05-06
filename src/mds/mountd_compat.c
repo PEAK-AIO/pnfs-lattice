@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mountd_compat.c — Compatibility responder for `showmount -e`.
+ * mountd_compat.c -- Compatibility responder for `showmount -e`.
  *
  * Implements ONC-RPC program 100005 (mountd) version 3 over UDP and
  * TCP, restricted to procedures NULL, EXPORT and DUMP.  Every other
- * procedure — including MNT (proc 1) — is rejected with PROC_UNAVAIL
+ * procedure -- including MNT (proc 1) -- is rejected with PROC_UNAVAIL
  * at the RPC layer, which makes accidental NFSv3 mounts of the MDS
  * impossible by construction.
  *
@@ -64,7 +64,7 @@
 #define RPC_AUTH_NONE         0U
 #define RPC_AUTH_UNIX         1U
 
-/* RFC 5531 §8.2: rejected_reply.auth_stat values we actually emit. */
+/* RFC 5531 S8.2: rejected_reply.auth_stat values we actually emit. */
 #define RPC_AUTH_TOOWEAK      5U
 
 /* -----------------------------------------------------------------------
@@ -81,7 +81,7 @@
 #define MOUNTPROC3_UMNTALL   4U
 #define MOUNTPROC3_EXPORT    5U
 
-/* RFC 1833 (rpcbind / portmap v2) — used for self-registration. */
+/* RFC 1833 (rpcbind / portmap v2) -- used for self-registration. */
 #define PMAP_PROG            100000U
 #define PMAP_VERS2           2U
 #define PMAPPROC_SET         1U
@@ -97,11 +97,11 @@
 #define MOUNTD_MAX_PKT          8192U
 #define MOUNTD_MAX_TCP_CONNS    16
 #define MOUNTD_TCP_IDLE_SEC     30
-#define MOUNTD_AUTH_BODY_MAX    400U   /* RFC 5531 §8.1: opaque_auth body capped at 400 */
+#define MOUNTD_AUTH_BODY_MAX    400U   /* RFC 5531 S8.1: opaque_auth body capped at 400 */
 #define MOUNTD_RECV_TIMEOUT_MS  500    /* epoll wait quantum so we observe shutdown */
 
 /* -----------------------------------------------------------------------
- * XDR primitive helpers — big-endian on the wire.
+ * XDR primitive helpers -- big-endian on the wire.
  * ----------------------------------------------------------------------- */
 
 static inline uint32_t mc_get_u32(const uint8_t *p)
@@ -147,7 +147,7 @@ static size_t mc_put_xdr_string(uint8_t *out, size_t cap, const char *s)
 }
 
 /* -----------------------------------------------------------------------
- * Reply helpers — every helper writes to a caller-provided buffer
+ * Reply helpers -- every helper writes to a caller-provided buffer
  * and returns the number of bytes written, or 0 if @a cap is too
  * small.  None of them allocate.
  * ----------------------------------------------------------------------- */
@@ -219,7 +219,7 @@ static size_t mc_emit_auth_error(uint8_t *out, size_t cap,
  * Emit the EXPORT result: a list of `exportnode { dirpath, groups }`,
  * with `groups` always set to the empty list (= world-readable).
  *
- * XDR linked-list encoding (RFC 4506 §4.19): each element is preceded
+ * XDR linked-list encoding (RFC 4506 S4.19): each element is preceded
  * by a 4-byte boolean "value-follows".  TRUE = an element follows;
  * FALSE = end-of-list.
  *
@@ -274,7 +274,7 @@ static size_t mc_emit_empty_dump(uint8_t *out, size_t cap)
  *
  * Returns 0 on success and populates the out parameters with the
  * call's metadata.  Returns -1 on hopelessly truncated input (no
- * XID extractable — drop), or -2 on RPC version mismatch (caller
+ * XID extractable -- drop), or -2 on RPC version mismatch (caller
  * should send an RPC_MISMATCH rejection).
  * ----------------------------------------------------------------------- */
 
@@ -371,7 +371,7 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
         return -1;                              /* drop */
     }
 
-    /* RFC 5531 §8: AUTH_NONE always permitted; AUTH_SYS (== AUTH_UNIX)
+    /* RFC 5531 S8: AUTH_NONE always permitted; AUTH_SYS (== AUTH_UNIX)
      * is permitted with no validation because this responder is
      * read-only and answers public discovery info.  Everything else
      * is rejected with AUTH_TOOWEAK so well-behaved clients can fall
@@ -441,7 +441,7 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
         *out_len = n + body;
         return 0;
     }
-    /* MNT, UMNT, UMNTALL, anything else → PROC_UNAVAIL. */
+    /* MNT, UMNT, UMNTALL, anything else -> PROC_UNAVAIL. */
     case MOUNTPROC3_MNT:
     case MOUNTPROC3_UMNT:
     case MOUNTPROC3_UMNTALL:
@@ -457,7 +457,7 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
 }
 
 /* -----------------------------------------------------------------------
- * I/O loop — server context and thread.
+ * I/O loop -- server context and thread.
  * ----------------------------------------------------------------------- */
 
 /**
@@ -501,7 +501,7 @@ struct mountd_compat_ctx {
 /* -----------------------------------------------------------------------
  * rpcbind self-registration (best-effort, UDP).
  *
- * RFC 1833 §3.2: PMAPPROC_SET takes a `mapping { prog, vers, prot,
+ * RFC 1833 S3.2: PMAPPROC_SET takes a `mapping { prog, vers, prot,
  * port }` and returns a single boolean.  We do not need to inspect
  * the boolean result; if rpcbind is unreachable or rejects the
  * request, we just log and continue.
@@ -763,7 +763,7 @@ static int mc_tcp_drain(struct mountd_compat_ctx *ctx,
             c->last_fragment = (marker & 0x80000000U) != 0U;
             uint32_t frag_len = marker & 0x7FFFFFFFU;
             if ((uint64_t)c->have_bytes + frag_len > MOUNTD_MAX_PKT) {
-                /* Record too large — drop the connection. */
+                /* Record too large -- drop the connection. */
                 return -1;
             }
             c->need_bytes = frag_len;
@@ -804,7 +804,7 @@ static int mc_tcp_drain(struct mountd_compat_ctx *ctx,
         c->have_bytes = 0;
 
         if (rc != 0) {
-            /* Drop silently per RFC 5531 §10. */
+            /* Drop silently per RFC 5531 S10. */
             continue;
         }
         if (mc_tcp_write_record(c->fd, reply, reply_len) != 0) {
@@ -858,7 +858,7 @@ static void mc_handle_accept(struct mountd_compat_ctx *ctx)
 
         struct mc_tcp_conn *c = mc_conn_alloc(ctx, cfd);
         if (c == NULL) {
-            /* No slot — graceful close. */
+            /* No slot -- graceful close. */
             close(cfd);
             continue;
         }

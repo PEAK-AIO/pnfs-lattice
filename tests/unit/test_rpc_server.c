@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rpc_server.c — Loopback tests for the RPC server.
+ * test_rpc_server.c -- Loopback tests for the RPC server.
  *
  * Starts a server on an ephemeral port, connects via TCP, sends
  * record-marked RPC messages, and verifies the replies.
@@ -105,7 +105,7 @@ static void setup_test(struct test_ctx *ctx)
 
     assert(pthread_create(&ctx->thread, NULL, server_thread,
                           ctx->srv) == 0);
-    usleep(50000); /* 50ms — let server start epoll loop. */
+    usleep(50000); /* 50ms -- let server start epoll loop. */
 }
 
 static void teardown_test(struct test_ctx *ctx)

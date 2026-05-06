@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_inline_data.c — Unit tests for inline data (small-file acceleration).
+ * test_inline_data.c -- Unit tests for inline data (small-file acceleration).
  *
  * Covers: CRUD, inline read/write via compound, promotion on size
  * exceed, inline remove (no GC), backward-compat 105-byte inodes,
@@ -97,7 +97,7 @@ static void cleanup_temp_db(const char *path)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_crud — put / get / del round-trip
+ * test_inline_crud -- put / get / del round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_inline_crud(void)
@@ -162,7 +162,7 @@ static void test_inline_crud(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_zero_length — zero-length inline data
+ * test_inline_zero_length -- zero-length inline data
  * ----------------------------------------------------------------------- */
 
 static void test_inline_zero_length(void)
@@ -195,7 +195,7 @@ static void test_inline_zero_length(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_txn — put/get within explicit transaction
+ * test_inline_txn -- put/get within explicit transaction
  * ----------------------------------------------------------------------- */
 
 static void test_inline_txn(void)
@@ -246,7 +246,7 @@ static void test_inline_txn(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_inode_flag — new REG files get MDS_IFLAG_INLINE
+ * test_inline_inode_flag -- new REG files get MDS_IFLAG_INLINE
  * ----------------------------------------------------------------------- */
 
 static void test_inline_inode_flag(void)
@@ -271,13 +271,13 @@ static void test_inline_inode_flag(void)
 	ASSERT_EQ(st, MDS_OK);
 	ASSERT_NE(child_inode.fileid, 0u);
 
-	/* Read back — should have inline flag. */
+	/* Read back -- should have inline flag. */
 	st = mds_cat_ns_getattr(db, child_inode.fileid, &inode);
 	ASSERT_EQ(st, MDS_OK);
 	ASSERT_TRUE(inode.flags & MDS_IFLAG_INLINE);
 
 	/*
-	 * No inline_data record yet — empty inline file is represented
+	 * No inline_data record yet -- empty inline file is represented
 	 * by MDS_IFLAG_INLINE + size 0, with no inline_data key.
 	 */
 	{
@@ -310,7 +310,7 @@ static void test_inline_inode_flag(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_remove — removing inline file cleans up inline data
+ * test_inline_remove -- removing inline file cleans up inline data
  * ----------------------------------------------------------------------- */
 
 static void test_inline_remove(void)
@@ -355,7 +355,7 @@ static void test_inline_remove(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_backward_compat — 105-byte inode records still work
+ * test_inline_backward_compat -- 105-byte inode records still work
  * ----------------------------------------------------------------------- */
 
 static void test_inline_backward_compat(void)
@@ -378,7 +378,7 @@ static void test_inline_backward_compat(void)
 			       NULL, &out_inode);
 	ASSERT_EQ(st, MDS_OK);
 
-	/* Read back — the 109-byte record is valid. */
+	/* Read back -- the 109-byte record is valid. */
 	memset(&inode, 0, sizeof(inode));
 	st = mds_cat_ns_getattr(db, out_inode.fileid, &inode);
 	ASSERT_EQ(st, MDS_OK);
@@ -392,7 +392,7 @@ static void test_inline_backward_compat(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_migration_roundtrip — chunk with inline data survives ser/de
+ * test_inline_migration_roundtrip -- chunk with inline data survives ser/de
  * ----------------------------------------------------------------------- */
 
 static void test_inline_migration_roundtrip(void)
@@ -437,7 +437,7 @@ static void test_inline_migration_roundtrip(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_max_size — write exactly MDS_INLINE_DATA_MAX
+ * test_inline_max_size -- write exactly MDS_INLINE_DATA_MAX
  * ----------------------------------------------------------------------- */
 
 static void test_inline_max_size(void)
@@ -484,7 +484,7 @@ static void test_inline_max_size(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_inline_write_updates_metadata — verify mtime/ctime/change
+ * test_inline_write_updates_metadata -- verify mtime/ctime/change
  *
  * Writes inline data and asserts that the inode metadata contract
  * is honoured: change must increase, mtime/ctime must not go backward.

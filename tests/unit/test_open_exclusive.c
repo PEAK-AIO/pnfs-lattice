@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_open_exclusive.c — Tests for EXCLUSIVE4/EXCLUSIVE4_1 create modes.
+ * test_open_exclusive.c -- Tests for EXCLUSIVE4/EXCLUSIVE4_1 create modes.
  */
 
 #include <stdio.h>

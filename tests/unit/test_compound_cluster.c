@@ -2,14 +2,14 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_compound_cluster.c — Tests for compound dispatch referral hooks
+ * test_compound_cluster.c -- Tests for compound dispatch referral hooks
  *                            and cross-subtree rename routing.
  *
  * These tests exercise the cluster integration in compound.c:
- *   - PUTFH on a junction → NFS4_OK
- *   - LOOKUP into a junction → NFS4ERR_MOVED
- *   - LOOKUP + GETATTR(fs_locations) on a junction → NFS4_OK
- *   - RENAME cross-subtree without transport → NFS4ERR_XDEV
+ *   - PUTFH on a junction -> NFS4_OK
+ *   - LOOKUP into a junction -> NFS4ERR_MOVED
+ *   - LOOKUP + GETATTR(fs_locations) on a junction -> NFS4_OK
+ *   - RENAME cross-subtree without transport -> NFS4ERR_XDEV
  */
 
 #include <stdio.h>
@@ -191,7 +191,7 @@ static void test_putfh_junction_succeeds(void)
 
     uint32_t n = compound_process(&cd, ops, results, 1);
     ASSERT_EQ(n, 1);
-    ASSERT_EQ(results[0].status, NFS4_OK); /* PUTFH on junction succeeds — RFC 8881 §8.5.1 */
+    ASSERT_EQ(results[0].status, NFS4_OK); /* PUTFH on junction succeeds -- RFC 8881 S8.5.1 */
 
     mds_catalogue_close(db);
     subtree_map_destroy(smap);
@@ -320,7 +320,7 @@ static void test_lookup_junction_getattr_fs_locations(void)
  * is guaranteed by NDB's internal 2PC (see compound_namespace.c
  * src_local && !dst_local block, ~6 RTs collapse to one NDB commit).
  *
- * The old expectation here was NFS4ERR_XDEV — a give-up signal that
+ * The old expectation here was NFS4ERR_XDEV -- a give-up signal that
  * predates the fused-rename optimisation and has been moot since the
  * RonDB-only catalogue migration.  This rewrite verifies the new
  * contract:
@@ -360,8 +360,8 @@ static void test_rename_cross_subtree_local_to_remote_fastpath(void)
                           0644, &file);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Subtree map: /local → self (MDS 1), /remote → MDS 2.
-     * Source is local, destination is non-local — the path the
+    /* Subtree map: /local -> self (MDS 1), /remote -> MDS 2.
+     * Source is local, destination is non-local -- the path the
      * fast-path block in op_rename targets. */
     struct subtree_map *smap = NULL;
     st = subtree_map_init(NULL, NULL, 1, "localhost",
@@ -374,8 +374,8 @@ static void test_rename_cross_subtree_local_to_remote_fastpath(void)
                          SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* PUTROOTFH → LOOKUP(local) → SAVEFH → PUTROOTFH →
-     * LOOKUP(remote) → RENAME("data.txt" → "data.txt"). */
+    /* PUTROOTFH -> LOOKUP(local) -> SAVEFH -> PUTROOTFH ->
+     * LOOKUP(remote) -> RENAME("data.txt" -> "data.txt"). */
     struct compound_data cd;
     compound_init(&cd);
     cd.cat = cat;
@@ -466,7 +466,7 @@ static void test_rename_cross_subtree_membership(void)
                           0644, &file);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Subtree map: /local → self (MDS 1), /remote → MDS 2. */
+    /* Subtree map: /local -> self (MDS 1), /remote -> MDS 2. */
     struct subtree_map *smap = NULL;
     st = subtree_map_init(NULL, NULL, 1, "localhost",
                                  NULL, &smap);
@@ -557,7 +557,7 @@ static void test_rename_cross_subtree_membership(void)
     ops[5] = mk_rename("data.txt", "data.txt");
 
     uint32_t n = compound_process(&cd, ops, results, 6);
-    /* All ops should succeed — rename resolves via membership. */
+    /* All ops should succeed -- rename resolves via membership. */
     ASSERT_EQ(n, 6);
     ASSERT_EQ(results[0].status, NFS4_OK);
     ASSERT_EQ(results[1].status, NFS4_OK);

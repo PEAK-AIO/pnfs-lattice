@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_internal.h — Internal catalogue handle layout.
+ * catalogue_internal.h -- Internal catalogue handle layout.
  *
  * This header is intentionally private to the catalogue subsystem.
  * Callers must continue to use the opaque struct mds_catalogue from
@@ -47,7 +47,7 @@ struct mds_catalogue_ops {
 };
 
 /* -----------------------------------------------------------------------
- * Authority ops vtable — catalogue data plane
+ * Authority ops vtable -- catalogue data plane
  *
  * One function pointer per mds_cat_* operation declared in
  * mds_catalogue.h.  Each backend (RonDB) populates its own
@@ -103,7 +103,7 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t *fileid);
 
     /** Full inode write (create or overwrite).
-     *  Unlike ns_setattr, this is NOT a masked read-modify-write —
+     *  Unlike ns_setattr, this is NOT a masked read-modify-write --
      *  the entire inode record is replaced atomically. */
     enum mds_status (*inode_put)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, const struct mds_inode *inode);
@@ -253,7 +253,7 @@ struct mds_authority_ops {
 };
 
 /* -----------------------------------------------------------------------
- * Coordination ops vtable — recovery-critical state
+ * Coordination ops vtable -- recovery-critical state
  *
  * One function pointer per mds_coord_* operation declared in
  * mds_coordination.h.

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * hpc_hint.h — shared in-memory representation for the HPC striping hint.
+ * hpc_hint.h -- shared in-memory representation for the HPC striping hint.
  */
 
 #ifndef HPC_HINT_H

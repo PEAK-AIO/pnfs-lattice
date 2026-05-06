@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rebalance_stub.c — no-op stub implementations of the rebalance API.
+ * rebalance_stub.c -- no-op stub implementations of the rebalance API.
  *
  * Linked into pnfs_mds_core when ENABLE_REBALANCE=OFF (community
  * build). The full implementation is in rebalance.c in this same
@@ -11,8 +11,8 @@
  * Semantics: rebalance is unavailable.  rebalance_init() returns
  * success but yields a NULL worker handle so callers that null-check
  * before use (cluster_transport handlers) short-circuit cleanly.
- * rebalance_start() returns MDS_ERR_INVAL — "rebalance is not
- * configured on this host" — which is what callers already handle
+ * rebalance_start() returns MDS_ERR_INVAL -- "rebalance is not
+ * configured on this host" -- which is what callers already handle
  * when source==target or DSes are offline.
  */
 #include "rebalance.h"

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# observability — Prometheus /metrics HTTP endpoint.
+# observability -- Prometheus /metrics HTTP endpoint.
 #
 # Enterprise build (ENABLE_OBSERVABILITY=ON, the default): real impl
 # linked into pnfs_mds_core (was previously linked into the pnfs-mds
@@ -17,5 +17,5 @@ if(ENABLE_OBSERVABILITY)
 else()
     target_sources(pnfs_mds_core PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/metrics_http_stub.c)
-    message(STATUS "observability: disabled (community build) — using stubs")
+    message(STATUS "observability: disabled (community build) -- using stubs")
 endif()

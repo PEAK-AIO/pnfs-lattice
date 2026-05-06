@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_membership.c — MDS cluster membership table.
+ * cluster_membership.c -- MDS cluster membership table.
  *
  * Public API dispatches write operations through a backend vtable
  * (local in-memory).
@@ -141,14 +141,14 @@ static bool apply_member_upsert(struct cluster_membership *ctx,
 
     int idx = find_member(ctx, member->mds_id);
     if (idx >= 0) {
-        /* Update existing member — preserve join_time if not set. */
+        /* Update existing member -- preserve join_time if not set. */
         uint64_t old_join_time = ctx->members[idx].join_time_sec;
         ctx->members[idx] = *member;
         if (ctx->members[idx].join_time_sec == 0) {
             ctx->members[idx].join_time_sec = old_join_time;
         }
     } else {
-        /* New member — grow and insert. */
+        /* New member -- grow and insert. */
         if (grow_members(ctx) == MDS_OK) {
             ctx->members[ctx->count] = *member;
             ctx->count++;
@@ -560,7 +560,7 @@ enum mds_status cluster_standby_detach(struct cluster_membership *ctx,
 
     pthread_rwlock_unlock(&ctx->lock);
 
-    /* Safe to remove — delegate to backend. */
+    /* Safe to remove -- delegate to backend. */
 
     pthread_rwlock_wrlock(&ctx->lock);
 
@@ -617,7 +617,7 @@ enum mds_status cluster_force_remove_node(struct cluster_membership *ctx,
         return MDS_ERR_PERM;
     }
 
-    /* Bypass lifecycle checks — straight removal. */
+    /* Bypass lifecycle checks -- straight removal. */
 
     pthread_rwlock_wrlock(&ctx->lock);
 
@@ -650,9 +650,9 @@ enum mds_status cluster_force_remove_node(struct cluster_membership *ctx,
  * entry still shows ACTIVE + ACTIVE_SERVING so that the partner-loss
  * watcher on the standby fires correctly.
  *
- * etcd mode  — backend->leave deletes the key; the etcd watch handler
+ * etcd mode  -- backend->leave deletes the key; the etcd watch handler
  *              picks up the DELETE and fires partner_loss_cb.
- * local mode — remove from the array, fire change_cb + partner_loss_cb
+ * local mode -- remove from the array, fire change_cb + partner_loss_cb
  *              inline (no watch loop).
  * ----------------------------------------------------------------------- */
 
@@ -893,7 +893,7 @@ enum mds_status cluster_membership_set_lifecycle(
     }
 
 
-    /* Local mode — under write lock */
+    /* Local mode -- under write lock */
     pthread_rwlock_wrlock(&ctx->lock);
 
     int idx = find_member(ctx, mds_id);

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mds_shard.c — Unit tests for shard map routing.
+ * test_mds_shard.c -- Unit tests for shard map routing.
  *
  * RonDB-native: no catalogue handles.  Tests the shard map API
  * (create, add, lookup, remove, for_each, format_local_path).
@@ -94,7 +94,7 @@ static void test_shard_map_remove(void)
     ASSERT_EQ(mds_shard_map_remove(map, "/data"), 0);
     ASSERT_EQ(mds_shard_map_count(map), (uint32_t)0);
 
-    /* Remove non-existent — should return -1. */
+    /* Remove non-existent -- should return -1. */
     ASSERT_EQ(mds_shard_map_remove(map, "/data"), -1);
 
     mds_shard_map_destroy(map);
@@ -105,7 +105,7 @@ static void test_shard_map_get_default(void)
     struct mds_shard_map *map = NULL;
     ASSERT_EQ(mds_shard_map_create(&map), 0);
 
-    /* No root shard → NULL. */
+    /* No root shard -> NULL. */
     ASSERT_EQ(mds_shard_map_get_default(map) == NULL, 1);
 
     ASSERT_EQ(mds_shard_map_add(map, "/", NULL), 0);

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * placement.h — Stripe placement policy API.
+ * placement.h -- Stripe placement policy API.
  *
  * Selects which data servers host the stripes + mirrors for a new file.
  * Phase 2 provides round-robin; capacity-weighted and tier-aware
@@ -19,19 +19,19 @@
  * Select DS nodes for a new file's stripe layout.
  *
  * Filters the DS registry for ONLINE servers, then assigns
- * stripe_count × mirror_count entries via round-robin.  No two
+ * stripe_count x mirror_count entries via round-robin.  No two
  * mirrors of the same stripe will land on the same DS.
  *
  * @param ds_list       Array of registered data servers (from
  *                      mds_cat_ds_list()).
  * @param ds_count      Number of entries in @ds_list.
  * @param stripe_count  Number of stripes for the file.
- * @param mirror_count  Number of mirrors per stripe (≥ 1).
+ * @param mirror_count  Number of mirrors per stripe (>= 1).
  * @param stripe_unit   Stripe unit size in bytes (written into each
- *                      entry for the caller's convenience — not used
+ *                      entry for the caller's convenience -- not used
  *                      by this function).
  * @param entries       Caller-allocated output array of size
- *                      stripe_count × mirror_count.
+ *                      stripe_count x mirror_count.
  * @return MDS_OK on success, MDS_ERR_NOSPC if insufficient ONLINE DSs,
  *         MDS_ERR_INVAL on bad parameters.
  */
@@ -160,7 +160,7 @@ enum mds_status ds_filter_with_caps(
  *
  * Behaviour:
  *   1. Build the set of ONLINE DSes that match @p required_mode
- *      and @p required_transport (the hard floor — same semantics
+ *      and @p required_transport (the hard floor -- same semantics
  *      as ds_filter_compatible).
  *   2. Within that set, build the subset that ALSO matches the
  *      preference: at least one bit of @p preferred_transport AND
@@ -169,7 +169,7 @@ enum mds_status ds_filter_with_caps(
  *      return the full required-matching set (graceful fallback).
  *
  * Passing preferred_transport == 0 and preferred_caps == 0 is
- * equivalent to ds_filter_compatible — the function collapses into
+ * equivalent to ds_filter_compatible -- the function collapses into
  * the no-preference path.  Caller must free(*out) when done.
  *
  * Concrete use: HPC-shared files prefer RDMA|GPUDirect DSes when the

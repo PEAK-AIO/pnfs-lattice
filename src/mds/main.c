@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * main.c â MDS daemon entry point.
+ * main.c -- MDS daemon entry point.
  */
 
 #include <stdio.h>
@@ -118,7 +118,7 @@ static void *rondb_hb_fn(void *a)
 }
 #endif
 
-/** DS failure callback adapter — bridges ds_health to layout_recall. */
+/** DS failure callback adapter -- bridges ds_health to layout_recall. */
 static void ds_fail_recall_cb(uint32_t ds_id, void *ctx)
 {
 	struct layout_recall *lr = ctx;
@@ -140,7 +140,7 @@ static void ds_fail_recall_cb(uint32_t ds_id, void *ctx)
  * Returns 0 on success (bucket cleared), -1 on persistence failure
  * (bucket stays dirty for the next attempt).  An MDS_ERR_NOTFOUND
  * from getattr is treated as success so the bucket is dropped
- * — this covers the unlink-while-flush race.
+ * -- this covers the unlink-while-flush race.
  * ----------------------------------------------------------------------- */
 struct lcommit_flush_ctx {
 	struct mds_catalogue *cat;
@@ -168,7 +168,7 @@ static int lcommit_flush_cb(uint64_t fileid, uint64_t size,
 	st = mds_cat_ns_getattr(ctx->cat, fileid, &inode);
 	if (st == MDS_ERR_NOTFOUND) {
 		/* File was unlinked while the bucket was dirty.  Drop the
-		 * snapshot — the size value no longer has any meaning. */
+		 * snapshot -- the size value no longer has any meaning. */
 		return 0;
 	}
 	if (st != MDS_OK) {
@@ -203,13 +203,13 @@ static int lcommit_flush_cb(uint64_t fileid, uint64_t size,
 	return 0;
 }
 
-/** Partner-loss callback — bridges membership watch to failover. */
+/** Partner-loss callback -- bridges membership watch to failover. */
 static void failover_on_partner_loss(
 	const struct cluster_member *removed, void *arg)
 {
 	struct failover_ctx *fo = arg;
 	(void)fprintf(stderr,
-		"INFO: partner %u (role=%d, lifecycle=%d) lost — "
+		"INFO: partner %u (role=%d, lifecycle=%d) lost -- "
 		"attempting promotion\n",
 		removed->mds_id, (int)removed->role,
 		(int)removed->lifecycle);
@@ -373,7 +373,7 @@ int main(int argc, char *argv[])
 					(void)fprintf(stderr,
 						"WARN: bootstrap returned %d, "
 						"another MDS may be "
-						"bootstrapping — retrying "
+						"bootstrapping -- retrying "
 						"probe...\n", (int)rc);
 				} else {
 					(void)fprintf(stderr,
@@ -496,7 +496,7 @@ int main(int argc, char *argv[])
 
 
 	/* 3a. Start replication health monitor.
-	 *     repl is NULL — RonDB has native multi-node visibility;
+	 *     repl is NULL -- RonDB has native multi-node visibility;
 	 *     health_monitor_init(NULL, ...) = no standby monitoring. */
 	if (health_monitor_init(NULL, cfg.repl_health_interval_ms,
 				cfg.repl_refuse_writes_on_resync,
@@ -540,7 +540,7 @@ int main(int argc, char *argv[])
 		/* 4a-shard. Auto-seed partition_map with /shardN entries
 		 * when cluster_size > 1 and only the root entry exists.
 		 * Each MDS gets its own subtree for referral-based sharding.
-		 * Must run BEFORE set_membership — the membership check
+		 * Must run BEFORE set_membership -- the membership check
 		 * would reject remote MDS IDs that haven't joined yet. */
 		if (cfg.cluster_size > 1 &&
 		    subtree_map_count(smap) <= 1) {
@@ -747,7 +747,7 @@ int main(int argc, char *argv[])
 					"INFO: created junction /%s -> MDS %u\n",
 					jname, (unsigned)je.owner_mds_id);
 			} else if (jst == MDS_ERR_EXISTS) {
-				/* Junction already exists — no action needed. */
+				/* Junction already exists -- no action needed. */
 			} else {
 				(void)fprintf(stderr,
 					"WARN: failed to create junction /%s: %d\n",
@@ -839,7 +839,7 @@ int main(int argc, char *argv[])
 	 *      The chosen placement_policy is plumbed into prealloc so
 	 *      its pop path delegates DS selection to the same
 	 *      placement_select_ex() helper used elsewhere in the
-	 *      daemon — keeping fresh-CREATE placement coherent with
+	 *      daemon -- keeping fresh-CREATE placement coherent with
 	 *      the LAYOUTGET fallback path.  When the operator-facing
 	 *      placement_policy_enabled flag is off we still pin
 	 *      PLACEMENT_RR so prealloc's RR is fair across DSes. */
@@ -894,7 +894,7 @@ int main(int argc, char *argv[])
 	/*
 	 * Plumb the DS cache into the prealloc pool so its pop
 	 * snapshot picks up live capacity (statvfs probe) and
-	 * operator/auto weights — without this, WRR / CAPACITY policies
+	 * operator/auto weights -- without this, WRR / CAPACITY policies
 	 * collapse to uniform RR for prealloc-backed CREATE because
 	 * RonDB's persisted DS registry has zeroed total/used bytes on
 	 * 3rd-party DSes.  Done after ds_cache_apply_weights so the
@@ -960,7 +960,7 @@ int main(int argc, char *argv[])
 	 *      Disabled when proxy I/O is not available because the
 	 *      worker needs DS mount points to issue unlinks.  The
 	 *      poll interval is intentionally fixed at 5s for the
-	 *      first deployment — small enough that a removed file
+	 *      first deployment -- small enough that a removed file
 	 *      reclaims its DS bytes within the lab's smoke timing,
 	 *      large enough that NDB peek traffic stays below the
 	 *      noise floor on the catalogue. */
@@ -1071,7 +1071,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* 6a. Commit queue — RonDB does not use CQ.
+	/* 6a. Commit queue -- RonDB does not use CQ.
 	 *     Mutations go directly to NDB. */
 	cq = NULL;
 
@@ -1323,7 +1323,7 @@ int main(int argc, char *argv[])
 		rpc_cfg.gss_tbl = gss_tbl;
 
 	/* Create worker pool for COMPOUND dispatch (3.3).
-	 * worker_threads == 0 or 1 → inline processing (tp = NULL). */
+	 * worker_threads == 0 or 1 -> inline processing (tp = NULL). */
 	if (cfg.worker_threads > 1) {
 		if (threadpool_create(cfg.worker_threads, &rpc_tp) != 0) {
 			(void)fprintf(stderr,
@@ -1363,7 +1363,7 @@ int main(int argc, char *argv[])
 			}
 			rpc_cfg.icache = icache;
 
-			/* Pre-warm cache with root inode — eliminates
+			/* Pre-warm cache with root inode -- eliminates
 			 * 1 NDB RT from every PUTROOTFH compound. */
 			if (icache != NULL && cat != NULL) {
 				struct mds_inode root;
@@ -1395,7 +1395,7 @@ int main(int argc, char *argv[])
 		rpc_cfg.dcache = dcache;
 		}
 
-		/* Layout recall coordinator — used by op_layoutget for
+		/* Layout recall coordinator -- used by op_layoutget for
 		 * byte-range conflict-recall (Mark's bug) and reused by
 		 * the existing DS-failure / admin paths.  NULL-safe in
 		 * compound_data; op_layoutget skips the conflict scan. */
@@ -1405,7 +1405,7 @@ int main(int argc, char *argv[])
 		 * docs/hpc-nto1-plan.md).  Populated only for inodes with
 		 * MDS_IFLAG_HPC_SHARED.  init failure is non-fatal: we
 		 * leave rpc_cfg.lcache NULL and the LAYOUTGET path
-		 * transparently falls back to the catalogue read — this
+		 * transparently falls back to the catalogue read -- this
 		 * matches the pre-Phase-D behaviour. */
 		{
 			struct layout_cache *lcache = NULL;
@@ -1427,7 +1427,7 @@ int main(int argc, char *argv[])
 		/* HPC-Shared LAYOUTCOMMIT aggregator (Phase F of
 		 * docs/hpc-nto1-plan.md, integration part A).  v1
 		 * scope: create the aggregator, wire the flush callback,
-		 * start the timer thread.  No callers submit yet — op_*
+		 * start the timer thread.  No callers submit yet -- op_*
 		 * handlers continue to take the synchronous LAYOUTCOMMIT
 		 * path until integration part B lands.  Init failure is
 		 * non-fatal: rpc_cfg.lcommit_agg stays NULL and the
@@ -1474,7 +1474,7 @@ int main(int argc, char *argv[])
 			rpc_cfg.lcommit_agg = lcommit_agg;
 		}
 
-		/* Delegation state table (RFC 8881 §10.4).
+		/* Delegation state table (RFC 8881 S10.4).
 		 *
 		 * Gated by cfg.file_delegations_enabled (default true).  When
 		 * false, we skip the table init entirely and leave
@@ -1525,7 +1525,7 @@ int main(int argc, char *argv[])
 				" file delegations)\n");
 		}
 
-		/* Directory delegation table (RFC 8881 §10.9). */
+		/* Directory delegation table (RFC 8881 S10.9). */
 		{
 			struct dir_deleg_table *ddt = NULL;
 
@@ -1688,7 +1688,7 @@ int main(int argc, char *argv[])
 		(void)sigwait(&shutdown_set, &caught_sig);
 	}
 
-	/* Orderly shutdown — ordering matters:
+	/* Orderly shutdown -- ordering matters:
 	 * 1. Stop RPC servers + join threads (no new COMPOUNDs)
 	 * 2. Destroy copy offload (drain in-flight async copies)
 	 * 3. Stop cluster transport (no in-flight rename 2PC)
@@ -1707,7 +1707,7 @@ cleanup:
 		}
 	}
 
-	/* Stop the showmount-compat responder early — it has no
+	/* Stop the showmount-compat responder early -- it has no
 	 * dependency on the catalogue or any other subsystem, but
 	 * unregistering from rpcbind here keeps `showmount -e` from
 	 * returning a stale port while the rest of cleanup runs. */
@@ -1721,7 +1721,7 @@ cleanup:
 
 	/* Drain the RPC worker pool AFTER epoll loops have exited
 	 * but BEFORE destroying any rpc_server.  Workers hold raw
-	 * pointers to rpc_server / rpc_conn — the pool must be
+	 * pointers to rpc_server / rpc_conn -- the pool must be
 	 * fully joined before that memory is freed. */
 	threadpool_destroy(rpc_tp);
 	rpc_tp = NULL;

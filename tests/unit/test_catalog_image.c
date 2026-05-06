@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_catalog_image.c — Unit tests for the materialized catalog image.
+ * test_catalog_image.c -- Unit tests for the materialized catalog image.
  */
 
 #include <stdio.h>
@@ -462,7 +462,7 @@ static void test_replay_gap_detection(void)
     rec.seqno = 3; /* skip seqno 2 */
     ASSERT_EQ(catalog_image_apply(img, &rec), 0);
     ASSERT_EQ_U64(catalog_image_applied_high_water(img, 0), 3);
-    /* Gap detected — not complete even though hw >= 3. */
+    /* Gap detected -- not complete even though hw >= 3. */
     ASSERT_TRUE(!catalog_image_is_complete(img, 0, 3));
 
     catalog_image_destroy(img);

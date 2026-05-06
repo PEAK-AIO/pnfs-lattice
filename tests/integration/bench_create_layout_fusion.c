@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * bench_create_layout_fusion.c — Client-side validation of the
+ * bench_create_layout_fusion.c -- Client-side validation of the
  * CREATE+LAYOUTGET fusion design.
  *
  * PURPOSE
@@ -166,7 +166,7 @@ static struct nfs4_op mk_create_session(uint64_t clientid, uint32_t seqid,
 	op.arg.create_session.csa_flags = 0;
 	op.arg.create_session.fore_slots = slots;
 	op.arg.create_session.back_slots = slots;
-	/* RFC 8881 §18.36 channel attrs — sized so op_create_session
+	/* RFC 8881 S18.36 channel attrs -- sized so op_create_session
 	 * passes its NFS4ERR_TOOSMALL gate (ca_max{request,response}
 	 * size >= 256, ca_max{operations,requests} >= 1).  The bench
 	 * is a synthetic harness; it doesn't drive the SEQUENCE
@@ -446,7 +446,7 @@ static double monotonic_seconds(void)
 }
 
 /* -----------------------------------------------------------------------
- * Mode A — fused: one compound per file
+ * Mode A -- fused: one compound per file
  *
  *   SEQUENCE + PUTFH(parent) + OPEN(CREATE) + GETFH + LAYOUTGET
  *
@@ -493,10 +493,10 @@ static int mode_fused_once(struct bench_ctx *c, uint32_t *slot_seq,
 		return -1;
 	}
 	/* LAYOUTGET may return:
-	 *   NFS4_OK                   — ready FHs via real DS (lab);
-	 *   NFS4ERR_DELAY             — unready FHs, phase-3 deferred
+	 *   NFS4_OK                   -- ready FHs via real DS (lab);
+	 *   NFS4ERR_DELAY             -- unready FHs, phase-3 deferred
 	 *                               capture (lab, before refill);
-	 *   NFS4ERR_LAYOUTUNAVAILABLE — inline-only backend (memdb CI).
+	 *   NFS4ERR_LAYOUTUNAVAILABLE -- inline-only backend (memdb CI).
 	 *
 	 * All three are valid for the bench: the fusion detector in
 	 * op_open and the CQ submit have already run before LAYOUTGET
@@ -516,7 +516,7 @@ static int mode_fused_once(struct bench_ctx *c, uint32_t *slot_seq,
 }
 
 /* -----------------------------------------------------------------------
- * Mode B — unfused: two compounds per file
+ * Mode B -- unfused: two compounds per file
  *
  *   Compound 1: SEQUENCE + PUTFH(parent) + OPEN(CREATE) + GETFH
  *   Compound 2: SEQUENCE + PUTFH(child_fileid) + LAYOUTGET
@@ -544,7 +544,7 @@ static int mode_unfused_once(struct bench_ctx *c, uint32_t *slot_seq,
 	 * on uninitialised opnum=OP_LAYOUTGET stack memory. */
 	memset(res, 0, sizeof(res));
 
-	/* Compound 1: OPEN(CREATE) only — no LAYOUTGET in this batch. */
+	/* Compound 1: OPEN(CREATE) only -- no LAYOUTGET in this batch. */
 	bench_init_cd(c, &cd);
 
 	ops[0] = mk_sequence(c->session_id, 0, (*slot_seq)++);
@@ -669,7 +669,7 @@ static int run_mode(struct bench_ctx *c, uint32_t *slot_seq,
 		} else {
 			delayed++;
 		}
-		/* Close the open — bounded open_state table. */
+		/* Close the open -- bounded open_state table. */
 		if (close_open(c, slot_seq, child_fileid,
 			       &open_sid) != 0) {
 			return -1;

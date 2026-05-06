@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * io_tracker.h — Per-file I/O frequency tracker for tiering decisions.
+ * io_tracker.h -- Per-file I/O frequency tracker for tiering decisions.
  *
  * Aggregates LAYOUTSTATS read/write bytes (primary) and LAYOUTGET
  * bump counts (fallback) per fileid.  The tiering evaluator snapshots
@@ -43,7 +43,7 @@ void io_tracker_destroy(struct io_tracker *iot);
  *
  * Thread-safe (read-lock path with atomic counters).
  *
- * @param iot         Tracker (NULL tolerated — no-op).
+ * @param iot         Tracker (NULL tolerated -- no-op).
  * @param fileid      File identifier.
  * @param read_bytes  Bytes read since last report.
  * @param write_bytes Bytes written since last report.
@@ -56,7 +56,7 @@ void io_tracker_record(struct io_tracker *iot, uint64_t fileid,
  *
  * Thread-safe.
  *
- * @param iot     Tracker (NULL tolerated — no-op).
+ * @param iot     Tracker (NULL tolerated -- no-op).
  * @param fileid  File identifier.
  */
 void io_tracker_bump(struct io_tracker *iot, uint64_t fileid);
@@ -65,7 +65,7 @@ void io_tracker_bump(struct io_tracker *iot, uint64_t fileid);
  * Snapshot all entries and reset counters to zero.
  *
  * The caller receives a malloc'd array of entries and must free() it.
- * Thread-safe (write-lock — brief exclusive hold).
+ * Thread-safe (write-lock -- brief exclusive hold).
  *
  * @param iot    Tracker.
  * @param out    Receives malloc'd array (NULL if count == 0).

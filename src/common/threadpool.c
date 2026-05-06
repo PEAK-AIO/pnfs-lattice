@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * threadpool.c — Fixed-size worker pool for RPC dispatch.
+ * threadpool.c -- Fixed-size worker pool for RPC dispatch.
  *
  * Work items are drawn from a pre-allocated freelist (slab) sized
  * to max_pending, eliminating malloc/free on the submit/complete
@@ -130,7 +130,7 @@ int threadpool_create(uint32_t count, struct threadpool **out)
     for (uint32_t i = 0; i < count; i++) {
         int rc = pthread_create(&tp->threads[i], NULL, worker_loop, tp);
         if (rc != 0) {
-            /* Partial creation — shut down what we started */
+            /* Partial creation -- shut down what we started */
             tp->shutdown = true;
             pthread_cond_broadcast(&tp->cond);
             for (uint32_t j = 0; j < i; j++) {
@@ -203,7 +203,7 @@ void threadpool_destroy(struct threadpool *tp)
         pthread_join(tp->threads[i], NULL);
     }
 
-    /* Slab owns all work items — single free covers everything. */
+    /* Slab owns all work items -- single free covers everything. */
     pthread_mutex_destroy(&tp->lock);
     pthread_cond_destroy(&tp->cond);
     free(tp->slab);

@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rpc_server.c — TCP-based ONC-RPC server for NFSv4.1.
+ * rpc_server.c -- TCP-based ONC-RPC server for NFSv4.1.
  *
  * Epoll event loop with optional thread-pool COMPOUND dispatch.
  * Handles ONC-RPC record marking
- * (RFC 5531 §11), dispatches NFS NULL and COMPOUND procedures.
+ * (RFC 5531 S11), dispatches NFS NULL and COMPOUND procedures.
  */
 
 #include <stdlib.h>
@@ -55,7 +55,7 @@ struct rpc_conn {
     uint8_t   hdr_buf[4];    /**< Partial fragment header accumulator. */
     uint32_t  hdr_pos;        /**< Bytes of hdr_buf filled. */
 
-    /* Output queue for EAGAIN handling — circular buffer.
+    /* Output queue for EAGAIN handling -- circular buffer.
      * send_head is the read position; send_len is the count of
      * pending bytes.  No memmove on partial drain. */
     uint8_t  *send_buf;       /**< Circular output buffer. */
@@ -67,7 +67,7 @@ struct rpc_conn {
     pthread_mutex_t send_lock; /**< Protects send_buf/send_len + writev. */
     _Atomic bool    busy;      /**< Request in flight on worker thread. */
 
-    /* Embedded work item — eliminates malloc per dispatch.
+    /* Embedded work item -- eliminates malloc per dispatch.
      * Safe because busy prevents concurrent dispatch per-conn. */
     struct rpc_server *wi_srv;        /**< Server backpointer for worker. */
     uint8_t           *wi_record;     /**< Points to recv_buf (zero-copy). */
@@ -91,13 +91,13 @@ struct rpc_server {
     /* Phase 3: default stripe/mirror geometry. */
     uint32_t                 default_stripe_count;
     uint32_t                 default_mirror_count;
-    /* Phase F of docs/hpc-nto1-plan.md — HPC-Shared GETATTR
+    /* Phase F of docs/hpc-nto1-plan.md -- HPC-Shared GETATTR
      * consistency mode. */
     enum mds_hpc_getattr_mode hpc_getattr_mode;
-    /* Phase C / Step 5 of docs/hpc-nto1-plan.md — wide pre-warm
+    /* Phase C / Step 5 of docs/hpc-nto1-plan.md -- wide pre-warm
      * stripe-count cap.  0 selects compile-time default 128. */
     uint32_t                 hpc_max_stripe_count;
-    /* Phase C of docs/hpc-nto1-plan.md — flex-files layout XDR
+    /* Phase C of docs/hpc-nto1-plan.md -- flex-files layout XDR
      * wire form for HPC-Shared inodes.  See enum mds_hpc_xdr_form. */
     enum mds_hpc_xdr_form    hpc_xdr_form;
 
@@ -123,9 +123,9 @@ struct rpc_server {
     struct ds_cache                 *ds_cache;
     struct inode_cache              *icache;
     struct dirent_cache             *dcache;
-    /* Phase D of docs/hpc-nto1-plan.md — HPC-Shared layout cache. */
+    /* Phase D of docs/hpc-nto1-plan.md -- HPC-Shared layout cache. */
     struct layout_cache             *lcache;
-    /* Phase F of docs/hpc-nto1-plan.md — HPC-Shared LAYOUTCOMMIT
+    /* Phase F of docs/hpc-nto1-plan.md -- HPC-Shared LAYOUTCOMMIT
      * aggregator.  NULL means synchronous LAYOUTCOMMIT (legacy). */
     struct layout_commit_aggregator *lcommit_agg;
     struct deleg_table              *dt;
@@ -224,7 +224,7 @@ static int send_queue_append(struct rpc_conn *c,
     uint32_t need = c->send_len + len;
 
     if (need > SEND_QUEUE_MAX) {
-        return -1; /* Queue overflow — drop connection. */
+        return -1; /* Queue overflow -- drop connection. */
     }
 
     if (need > c->send_alloc) {
@@ -274,11 +274,11 @@ static int send_queue_append(struct rpc_conn *c,
 
 /**
  * Try to drain the circular send queue.  Returns:
- *   0  — queue fully drained (or was already empty).
- *   1  — partial drain; EAGAIN hit, caller should register EPOLLOUT.
- *  -1  — fatal write error.
+ *   0  -- queue fully drained (or was already empty).
+ *   1  -- partial drain; EAGAIN hit, caller should register EPOLLOUT.
+ *  -1  -- fatal write error.
  *
- * Advances send_head instead of memmove — O(1) per write.
+ * Advances send_head instead of memmove -- O(1) per write.
  */
 static int send_queue_drain(struct rpc_conn *c)
 {
@@ -304,7 +304,7 @@ static int send_queue_drain(struct rpc_conn *c)
             return -1;
         }
 
-        /* Advance head — no memmove needed. */
+        /* Advance head -- no memmove needed. */
         c->send_head = (c->send_head + (uint32_t)n) %
                        c->send_alloc;
         c->send_len -= (uint32_t)n;
@@ -385,7 +385,7 @@ static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
     return 0;
 }
 
-/** Reply buffer size — 256 KB is plenty for any single NFS compound. */
+/** Reply buffer size -- 256 KB is plenty for any single NFS compound. */
 #define REPLY_BUF_SIZE ((size_t)256 * 1024)
 
 /** Maximum size of an inbound COMPOUND request body, in bytes.
@@ -393,8 +393,8 @@ static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
  * Matches the maxrequestsize advertised in CREATE_SESSION (1 MiB,
  * see encode_res_create_session in xdr_ops_core.c).  Records larger
  * than this trigger a COMPOUND reply with NFS4ERR_REQ_TOO_BIG
- * carried in a synthesised SEQUENCE result, per RFC 5661 §15.2 and
- * RFC 8881 §2.10.6.4 (the COMPOUND reply MUST contain at least one
+ * carried in a synthesised SEQUENCE result, per RFC 5661 S15.2 and
+ * RFC 8881 S2.10.6.4 (the COMPOUND reply MUST contain at least one
  * resarray entry; an empty resarray crashes Linux and pynfs
  * clients on resarray[0]). */
 #define MAX_COMPOUND_REQ_SIZE  ((uint32_t)(1024U * 1024U))
@@ -408,9 +408,9 @@ static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
  * The session_id and slot_id fields are zero-filled because the
  * SEQUENCE op was either not decoded (record too big / bad XDR) or
  * was decoded into a struct we no longer have access to (too many
- * ops following).  Per RFC 8881 §18.46.3, when SEQUENCE returns an
+ * ops following).  Per RFC 8881 S18.46.3, when SEQUENCE returns an
  * error the discriminator selects the void arm so the body is a
- * single status word — exactly what encode_one_result produces for
+ * single status word -- exactly what encode_one_result produces for
  * a non-OK result. */
 static int send_compound_decode_failure(struct rpc_conn *c,
                                         char *reply_buf,
@@ -585,7 +585,7 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
      * reused across all subsequent requests on the same thread.
      * Eliminates malloc+calloc+free per RPC (~1MB per request).
      *
-     * Phase C / Step 1 of docs/hpc-nto1-plan.md — tl_results MUST be
+     * Phase C / Step 1 of docs/hpc-nto1-plan.md -- tl_results MUST be
      * calloc'd, not malloc'd.  compound_process() now calls
      * nfs4_result_destroy(&results[i]) BEFORE memset on each
      * iteration so prior compounds' heap state is freed before the
@@ -630,7 +630,7 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
                                &cred_flavor, &gss_cred,
                                &cred_uid, &cred_gid,
                                cred_aux_gids, &cred_aux_gid_count) != 0) {
-        goto cleanup; /* Malformed — drop connection. */
+        goto cleanup; /* Malformed -- drop connection. */
     }
 
     xdrmem_ncreate(&enc, reply_buf, REPLY_BUF_SIZE, XDR_ENCODE);
@@ -677,7 +677,7 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
             goto cleanup;
         }
 
-        /* Unknown GSS procedure — drop. */
+        /* Unknown GSS procedure -- drop. */
         goto cleanup;
     }
 
@@ -709,7 +709,7 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
         uint32_t op_count = 0;
 
         /*
-         * Heap-allocate ops[] and results[] — their combined size
+         * Heap-allocate ops[] and results[] -- their combined size
          * (~37 MB with current struct layouts) far exceeds the
          * default pthread stack.
          */
@@ -719,7 +719,7 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
         results = tl_results;
 
         /* --------------------------------------------------------
-         * Auth enforcement — whitelist gate.
+         * Auth enforcement -- whitelist gate.
          * Must run BEFORE request-path protection so that
          * gss_svc_eff is set before MIC/unwrap checks.
          * -------------------------------------------------------- */
@@ -897,11 +897,11 @@ wrongsec:
         }
 
         /*
-         * RFC 8881 §15.1.10.5 / §2.10.6.1.2 enforcement gate.  The
+         * RFC 8881 S15.1.10.5 / S2.10.6.1.2 enforcement gate.  The
          * client MUST NOT send a request larger than
          * ca_maxrequestsize, and the server MUST reject any such
          * request with NFS4ERR_REQ_TOO_BIG before doing per-op
-         * processing.  RFC 8881 §15.1.10.4 likewise mandates
+         * processing.  RFC 8881 S15.1.10.4 likewise mandates
          * NFS4ERR_TOO_MANY_OPS when the compound carries more
          * operations than ca_maxoperations.  Both checks MUST
          * happen ahead of fine-grained XDR validation: pynfs SEQ6
@@ -982,7 +982,7 @@ wrongsec:
                 ops, NFS4_MAX_OPS, &op_count);
             if (dec_rc != 0) {
                 /* Map decoder error code to RFC-mandated NFS4ERR_*
-                 * (RFC 5661 §15.2 / RFC 8881 §2.10.6.1.2):
+                 * (RFC 5661 S15.2 / RFC 8881 S2.10.6.1.2):
                  *   -2 = count > NFS4_MAX_OPS  -> TOO_MANY_OPS
                  *   -1 = malformed wire bytes  -> BADXDR
                  * In every case emit a single-element resarray
@@ -999,16 +999,16 @@ wrongsec:
         }
 
         /*
-         * RFC 8881 §1.7 / §14.4: the COMPOUND tag is a utf8str_cs.
+         * RFC 8881 S1.7 / S14.4: the COMPOUND tag is a utf8str_cs.
          * pynfs COMP3 (testBadTags) iterates get_invalid_utf8strings()
          * and expects NFS4ERR_INVAL for any tag that is not
          * well-formed UTF-8.  The decoder NUL-terminates @tag so
          * strlen() is safe; an embedded NUL inside the wire bytes
          * shows up as a too-short string, which the validator
-         * accepts as legal UTF-8 — we therefore additionally reject
+         * accepts as legal UTF-8 -- we therefore additionally reject
          * any tag whose post-decode strlen does not match the
          * decoded length.  Sent back via send_compound_decode_failure
-         * so the resarray-non-empty invariant (RFC 5661 §15.2) is
+         * so the resarray-non-empty invariant (RFC 5661 S15.2) is
          * preserved for clients that expect resarray[0].
          */
         {
@@ -1103,7 +1103,7 @@ wrongsec:
 
         /* DRC: if replay_cached is set, send the cached reply directly.
          *
-         * RFC 5661 §2.10.6.1.3 requires the replied bytes match what
+         * RFC 5661 S2.10.6.1.3 requires the replied bytes match what
          * the server originally sent for that (session, slot, seq_id),
          * EXCEPT for the RPC XID which MUST match the new request's
          * XID so the client's RPC layer can route the reply to the
@@ -1116,7 +1116,7 @@ wrongsec:
          * reply verifier; that MIC was computed over the original
          * request's seq_num and will not validate against the
          * replay's new seq_num.  Skip the cached-replay fast path
-         * for GSS for now — the cache miss path returns
+         * for GSS for now -- the cache miss path returns
          * NFS4ERR_RETRY_UNCACHED_REP, which is RFC-conformant.
          * Drives pynfs SEQ9a. */
         if (cd.replay_cached && cd.st != NULL && gss_svc_eff == 0 &&
@@ -1132,7 +1132,7 @@ wrongsec:
                  * (somehow shorter than 4 bytes or larger than
                  * the reply buffer) MUST not be sent. */
                 memcpy(reply_buf, cached, cached_len);
-                /* Patch XID @ offset 0 (RFC 5531 §9 message header,
+                /* Patch XID @ offset 0 (RFC 5531 S9 message header,
                  * uint32 big-endian).  htonl() converts from host
                  * order to network order for the wire. */
                 uint32_t xid_be = htonl(xid);
@@ -1141,7 +1141,7 @@ wrongsec:
                                  cached_len);
                 goto cleanup;
             }
-            /* Cache miss / GSS / size sanity — fall through to
+            /* Cache miss / GSS / size sanity -- fall through to
              * normal encoding so the SEQUENCE result that
              * compound_process already populated is sent. */
         }
@@ -1317,7 +1317,7 @@ wrongsec:
             } else {
                 /* krb5 (SVC_NONE): plain results,
                  * no length prefix (RFC 2203 s5.3.3.2
-                 * — same as AUTH_NONE format). */
+                 * -- same as AUTH_NONE format). */
                 if (compound_len > 0) {
                     uint32_t pos = xdr_getpos(&enc);
                     if (pos + compound_len >
@@ -1443,7 +1443,7 @@ static int nb_read(int fd, uint8_t *buf, uint32_t *pos, uint32_t want)
  */
 static int dispatch_to_pool(struct rpc_server *srv, struct rpc_conn *c)
 {
-    /* Set up embedded work item — zero-copy from recv_buf. */
+    /* Set up embedded work item -- zero-copy from recv_buf. */
     c->wi_srv        = srv;
     c->wi_record     = c->recv_buf;
     c->wi_record_len = c->recv_len;
@@ -1451,14 +1451,14 @@ static int dispatch_to_pool(struct rpc_server *srv, struct rpc_conn *c)
 
     atomic_store(&c->busy, true);
 
-    /* Disable EPOLLIN — no more reads until worker finishes. */
+    /* Disable EPOLLIN -- no more reads until worker finishes. */
     struct epoll_event ev;
     ev.events = 0;
     ev.data.fd = c->fd;
     epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, c->fd, &ev);
 
     if (threadpool_submit(srv->tp, rpc_work_fn, c) != 0) {
-        /* Pool full — re-enable EPOLLIN so the next epoll cycle
+        /* Pool full -- re-enable EPOLLIN so the next epoll cycle
          * retries.  NEVER fall back to inline processing here:
          * the epoll thread must not block on NDB/NFS calls or
          * it can't process comp_pipe completions, causing a
@@ -1528,7 +1528,7 @@ static int conn_read(struct rpc_server *srv, struct rpc_conn *c)
             if (rc != 0) {
                 return -1;
 }
-            /* Continue reading — there may be pipelined requests. */
+            /* Continue reading -- there may be pipelined requests. */
         }
         /* Else: more fragments expected. Loop back to read next header. */
     }
@@ -1646,7 +1646,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
 #ifdef SO_REUSEPORT
     /* Allow multiple listeners on the same port for multi-listener
      * mode (kernel distributes connections across listeners).
-     * Failure is non-fatal — single-listener still works. */
+     * Failure is non-fatal -- single-listener still works. */
     (void)setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT,
                      &opt, sizeof(opt));
 #endif
@@ -1721,7 +1721,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
 
     /* Create completion pipe for threadpool notifications.
      * Workers write the 4-byte conn index; the epoll thread
-     * reads only the completed indices — O(completed) not
+     * reads only the completed indices -- O(completed) not
      * O(max_conns). */
     if (srv->tp != NULL) {
         if (pipe(srv->comp_pipe) < 0) {
@@ -1782,7 +1782,7 @@ static struct rpc_conn *find_free_conn(struct rpc_server *srv)
     return NULL;
 }
 
-/** Find connection by fd — O(1) via fd-index. */
+/** Find connection by fd -- O(1) via fd-index. */
 static struct rpc_conn *find_conn_by_fd(struct rpc_server *srv, int fd)
 {
     if (fd < 0 || (uint32_t)fd >= srv->fd_index_size) {

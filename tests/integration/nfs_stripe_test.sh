@@ -2,7 +2,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# nfs_stripe_test.sh — Verify file striping across data servers.
+# nfs_stripe_test.sh -- Verify file striping across data servers.
 #
 # Tests that data written through the MDS is correctly distributed
 # across DS nodes according to the stripe map, and that cross-stripe
@@ -33,8 +33,8 @@ YEL='\033[0;33m'
 RST='\033[0m'
 
 log_pass() { PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); printf "  ${GRN}PASS${RST}  %s\n" "$1"; }
-log_fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); printf "  ${RED}FAIL${RST}  %s — %s\n" "$1" "$2"; }
-log_skip() { SKIP=$((SKIP+1)); TOTAL=$((TOTAL+1)); printf "  ${YEL}SKIP${RST}  %s — %s\n" "$1" "$2"; }
+log_fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); printf "  ${RED}FAIL${RST}  %s -- %s\n" "$1" "$2"; }
+log_skip() { SKIP=$((SKIP+1)); TOTAL=$((TOTAL+1)); printf "  ${YEL}SKIP${RST}  %s -- %s\n" "$1" "$2"; }
 
 assert_eq() {
     local desc="$1" got="$2" want="$3"
@@ -93,7 +93,7 @@ cleanup() {
 # =====================================================================
 echo ""
 echo "======================================================================"
-echo "  pNFS MDS — File Striping Verification Tests"
+echo "  pNFS MDS -- File Striping Verification Tests"
 echo "  Mount: $MOUNT"
 echo "  MDS:   $MDS_HOST"
 echo "  DS1:   $DS1_HOST ($DS1_DATA)"
@@ -247,7 +247,7 @@ MD5_NFS=$(md5sum "${MOUNT}/stripe_test_crossread" | awk '{print $1}')
 assert_eq "S4.1 1MiB cross-stripe read integrity" "$MD5_NFS" "$MD5_REF"
 
 # Partial read at stripe boundary offset (e.g., read 128KiB starting
-# at 48KiB into the file — should span two stripe units)
+# at 48KiB into the file -- should span two stripe units)
 dd if=/tmp/stripe_ref.bin of=/tmp/stripe_ref_partial.bin \
     bs=1024 skip=48 count=128 2>/dev/null
 dd if="${MOUNT}/stripe_test_crossread" of=/tmp/stripe_nfs_partial.bin \
@@ -292,7 +292,7 @@ echo "--- S6: Append extends file across stripe boundary ---"
 dd if=/dev/zero of="${MOUNT}/stripe_test_append" bs=65536 count=1 2>/dev/null
 sync
 
-# Append more data — should go to next stripe
+# Append more data -- should go to next stripe
 echo "APPENDED_DATA_BLOCK" >> "${MOUNT}/stripe_test_append"
 sync
 sleep 1
@@ -348,7 +348,7 @@ rm -f "${MOUNT}/stripe_test_gc"
 sync
 sleep 2  # Give GC time to process
 
-# GC is async — check if files are queued for removal
+# GC is async -- check if files are queued for removal
 # (they may or may not be deleted yet depending on GC speed)
 DS_FILES_AFTER=$(find_ds_files "$FILEID" | wc -l)
 if [ "$DS_FILES_AFTER" -lt "$DS_FILES_BEFORE" ] || \

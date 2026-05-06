@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * migration.h — Subtree migration API (freeze, stream, commit, unfreeze).
+ * migration.h -- Subtree migration API (freeze, stream, commit, unfreeze).
  *
  * Moves metadata ownership of a directory subtree from one MDS node to
- * another.  See docs/architecture.md §13 for the full protocol.
+ * another.  See docs/architecture.md S13 for the full protocol.
  */
 
 #ifndef MIGRATION_H
@@ -76,7 +76,7 @@ struct migration_transport {
 };
 
 /* -----------------------------------------------------------------------
- * Migration inode chunk — passed to the receive callback
+ * Migration inode chunk -- passed to the receive callback
  * ----------------------------------------------------------------------- */
 
 /** Single directory entry within a migration chunk. */

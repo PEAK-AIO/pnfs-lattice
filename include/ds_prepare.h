@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_prepare.h — Async DS file preparation queue (Epic B).
+ * ds_prepare.h -- Async DS file preparation queue (Epic B).
  *
  * After namespace CREATE commits a stripe_map with DS_PENDING,
  * a background worker creates the DS file and captures its NFS

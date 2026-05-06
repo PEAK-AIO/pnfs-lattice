@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * catalogue_rondb_shim.cpp — C++ shim hiding NDB API behind C ABI.
+ * catalogue_rondb_shim.cpp -- C++ shim hiding NDB API behind C ABI.
  *
  * This file is the ONLY C++ translation unit in the project.
  * It compiles into librondb_shim.a and exports extern "C" functions
@@ -82,7 +82,7 @@ static bool rondb_is_temporary(const NdbError &err)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 3: NDB Async Batch Pipeline — data structures
+ * Phase 3: NDB Async Batch Pipeline -- data structures
  *
  * Each NDB connection gets a shared Ndb object driven by a dedicated
  * flush thread.  Worker threads define operations under a mutex, call
@@ -143,7 +143,7 @@ struct rondb_shim_handle {
     ndb_conn_ctx            conn_ctxs[NDB_CONN_POOL_MAX];
 };
 
-/* Thread-local Ndb pointer — one per calling thread, lazily created. */
+/* Thread-local Ndb pointer -- one per calling thread, lazily created. */
 static thread_local Ndb *tl_ndb = nullptr;
 static thread_local rondb_shim_handle *tl_ndb_owner = nullptr;
 
@@ -338,7 +338,7 @@ static NdbDictionary::Dictionary *rondb_get_dictionary(rondb_shim_handle *state)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 3: NDB Async Batch Pipeline — callback, flush thread, helpers
+ * Phase 3: NDB Async Batch Pipeline -- callback, flush thread, helpers
  * ----------------------------------------------------------------------- */
 
 /** Async callback invoked by pollNdb() when a transaction completes. */
@@ -374,7 +374,7 @@ static void ndb_flush_thread_fn(ndb_conn_ctx *ctx)
         /* Batch-send all prepared transactions in one TCP segment. */
         ctx->ndb->sendPreparedTransactions(1);
 
-        /* Poll for completions — triggers ndb_async_callback which
+        /* Poll for completions -- triggers ndb_async_callback which
          * signals waiting worker threads via their condvars.
          * Timeout 1 ms, return as soon as >= 1 completes. */
         ctx->ndb->pollNdb(1, 1);
@@ -756,7 +756,7 @@ int rondb_shim_connect_pool(const char *connect_string,
                 rondb_destroy_handle(state);
                 return -1;
             }
-            /* Additional connection failed — use what we have. */
+            /* Additional connection failed -- use what we have. */
             delete conn;
             break;
         }
@@ -942,7 +942,7 @@ void rondb_shim_set_async_writes(void *handle, int enabled)
 }
 
 /* -----------------------------------------------------------------------
- * Stage B — metadata table DDL + row-level CRUD + atomic helpers.
+ * Stage B -- metadata table DDL + row-level CRUD + atomic helpers.
  *
  * Table names and column names are defined in rondb_schema.h and
  * referenced via the RONDB_TBL_* / RONDB_*_COL_* macros.
@@ -967,7 +967,7 @@ static int rondb_drop_table_if_exists(NdbDictionary::Dictionary *dict,
         NdbError err = dict->getNdbError();
         if (err.classification == NdbError::NoDataFound ||
             err.classification == NdbError::SchemaError) {
-            /* Table doesn't exist — flush stale cache entry anyway. */
+            /* Table doesn't exist -- flush stale cache entry anyway. */
             dict->invalidateTable(table_name);
             return 0;
         }
@@ -1362,7 +1362,7 @@ static int rondb_add_lock_holder_delete(NdbTransaction *tx,
  * data node (no read-modify-write race), and sets mtime/ctime.
  *
  * Uses interpretedUpdateTuple + incValue/subValue which execute entirely
- * at the NDB data node — zero extra round trips, immune to the
+ * at the NDB data node -- zero extra round trips, immune to the
  * read-modify-write race that caused BUG-1 (nlink corruption under
  * concurrent multi-MDS mutations in the same directory).
  *
@@ -1388,7 +1388,7 @@ static int rondb_interpreted_parent_update(
     op->interpretedUpdateTuple();
     (void)rondb_equal_u64(op, RONDB_INO_COL_FILEID, parent_fileid);
 
-    /* Atomic nlink delta — executed at the data node. */
+    /* Atomic nlink delta -- executed at the data node. */
     if (nlink_delta > 0) {
         op->incValue(RONDB_INO_COL_NLINK, (Uint32)nlink_delta);
     } else if (nlink_delta < 0) {
@@ -1398,7 +1398,7 @@ static int rondb_interpreted_parent_update(
     /* Atomic change counter increment. */
     op->incValue(RONDB_INO_COL_CHANGE, (Uint64)1);
 
-    /* Absolute mtime + ctime — both concurrent writers set ~same wall
+    /* Absolute mtime + ctime -- both concurrent writers set ~same wall
      * time; last-writer-wins is acceptable for timestamps. */
     clock_gettime(CLOCK_REALTIME, &now);
     (void)rondb_set_value_u64(op, RONDB_INO_COL_MTIME_SEC,
@@ -1899,7 +1899,7 @@ static int rondb_seed_root_inode(rondb_shim_handle *state)
  * Phase 1 DDL: catalogue + coordination parity tables
  * ----------------------------------------------------------------------- */
 
-/* mds_inline_data table intentionally omitted — inline data bypasses
+/* mds_inline_data table intentionally omitted -- inline data bypasses
  * the pNFS DS layout path.  RonDB mode forces inline_enabled=false. */
 
 static int rondb_define_xattrs_table(NdbDictionary::Dictionary *dict)
@@ -2136,7 +2136,7 @@ static int rondb_define_layout_state_table(NdbDictionary::Dictionary *dict)
      *   - SchemaObjectExists (idempotent reruns),
      *   - error 4714 "Index stats system tables do not exist"
      *     (the cluster's index statistics scaffolding hasn't been
-     *     initialised by ndb_index_stat — the index itself is
+     *     initialised by ndb_index_stat -- the index itself is
      *     functional, only statistics collection is disabled).
      * Any other error is fatal.
      *
@@ -2364,7 +2364,7 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
     if (rondb_define_ns_lock_holders_table(dict) != 0) { return -1; }
     if (rondb_define_partition_map_table(dict) != 0) { return -1; }
     /* Phase 1: catalogue + coordination parity tables.
-     * No inline_data table — pNFS routes all data through DSes. */
+     * No inline_data table -- pNFS routes all data through DSes. */
     if (rondb_define_xattrs_table(dict) != 0) { return -1; }
     if (rondb_define_ds_registry_table(dict) != 0) { return -1; }
     if (rondb_define_ds_provision_table(dict) != 0) { return -1; }
@@ -2419,7 +2419,7 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
          * and the legacy layout_by_client table.  The DDL below will
          * recreate layout_state with the new composite PK on its
          * first call; layout_by_client is gone for good.  Existing
-         * layout rows are lost — acceptable for transient protocol
+         * layout rows are lost -- acceptable for transient protocol
          * state that clients rebuild on reconnect. */
         if (schema_version < 6) {
             (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_STATE);
@@ -2819,7 +2819,7 @@ int rondb_shim_inode_setattr_atomic(void *handle, uint64_t fileid,
             "setattr_atomic startTx");
     }
 
-    /* 1. Exclusive-lock read — serialises concurrent setattrs on
+    /* 1. Exclusive-lock read -- serialises concurrent setattrs on
      *    the same inode at the NDB row-lock level. */
     rd_op = tx->getNdbOperation(tbl);
     if (rd_op == nullptr) {
@@ -2829,7 +2829,7 @@ int rondb_shim_inode_setattr_atomic(void *handle, uint64_t fileid,
     }
     rd_op->readTuple(NdbOperation::LM_Exclusive);
     (void)rondb_equal_u64(rd_op, RONDB_INO_COL_FILEID, fileid);
-    /* We don't need to fetch values — the caller already computed
+    /* We don't need to fetch values -- the caller already computed
      * the merged result.  The exclusive read is solely for locking. */
     rd_op->getValue(RONDB_INO_COL_NLINK, nullptr);
 
@@ -2894,7 +2894,7 @@ int rondb_shim_inode_del(void *handle, uint64_t fileid)
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
-        if (err.code == 626) { return 0; } /* row didn't exist — ok */
+        if (err.code == 626) { return 0; } /* row didn't exist -- ok */
         return rondb_report_error(err, "inode_del commit");
     }
 
@@ -2969,7 +2969,7 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     a_cfid  = dir_op->getValue(RONDB_DIR_COL_CHILD_FID, nullptr);
     a_ctype = dir_op->getValue(RONDB_DIR_COL_CHILD_TYPE, nullptr);
 
-    /* Execute dirent read with NoCommit — keep txn open for inode read. */
+    /* Execute dirent read with NoCommit -- keep txn open for inode read. */
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
@@ -3015,7 +3015,7 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     NdbRecAttr *a_parent = ino_op->getValue(RONDB_INO_COL_PARENT, nullptr);
     NdbRecAttr *a_shard  = ino_op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
 
-    /* Commit — both reads complete in this single round-trip. */
+    /* Commit -- both reads complete in this single round-trip. */
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
@@ -3025,7 +3025,7 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     }
     if (ino_op->getNdbError().code == 626) {
         rondb_get_ndb(state)->closeTransaction(tx);
-        return 1; /* inode not found — orphan dirent */
+        return 1; /* inode not found -- orphan dirent */
     }
 
     *child_fileid = cfid;
@@ -3251,7 +3251,7 @@ int rondb_shim_dirent_del(void *handle, uint64_t parent_fileid,
 }
 
 /* -----------------------------------------------------------------------
- * Readdir — single-partition scan with explicit in-memory ordering.
+ * Readdir -- single-partition scan with explicit in-memory ordering.
  *
  * NdbScanOperation does not guarantee entry_name ordering, so the shim
  * copies all rows for the parent directory and sorts them bytewise before
@@ -3385,16 +3385,16 @@ int rondb_shim_ns_readdir(void *handle,
 }
 
 /* -----------------------------------------------------------------------
- * READDIR_PLUS — fused dirent scan + batched inode reads in ONE
+ * READDIR_PLUS -- fused dirent scan + batched inode reads in ONE
  * NdbTransaction.  The scan runs under execute(NoCommit); every row's
  * inode primary-key read is then queued on the same transaction and
  * resolved by a single execute(Commit, AO_IgnoreError).  AO_IgnoreError
  * lets per-operation 626 (NOT_FOUND) be reported per entry instead of
- * aborting the whole batch — that covers the dirent/inode race where
+ * aborting the whole batch -- that covers the dirent/inode race where
  * an inode is deleted between the scan and the commit.
  *
  * Net effect: the classic N+1 round-trip cold-cache READDIR_PLUS
- * collapses to exactly two API→TC round-trips (NoCommit + Commit)
+ * collapses to exactly two API->TC round-trips (NoCommit + Commit)
  * inside a single NdbTransaction.  TC partition locality is anchored
  * to the DIRENTS parent_fileid partition via the startTransaction
  * hint; inode reads span the INODES partitions of each child_fileid,
@@ -3485,7 +3485,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
     a_cfid  = scan->getValue(RONDB_DIR_COL_CHILD_FID, nullptr);
     a_ctype = scan->getValue(RONDB_DIR_COL_CHILD_TYPE, nullptr);
 
-    /* Phase 1: NoCommit scan — drives one API→TC round-trip. */
+    /* Phase 1: NoCommit scan -- drives one API->TC round-trip. */
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
@@ -3540,7 +3540,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
         }
     }
 
-    /* Empty result — close the txn cleanly without the inode batch. */
+    /* Empty result -- close the txn cleanly without the inode batch. */
     if (first >= rows.size()) {
         rondb_get_ndb(state)->closeTransaction(tx);
         return 0;
@@ -3548,7 +3548,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
 
     /* Phase 2: queue one readTuple per dirent on INODES.  All ops are
      * queued on the SAME tx so execute(Commit) below drives a single
-     * API→TC round-trip that fans out the reads across partitions. */
+     * API->TC round-trip that fans out the reads across partitions. */
     std::vector<rondb_readdir_plus_ino_set> ino_ops(rows.size() - first);
     for (size_t i = first; i < rows.size(); i++) {
         rondb_readdir_plus_ino_set &s = ino_ops[i - first];
@@ -3592,7 +3592,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
     if (tx->execute(NdbTransaction::Commit,
                     NdbOperation::AO_IgnoreError) == -1) {
         err = tx->getNdbError();
-        /* 626 at the txn level is expected when some ops missed —
+        /* 626 at the txn level is expected when some ops missed --
          * tolerate it and drive per-op inspection. */
         if (err.code != 626) {
             rondb_get_ndb(state)->closeTransaction(tx);
@@ -3650,7 +3650,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
 }
 
 /* -----------------------------------------------------------------------
- * Atomic LINK (T2 — single NDB transaction, multi-row)
+ * Atomic LINK (T2 -- single NDB transaction, multi-row)
  *
  * Insert dirent + update parent inode + update target inode (nlink++).
  * ----------------------------------------------------------------------- */
@@ -3887,7 +3887,7 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
      * via FATTR4_CHANGE must bump `change`.  Without this, nlink
      * adjustments (hardlink create / remove) would leave `change`
      * untouched even though POSIX stat would show a different
-     * nlink — breaking the contract we make to clients via
+     * nlink -- breaking the contract we make to clients via
      * FATTR4_CHANGE_ATTR_TYPE = MONOTONIC_INCR.
      *
      * POSIX requires `ctime` to update on link/unlink; do so now
@@ -4072,7 +4072,7 @@ int rondb_shim_stripe_get(void *handle, uint64_t fileid,
 
         /* Entries are written in ordinal order by stripe_put, so results
          * come back in the same order we issued them.  Missing entries
-         * (per-op 626) are skipped — matches the fused-path behaviour. */
+         * (per-op 626) are skipped -- matches the fused-path behaviour. */
         n_entries = 0;
         for (uint32_t i = 0; i < sc_val; i++) {
             NdbError op_err = rd_attrs[i].rd_op->getNdbError();
@@ -4200,7 +4200,7 @@ int rondb_shim_stripe_put(void *handle, uint64_t fileid,
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
         if (rondb_is_temporary(err)) {
-            return -2; /* Retryable — caller should retry */
+            return -2; /* Retryable -- caller should retry */
         }
         return rondb_report_error(err, "stripe_put commit");
     }
@@ -4218,13 +4218,13 @@ stripe_put_err:
 }
 
 /*
- * stripe_del — best-effort scan-delete of mds_stripe_maps + mds_stripe_entries
+ * stripe_del -- best-effort scan-delete of mds_stripe_maps + mds_stripe_entries
  * for a single fileid.
  *
  * Under multi-MDS contention the inner scan-delete deadlocks against
  * concurrent op_remove sweeps on the same partition.  Every transient
  * NDB error here is already retried at the C-wrapper layer
- * (catalogue_rondb_stripe_map_del — 3 attempts with backoff), so the
+ * (catalogue_rondb_stripe_map_del -- 3 attempts with backoff), so the
  * shim returns -2 silently on temporary failures and only logs via
  * rondb_report_error when the error is genuinely permanent.  This
  * mirrors the pattern in rondb_shim_stripe_put.
@@ -4280,7 +4280,7 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
-        /* 626 = tuple not found — header didn't exist, still clean entries. */
+        /* 626 = tuple not found -- header didn't exist, still clean entries. */
         if (err.code != 626 &&
             err.classification != NdbError::NoDataFound) {
             if (rondb_is_temporary(err)) {
@@ -4384,7 +4384,7 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
  * Phase 2: Fused stripe_get + layout_grant (single NDB transaction)
  *
  * Reads stripe_maps header + entries, then writes layout_state +
- * layout_by_client + layout_by_file + ds_layout_idx — all in one NDB
+ * layout_by_client + layout_by_file + ds_layout_idx -- all in one NDB
  * transaction.  Saves 1 NDB round-trip vs separate calls.
  *
  * Returns: 0 = success, 1 = stripe NOTFOUND, -1 = error.
@@ -4485,7 +4485,7 @@ int rondb_shim_stripe_get_and_layout_grant(
         if (op_err.code == 626 ||
             op_err.classification == NdbError::NoDataFound) {
             rondb_get_ndb(state)->closeTransaction(tx);
-            return 1; /* NOTFOUND — caller does placement */
+            return 1; /* NOTFOUND -- caller does placement */
         }
     }
 
@@ -4553,7 +4553,7 @@ int rondb_shim_stripe_get_and_layout_grant(
             (void)rondb_set_value_u64(op, RONDB_LS_COL_GRANT_EPOCH, (Uint64)0);
         }
 
-        /* 3b. layout_by_file row — required by
+        /* 3b. layout_by_file row -- required by
          *     mds_coord_layout_iter_file for byte-range
          *     CB_LAYOUTRECALL conflict detection (Mark's bug:
          *     bugs from mark/mds_byte_range_layoutrecall.md).
@@ -4645,7 +4645,7 @@ int rondb_shim_stripe_get_and_layout_grant(
             }
 
             /* Also write ds_layout_idx for this DS (already committed
-             * via the PK write batch above — we pre-add them before
+             * via the PK write batch above -- we pre-add them before
              * knowing which entries exist, using the header count). */
             n_entries++;
         }
@@ -5002,7 +5002,7 @@ int rondb_shim_xattr_list(void *handle, uint64_t fileid,
  * DS registry CRUD (typed columns, PK = ds_id)
  *
  * mds_ds_registry: ds_id(PK, partition key, UNSIGNED) + 13 typed columns
- * matching struct mds_ds_info.  No blob serialisation — direct column
+ * matching struct mds_ds_info.  No blob serialisation -- direct column
  * access.  String fields (addr, host, export_path) are LONGVARBINARY(256)
  * with 2-byte LE length prefix.
  * ----------------------------------------------------------------------- */
@@ -5292,7 +5292,7 @@ int rondb_shim_ds_registry_list(void *handle,
         return rondb_report_error(err, "ds_reg_list readTuples");
     }
 
-    /* No filter — full table scan for all DS entries. */
+    /* No filter -- full table scan for all DS entries. */
     a_id = scan->getValue(RONDB_DSR_COL_DS_ID, nullptr);
     a_state = scan->getValue(RONDB_DSR_COL_STATE, nullptr);
     a_tier = scan->getValue(RONDB_DSR_COL_TIER, nullptr);
@@ -5464,7 +5464,7 @@ int rondb_shim_bench_create(void *handle, uint32_t n_ops,
 }
 
 /* -----------------------------------------------------------------------
- * Atomic CREATE (T2 — single NDB transaction, multi-row)
+ * Atomic CREATE (T2 -- single NDB transaction, multi-row)
  *
  * Inserts: child inode + dirent + updated parent inode +
  *          optional stripe header+entries.
@@ -5523,7 +5523,7 @@ int rondb_shim_ns_create(void *handle,
                                  "ns_create startTx");
     }
 
-    /* 1. Insert dirent (insertTuple fails on PK conflict → EXISTS). */
+    /* 1. Insert dirent (insertTuple fails on PK conflict -> EXISTS). */
     op_dirent = tx->getNdbOperation(dir_tbl);
     if (op_dirent == nullptr) { goto ns_create_err; }
     op_dirent->insertTuple();
@@ -5548,7 +5548,7 @@ int rondb_shim_ns_create(void *handle,
         goto ns_create_err;
     }
 
-    /* 4. Stripe data — create stripe_map header + entries in the
+    /* 4. Stripe data -- create stripe_map header + entries in the
      *    same transaction as the inode+dirent so the file is
      *    immediately ready for LAYOUTGET without a second RT. */
     if (stripe_buf != nullptr && stripe_count > 0 && stripe_len >= 8) {
@@ -5608,10 +5608,10 @@ int rondb_shim_ns_create(void *handle,
             err = tx->getNdbError();
             rondb_get_ndb(state)->closeTransaction(tx);
             if (err.classification == NdbError::ConstraintViolation) {
-                return 1; /* EXISTS — dirent PK conflict */
+                return 1; /* EXISTS -- dirent PK conflict */
             }
             if (rondb_is_temporary(err)) {
-                return -2; /* Retryable — caller should retry */
+                return -2; /* Retryable -- caller should retry */
             }
             return rondb_report_error(err, "ns_create commit");
         }
@@ -5665,7 +5665,7 @@ int rondb_shim_ns_create_with_layout(
      * output on Commit failure, so this is zero-cost on the hot
      * success path except for the small vector allocation.  The
      * per-op labels let operators pinpoint which write NDB
-     * rejected — useful e.g. during schema evolution when a PK
+     * rejected -- useful e.g. during schema evolution when a PK
      * / partition-key mismatch would otherwise surface as a
      * silent txn abort.
      */
@@ -5809,7 +5809,7 @@ int rondb_shim_ns_create_with_layout(
      * on the child fileid partition, matching the child inode +
      * stripe tables.  With the ds_layout_idx PK fix (all three PK
      * columns via equal()), the full queue of writes commits in a
-     * single Commit — no NoCommit flush needed.  The non-fused
+     * single Commit -- no NoCommit flush needed.  The non-fused
      * ns_create commits the same two-partition shape (parent +
      * child) with one Commit; the fused path now matches that.
      */
@@ -5872,7 +5872,7 @@ int rondb_shim_ns_create_with_layout(
                 }
 
                 /*
-                 * ds_layout_idx PK = (ds_id, clientid, fileid) —
+                 * ds_layout_idx PK = (ds_id, clientid, fileid) --
                  * ALL three are PK columns and require equal().
                  * The previous version used setValue() for
                  * clientid / fileid, which NDB rejects with
@@ -5922,7 +5922,7 @@ ns_create_wl_err:
 }
 
 /* -----------------------------------------------------------------------
- * Atomic REMOVE (T2 — single NDB transaction, multi-row)
+ * Atomic REMOVE (T2 -- single NDB transaction, multi-row)
  *
  * Deletes dirent + updates/deletes child inode + updates parent inode.
  * Stripe cleanup deferred to stripe_del stub.
@@ -5994,14 +5994,14 @@ int rondb_shim_ns_remove(void *handle,
      *
      * For the hardlink case (nlink > 1) we emit an
      * interpretedUpdateTuple that subtracts 1 from nlink, increments
-     * the change counter, and stamps ctime — all atomically at the
+     * the change counter, and stamps ctime -- all atomically at the
      * data node.  Symmetric to the interpreted parent update used on
      * ns_create.  Wins vs. the previous full-row updateTuple:
      *   * No read-modify-write race with a concurrent setattr/link on
      *     the same inode (WAW lost-update gone).
      *   * Wire payload for the hardlink-remove case shrinks from the
      *     full 137-byte inode record to three atomic opcodes.
-     *   * mtime is intentionally NOT touched — POSIX says unlink()
+     *   * mtime is intentionally NOT touched -- POSIX says unlink()
      *     only updates ctime; the full updateTuple path was rewriting
      *     mtime from the caller's snapshot, which is harmless but
      *     wrong-shaped.
@@ -6215,7 +6215,7 @@ remove_full_err:
 }
 
 /* -----------------------------------------------------------------------
- * Atomic RENAME (T2 — single NDB transaction, multi-row)
+ * Atomic RENAME (T2 -- single NDB transaction, multi-row)
  *
  * Option A (single-cluster model): any MDS executes the rename
  * directly as one NDB transaction.  No MDS-level 2PC.
@@ -6373,7 +6373,7 @@ rename_err:
 }
 
 /* -----------------------------------------------------------------------
- * Stage E — namespace intent lock operations.
+ * Stage E -- namespace intent lock operations.
  *
  * Acquire = create/update a resource row plus a per-holder row.
  * Release = delete a holder row and shrink/remove the resource row.
@@ -7037,7 +7037,7 @@ int rondb_shim_lock_test(void *handle,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — DS provisioning CRUD (mds_ds_provision: PK=ds_id)
+ * Phase 8A -- DS provisioning CRUD (mds_ds_provision: PK=ds_id)
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_ds_provision_get(void *handle, uint32_t ds_id,
@@ -7216,7 +7216,7 @@ int rondb_shim_ds_provision_del(void *handle, uint32_t ds_id)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — Quota rules CRUD (mds_quota_rules: PK=(scope_type, scope_id))
+ * Phase 8A -- Quota rules CRUD (mds_quota_rules: PK=(scope_type, scope_id))
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_quota_rule_get(void *handle, uint8_t scope_type,
@@ -7336,7 +7336,7 @@ int rondb_shim_quota_rule_put(void *handle, uint8_t scope_type,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — Quota usage CRUD (mds_quota_usage: PK=(usage_type, scope_id))
+ * Phase 8A -- Quota usage CRUD (mds_quota_usage: PK=(usage_type, scope_id))
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_quota_usage_get(void *handle, uint8_t usage_type,
@@ -7458,7 +7458,7 @@ int rondb_shim_quota_usage_put(void *handle, uint8_t usage_type,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — GC queue (mds_gc_queue: PK=gc_seq, FIFO via mds_meta counter)
+ * Phase 8A -- GC queue (mds_gc_queue: PK=gc_seq, FIFO via mds_meta counter)
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out)
@@ -7691,7 +7691,7 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
  *   - if the heap has room, push and re-heapify.
  *   - else if the row's seq is strictly less than the current max
  *     (heap.front()), replace the max with this row and re-heapify.
- *   - else skip — this row cannot displace the worst already kept.
+ *   - else skip -- this row cannot displace the worst already kept.
  * After the scan we sort ascending by seq so the caller dequeues in
  * the same FIFO order today's single rondb_shim_gc_peek caller saw.
  *
@@ -7773,7 +7773,7 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
             continue;
         }
 
-        /* Candidate — copy out of NDB's cursor buffer.  aRef()
+        /* Candidate -- copy out of NDB's cursor buffer.  aRef()
          * pointer becomes invalid on the next nextResult() call. */
         struct mds_gc_entry e;
         std::memset(&e, 0, sizeof(e));
@@ -7929,7 +7929,7 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — Shared 2PC journal CRUD
+ * Phase 8A -- Shared 2PC journal CRUD
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_journal_put(void *handle,
@@ -8271,7 +8271,7 @@ int rondb_shim_journal_scan(void *handle,
  * Layout state CRUD (schema v6)
  *   mds_layout_state   : PK=(fileid BIGUNSIGNED, stateid_other VARBINARY 12),
  *                        partition by fileid
- *   mds_layout_by_file : PK=(fileid, stateid_other) — legacy index kept
+ *   mds_layout_by_file : PK=(fileid, stateid_other) -- legacy index kept
  *   mds_ds_layout_idx  : PK=(ds_id, clientid, fileid), partition by fileid
  *
  * mds_layout_by_client was removed in v6; ix_layout_state_clientid
@@ -8325,7 +8325,7 @@ int rondb_shim_layout_state_put(void *handle,
     }
 
     /* 1. Insert/write layout_state.
-     * PK = (fileid, stateid_other) — both via equal(). */
+     * PK = (fileid, stateid_other) -- both via equal(). */
     op = tx->getNdbOperation(ls_tbl);
     if (op == nullptr) { goto layout_put_err; }
     op->writeTuple();
@@ -8767,7 +8767,7 @@ int rondb_shim_layout_del_all_for_client(void *handle, uint64_t clientid)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A+ — ds_layout_idx scan by ds_id
+ * Phase 8A+ -- ds_layout_idx scan by ds_id
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_ds_layout_idx_scan(void *handle, uint32_t ds_id,
@@ -8844,7 +8844,7 @@ int rondb_shim_ds_layout_idx_scan(void *handle, uint32_t ds_id,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A+ — layout_by_file iteration with layout_state join
+ * Phase 8A+ -- layout_by_file iteration with layout_state join
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
@@ -8943,7 +8943,7 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A — Client recovery CRUD (mds_client_recovery: PK=clientid)
+ * Phase 8A -- Client recovery CRUD (mds_client_recovery: PK=clientid)
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_recovery_put(void *handle, uint64_t clientid,
@@ -9138,7 +9138,7 @@ int rondb_shim_recovery_get(void *handle, uint64_t clientid,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A+ — Recovery record scan (full table scan with owner filter)
+ * Phase 8A+ -- Recovery record scan (full table scan with owner filter)
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_recovery_scan(void *handle, uint32_t filter_mds_id,
@@ -9219,7 +9219,7 @@ int rondb_shim_recovery_scan(void *handle, uint32_t filter_mds_id,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Node registry DDL + CRUD
+ * Phase 9A -- Node registry DDL + CRUD
  * ----------------------------------------------------------------------- */
 
 static int rondb_define_node_registry_table(NdbDictionary::Dictionary *dict)
@@ -9507,7 +9507,7 @@ int rondb_shim_mds_scan_stale(void *handle, uint64_t threshold_ns,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Range-based counter allocation (CAS pattern)
+ * Phase 9A -- Range-based counter allocation (CAS pattern)
  *
  * Used for fileid_counter and gc_seq_counter to avoid hot-row
  * contention under multi-MDS concurrent writes.
@@ -9605,7 +9605,7 @@ int rondb_shim_alloc_gc_seq_range(void *handle, uint32_t batch_size,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9A — Lock reaping for dead nodes
+ * Phase 9A -- Lock reaping for dead nodes
  *
  * Scan mds_ns_lock_holders for all rows matching (owner_mds_id,
  * owner_epoch).  For each holder found, delete the holder row and
@@ -9725,7 +9725,7 @@ int rondb_shim_lock_reap_by_owner(void *handle,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 9C — Delta broadcast DDL + CRUD
+ * Phase 9C -- Delta broadcast DDL + CRUD
  * ----------------------------------------------------------------------- */
 
 static int rondb_define_delta_broadcast_table(NdbDictionary::Dictionary *dict)
@@ -9836,7 +9836,7 @@ int rondb_shim_delta_insert(void *handle,
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
         /* Duplicate key (constraint violation) is not fatal for
-         * changefeed — the record was already inserted. */
+         * changefeed -- the record was already inserted. */
         if (err.classification == NdbError::ConstraintViolation) {
             return 0;
         }
@@ -10083,7 +10083,7 @@ int rondb_shim_delta_seqno_load(void *handle, uint32_t mds_id,
     uint64_t val = 0;
     int rc = rondb_read_meta_u64(state, key_buf, &val);
     if (rc != 0) {
-        /* Key not found — first boot for this MDS, start at 1. */
+        /* Key not found -- first boot for this MDS, start at 1. */
         *seqno = 1;
         return 0;
     }
@@ -10697,7 +10697,7 @@ int rondb_shim_stripe_map_scan(void *handle,
                   return a.ordinal < b.ordinal;
               });
 
-    /* Build a fileid → index map for fast entry lookup.
+    /* Build a fileid -> index map for fast entry lookup.
      * Since entries are sorted by fileid, we only need the start
      * offset and count for each fileid. */
     struct entry_span { size_t start; size_t count; };
@@ -10731,7 +10731,7 @@ int rondb_shim_stripe_map_scan(void *handle,
         /* Look up entries for this fileid. */
         auto it = ent_map.find(hdr.fileid);
         if (it == ent_map.end()) {
-            /* Header with no entries — skip. */
+            /* Header with no entries -- skip. */
             continue;
         }
 
@@ -11096,7 +11096,7 @@ int rondb_shim_open_scan_client(void *handle, uint64_t clientid,
  * Writes the xattr then updates the inode's ctime and change
  * counter. Both operations use self-contained NDB transactions.
  * A single-transaction implementation is possible but requires
- * cross-table NDB operations within one T2 transaction — deferred
+ * cross-table NDB operations within one T2 transaction -- deferred
  * to a future optimization pass.
  * ----------------------------------------------------------------------- */
 
@@ -11112,7 +11112,7 @@ int rondb_shim_open_scan_client(void *handle, uint64_t clientid,
  *   * executes entirely at the NDB data node (zero extra round
  *     trips, same cost as a plain update),
  *   * increments `change` atomically with no read-modify-write
- *     race between concurrent xattr mutators — the only
+ *     race between concurrent xattr mutators -- the only
  *     interleaving is NDB's own TC-level ordering, which is
  *     strictly serial per row,
  *   * holds the strict-monotonic property we advertise via

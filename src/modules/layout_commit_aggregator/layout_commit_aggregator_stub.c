@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_commit_aggregator_stub.c — no-op stubs.
+ * layout_commit_aggregator_stub.c -- no-op stubs.
  *
  * Linked into pnfs_mds_core when ENABLE_LAYOUT_COMMIT_AGGREGATOR=OFF
  * (community build).  The real implementation is in
@@ -10,14 +10,14 @@
  *
  * Semantics: the aggregator is unavailable.  init() returns success
  * with a NULL handle so callers' null-checks short-circuit; submit()
- * returns 0 (silently dropped — the caller is expected to also
+ * returns 0 (silently dropped -- the caller is expected to also
  * persist directly via the catalogue, which is what every existing
  * code path already does for durability), peek() / flush_fileid()
  * miss, flush_all_dirty() returns 0, drop() and stats_get() are
  * safe no-ops.
  *
  * The community daemon therefore performs one RonDB write per
- * LAYOUTCOMMIT instead of amortising — correct, just less
+ * LAYOUTCOMMIT instead of amortising -- correct, just less
  * efficient.
  */
 #include "layout_commit_aggregator.h"

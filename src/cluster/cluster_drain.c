@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_drain.c — Donor-local drain orchestrator (Seq 8).
+ * cluster_drain.c -- Donor-local drain orchestrator (Seq 8).
  */
 
 #include "cluster_drain.h"

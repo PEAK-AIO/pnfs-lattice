@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * xdr_ops_layout.c — pNFS layout XDR decoders and result encoders.
+ * xdr_ops_layout.c -- pNFS layout XDR decoders and result encoders.
  */
 
 #include <stdint.h>
@@ -64,7 +64,7 @@ bool decode_op_getdeviceinfo(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &a->maxcount)) {
         return false;
 }
-    /* notify_types bitmap — consume but ignore. */
+    /* notify_types bitmap -- consume but ignore. */
     return xdr_nfs4_bitmap_decode(xdrs, bm, NFS4_BITMAP_WORDS, &bm_words);
 }
 
@@ -100,7 +100,7 @@ bool decode_op_layoutreturn(XDR *xdrs, struct nfs4_op *op)
         if (!xdr_nfs4_stateid_decode(xdrs, &a->stateid)) {
             return false;
 }
-        /* lrf_body opaque — consume length + skip. */
+        /* lrf_body opaque -- consume length + skip. */
         if (!xdr_uint32_t(xdrs, &body_len)) {
             return false;
 }
@@ -192,11 +192,11 @@ bool decode_op_layouterror(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_layouterror *a = &op->arg.layouterror;
     uint32_t st_val, op_val, de_count;
-    /* RFC 7862 §15.6: stateid, offset, length, device_error<> */
+    /* RFC 7862 S15.6: stateid, offset, length, device_error<> */
     if (!xdr_nfs4_stateid_decode(xdrs, &a->stateid)) { return false; }
     if (!xdr_uint64_t(xdrs, &a->offset)) { return false; }
     if (!xdr_uint64_t(xdrs, &a->length)) { return false; }
-    /* device_error4 array — decode count + first entry only. */
+    /* device_error4 array -- decode count + first entry only. */
     if (!xdr_uint32_t(xdrs, &de_count)) { return false; }
     if (de_count == 0) { return true; }
     if (!xdr_opaque_decode(xdrs, (char *)a->deviceid, NFS4_DEVICEID4_SIZE)) {
@@ -250,20 +250,20 @@ bool decode_op_layoutstats(XDR *xdrs, struct nfs4_op *op)
  *             ffl_user(4) ffl_group(4)
  *   ff_flags(4)
  *
- * Phase C / Step 6 of docs/hpc-nto1-plan.md — the encoder splits into
+ * Phase C / Step 6 of docs/hpc-nto1-plan.md -- the encoder splits into
  * two helpers selected by lg->ff_xdr_form:
  *
- *   _legacy  — emits one ff_mirror4 per stripe, each with
+ *   _legacy  -- emits one ff_mirror4 per stripe, each with
  *              ds_count = mirror_count.  This is what every previous
  *              version of the daemon produced and is what pre-Linux-
  *              6.18 flex-files clients consume.
- *   _striped — emits a single ff_mirror4 whose ds_count equals the
+ *   _striped -- emits a single ff_mirror4 whose ds_count equals the
  *              stripe count, listing every DS in the layout.  Linux
  *              6.18+ clients consume this as the per-stripe DS
  *              dispatch table (dss_id = offset / stripe_unit) and
  *              fan out parallel WRITE / READ RPCs across all DSes.
  *
- * Both helpers emit the same RFC 8435 wire format — only the
+ * Both helpers emit the same RFC 8435 wire format -- only the
  * mirror_count and per-mirror ds_count differ.
  * ----------------------------------------------------------------------- */
 
@@ -427,7 +427,7 @@ static bool encode_ff_layout4_body_legacy(XDR *body_xdrs,
 static bool encode_ff_layout4_body_striped(XDR *body_xdrs,
                                            const struct nfs4_res_layoutget *lg)
 {
-    /* stripe_unit — the load-bearing field for the 6.18+ client's
+    /* stripe_unit -- the load-bearing field for the 6.18+ client's
      * dss_id dispatch.  See compound_layout.c's runtime BUG check. */
     uint64_t su = (uint64_t)lg->stripe_unit;
     if (!xdr_uint64_t(body_xdrs, &su)) {
@@ -466,8 +466,8 @@ static bool encode_ff_layout4_body_striped(XDR *body_xdrs,
 /**
  * Compute the worst-case encoded size of one ff_data_server4 entry.
  * Bounded by deviceid(16) + efficiency(4) + stateid(16) + fh_count(4)
- * + fh_len(4) + fh(MDS_NFS_FH_MAX, padded) + user_len(4) + user_str(≄12)
- * + group_len(4) + group_str(≄12).  ~200 bytes upper bound; we round
+ * + fh_len(4) + fh(MDS_NFS_FH_MAX, padded) + user_len(4) + user_str(!~12)
+ * + group_len(4) + group_str(!~12).  ~200 bytes upper bound; we round
  * up to 256 for headroom and 4-byte XDR alignment.
  */
 #define FF_DATA_SERVER4_MAX_BYTES  256
@@ -477,8 +477,8 @@ static bool encode_ff_layout4_body_striped(XDR *body_xdrs,
  * (default LEGACY) and emits the body opaque<> payload around the
  * chosen helper.
  *
- * Phase 2 of the QA plan — heap-back the body buffer.  The legacy
- * fixed `char body_buf[8192]` overflowed silently for >≂40 DSes;
+ * Phase 2 of the QA plan -- heap-back the body buffer.  The legacy
+ * fixed `char body_buf[8192]` overflowed silently for >~40 DSes;
  * heap-allocating sized to (ds_count * FF_DATA_SERVER4_MAX_BYTES) +
  * 64 bytes of frame overhead lets the same code path serve 4-stripe
  * and 1024-stripe layouts without truncation.  Allocation failure is
@@ -511,7 +511,7 @@ static bool encode_ff_layout4_body(XDR *xdrs,
 
     /* Frame overhead: stripe_unit(8) + outer_count(4) + per-mirror
      * ds_count(4) repeated up to ff_mirror_count + ff_flags(4) +
-     * stats_collect_hint(4) ≈ 16 + 4*ff_mirror_count.  Cap at 64
+     * stats_collect_hint(4) ~ 16 + 4*ff_mirror_count.  Cap at 64
      * bytes plus 4 bytes per mirror to bound the overhead. */
     body_cap = (size_t)worst_ds_count * FF_DATA_SERVER4_MAX_BYTES;
     body_cap += 64 + 4 * (size_t)lg->ff_mirror_count;
@@ -602,7 +602,7 @@ bool encode_res_layoutget(XDR *xdrs, const struct nfs4_result *r)
      *   [deviceid 16][nfl_util u32][first_stripe_index u32]
      *   [pattern_offset u64][fh_list count + fhs]
      *
-     * Phase 2 of the QA plan — heap-back the body buffer.  Sized to
+     * Phase 2 of the QA plan -- heap-back the body buffer.  Sized to
      * deviceid(16) + util(4) + first_idx(4) + pat_offset(8) +
      * fh_count(4) + per-DS (fh_len(4) + fh(MDS_NFS_FH_MAX, padded)).
      * Allocation failure surfaces as XDR encode error. */
@@ -613,7 +613,7 @@ bool encode_res_layoutget(XDR *xdrs, const struct nfs4_result *r)
     }
     xdrmem_ncreate(&body_xdrs, body_buf, (uint32_t)body_cap, XDR_ENCODE);
     {
-        /* RFC 5661 §13.4.2: nfl_util encodes stripe_unit in low
+        /* RFC 5661 S13.4.2: nfl_util encodes stripe_unit in low
          * 31 bits, and NFL4_UFLG_COMMIT_THRU_MDS in bit 31. */
 #define NFL4_UFLG_COMMIT_THRU_MDS 0x80000000U
         uint32_t nfl_util = lg->stripe_unit & ~NFL4_UFLG_COMMIT_THRU_MDS;
@@ -621,7 +621,7 @@ bool encode_res_layoutget(XDR *xdrs, const struct nfs4_result *r)
         uint64_t pat_offset = 0;
         uint32_t fh_count = lg->ds_count;
 
-        /* deviceid — use first DS's deviceid. */
+        /* deviceid -- use first DS's deviceid. */
         if (lg->ds_count > 0) {
             if (!xdr_opaque_encode(&body_xdrs,
                     (const char *)lg->ds[0].deviceid,
@@ -724,10 +724,10 @@ bool encode_res_getdeviceinfo(XDR *xdrs, const struct nfs4_result *r)
 
         /*
          * Flex-files (RFC 8435): ffda_netaddrs is a SINGLE
-         * multipath_list4 = netaddr4<> — a flat array of addresses.
+         * multipath_list4 = netaddr4<> -- a flat array of addresses.
          *
          * Files layout (RFC 5661): multipath_ds_list<> is an array
-         * of multipath_list4 — two-level: [DS count][per-DS count + addrs].
+         * of multipath_list4 -- two-level: [DS count][per-DS count + addrs].
          */
         if (layout_type == LAYOUT4_FLEX_FILES) {
             /* Flat address list: total count, then all netaddr4 entries. */
@@ -763,7 +763,7 @@ bool encode_res_getdeviceinfo(XDR *xdrs, const struct nfs4_result *r)
             uint16_t port = gdi->ds[i].port;
 
             /* Files layout: per-DS inner multipath count.
-             * Flex-files: skip — already wrote flat count above. */
+             * Flex-files: skip -- already wrote flat count above. */
             if (layout_type != LAYOUT4_FLEX_FILES) {
                 if (!xdr_uint32_t(&dev_xdrs, &addr_count)) {
                     return false;

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 
-# Core MDS modules — shared between the daemon and unit tests.
+# Core MDS modules -- shared between the daemon and unit tests.
 add_library(pnfs_mds_core STATIC
     compound.c
     compound_session.c
@@ -135,7 +135,7 @@ if(ENABLE_RONDB)
     set_target_properties(pnfs-mds PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
-# Install targets — used by 'cmake --install' or 'make install'.
+# Install targets -- used by 'cmake --install' or 'make install'.
 install(TARGETS pnfs-mds RUNTIME DESTINATION bin)
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
         DESTINATION include/pnfs-mds

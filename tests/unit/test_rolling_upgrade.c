@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rolling_upgrade.c — Unit tests for rolling upgrade V1 (Item 46).
+ * test_rolling_upgrade.c -- Unit tests for rolling upgrade V1 (Item 46).
  *
  * Tests cover: version serialization, legacy shim, version string helper,
  * sync barrier, controlled demote, promote compat, upgrade status parsing,
@@ -244,7 +244,7 @@ static void test_freeze_owned_subtrees(void)
                          SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Add a subtree owned by a different node — should not be frozen. */
+    /* Add a subtree owned by a different node -- should not be frozen. */
     st = subtree_map_add(map, "/other", 2, "mds2.local",
                          SUBTREE_ACTIVE, 1);
     ASSERT_EQ(st, MDS_OK);
@@ -471,7 +471,7 @@ static void test_demote_wrong_role_guard(void)
     };
     ASSERT_EQ(failover_init(&fcfg, &ctx), MDS_OK);
 
-    /* ctx starts in STANDBY — demote must fail. */
+    /* ctx starts in STANDBY -- demote must fail. */
     ASSERT_EQ(failover_get_role(ctx), FAILOVER_STANDBY);
     /* repl=NULL triggers the repl-required check first, but if role is
      * wrong it should still be MDS_ERR_PERM regardless. */
@@ -612,9 +612,9 @@ static void test_active_lifecycle_init(void)
 }
 
 /* ===================================================================
- * Test 19: Lifecycle FSM allows ACTIVE_SERVING → DRAINING → DRAINED
+ * Test 19: Lifecycle FSM allows ACTIVE_SERVING -> DRAINING -> DRAINED
  *          (the two-step sequence controlled demote uses) but rejects
- *          the invalid direct ACTIVE_SERVING → DRAINED jump.
+ *          the invalid direct ACTIVE_SERVING -> DRAINED jump.
  * =================================================================== */
 static void test_demote_lifecycle_fsm(void)
 {
@@ -631,11 +631,11 @@ static void test_demote_lifecycle_fsm(void)
     ASSERT_EQ(cluster_membership_get(ctx, 1, &m), MDS_OK);
     ASSERT_EQ((int)m.lifecycle, (int)NODE_ACTIVE_SERVING);
 
-    /* Direct ACTIVE_SERVING → DRAINED must fail. */
+    /* Direct ACTIVE_SERVING -> DRAINED must fail. */
     ASSERT_EQ(cluster_membership_set_lifecycle(ctx, 1, NODE_DRAINED),
               MDS_ERR_INVAL);
 
-    /* Two-step: ACTIVE_SERVING → DRAINING → DRAINED must succeed. */
+    /* Two-step: ACTIVE_SERVING -> DRAINING -> DRAINED must succeed. */
     ASSERT_EQ(cluster_membership_set_lifecycle(ctx, 1, NODE_DRAINING),
               MDS_OK);
     ASSERT_EQ(cluster_membership_get(ctx, 1, &m), MDS_OK);
@@ -652,7 +652,7 @@ static void test_demote_lifecycle_fsm(void)
 
 
 /* ===================================================================
- * Test 20: cluster_membership_remove_self — member is removed.
+ * Test 20: cluster_membership_remove_self -- member is removed.
  * =================================================================== */
 static void test_self_remove_succeeds(void)
 {
@@ -707,7 +707,7 @@ static void test_self_remove_partner_loss_fires(void)
     ASSERT_EQ(cluster_membership_init(&cfg, smap, NULL, &ctx), MDS_OK);
 
     /* Register partner-loss watcher: watch for partner_id == 1
-     * (self — simulates what the standby sees when the primary
+     * (self -- simulates what the standby sees when the primary
      * is configured as its partner). */
     cluster_membership_set_partner_loss_cb(ctx, 1, ploss_test_cb, NULL);
 
@@ -746,7 +746,7 @@ static void test_self_remove_no_ploss_if_draining(void)
     ASSERT_EQ(cluster_membership_set_lifecycle(ctx, 1, NODE_DRAINING),
               MDS_OK);
 
-    /* Self-remove while DRAINING — should succeed but NOT fire ploss. */
+    /* Self-remove while DRAINING -- should succeed but NOT fire ploss. */
     ASSERT_EQ(cluster_membership_remove_self(ctx), MDS_OK);
 
     /* Partner-loss callback must NOT have fired. */

@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * placement.c — Stripe placement policy.
+ * placement.c -- Stripe placement policy.
  *
  * Phase 2: round-robin across ONLINE data servers.
  * Phase 3 will add capacity-weighted and tier-aware policies.
- * See architecture.md §3.7 for full design.
+ * See architecture.md S3.7 for full design.
  */
 
 #include <stdlib.h>
@@ -635,7 +635,7 @@ enum mds_status ds_filter_with_caps(
 }
 
 /*
- * Phase H of docs/hpc-nto1-plan.md — ds_filter_compatible with a soft
+ * Phase H of docs/hpc-nto1-plan.md -- ds_filter_compatible with a soft
  * preference (preferred transport bits + preferred capability bits).
  *
  * Two-pass scan over the same input array:
@@ -650,7 +650,7 @@ enum mds_status ds_filter_with_caps(
  *                      RDMA / GPUDirect hardware).
  *
  * Behaviour with preferred_transport == 0 && preferred_caps == 0 is
- * delegated to ds_filter_compatible — same wire shape, no allocation
+ * delegated to ds_filter_compatible -- same wire shape, no allocation
  * overhead beyond what the legacy callers already pay.  Memory
  * ownership matches the rest of the file: caller owns *out and must
  * free it.
@@ -668,7 +668,7 @@ enum mds_status ds_filter_compatible_preferred(
         return MDS_ERR_INVAL;
     }
 
-    /* No preference — fall through to the legacy filter so the
+    /* No preference -- fall through to the legacy filter so the
      * one-arg-shape callers are guaranteed bit-identical. */
     if (preferred_transport == 0 && preferred_caps == 0) {
         return ds_filter_compatible(in, in_count,

@@ -2,9 +2,9 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * lock_state.h — NFSv4.1 byte-range lock manager API.
+ * lock_state.h -- NFSv4.1 byte-range lock manager API.
  *
- * Implements LOCK, LOCKT, LOCKU per RFC 8881 §18.10-18.12.
+ * Implements LOCK, LOCKT, LOCKU per RFC 8881 S18.10-18.12.
  * Thread-safe via striped mutexes.
  */
 
@@ -18,7 +18,7 @@
 /* RFC 8881 lock types */
 #define READ_LT          1
 #define WRITE_LT         2
-#define READW_LT         3   /* blocking read (not implemented — treated as READ_LT) */
+#define READW_LT         3   /* blocking read (not implemented -- treated as READ_LT) */
 #define WRITEW_LT        4   /* blocking write (treated as WRITE_LT) */
 
 #define LOCK_OWNER_MAX  128

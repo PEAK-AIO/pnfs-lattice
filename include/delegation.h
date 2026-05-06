@@ -2,14 +2,14 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * delegation.h — NFSv4.1 file delegation manager.
+ * delegation.h -- NFSv4.1 file delegation manager.
  *
  * Tracks READ and WRITE delegations granted to clients via OPEN.
  * When a conflicting operation arrives from another client, the
  * delegation is recalled via CB_RECALL on the backchannel.
  *
  * Thread-safe via 16 striped mutexes (hash on fileid).
- * See RFC 8881 §10.4.
+ * See RFC 8881 S10.4.
  */
 
 #ifndef DELEGATION_H
@@ -19,15 +19,15 @@
 #include <stdbool.h>
 #include "open_state.h"  /* struct nfs4_stateid */
 
-/* Delegation types (RFC 8881 §18.16.4 — open_delegation_type4,
- * extended by RFC 7862 §15.5 — NFSv4.2 attribute delegations).
+/* Delegation types (RFC 8881 S18.16.4 -- open_delegation_type4,
+ * extended by RFC 7862 S15.5 -- NFSv4.2 attribute delegations).
  *
- *   0 OPEN_DELEGATE_NONE              — v4.0 / fallback (void body)
- *   1 OPEN_DELEGATE_READ              — read deleg
- *   2 OPEN_DELEGATE_WRITE             — write deleg
- *   3 OPEN_DELEGATE_NONE_EXT          — v4.1+ "declined" with reason
- *   4 OPEN_DELEGATE_READ_ATTRS_DELEG  — v4.2 attr-only deleg (NOT us)
- *   5 OPEN_DELEGATE_WRITE_ATTRS_DELEG — v4.2 attr-only deleg (NOT us)
+ *   0 OPEN_DELEGATE_NONE              -- v4.0 / fallback (void body)
+ *   1 OPEN_DELEGATE_READ              -- read deleg
+ *   2 OPEN_DELEGATE_WRITE             -- write deleg
+ *   3 OPEN_DELEGATE_NONE_EXT          -- v4.1+ "declined" with reason
+ *   4 OPEN_DELEGATE_READ_ATTRS_DELEG  -- v4.2 attr-only deleg (NOT us)
+ *   5 OPEN_DELEGATE_WRITE_ATTRS_DELEG -- v4.2 attr-only deleg (NOT us)
  *
  * The encoder selects between OPEN_DELEGATE_NONE and
  * OPEN_DELEGATE_NONE_EXT based on the session minorversion: v4.0
@@ -40,19 +40,19 @@
  * value collides with the v4.2 attribute-delegation discriminator,
  * caused Wireshark to dissect our "declined" replies as
  * READ_ATTRS_DELEG, and made pynfs parse the open_none_delegation4
- * body as the (longer) attr-deleg body — producing EOFError on
+ * body as the (longer) attr-deleg body -- producing EOFError on
  * every OPEN reply.  RFC numbers are the source of truth. */
 #define OPEN_DELEGATE_NONE                 0
 #define OPEN_DELEGATE_READ                 1
 #define OPEN_DELEGATE_WRITE                2
-#define OPEN_DELEGATE_NONE_EXT             3   /* RFC 8881 §18.16.4 */
-#define OPEN_DELEGATE_READ_ATTRS_DELEG     4   /* RFC 7862 §15.5  (unused) */
-#define OPEN_DELEGATE_WRITE_ATTRS_DELEG    5   /* RFC 7862 §15.5  (unused) */
+#define OPEN_DELEGATE_NONE_EXT             3   /* RFC 8881 S18.16.4 */
+#define OPEN_DELEGATE_READ_ATTRS_DELEG     4   /* RFC 7862 S15.5  (unused) */
+#define OPEN_DELEGATE_WRITE_ATTRS_DELEG    5   /* RFC 7862 S15.5  (unused) */
 
 /*
- * why_no_delegation4 codes (RFC 8881 §18.16.4).  Only valid when
+ * why_no_delegation4 codes (RFC 8881 S18.16.4).  Only valid when
  * the open_delegation4 type is OPEN_DELEGATE_NONE_EXT.  WND4_NOT_WANTED
- * is the most common reason — the client set OPEN4_SHARE_ACCESS_WANT_NO_DELEG
+ * is the most common reason -- the client set OPEN4_SHARE_ACCESS_WANT_NO_DELEG
  * (or WANT_CANCEL).  WND4_CONTENTION and WND4_RESOURCE carry an
  * additional bool tail (ond_server_will_push_deleg /
  * ond_server_will_signal_avail).  All other variants have a void tail.
@@ -67,9 +67,9 @@
 #define WND4_CANCELLED          7
 #define WND4_IS_DIR             8
 
-struct nfs4_session;  /* Forward — for CB_RECALL delivery. */
+struct nfs4_session;  /* Forward -- for CB_RECALL delivery. */
 struct mds_catalogue;
-struct session_table; /* Forward — for backchannel snapshot lookup. */
+struct session_table; /* Forward -- for backchannel snapshot lookup. */
 
 /** Opaque delegation table handle. */
 struct deleg_table;
@@ -203,7 +203,7 @@ void deleg_revoke_client(struct deleg_table *dt, uint64_t clientid);
  * Intended for the final-unlink path (op_remove) and any other
  * code path that destroys the underlying object: once the file
  * is gone, every grant against it is meaningless and must be
- * dropped to free the per-grant struct deleg_entry — otherwise
+ * dropped to free the per-grant struct deleg_entry -- otherwise
  * the table grows without bound under open/unlink workloads
  * (heaptrack confirmed ~80 B per OPEN that takes the grant
  * branch is retained forever in deleg_grant).
@@ -215,7 +215,7 @@ void deleg_revoke_client(struct deleg_table *dt, uint64_t clientid);
  * cleans up on lease expiry.
  *
  * Idempotent and NULL-safe.  Locks only the stripe owning the
- * fileid's bucket — safe to call from inside any compound op.
+ * fileid's bucket -- safe to call from inside any compound op.
  *
  * @param dt      Table handle (NULL is a no-op).
  * @param fileid  File whose grants to drop.

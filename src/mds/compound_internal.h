@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * compound_internal.h — Private dispatch header for compound op modules.
+ * compound_internal.h -- Private dispatch header for compound op modules.
  *
  * NOT a public API header.  Only included by compound_*.c and
  * compound.c for cross-file function calls.
@@ -152,7 +152,7 @@ void compound_recall_dir_delegations(struct compound_data *cd,
 				     uint64_t dir_fileid);
 
 /**
- * RFC 8881 §12.7 / §16.4.5 / §18.26.4 — component4 name validation.
+ * RFC 8881 S12.7 / S16.4.5 / S18.26.4 -- component4 name validation.
  *
  * Returns NFS4_OK iff @a name is a valid component4:
  *   - non-empty                          (else NFS4ERR_INVAL)
@@ -227,10 +227,10 @@ enum nfs4_status mds_status_to_nfs4(enum mds_status s);
 uint64_t xattr_base_fileid(uint64_t fh);
 
 /* -----------------------------------------------------------------------
- * Current-stateid helpers (RFC 8881 §16.2.4)
+ * Current-stateid helpers (RFC 8881 S16.2.4)
  *
  * The wire form of the special CURRENT_STATEID4 marker is
- * seqid==1 and other==all-zeros (RFC 8881 §16.2.3.1.2).  Operations
+ * seqid==1 and other==all-zeros (RFC 8881 S16.2.3.1.2).  Operations
  * that consume a stateid and observe this marker MUST replace it with
  * the per-compound current_stateid stashed by an earlier producer
  * (OPEN, LOCK, LOCKU, OPEN_DOWNGRADE, CLOSE, LAYOUTGET, LAYOUTRETURN).
@@ -292,13 +292,13 @@ enum nfs4_status op_destroy_session(struct compound_data *cd,
 				    const struct nfs4_op *op,
 				    struct nfs4_result *res);
 /*
- * RFC 8881 §18.33 BACKCHANNEL_CTL.
+ * RFC 8881 S18.33 BACKCHANNEL_CTL.
  *
  * Updates the callback program number and/or callback security
  * parameters on the SEQUENCE-bound session.  Pynfs DELEG7
  * (testCBSecParmsChange) drives this path.  The session_id is
  * obtained from the leading SEQUENCE operation in the same
- * compound — BACKCHANNEL_CTL's own arg struct does not carry one
+ * compound -- BACKCHANNEL_CTL's own arg struct does not carry one
  * (the RFC defines it implicitly via the "current session").
  */
 enum nfs4_status op_backchannel_ctl(struct compound_data *cd,

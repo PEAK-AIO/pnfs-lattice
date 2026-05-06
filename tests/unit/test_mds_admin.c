@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mds_admin.c — Unit tests for admin_util helpers (Item 47).
+ * test_mds_admin.c -- Unit tests for admin_util helpers (Item 47).
  */
 
 #include <stdio.h>
@@ -70,7 +70,7 @@ static void test_parse_admin_endpoint_json_null(void)
     const char *argv[] = {"--json"};
     const char *host = NULL;
     uint16_t port = 0;
-    /* json pointer is NULL — should not crash. */
+    /* json pointer is NULL -- should not crash. */
     parse_admin_endpoint(1, argv, &host, &port, NULL);
 
     ASSERT_STREQ(host, DEFAULT_MDS_HOST);
@@ -253,7 +253,7 @@ static void test_json_escape_truncation(void)
     char out[4];
     int n = json_escape_string("hello", out, sizeof(out));
 
-    /* Buffer too small — should return -1. */
+    /* Buffer too small -- should return -1. */
     ASSERT_EQ(n, -1);
 
     fprintf(stdout, "PASS\n");
@@ -316,7 +316,7 @@ static void test_parse_ds_mode_valid(void)
 {
     fprintf(stdout, "  test_parse_ds_mode_valid:           ");
     uint8_t out = 99;
-    /* Patched mode removed — only generic is accepted. */
+    /* Patched mode removed -- only generic is accepted. */
     ASSERT_EQ(parse_ds_mode("patched", &out), -1);
     ASSERT_EQ(parse_ds_mode("generic", &out), 0);
     ASSERT_EQ(out, 1);

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_gc.c — Unit tests for the parallel DS GC drainer.
+ * test_ds_gc.c -- Unit tests for the parallel DS GC drainer.
  *
  * The drainer is exercised against the in-memory memdb catalogue
  * (no RonDB dependency; the dispatcher's single-peek fallback fills
@@ -10,7 +10,7 @@
  * created with a temp directory as a fake DS mount so that
  * mds_proxy_unlink_ds_file() returns MDS_OK + existed=false on every
  * absent path, which lets process_one_entry() exit on the first
- * stripe row's first mirror with had_any_existed=false — i.e. the
+ * stripe row's first mirror with had_any_existed=false -- i.e. the
  * fast path that keeps the test deterministic without simulating the
  * (s, m) layout.
  */

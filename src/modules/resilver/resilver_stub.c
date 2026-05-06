@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * resilver_stub.c — no-op stub implementations of the resilver API.
+ * resilver_stub.c -- no-op stub implementations of the resilver API.
  *
  * Linked into pnfs_mds_core when ENABLE_RESILVER=OFF (community
  * build). The full implementation is in resilver.c in this same

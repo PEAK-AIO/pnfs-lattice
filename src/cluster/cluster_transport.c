@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_transport.c — Lightweight TCP transport for inter-MDS 2PC.
+ * cluster_transport.c -- Lightweight TCP transport for inter-MDS 2PC.
  *
  * Wire format (all multi-byte fields big-endian):
  *   Header: [msg_type u8][payload_len u32]  (5 bytes)
@@ -160,7 +160,7 @@ struct cluster_server {
     int                listen_fd;
     uint16_t           port;
     struct mds_catalogue *cat;
-    /* catalogue handle — all handlers use srv->cat. */
+    /* catalogue handle -- all handlers use srv->cat. */
     struct subtree_map *smap;
     pthread_t          thread;
     _Atomic bool      running;
@@ -287,7 +287,7 @@ static bool dest_host_is_allowed(const struct cluster_server *srv,
                                  const char *host)
 {
     if (srv->allowed_peer_count == 0) {
-        return true; /* No allowlist — allow all destinations. */
+        return true; /* No allowlist -- allow all destinations. */
 }
 
     struct in_addr addr;
@@ -462,7 +462,7 @@ static void handle_mig_begin(struct cluster_server *srv, int conn_fd,
                              const uint8_t *payload, uint32_t plen)
 {
     (void)srv;
-    /* Parse path (informational only — dest just ACKs). */
+    /* Parse path (informational only -- dest just ACKs). */
     uint8_t ack_status = 0;  /* 0 = OK */
     if (plen < 2) {
         ack_status = 1;
@@ -709,7 +709,7 @@ static void handle_resilver_status(const struct cluster_server *srv, int conn_fd
 }
 
 /* -----------------------------------------------------------------------
- * Extended resilver status handler (Seq 11 — skip counters)
+ * Extended resilver status handler (Seq 11 -- skip counters)
  * ----------------------------------------------------------------------- */
 
 static void handle_resilver_status_ext(const struct cluster_server *srv,
@@ -759,7 +759,7 @@ static void handle_resilver_status_ext(const struct cluster_server *srv,
 
 
 /* -----------------------------------------------------------------------
- * Rebalance admin handlers (§3.8 mirror relocation V1)
+ * Rebalance admin handlers (S3.8 mirror relocation V1)
  * ----------------------------------------------------------------------- */
 
 void cluster_transport_server_set_rebalance(struct cluster_server *srv,
@@ -843,7 +843,7 @@ static void handle_rebalance_status(const struct cluster_server *srv,
 }
 
 /* -----------------------------------------------------------------------
- * Tiering admin handlers (§3.9 storage tiering V1)
+ * Tiering admin handlers (S3.9 storage tiering V1)
  * ----------------------------------------------------------------------- */
 
 void cluster_transport_server_set_tiering(struct cluster_server *srv,
@@ -1125,7 +1125,7 @@ respond:;
 }
 
 /* -----------------------------------------------------------------------
- * Assign admin handler (Seq 7.3 — exact-root migrate)
+ * Assign admin handler (Seq 7.3 -- exact-root migrate)
  * ----------------------------------------------------------------------- */
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
@@ -1498,7 +1498,7 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
         uint32_t payload_len;
 
         /* H2 fix: poll with timeout to prevent single-client DoS.
-         * When TLS is active, check for buffered data first —
+         * When TLS is active, check for buffered data first --
          * SSL may have decrypted a full record already. */
         if (tl_tls_conn == NULL ||
             mds_tls_pending(tl_tls_conn) == 0) {
@@ -1752,7 +1752,7 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
             break;
 
         default:
-            /* Unknown message — disconnect. */
+            /* Unknown message -- disconnect. */
             free(payload);
             goto done;
         }
@@ -1780,7 +1780,7 @@ static void *conn_thread_entry(void *arg)
     if (srv->tls != NULL) {
         if (mds_tls_wrap(srv->tls, fd, true,
                          NULL, &tc) != 0) {
-            /* Handshake failed — drop connection. */
+            /* Handshake failed -- drop connection. */
             unregister_conn_fd(srv, fd);
             close(fd);
             atomic_fetch_sub(&srv->conn_count, 1);
@@ -1815,7 +1815,7 @@ static void *server_thread(void *arg)
         };
         int pr = poll(&pfd, 1, 200);  /* 200 ms */
         if (pr <= 0) {
-            continue;  /* Timeout or error — re-check running flag. */
+            continue;  /* Timeout or error -- re-check running flag. */
         }
 
         struct sockaddr_in client_addr;
@@ -2458,7 +2458,7 @@ void cluster_transport_disconnect_migration(struct migration_transport *t)
 }
 
 /* -----------------------------------------------------------------------
- * Admin migration request (mds-admin CLI → running daemon)
+ * Admin migration request (mds-admin CLI -> running daemon)
  * ----------------------------------------------------------------------- */
 
 enum mds_status cluster_transport_request_migration(
@@ -2628,7 +2628,7 @@ enum mds_status cluster_transport_request_split(
     /* Build payload:
      * [pp_len 2 BE][parent_path]
      * [cp_len 2 BE][child_path]
-     * [child_fileid 8 BE]  (always 0 — daemon resolves)
+     * [child_fileid 8 BE]  (always 0 -- daemon resolves)
      * [dest_id 4 BE]
      * [host_len 2 BE][host][dest_port 2 BE]
      */
@@ -2859,7 +2859,7 @@ static int ct_client_connect(const char *host, uint16_t port)
 }
 
 /* -----------------------------------------------------------------------
- * Resilver client requests (mds-admin CLI → daemon)
+ * Resilver client requests (mds-admin CLI -> daemon)
  * ----------------------------------------------------------------------- */
 
 enum mds_status cluster_transport_request_resilver_start(
@@ -3012,7 +3012,7 @@ enum mds_status cluster_transport_request_resilver_status_ext(
 
 
 /* -----------------------------------------------------------------------
- * Rebalance client requests (mds-admin CLI → daemon)
+ * Rebalance client requests (mds-admin CLI -> daemon)
  * ----------------------------------------------------------------------- */
 
 enum mds_status cluster_transport_request_rebalance_start(
@@ -3122,7 +3122,7 @@ enum mds_status cluster_transport_request_rebalance_status(
 }
 
 /* -----------------------------------------------------------------------
- * Tiering client requests (mds-admin CLI → daemon)
+ * Tiering client requests (mds-admin CLI -> daemon)
  * ----------------------------------------------------------------------- */
 
 enum mds_status cluster_transport_request_tiering_start(
@@ -3522,7 +3522,7 @@ static void handle_cluster_status(const struct cluster_server *srv, int conn_fd,
 }
 
 /* -----------------------------------------------------------------------
- * Cluster membership client requests (mds-admin CLI → daemon)
+ * Cluster membership client requests (mds-admin CLI -> daemon)
  * ----------------------------------------------------------------------- */
 
 enum mds_status cluster_transport_request_node_join(
@@ -4126,7 +4126,7 @@ static void handle_ds_add_admin(const struct cluster_server *srv,
         }
     (void)off;  /* consumed all fields */
     } else {
-        /* Legacy payload — default to patched/tcp, parse addr. */
+        /* Legacy payload -- default to patched/tcp, parse addr. */
         info->mode = DS_MODE_GENERIC;
         info->transport = DS_TRANSPORT_TCP;
         /* Parse "host:/export" from legacy addr. */
@@ -4544,7 +4544,7 @@ static void handle_ds_validate_clr_admin(const struct cluster_server *srv,
         return;
     }
 
-    /* Validation metadata cleared — DS info update above is
+    /* Validation metadata cleared -- DS info update above is
      * the authoritative state. */
     (void)refresh_ds_cache(srv);
     send_status_resp(conn_fd, CT_MSG_DS_VALIDATE_CLR_RESP, MDS_OK);
@@ -5031,7 +5031,7 @@ enum mds_status cluster_transport_request_mig_progress(
 }
 
 /* -----------------------------------------------------------------------
- * Quota wire protocol handlers (§4.5)
+ * Quota wire protocol handlers (S4.5)
  *
  * Payload formats:
  *   QUOTA_SET:     [scope_type u8][scope_id u64 BE][hard_bytes u64 BE]
@@ -5633,7 +5633,7 @@ enum mds_status cluster_transport_request_ds_list(
         arr[i].addr[alen] = '\0';
         off += alen;
 
-        /* V2 structured fields — only present when wire_ver >= 2. */
+        /* V2 structured fields -- only present when wire_ver >= 2. */
         if (wire_ver >= 2 && off + 2 <= resp_len) {
             arr[i].mode = resp[off++];
             arr[i].transport = resp[off++];

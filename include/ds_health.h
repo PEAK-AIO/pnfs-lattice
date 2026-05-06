@@ -2,13 +2,13 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_health.h — Data server health monitoring.
+ * ds_health.h -- Data server health monitoring.
  *
  * Periodically probes each DS_ONLINE data server with NFS NULL RPCs.
  * After fail_threshold consecutive failures, marks the DS offline
  * (replicated via commit queue) and invokes a failure callback.
  *
- * See docs/architecture.md §15 for design.
+ * See docs/architecture.md S15 for design.
  */
 
 #ifndef DS_HEALTH_H

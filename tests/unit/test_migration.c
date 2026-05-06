@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_migration.c — Unit tests for subtree migration.
+ * test_migration.c -- Unit tests for subtree migration.
  *
  * RonDB-native: tests migration chunk serialization (backend-neutral)
  * and migration state enum values.

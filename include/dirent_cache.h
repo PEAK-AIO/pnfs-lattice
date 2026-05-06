@@ -2,9 +2,9 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * dirent_cache.h — In-memory directory entry LRU cache.
+ * dirent_cache.h -- In-memory directory entry LRU cache.
  *
- * Caches (parent_fileid, name) → (child_fileid, child_type) to avoid
+ * Caches (parent_fileid, name) -> (child_fileid, child_type) to avoid
  * NDB reads on repeated LOOKUPs.  Supports negative entries (NOTFOUND)
  * with configurable TTL to suppress NDB reads for missing names
  * (e.g. .git/, .DS_Store probes).

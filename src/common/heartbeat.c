@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * heartbeat.c — MDS↔DS and MDS↔MDS heartbeat.
+ * heartbeat.c -- MDS<->DS and MDS<->MDS heartbeat.
  */
 
 #include <stdlib.h>

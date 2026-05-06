@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * cluster_transport.h — Inter-MDS transport for 2PC rename messages.
+ * cluster_transport.h -- Inter-MDS transport for 2PC rename messages.
  *
  * Defines the transport abstraction (function pointers) and a
  * lightweight TCP implementation.  The same abstraction supports
@@ -61,7 +61,7 @@ struct rename_2pc_transport {
 #define CT_MSG_ABORT    4
 #define CT_MSG_ACK      5
 
-/* Migration message types (§13 subtree migration). */
+/* Migration message types (S13 subtree migration). */
 #define CT_MSG_MIG_BEGIN   6
 #define CT_MSG_MIG_INODE   7
 #define CT_MSG_MIG_FINISH  8
@@ -72,12 +72,12 @@ struct rename_2pc_transport {
 #define CT_MSG_MIG_ADMIN_REQ   11
 #define CT_MSG_MIG_ADMIN_RESP  12
 
-/* Resilver admin messages (§15.3 resilvering). */
+/* Resilver admin messages (S15.3 resilvering). */
 #define CT_MSG_RESILVER_START   13
 #define CT_MSG_RESILVER_STATUS  14
 #define CT_MSG_RESILVER_RESP    15
 
-/* Cluster membership admin messages (§13.5 MDS scale-out scaffold). */
+/* Cluster membership admin messages (S13.5 MDS scale-out scaffold). */
 #define CT_MSG_NODE_JOIN            16
 #define CT_MSG_NODE_LEAVE           17
 #define CT_MSG_CLUSTER_STATUS_REQ   18
@@ -85,15 +85,15 @@ struct rename_2pc_transport {
 #define CT_MSG_MEMBERSHIP_RESP      20  /* generic OK/ERR for join/leave */
 #define CT_MSG_SET_LIFECYCLE        21  /* set node lifecycle state */
 
-/* Split admin messages (§7.1 subtree split scale-out). */
+/* Split admin messages (S7.1 subtree split scale-out). */
 #define CT_MSG_SPLIT_ADMIN_REQ      22
 #define CT_MSG_SPLIT_ADMIN_RESP     23
 
-/* Assign admin messages (§7.3 exact-root migrate for scale-out). */
+/* Assign admin messages (S7.3 exact-root migrate for scale-out). */
 #define CT_MSG_ASSIGN_ADMIN_REQ     24
 #define CT_MSG_ASSIGN_ADMIN_RESP    25
 
-/* Cross-subtree hard link nlink management (§ cross-MDS links). */
+/* Cross-subtree hard link nlink management (S cross-MDS links). */
 /* Split evaluator admin messages (Tier 3 Phase 1). */
 #define CT_MSG_SPLIT_PROPOSALS_REQ   75
 #define CT_MSG_SPLIT_PROPOSALS_RESP  76
@@ -118,37 +118,37 @@ struct rename_2pc_transport {
 #define CT_MSG_MIG_PROGRESS_ADMIN_REQ   31
 #define CT_MSG_MIG_PROGRESS_ADMIN_RESP  32
 
-/* Extended resilver status (Seq 11 — includes skip counters). */
+/* Extended resilver status (Seq 11 -- includes skip counters). */
 #define CT_MSG_RESILVER_STATUS_EXT  33
 
-/* Rebalance admin messages (§3.8 mirror relocation V1). */
+/* Rebalance admin messages (S3.8 mirror relocation V1). */
 #define CT_MSG_REBALANCE_START       34
 #define CT_MSG_REBALANCE_STATUS_REQ  35
 #define CT_MSG_REBALANCE_RESP        36
 
-/* Tiering admin messages (§3.9 storage tiering V1). */
+/* Tiering admin messages (S3.9 storage tiering V1). */
 #define CT_MSG_TIERING_START         37
 #define CT_MSG_TIERING_STOP          38
 #define CT_MSG_TIERING_STATUS_REQ    39
 #define CT_MSG_TIERING_RESP          40
 
-/* Quota admin messages (§4.5 quota management V1). */
+/* Quota admin messages (S4.5 quota management V1). */
 #define CT_MSG_QUOTA_SET             41
 #define CT_MSG_QUOTA_GET_REQ         42
 #define CT_MSG_QUOTA_GET_RESP        43
 #define CT_MSG_QUOTA_DEL             44
 
-/* Rolling upgrade admin messages (§8.5 rolling upgrade V1). */
+/* Rolling upgrade admin messages (S8.5 rolling upgrade V1). */
 #define CT_MSG_FAILOVER_REQ          45
 #define CT_MSG_FAILOVER_RESP         46
 #define CT_MSG_UPGRADE_STATUS_REQ    47
 #define CT_MSG_UPGRADE_STATUS_RESP   48
 
-/* DS registry admin messages (§7 admin CLI V1). */
+/* DS registry admin messages (S7 admin CLI V1). */
 #define CT_MSG_DS_LIST_REQ           49
 #define CT_MSG_DS_LIST_RESP          50
 
-/* DS admin write messages (§7 admin CLI V1, item 47b). */
+/* DS admin write messages (S7 admin CLI V1, item 47b). */
 #define CT_MSG_DS_ADD_REQ            51
 #define CT_MSG_DS_ADD_RESP           52
 #define CT_MSG_DS_SET_STATE_REQ      53
@@ -215,10 +215,10 @@ struct cluster_server;
  * admin migration requests (CT_MSG_MIG_ADMIN_REQ) are also handled.
  *
  * @param port              TCP port to listen on.
- * @param bind_addr        Address to bind (NULL → 127.0.0.1).
- * @param allowed_peers    Array of allowed peer IPs (NULL → accept all).
+ * @param bind_addr        Address to bind (NULL -> 127.0.0.1).
+ * @param allowed_peers    Array of allowed peer IPs (NULL -> accept all).
  * @param allowed_peer_count  Number of entries in allowed_peers.
- * @param max_conns         Max concurrent connections (0 → default 16).
+ * @param max_conns         Max concurrent connections (0 -> default 16).
  * @param cat              Catalogue handle (must not be NULL).
  * @param smap             Subtree map (may be NULL if admin migration not needed).
  * @param[out] out  Receives the server handle.
@@ -386,7 +386,7 @@ enum mds_status cluster_transport_request_resilver_status_ext(
     struct resilver_status_info *info);
 
 /* -----------------------------------------------------------------------
- * Rebalance admin (§3.8 mirror relocation V1)
+ * Rebalance admin (S3.8 mirror relocation V1)
  * ----------------------------------------------------------------------- */
 
 struct rebalance_worker;
@@ -401,7 +401,7 @@ void cluster_transport_server_set_rebalance(struct cluster_server *srv,
                                              struct rebalance_worker *rw);
 
 /**
- * @brief Request the daemon to start rebalancing source → target.
+ * @brief Request the daemon to start rebalancing source -> target.
  *
  * @param mds_host   Daemon cluster transport host.
  * @param mds_port   Daemon cluster transport port.
@@ -428,7 +428,7 @@ enum mds_status cluster_transport_request_rebalance_status(
     struct rebalance_status_info *info);
 
 /* -----------------------------------------------------------------------
- * Tiering admin (§3.9 storage tiering V1)
+ * Tiering admin (S3.9 storage tiering V1)
  * ----------------------------------------------------------------------- */
 
 struct tiering_worker;

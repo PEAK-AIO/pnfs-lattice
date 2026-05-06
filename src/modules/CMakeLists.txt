@@ -14,12 +14,12 @@
 #       else()
 #           target_sources(pnfs_mds_core PRIVATE <name>_stub.c)
 #       endif()
-#   src/modules/<name>/<name>.c       — real implementation
-#   src/modules/<name>/<name>_stub.c  — no-op stubs (community build)
+#   src/modules/<name>/<name>.c       -- real implementation
+#   src/modules/<name>/<name>_stub.c  -- no-op stubs (community build)
 #
 # The header (include/<name>.h) stays unchanged so call sites do not
 # move and the API surface is identical between enterprise and
-# community builds — only the implementation differs.
+# community builds -- only the implementation differs.
 #
 # This file must be included AFTER add_subdirectory(src/cluster) and
 # add_subdirectory(src/mds) so that the pnfs_cluster and pnfs_mds_core

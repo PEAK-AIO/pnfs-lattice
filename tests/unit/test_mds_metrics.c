@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mds_metrics.c — Unit tests for metrics registry.
+ * test_mds_metrics.c -- Unit tests for metrics registry.
  */
 
 #include <stdio.h>

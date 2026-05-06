@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_capacity.c — Phase B unit tests for the live capacity probe.
+ * test_ds_capacity.c -- Phase B unit tests for the live capacity probe.
  *
  * statvfs() against /tmp is reliable on any Linux host (tmpfs or
  * an ext4 mount).  We use it as the "DS" for these tests.
@@ -167,7 +167,7 @@ static void test_auto_weight_full_stays_one(void)
     ASSERT_EQ(ds_capacity_derive_auto_weight(1000, 2000), 1u);
 }
 
-/** Value always lands in {0} ∪ [1, 100] across a wide sweep. */
+/** Value always lands in {0} U [1, 100] across a wide sweep. */
 static void test_auto_weight_bounded(void)
 {
     const uint64_t total = 1ULL << 50;   /* 1 PiB */

@@ -2,8 +2,8 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_repl_health.c — Unit tests for replication health monitoring
- *                      and compound write refusal (§23 item 38a).
+ * test_repl_health.c -- Unit tests for replication health monitoring
+ *                      and compound write refusal (S23 item 38a).
  */
 
 #include <stdio.h>
@@ -66,7 +66,7 @@ static void test_health_init_destroy(void)
 	struct health_monitor *hm = NULL;
 	int rc;
 
-	/* NULL out pointer → error. */
+	/* NULL out pointer -> error. */
 	rc = health_monitor_init(NULL, 5000, false, NULL);
 	ASSERT_EQ(rc, -1);
 
@@ -79,10 +79,10 @@ static void test_health_init_destroy(void)
 	ASSERT_TRUE(health_repl_is_ok(hm));
 	ASSERT_TRUE(!health_writes_blocked(hm));
 
-	/* Destroy without start — must be safe. */
+	/* Destroy without start -- must be safe. */
 	health_monitor_destroy(hm);
 
-	/* Destroy NULL — must be safe. */
+	/* Destroy NULL -- must be safe. */
 	health_monitor_destroy(NULL);
 
 	PASS();
@@ -111,7 +111,7 @@ static void test_health_repl_ok_default(void)
 	/* Let the thread run a few cycles. */
 	usleep(350000);
 
-	/* Still healthy — NULL conn never sets resync. */
+	/* Still healthy -- NULL conn never sets resync. */
 	ASSERT_TRUE(health_repl_is_ok(hm));
 	ASSERT_TRUE(!health_writes_blocked(hm));
 
@@ -189,7 +189,7 @@ static void test_health_refuse_writes_config(void)
  * test_compound_write_refused
  *
  * Verify that health_writes_blocked() returns true when replication
- * is in resync state and refuse_writes is enabled — this is the
+ * is in resync state and refuse_writes is enabled -- this is the
  * function compound.c calls to gate mutating ops.
  * ------------------------------------------------------------------- */
 
@@ -226,7 +226,7 @@ static void test_compound_write_allowed(void)
 	int rc = health_monitor_init(NULL, 100, true, &hm);
 	ASSERT_EQ(rc, 0);
 
-	/* Default: repl_ok=1 → healthy → writes allowed. */
+	/* Default: repl_ok=1 -> healthy -> writes allowed. */
 	ASSERT_EQ(health_writes_blocked(hm), false);
 
 	health_monitor_destroy(hm);

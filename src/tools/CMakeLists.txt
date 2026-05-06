@@ -23,7 +23,7 @@ target_link_libraries(mds-admin
         pthread
 )
 
-# Backend probe tool — validates catalogue backend connectivity.
+# Backend probe tool -- validates catalogue backend connectivity.
 add_executable(mds-backend-probe
     mds_backend_probe.c
 )

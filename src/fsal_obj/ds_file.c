@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_file.c — Data server file creation and file handle capture.
+ * ds_file.c -- Data server file creation and file handle capture.
  *
  * When a new file is created, the MDS pre-creates empty objects on
  * the target DS nodes via its private NFS mounts and captures the
@@ -38,7 +38,7 @@ static int ds_file_remove(const struct mds_ds_map_entry *ds,
                    const uint8_t *ds_fh, uint32_t ds_fh_len)
 {
     /* TODO: implement
-     * Called when a file is deleted from MDS — remove DS object.
+     * Called when a file is deleted from MDS -- remove DS object.
      * May be deferred / batched for efficiency.
      */
     (void)ds;

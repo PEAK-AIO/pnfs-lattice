@@ -2,13 +2,13 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * proxy_io.c — Non-pNFS client proxy read/write.
+ * proxy_io.c -- Non-pNFS client proxy read/write.
  *
  * Clients that do not support pNFS (LAYOUTGET fails or is not attempted)
  * fall back to READ/WRITE through the MDS.  The MDS proxies I/O to the
  * DS via NFS over its private mounts.
  *
- * Data file naming convention (architecture.md §3.4):
+ * Data file naming convention (architecture.md S3.4):
  *   {mount_path}/data/{fileid}_{stripe}_{mirror}
  *
  * Stripe addressing for single-stripe-unit operations:
@@ -58,17 +58,17 @@ struct ds_mount {
 };
 
 /* -----------------------------------------------------------------------
- * FD cache — avoids open()/close() per I/O chunk
+ * FD cache -- avoids open()/close() per I/O chunk
  *
  * Hash table keyed by (fileid, ds_id, stripe, mirror, flags).
  * Doubly-linked LRU list for eviction.  Thread-safe via mutex.
  *
  * Lifetime model (pin/unpin, no extra syscalls on the hot path):
- *   - fd_cache_get()        — returns fd, pins entry (refcount++).
- *   - fd_cache_put()        — inserts new entry already pinned (refcount=1).
- *   - fd_cache_release()    — unpins (refcount--).  Closes+frees if the
+ *   - fd_cache_get()        -- returns fd, pins entry (refcount++).
+ *   - fd_cache_put()        -- inserts new entry already pinned (refcount=1).
+ *   - fd_cache_release()    -- unpins (refcount--).  Closes+frees if the
  *                             entry was marked dead and no pins remain.
- *   - fd_cache_invalidate_* — marks entry dead and unlinks it from the
+ *   - fd_cache_invalidate_* -- marks entry dead and unlinks it from the
  *                             hash/LRU; actual close is deferred to the
  *                             final release so in-flight I/O never sees
  *                             the fd closed underneath it.
@@ -238,9 +238,9 @@ static int fd_cache_get(struct fd_cache *c, uint64_t fileid,
  *  pinned, the cache is temporarily allowed to exceed FD_CACHE_MAX
  *  and will settle once pins drain.
  *
- *  @return 0 on success — caller owns a pin and MUST call
+ *  @return 0 on success -- caller owns a pin and MUST call
  *          fd_cache_release() once I/O completes.
- *          -1 on failure — @a fd has been closed, caller MUST NOT use it.
+ *          -1 on failure -- @a fd has been closed, caller MUST NOT use it.
  */
 static int fd_cache_put(struct fd_cache *c, uint64_t fileid,
                         uint32_t ds_id, uint32_t stripe, uint32_t mirror,
@@ -287,7 +287,7 @@ static int fd_cache_put(struct fd_cache *c, uint64_t fileid,
 
 /** Release a pin taken by fd_cache_get() or fd_cache_put().
  *  If the entry was marked dead and this was the last pin, the fd is
- *  closed and the entry is freed here — deferring the close until no
+ *  closed and the entry is freed here -- deferring the close until no
  *  thread is using the fd. */
 static void fd_cache_release(struct fd_cache *c, uint64_t fileid,
                              uint32_t ds_id, uint32_t stripe,
@@ -611,7 +611,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
 
             /* Try FD cache first; fall back to open().  The fd returned
              * (cache hit OR cache miss insert) is pinned until we call
-             * fd_cache_release() below — no other thread can close it
+             * fd_cache_release() below -- no other thread can close it
              * underneath our pread(). */
             fd = fd_cache_get(&((struct mds_proxy_ctx *)ctx)->fdc,
                               fileid, entries[entry_idx].ds_id,
@@ -622,7 +622,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                 if (fd_cache_put(&((struct mds_proxy_ctx *)ctx)->fdc,
                                  fileid, entries[entry_idx].ds_id,
                                  stripe_idx, m, O_RDONLY, fd) != 0) {
-                    /* Insert failed — fd is already closed by put. */
+                    /* Insert failed -- fd is already closed by put. */
                     continue;
                 }
             }
@@ -630,7 +630,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
             nr = pread(fd, buf, chunk, (off_t)local_offset);
 
             if (nr < 0) {
-                /* Stale fd — mark dead (still pinned by us) and drop
+                /* Stale fd -- mark dead (still pinned by us) and drop
                  * our pin.  The deferred close fires inside release
                  * because we were the last pin holder. */
                 fd_cache_invalidate_one(
@@ -657,7 +657,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                 *eof = true;
                 goto done;
             }
-            break;  /* Success — move to next stripe. */
+            break;  /* Success -- move to next stripe. */
         }
 
         if (!read_ok) {
@@ -771,7 +771,7 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
                                  fileid, entries[entry_idx].ds_id,
                                  stripe_idx, m, O_WRONLY | O_CREAT,
                                  fd) != 0) {
-                    /* Insert failed — fd already closed by put. */
+                    /* Insert failed -- fd already closed by put. */
                     free(entries);
                     return MDS_ERR_IO;
                 }
@@ -845,7 +845,7 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
     }
 
     /*
-     * RFC 8435 §2.2.1: In the loosely coupled model, the MDS
+     * RFC 8435 S2.2.1: In the loosely coupled model, the MDS
      * MUST set the owner of the data file to the synthetic
      * uid/gid so that the client's AUTH_SYS credentials
      * (from ffl_user/ffl_group in the layout) pass the DS's
@@ -869,7 +869,7 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
  *
  * VFS handle layout (kernel 6.8+, NFSv3, handle_type=13):
  *   f_handle[0..11]  : VFS NFS wrapper (fs identity, opaque)
- *   f_handle[12..13] : uint16_t LE — server FH size (e.g. 36)
+ *   f_handle[12..13] : uint16_t LE -- server FH size (e.g. 36)
  *   f_handle[14..]   : raw knfsd server FH (byte 0 = 0x01 version)
  * ----------------------------------------------------------------------- */
 
@@ -907,7 +907,7 @@ static int proxy_name_to_handle(const char *path,
         return -1;
     }
 
-    /* Validate handle type — must be NFS opaque FH. */
+    /* Validate handle type -- must be NFS opaque FH. */
     if (fh->handle_type != NFS_FH_HANDLE_TYPE) {
         return -1;
     }
@@ -1016,7 +1016,7 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
             }
             return MDS_OK;
         }
-        /* name_to_handle_at failed — fall through to RPC. */
+        /* name_to_handle_at failed -- fall through to RPC. */
     }
 
 fallback_rpc:
@@ -1091,7 +1091,7 @@ enum mds_status mds_proxy_write_direct(const struct mds_proxy_ctx *ctx,
 }
 
 /* -----------------------------------------------------------------------
- * NFSv4.2 proxy helpers — shared stripe resolver
+ * NFSv4.2 proxy helpers -- shared stripe resolver
  *
  * Opens the DS data file for a given fileid at stripe 0, mirror 0
  * and returns the fd.  Caller must close() when done.
@@ -1169,7 +1169,7 @@ static int open_ds_file_ex(const struct mds_proxy_ctx *ctx,
     return fd;
 }
 
-/** Legacy wrapper — fetches stripe map from catalogue. */
+/** Legacy wrapper -- fetches stripe map from catalogue. */
 static int open_ds_file(const struct mds_proxy_ctx *ctx,
                         struct mds_catalogue *cat,
                         uint64_t fileid, uint64_t offset,
@@ -1362,7 +1362,7 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
 
     if (result < 0) {
         if (errno == ENXIO) {
-            /* Beyond end of data / no more holes — report EOF. */
+            /* Beyond end of data / no more holes -- report EOF. */
             *eof = true;
             *out_offset = 0;
             close(fd);
@@ -1667,7 +1667,7 @@ enum mds_status mds_proxy_seek_direct(const struct mds_proxy_ctx *ctx,
     result = lseek(fd, (off_t)offset, whence);
     if (result < 0) {
         if (errno == ENXIO) {
-            /* past end — no more data/holes */
+            /* past end -- no more data/holes */
             *eof = true;
             close(fd);
             return MDS_OK;
@@ -1811,7 +1811,7 @@ enum mds_status mds_proxy_unlink_ds_file(const struct mds_proxy_ctx *ctx,
 
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {
-        /* DS isn't NFS-mounted on this MDS host — the GC worker
+        /* DS isn't NFS-mounted on this MDS host -- the GC worker
          * cannot reach the file.  Surface a distinct status so
          * the caller can decide whether to retry later (DS may
          * come online) or treat this entry as unreachable. */
@@ -1824,7 +1824,7 @@ enum mds_status mds_proxy_unlink_ds_file(const struct mds_proxy_ctx *ctx,
     }
 
     if (unlink(file_path) != 0) {
-        /* ENOENT is benign — the GC entry refers to a file that
+        /* ENOENT is benign -- the GC entry refers to a file that
          * was already removed, possibly by a previous worker run
          * or by an operator wiping /export/ds/data.  Treat as
          * success so the caller dequeues, but signal
@@ -1842,7 +1842,7 @@ enum mds_status mds_proxy_unlink_ds_file(const struct mds_proxy_ctx *ctx,
     return MDS_OK;
 }
 
-/* RFC 8435 §14: Fencing uid/gid — revokes client access to DS file. */
+/* RFC 8435 S14: Fencing uid/gid -- revokes client access to DS file. */
 #define MDS_FENCE_UID  1
 #define MDS_FENCE_GID  1
 

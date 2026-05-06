@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_layout_cache.c — Phase D v1 unit tests.
+ * test_layout_cache.c -- Phase D v1 unit tests.
  *
  * Pure data-structure tests against the layout_cache module.  No
- * catalogue, no compound, no daemon — just the cache.
+ * catalogue, no compound, no daemon -- just the cache.
  */
 
 #include <stdio.h>
@@ -171,7 +171,7 @@ static void test_miss_on_empty(void)
     struct mds_ds_map_entry *out = (void *)(uintptr_t)0xdeadbeef;
     ASSERT_EQ(layout_cache_get(lc, 42, &sc, &su, &mc, &out), -1);
     /* On miss, no allocation happens.  We don't spec the values of
-     * sc/su/mc/out — caller must check the return code first. */
+     * sc/su/mc/out -- caller must check the return code first. */
 
     struct layout_cache_stats st;
     layout_cache_stats_get(lc, &st);
@@ -303,7 +303,7 @@ static void test_eviction_at_capacity(void)
 
     /* Use a tiny capacity so eviction happens after a small number
      * of inserts.  We size to LAYOUT_CACHE_SHARDS * 4 = 64 because
-     * the per-shard floor is 4 — anything smaller still rounds up
+     * the per-shard floor is 4 -- anything smaller still rounds up
      * to that floor.  Insert 1024 entries, then check that the
      * total entry count is bounded and the eviction counter
      * reflects the overflow. */
@@ -349,7 +349,7 @@ static void test_get_returns_owned_copy(void)
     ASSERT_TRUE(out != NULL);
 
     /* Caller mutates its copy.  This must NOT corrupt the cached
-     * entry — verified by a second get returning the original. */
+     * entry -- verified by a second get returning the original. */
     out[0].ds_id = 0xDEADBEEF;
     out[1].ds_id = 0xDEADBEEF;
     free(out);

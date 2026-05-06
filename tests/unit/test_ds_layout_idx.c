@@ -2,15 +2,15 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_ds_layout_idx.c — Tests for DS layout reverse index and
+ * test_ds_layout_idx.c -- Tests for DS layout reverse index and
  * replicated layout operations via commit queue.
  *
  * Covers:
  *   1. ds_layout_idx put/scan/del round-trip.
  *   2. Multi-DS scan with distinct ds_ids.
  *   3. Empty scan returns MDS_OK with no callbacks.
- *   4. COMMIT_OP_LAYOUT_STATE_PUT through CQ — layout_state + index.
- *   5. COMMIT_OP_LAYOUT_STATE_DEL through CQ — layout_state + index cleanup.
+ *   4. COMMIT_OP_LAYOUT_STATE_PUT through CQ -- layout_state + index.
+ *   5. COMMIT_OP_LAYOUT_STATE_DEL through CQ -- layout_state + index cleanup.
  */
 
 #include <stdio.h>
@@ -98,7 +98,7 @@ static void test_idx_put_scan_del(void)
     ASSERT_EQ(st, MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    /* Scan for ds_id=1 — should find one entry. */
+    /* Scan for ds_id=1 -- should find one entry. */
     memset(&sr, 0, sizeof(sr));
     st = mds_coord_ds_layout_idx_scan(db, 1, collect_cb, &sr);
     ASSERT_EQ(st, MDS_OK);
@@ -111,7 +111,7 @@ static void test_idx_put_scan_del(void)
                                  ds_ids, 1);
     ASSERT_EQ(st, MDS_OK);
 
-    /* Scan again — should be empty. */
+    /* Scan again -- should be empty. */
     memset(&sr, 0, sizeof(sr));
     st = mds_coord_ds_layout_idx_scan(db, 1, collect_cb, &sr);
     ASSERT_EQ(st, MDS_OK);
@@ -122,7 +122,7 @@ static void test_idx_put_scan_del(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 2: Multi-DS scan — entries for different ds_ids
+ * Test 2: Multi-DS scan -- entries for different ds_ids
  * ----------------------------------------------------------------------- */
 
 static void test_idx_multi_ds_scan(void)
@@ -156,13 +156,13 @@ static void test_idx_multi_ds_scan(void)
     ASSERT_EQ(st, MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    /* Scan ds_id=1 — should find 2 entries. */
+    /* Scan ds_id=1 -- should find 2 entries. */
     memset(&sr, 0, sizeof(sr));
     st = mds_coord_ds_layout_idx_scan(db, 1, collect_cb, &sr);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_EQ(sr.count, 2);
 
-    /* Scan ds_id=2 — should find 1 entry. */
+    /* Scan ds_id=2 -- should find 1 entry. */
     memset(&sr, 0, sizeof(sr));
     st = mds_coord_ds_layout_idx_scan(db, 2, collect_cb, &sr);
     ASSERT_EQ(st, MDS_OK);
@@ -170,7 +170,7 @@ static void test_idx_multi_ds_scan(void)
     ASSERT_EQ(sr.clientids[0], 20);
     ASSERT_EQ(sr.fileids[0], 300);
 
-    /* Scan ds_id=99 — should find nothing. */
+    /* Scan ds_id=99 -- should find nothing. */
     memset(&sr, 0, sizeof(sr));
     st = mds_coord_ds_layout_idx_scan(db, 99, collect_cb, &sr);
     ASSERT_EQ(st, MDS_OK);

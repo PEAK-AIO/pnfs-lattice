@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_ds_ids.h — Helpers for durable pNFS layout-state DS ID lists.
+ * layout_ds_ids.h -- Helpers for durable pNFS layout-state DS ID lists.
  */
 
 #ifndef LAYOUT_DS_IDS_H

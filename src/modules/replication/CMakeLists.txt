@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# replication — cluster health monitor for replicated MDS pairs.
+# replication -- cluster health monitor for replicated MDS pairs.
 #
 # Enterprise build (ENABLE_REPLICATION=ON, the default): real impl
 # linked into pnfs_mds_core.
@@ -22,5 +22,5 @@ if(ENABLE_REPLICATION)
 else()
     target_sources(pnfs_cluster PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/health_stub.c)
-    message(STATUS "replication: disabled (community build) — using stubs")
+    message(STATUS "replication: disabled (community build) -- using stubs")
 endif()

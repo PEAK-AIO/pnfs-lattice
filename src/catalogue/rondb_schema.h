@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rondb_schema.h — RonDB table layout, column names, and serialization.
+ * rondb_schema.h -- RonDB table layout, column names, and serialization.
  *
  * Pure C, no NDB dependency.  All table/column name constants are
  * shared between the C++ shim (DDL) and the C wrapper (encoding).
@@ -61,7 +61,7 @@
 #define RONDB_TBL_NS_LOCK_HOLDERS "mds_ns_lock_holders"
 #define RONDB_TBL_PARTITION_MAP   "mds_partition_map"
 /* Phase 1 tables (catalogue + coordination parity) */
-/* mds_inline_data intentionally omitted — inline data defeats the
+/* mds_inline_data intentionally omitted -- inline data defeats the
  * pNFS architecture.  RonDB mode forces inline_enabled=false so all
  * file data goes through DS layout paths. */
 #define RONDB_TBL_XATTRS          "mds_xattrs"
@@ -94,7 +94,7 @@
 #define RONDB_TABLE_COUNT  35
 
 /* -----------------------------------------------------------------------
- * Column names — mds_meta
+ * Column names -- mds_meta
  * ----------------------------------------------------------------------- */
 
 #define RONDB_META_COL_KEY       "key_name"
@@ -106,7 +106,7 @@
 #define RONDB_META_KEY_DELTA_SEQ "delta_seqno_counter"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_inodes
+ * Column names -- mds_inodes
  * ----------------------------------------------------------------------- */
 
 #define RONDB_INO_COL_FILEID       "fileid"
@@ -131,7 +131,7 @@
 #define RONDB_INO_COL_HOME_SHARD   "home_shard_id"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_dirents
+ * Column names -- mds_dirents
  * ----------------------------------------------------------------------- */
 
 #define RONDB_DIR_COL_PARENT      "parent_fileid"
@@ -140,7 +140,7 @@
 #define RONDB_DIR_COL_CHILD_TYPE  "child_type"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_stripe_maps (header)
+ * Column names -- mds_stripe_maps (header)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_SM_COL_FILEID       "fileid"
@@ -149,7 +149,7 @@
 #define RONDB_SM_COL_MIRROR_CNT   "mirror_count"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_stripe_entries (child)
+ * Column names -- mds_stripe_entries (child)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_SE_COL_FILEID       "fileid"
@@ -159,7 +159,7 @@
 #define RONDB_SE_COL_NFS_FH       "nfs_fh"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_rename_journal
+ * Column names -- mds_rename_journal
  * ----------------------------------------------------------------------- */
 
 #define RONDB_RJ_COL_TXN_ID       "txn_id"
@@ -185,7 +185,7 @@
 #define RONDB_RJ_ROLE_PARTICIPANT 1
 
 /* -----------------------------------------------------------------------
- * Column names — mds_ns_locks
+ * Column names -- mds_ns_locks
  * ----------------------------------------------------------------------- */
 
 #define RONDB_LK_COL_PART_HINT    "partition_hint"
@@ -205,8 +205,8 @@
  * acquire locks sorted by (class, partition_hint, key_bytes)
  * in ascending order.
  *
- * Classes 0–3: namespace structure mutations (Phase 9B).
- * Classes 4–7: shared protocol state (shared-attr). */
+ * Classes 0--3: namespace structure mutations (Phase 9B).
+ * Classes 4--7: shared protocol state (shared-attr). */
 #define RONDB_LOCK_CLASS_TOPOLOGY        0
 #define RONDB_LOCK_CLASS_PARENT_NAME     1
 #define RONDB_LOCK_CLASS_DIR_MUTATION    2
@@ -224,7 +224,7 @@
 #define RONDB_TOPOLOGY_SENTINEL   UINT64_C(0xFFFFFFFFFFFFFFFF)
 
 /* -----------------------------------------------------------------------
- * Column names — mds_partition_map
+ * Column names -- mds_partition_map
  * ----------------------------------------------------------------------- */
 
 #define RONDB_PM_COL_PART_ID      "partition_id"
@@ -238,7 +238,7 @@
 #define RONDB_PM_STATE_FROZEN     2
 
 /* -----------------------------------------------------------------------
- * Column names — mds_xattrs
+ * Column names -- mds_xattrs
  *
  * Max name  = MDS_XATTR_NAME_MAX (255, pnfs_mds.h).
  * Max value = MDS_XATTR_VAL_MAX  (65536, pnfs_mds.h).
@@ -249,7 +249,7 @@
 #define RONDB_XA_COL_VALUE        "value"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_ds_registry (typed, matches struct mds_ds_info)
+ * Column names -- mds_ds_registry (typed, matches struct mds_ds_info)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_DSR_COL_DS_ID       "ds_id"
@@ -268,7 +268,7 @@
 #define RONDB_DSR_COL_CAPS        "capabilities"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_ds_provision (typed)
+ * Column names -- mds_ds_provision (typed)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_DSP_COL_DS_ID       "ds_id"
@@ -276,7 +276,7 @@
 #define RONDB_DSP_COL_EPOCH       "epoch"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_quota_rules (typed, matches struct mds_quota_rule)
+ * Column names -- mds_quota_rules (typed, matches struct mds_quota_rule)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_QR_COL_SCOPE_TYPE   "scope_type"
@@ -288,7 +288,7 @@
 #define RONDB_QR_COL_GRACE_SEC    "grace_sec"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_quota_usage (typed, matches struct mds_quota_usage)
+ * Column names -- mds_quota_usage (typed, matches struct mds_quota_usage)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_QU_COL_USAGE_TYPE   "usage_type"
@@ -299,7 +299,7 @@
 #define RONDB_QU_COL_GRACE_INODES "grace_start_inodes"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_gc_queue
+ * Column names -- mds_gc_queue
  *
  * FIFO queue keyed by monotonic gc_seq from mds_meta gc_seq_counter.
  * ----------------------------------------------------------------------- */
@@ -311,7 +311,7 @@
 #define RONDB_GC_COL_NFS_FH       "nfs_fh"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_layout_state
+ * Column names -- mds_layout_state
  * PK      = (fileid, stateid_other)
  * partition key = fileid
  * indices = ix_layout_state_stateid (stateid_other),
@@ -330,21 +330,21 @@
 #define RONDB_IX_LS_CLIENTID      "ix_layout_state_clientid"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_layout_by_client (index: clientid -> stateid)
+ * Column names -- mds_layout_by_client (index: clientid -> stateid)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_LBC_COL_CLIENTID    "clientid"
 #define RONDB_LBC_COL_STATEID     "stateid_other"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_layout_by_file (index: fileid -> stateid)
+ * Column names -- mds_layout_by_file (index: fileid -> stateid)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_LBF_COL_FILEID      "fileid"
 #define RONDB_LBF_COL_STATEID     "stateid_other"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_ds_layout_idx (index: ds_id -> client+file)
+ * Column names -- mds_ds_layout_idx (index: ds_id -> client+file)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_DLI_COL_DS_ID       "ds_id"
@@ -352,7 +352,7 @@
 #define RONDB_DLI_COL_FILEID      "fileid"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_client_recovery
+ * Column names -- mds_client_recovery
  * ----------------------------------------------------------------------- */
 
 #define RONDB_CR_COL_CLIENTID     "clientid"
@@ -362,14 +362,14 @@
 #define RONDB_CR_COL_OWNER_EPOCH  "owner_boot_epoch"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_layout_state (Phase 9 additions)
+ * Column names -- mds_layout_state (Phase 9 additions)
  * ----------------------------------------------------------------------- */
 
 #define RONDB_LS_COL_GRANT_MDS    "grant_owner_mds_id"
 #define RONDB_LS_COL_GRANT_EPOCH  "grant_owner_boot_epoch"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_node_registry (Phase 9)
+ * Column names -- mds_node_registry (Phase 9)
  *
  * PK = mds_id (uint32).
  * boot_epoch distinguishes daemon reincarnations with the same mds_id.
@@ -390,7 +390,7 @@
 #define RONDB_NR_STATE_DRAINING   2
 
 /* -----------------------------------------------------------------------
- * Column names — mds_delta_broadcast (Phase 9)
+ * Column names -- mds_delta_broadcast (Phase 9)
  *
  * PK = (source_mds_id, seqno).  boot_epoch is non-PK.
  * seqno is globally monotonic per MDS (never resets on restart).
@@ -477,7 +477,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
                          struct rondb_rename_journal_entry *entry);
 
 /* -----------------------------------------------------------------------
- * Column names — mds_open_state (shared-attr)
+ * Column names -- mds_open_state (shared-attr)
  *
  * PK = stateid_other (12B Varbinary).
  * Secondary indexes: mds_open_by_file (fileid), mds_open_by_client (clientid).
@@ -495,7 +495,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
 #define RONDB_OS_COL_OWNER_EPOCH   "owner_boot_epoch"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_byte_range_locks (shared-attr)
+ * Column names -- mds_byte_range_locks (shared-attr)
  *
  * PK = (fileid, lock_id).  lock_id is a monotonic per-file counter.
  * Secondary index: mds_lock_by_owner (clientid, owner_hash).
@@ -516,7 +516,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
 #define RONDB_BL_COL_OWNER_EPOCH   "owner_boot_epoch"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_delegations (shared-attr)
+ * Column names -- mds_delegations (shared-attr)
  *
  * PK = stateid_other (12B).
  * Secondary indexes: mds_deleg_by_file (fileid), mds_deleg_by_client (clientid).
@@ -533,7 +533,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
 #define RONDB_DG_COL_RECALL_PEND   "recall_pending"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_clients (shared-attr)
+ * Column names -- mds_clients (shared-attr)
  *
  * PK = clientid (u64).
  * ----------------------------------------------------------------------- */
@@ -547,7 +547,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
 #define RONDB_CL_COL_LEASE_NS     "lease_renewed_ns"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_sessions (shared-attr)
+ * Column names -- mds_sessions (shared-attr)
  *
  * PK = session_id (16B Varbinary).
  * Secondary index: mds_session_by_client (clientid).
@@ -563,7 +563,7 @@ int rondb_rj_deserialize(const uint8_t *buf, size_t len,
 #define RONDB_SS_COL_CREATED_NS    "created_ns"
 
 /* -----------------------------------------------------------------------
- * Column names — mds_drc_slots (shared-attr)
+ * Column names -- mds_drc_slots (shared-attr)
  *
  * PK = (session_id, slot_id).
  * cached_reply is a Blob column (NDB Blob API).

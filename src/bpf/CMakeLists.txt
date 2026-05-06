@@ -35,5 +35,5 @@ if(LIBBPF_FOUND)
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/repl_monitor.bpf.o
     )
 else()
-    message(STATUS "libbpf not found — eBPF monitoring disabled")
+    message(STATUS "libbpf not found -- eBPF monitoring disabled")
 endif()

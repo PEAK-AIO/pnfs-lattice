@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * copy_offload.h — NFSv4.2 asynchronous COPY offload tracker.
+ * copy_offload.h -- NFSv4.2 asynchronous COPY offload tracker.
  *
  * Manages background copy jobs spawned by OP_COPY when the client
  * requests asynchronous operation (synchronous=false).  Each job gets

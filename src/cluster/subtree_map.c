@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * subtree_map.c — Subtree ownership map.
+ * subtree_map.c -- Subtree ownership map.
  *
  * Lock contract:
  *   - apply_subtree_upsert() / apply_subtree_remove() are private
@@ -440,7 +440,7 @@ enum mds_status subtree_map_init(const char *etcd_endpoints,
 
 #ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
-/* RONDB_PM_STATE_ACTIVE from rondb_schema.h — inlined to avoid
+/* RONDB_PM_STATE_ACTIVE from rondb_schema.h -- inlined to avoid
  * adding src/catalogue to the cluster include path. */
 #define PM_STATE_ACTIVE 0
 
@@ -571,7 +571,7 @@ void subtree_map_set_change_cb(struct subtree_map *map,
 }
 
 /* -----------------------------------------------------------------------
- * Public API — reads
+ * Public API -- reads
  * ----------------------------------------------------------------------- */
 
 enum mds_status subtree_map_lookup(const struct subtree_map *map,
@@ -621,7 +621,7 @@ bool subtree_map_is_local(const struct subtree_map *map, const char *path)
 }
 
 /* -----------------------------------------------------------------------
- * Public API — writes
+ * Public API -- writes
  * ----------------------------------------------------------------------- */
 
 enum mds_status subtree_map_set_owner(struct subtree_map *map,
@@ -934,9 +934,9 @@ enum mds_status referral_build(const struct subtree_map *map,
     if (st != MDS_OK) { return st;
 }
 
-    /* rootpath is "/" — each target MDS exports its subtree
+    /* rootpath is "/" -- each target MDS exports its subtree
      * at its own root.  The client mounts MDS_N:/ and sees
-     * the subtree as the top-level namespace (RFC 8881 §11.11). */
+     * the subtree as the top-level namespace (RFC 8881 S11.11). */
     (void)snprintf(loc->rootpath, sizeof(loc->rootpath),
                    "/");
     return MDS_OK;
@@ -1194,7 +1194,7 @@ enum mds_status subtree_map_remove_subtree(struct subtree_map *map,
 }
 
 /* -----------------------------------------------------------------------
- * Node registration — public wrappers
+ * Node registration -- public wrappers
  * ----------------------------------------------------------------------- */
 
 enum mds_status subtree_map_register_node(struct subtree_map *map,

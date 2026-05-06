@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_mountd_compat.c — Unit tests for the showmount-e responder.
+ * test_mountd_compat.c -- Unit tests for the showmount-e responder.
  *
  * Exercises mountd_compat_handle_packet in isolation: synthetic
  * RPC call bytes in, reply bytes out, no sockets, no threads.
@@ -49,7 +49,7 @@ static int tests_passed;
 
 /* ------------------------------------------------------------------- */
 
-/* RFC 5531 / 1813 constants — duplicated here so the test does not
+/* RFC 5531 / 1813 constants -- duplicated here so the test does not
  * depend on internal mountd_compat.c definitions. */
 #define T_CALL          0U
 #define T_REPLY         1U
@@ -193,7 +193,7 @@ static void test_null_proc_success(void)
     ASSERT_EQ(mountd_compat_handle_packet(&e, in, in_len,
                                           out, sizeof(out), &out_len), 0);
     check_accepted_header(out, out_len, T_XID, T_ACCEPT_SUCCESS);
-    /* NULL has no body — exactly 24 bytes. */
+    /* NULL has no body -- exactly 24 bytes. */
     ASSERT_EQ(out_len, 24U);
 }
 
@@ -381,7 +381,7 @@ static void test_wrong_rpc_version_denied(void)
     uint8_t in[64];
     uint8_t out[64];
     size_t  out_len = 0;
-    /* RPC version != 2 → MSG_DENIED + RPC_MISMATCH. */
+    /* RPC version != 2 -> MSG_DENIED + RPC_MISMATCH. */
     size_t  in_len = build_call_min(in, T_XID, T_CALL, 3U /* not 2 */,
                                     T_MOUNTD_PROG, T_MOUNTD_VERS3,
                                     T_PROC_NULL, T_AUTH_NONE);
@@ -467,8 +467,8 @@ static void test_oversized_cred_len_dropped(void)
     size_t in_len = build_call_min(in, T_XID, T_CALL, T_RPC_VERSION,
                                    T_MOUNTD_PROG, T_MOUNTD_VERS3,
                                    T_PROC_NULL, T_AUTH_UNIX);
-    /* Overwrite cred_len with 0x00100000 (1 MiB) — far over the
-     * RFC 5531 §8.1 cap (400 bytes). */
+    /* Overwrite cred_len with 0x00100000 (1 MiB) -- far over the
+     * RFC 5531 S8.1 cap (400 bytes). */
     put_u32(in + 28, 0x00100000U);
 
     ASSERT_EQ(mountd_compat_handle_packet(&e, in, in_len,

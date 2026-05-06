@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_compound.c — Unit tests for the NFSv4.1 compound dispatcher.
+ * test_compound.c -- Unit tests for the NFSv4.1 compound dispatcher.
  *
  * Each test opens a fresh catalogue, builds a compound sequence, processes
  * it, and verifies the results.
@@ -30,7 +30,7 @@
 
 #define TEST_MAP_SIZE (16ULL * 1024 * 1024)
 
-/* Like assert() but not elided by NDEBUG — for side-effectful checks. */
+/* Like assert() but not elided by NDEBUG -- for side-effectful checks. */
 #define VERIFY(expr) do { if (!(expr)) { \
 	fprintf(stderr, "VERIFY FAILED: %s (%s:%d)\n", \
 		#expr, __FILE__, __LINE__); abort(); } } while (0)
@@ -384,7 +384,7 @@ static struct nfs4_op mk_readdir(uint64_t cookie)
 }
 
 /* -----------------------------------------------------------------------
- * test_root_getattr — SEQUENCE + PUTROOTFH + GETATTR
+ * test_root_getattr -- SEQUENCE + PUTROOTFH + GETATTR
  * ----------------------------------------------------------------------- */
 
 static void test_root_getattr(void)
@@ -628,7 +628,7 @@ static void test_layoutget_ds_pending_patched_ready_clears_pending(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_create_and_lookup — create a file, then lookup + getattr
+ * test_create_and_lookup -- create a file, then lookup + getattr
  * ----------------------------------------------------------------------- */
 
 static void test_create_and_lookup(void)
@@ -676,7 +676,7 @@ static void test_create_and_lookup(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_create_and_remove — create then remove
+ * test_create_and_remove -- create then remove
  * ----------------------------------------------------------------------- */
 
 static void test_create_and_remove(void)
@@ -721,7 +721,7 @@ static void test_create_and_remove(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir — create entries then readdir
+ * test_readdir -- create entries then readdir
  * ----------------------------------------------------------------------- */
 
 static void test_readdir(void)
@@ -835,7 +835,7 @@ static void test_readdir_skips_pending_hpc_create(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir_pagination — resume with non-zero cookie
+ * test_readdir_pagination -- resume with non-zero cookie
  * ----------------------------------------------------------------------- */
 
 static void test_readdir_pagination(void)
@@ -866,7 +866,7 @@ static void test_readdir_pagination(void)
 	n = compound_process(&cd, ops, res, 9);
 	ASSERT_EQ(n, (uint32_t)9);
 
-	/* Page 1: cookie=0 → all 4 entries, cookies 1..4 (absolute). */
+	/* Page 1: cookie=0 -> all 4 entries, cookies 1..4 (absolute). */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -883,7 +883,7 @@ static void test_readdir_pagination(void)
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[0].name, "alpha"), 0);
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[3].name, "delta"), 0);
 
-	/* Page 2: cookie = fileid of 2nd entry ("bravo") → resume after it.
+	/* Page 2: cookie = fileid of 2nd entry ("bravo") -> resume after it.
 	 * Cookies are now fileid-based (stable under mutation). */
 	{
 		uint64_t bravo_fid = res[2].res.readdir.entries[1].fileid;
@@ -903,7 +903,7 @@ static void test_readdir_pagination(void)
 		ASSERT_EQ(strcmp(res[2].res.readdir.entries[1].name, "delta"), 0);
 	}
 
-	/* Page 3: cookie = fileid of last entry ("delta") → past end. */
+	/* Page 3: cookie = fileid of last entry ("delta") -> past end. */
 	{
 		uint64_t delta_fid = res[2].res.readdir.entries[1].fileid;
 		compound_init(&cd);
@@ -924,7 +924,7 @@ static void test_readdir_pagination(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_rename — SAVEFH + PUTROOTFH + RENAME
+ * test_rename -- SAVEFH + PUTROOTFH + RENAME
  * ----------------------------------------------------------------------- */
 
 static void test_rename(void)
@@ -979,7 +979,7 @@ static void test_rename(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_link — SAVEFH + LINK
+ * test_link -- SAVEFH + LINK
  * ----------------------------------------------------------------------- */
 
 static void test_link(void)
@@ -1038,7 +1038,7 @@ static void test_link(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_setattr — create file + setattr + getattr to verify
+ * test_setattr -- create file + setattr + getattr to verify
  * ----------------------------------------------------------------------- */
 
 static void test_setattr(void)
@@ -1073,7 +1073,7 @@ static void test_setattr(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_getfh_savefh_restorefh — FH state machine
+ * test_getfh_savefh_restorefh -- FH state machine
  * ----------------------------------------------------------------------- */
 
 static void test_fh_state_machine(void)
@@ -1110,7 +1110,7 @@ static void test_fh_state_machine(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_fh_owner_stamped — Gaurav Gangalwar's FH-encoded subtree
+ * test_fh_owner_stamped -- Gaurav Gangalwar's FH-encoded subtree
  * ownership.  Asserts:
  *   1. cd.mds_id == 0 (test default) keeps owner_mds_id == 0 on every
  *      FH the server produces, so the encoder still emits the v0 wire
@@ -1135,7 +1135,7 @@ static void test_fh_owner_stamped(void)
 
 	db = open_test_db(&path);
 
-	/* (1) mds_id == 0 → owner_mds_id stays 0 on every produced FH. */
+	/* (1) mds_id == 0 -> owner_mds_id stays 0 on every produced FH. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -1150,7 +1150,7 @@ static void test_fh_owner_stamped(void)
 	ASSERT_EQ(res[2].res.getfh.fh.fileid, (uint64_t)MDS_FILEID_ROOT);
 	ASSERT_EQ(res[2].res.getfh.fh.owner_mds_id, (uint32_t)0);
 
-	/* (2) mds_id != 0 → owner_mds_id stamped on PUTROOTFH.  Pick 7
+	/* (2) mds_id != 0 -> owner_mds_id stamped on PUTROOTFH.  Pick 7
 	 *     (any non-zero value works; 7 was chosen to be unmistakably
 	 *     non-default so a regression that drops the stamping is
 	 *     immediately obvious in the failure message). */
@@ -1209,7 +1209,7 @@ static void test_fh_owner_stamped(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_stop_on_error — error aborts remaining ops
+ * test_stop_on_error -- error aborts remaining ops
  * ----------------------------------------------------------------------- */
 
 static void test_stop_on_error(void)
@@ -1242,7 +1242,7 @@ static void test_stop_on_error(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_nofilehandle — ops that require FH fail without one
+ * test_nofilehandle -- ops that require FH fail without one
  * ----------------------------------------------------------------------- */
 
 static void test_nofilehandle(void)
@@ -1270,9 +1270,9 @@ static void test_nofilehandle(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_putfh_invalid — PUTFH with nonexistent fileid returns BADHANDLE.
+ * test_putfh_invalid -- PUTFH with nonexistent fileid returns BADHANDLE.
  *
- * RFC 8881 §18.19.4: an unrecognised filehandle MUST yield
+ * RFC 8881 S18.19.4: an unrecognised filehandle MUST yield
  * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Pynfs PUTFH2 (testBadHandle)
  * verifies the same code on the wire path; this unit test mirrors it
  * for the in-process compound path.
@@ -1405,7 +1405,7 @@ static void mark_file_ds_pending(struct mds_catalogue *db, uint64_t fileid,
 }
 
 /* -----------------------------------------------------------------------
- * test_layoutget — LAYOUTGET on a regular file with a ready DS
+ * test_layoutget -- LAYOUTGET on a regular file with a ready DS
  * ----------------------------------------------------------------------- */
 
 static struct nfs4_op mk_layoutget(uint32_t iomode)
@@ -1575,7 +1575,7 @@ static void test_layoutget_maxcount_toosmall_revokes_layout_state(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_layoutreturn — LAYOUTRETURN removes layout state
+ * test_layoutreturn -- LAYOUTRETURN removes layout state
  * ----------------------------------------------------------------------- */
 
 static void test_layoutreturn(void)
@@ -1607,7 +1607,7 @@ static void test_layoutreturn(void)
 	clear_inline_flag(db, res[2].res.create.inode.fileid);
 
 	/* Phase 12 Component A: LAYOUTGET without proxy yields DELAY
-	 * (async DS prepare in flight) — there is no actual layout to
+	 * (async DS prepare in flight) -- there is no actual layout to
 	 * RETURN in this configuration.  The op_layoutreturn path is
 	 * exercised via test_layoutget_then_layoutreturn under the
 	 * proxy-backed integration suite. */
@@ -1627,7 +1627,7 @@ static void test_layoutreturn(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_openattr_create_remove — OPENATTR + CREATE/REMOVE xattr
+ * test_openattr_create_remove -- OPENATTR + CREATE/REMOVE xattr
  * ----------------------------------------------------------------------- */
 
 static struct nfs4_op mk_openattr(void)
@@ -1749,7 +1749,7 @@ static void test_openattr_create_remove(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_openattr_read_write — OPENATTR + CREATE + WRITE + READ
+ * test_openattr_read_write -- OPENATTR + CREATE + WRITE + READ
  * ----------------------------------------------------------------------- */
 
 static void test_openattr_read_write(void)
@@ -1814,7 +1814,7 @@ static void test_openattr_read_write(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_gc_on_remove — REMOVE file with stripe map enqueues GC entries
+ * test_gc_on_remove -- REMOVE file with stripe map enqueues GC entries
  * ----------------------------------------------------------------------- */
 
 static void test_gc_on_remove(void)
@@ -1865,7 +1865,7 @@ static void test_gc_on_remove(void)
 	ASSERT_EQ(mds_cat_gc_count(db, &gc_count), MDS_OK);
 	ASSERT_EQ(gc_count, (uint32_t)0);
 
-	/* REMOVE the file → should enqueue GC entries + delete stripe_map. */
+	/* REMOVE the file -> should enqueue GC entries + delete stripe_map. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -1901,7 +1901,7 @@ static void test_gc_on_remove(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_proxy_read_write_compound — proxy READ/WRITE through compound
+ * test_proxy_read_write_compound -- proxy READ/WRITE through compound
  * ----------------------------------------------------------------------- */
 
 static char *make_ds_tmpdir(void)
@@ -1964,7 +1964,7 @@ static void test_proxy_read_write_compound(void)
 	clear_inline_flag(db, file_fid);
 
 	/* Phase 12 Component A: even with a proxy mount, the first
-	 * LAYOUTGET races the FH-capture path — entries land with
+	 * LAYOUTGET races the FH-capture path -- entries land with
 	 * nfs_fh_len == 0, so the server enqueues async ds_prepare
 	 * and returns NFS4ERR_DELAY rather than committing a layout
 	 * with a stale FH.  Subsequent retries resolve once prepare
@@ -1995,7 +1995,7 @@ static void test_proxy_read_write_compound(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_read_bad_seqid — READ with wrong seqid returns BAD_STATEID
+ * test_read_bad_seqid -- READ with wrong seqid returns BAD_STATEID
  * ----------------------------------------------------------------------- */
 
 static void test_read_bad_seqid(void)
@@ -2045,7 +2045,7 @@ static void test_read_bad_seqid(void)
 	bad_sid = sid;
 	bad_sid.seqid = sid.seqid + 1;
 
-	/* READ with bad seqid → NFS4ERR_BAD_STATEID. */
+	/* READ with bad seqid -> NFS4ERR_BAD_STATEID. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -2075,7 +2075,7 @@ static void test_read_bad_seqid(void)
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
 	/* With correct stateid the compound must NOT reject credentials.
-	 * The actual I/O may still fail (no DS backing) — any non-BAD_STATEID
+	 * The actual I/O may still fail (no DS backing) -- any non-BAD_STATEID
 	 * status is acceptable. */
 	ASSERT_TRUE(res[2].status != NFS4ERR_BAD_STATEID);
 
@@ -2338,7 +2338,7 @@ static void test_ds_pending_write_bad_stateid_does_not_clear_pending(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_write_wrong_client — WRITE with wrong clientid returns BAD_STATEID
+ * test_write_wrong_client -- WRITE with wrong clientid returns BAD_STATEID
  * ----------------------------------------------------------------------- */
 
 static void test_write_wrong_client(void)
@@ -2384,7 +2384,7 @@ static void test_write_wrong_client(void)
 				  OPEN4_SHARE_ACCESS_BOTH,
 				  OPEN4_SHARE_DENY_NONE, &sid), 0);
 
-	/* WRITE as a different client (0x200) → NFS4ERR_BAD_STATEID. */
+	/* WRITE as a different client (0x200) -> NFS4ERR_BAD_STATEID. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -2400,7 +2400,7 @@ static void test_write_wrong_client(void)
 	ASSERT_EQ(res[2].status, NFS4ERR_BAD_STATEID);
 
 	/* Correct client: must NOT reject credentials.
-	 * The actual I/O may still fail (no DS backing) — any non-BAD_STATEID
+	 * The actual I/O may still fail (no DS backing) -- any non-BAD_STATEID
 	 * status is acceptable. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
@@ -2423,7 +2423,7 @@ static void test_write_wrong_client(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_xattr_short_read_eof — count < value length → eof=false
+ * test_xattr_short_read_eof -- count < value length -> eof=false
  * ----------------------------------------------------------------------- */
 
 static void test_xattr_short_read_eof(void)
@@ -2466,7 +2466,7 @@ static void test_xattr_short_read_eof(void)
 	ASSERT_EQ(res[4].status, NFS4_OK);
 	ASSERT_EQ(res[4].res.write.count, (uint32_t)8);
 
-	/* Short read: count=4, value is 8 bytes → eof must be false. */
+	/* Short read: count=4, value is 8 bytes -> eof must be false. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -2483,7 +2483,7 @@ static void test_xattr_short_read_eof(void)
 	ASSERT_EQ(res[4].res.read.eof, false);
 	ASSERT_EQ(memcmp(res[4].res.read.data, "1234", 4), 0);
 
-	/* Full read: count=8 → eof must be true. */
+	/* Full read: count=8 -> eof must be true. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
@@ -2512,11 +2512,11 @@ static void test_xattr_short_read_eof(void)
  * ----------------------------------------------------------------------- */
 
 /**
- * Multi-module compound: SEQUENCE (session) → PUTROOTFH (namespace)
- * → CREATE file (namespace) → LOOKUP (namespace) → GETFH (namespace)
- * → GETATTR (namespace).
+ * Multi-module compound: SEQUENCE (session) -> PUTROOTFH (namespace)
+ * -> CREATE file (namespace) -> LOOKUP (namespace) -> GETFH (namespace)
+ * -> GETATTR (namespace).
  *
- * A single 6-op compound that crosses the session→namespace module
+ * A single 6-op compound that crosses the session->namespace module
  * boundary and exercises multiple namespace ops.  Confirms that
  * dispatch_op resolves all function pointers correctly after the split.
  */
@@ -2535,9 +2535,9 @@ static void test_cross_module_namespace(void)
 	cd.prealloc = g_prealloc;
 
 	/*
-	 * 7-op compound crossing session→namespace module boundary:
-	 * SEQUENCE(session) → PUTROOTFH → CREATE → PUTROOTFH →
-	 * LOOKUP → GETFH → GETATTR (all namespace module).
+	 * 7-op compound crossing session->namespace module boundary:
+	 * SEQUENCE(session) -> PUTROOTFH -> CREATE -> PUTROOTFH ->
+	 * LOOKUP -> GETFH -> GETATTR (all namespace module).
 	 * CREATE sets FH to the new file, so a second PUTROOTFH
 	 * is required before LOOKUP.
 	 */
@@ -2564,8 +2564,8 @@ static void test_cross_module_namespace(void)
 }
 
 /**
- * Illegal op dispatch: SEQUENCE (session) → PUTROOTFH (namespace)
- * → unknown opnum 9999.
+ * Illegal op dispatch: SEQUENCE (session) -> PUTROOTFH (namespace)
+ * -> unknown opnum 9999.
  *
  * Confirms that dispatch_op returns NFS4ERR_OP_ILLEGAL for an
  * unrecognized opnum, and that compound processing stops after the
@@ -2609,7 +2609,7 @@ static void test_dispatch_illegal_op(void)
  * ----------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------
- * test_getdeviceinfo_structured_endpoint — Phase 2 GDI uses netid/host
+ * test_getdeviceinfo_structured_endpoint -- Phase 2 GDI uses netid/host
  * ----------------------------------------------------------------------- */
 
 static void test_getdeviceinfo_structured_endpoint(void)
@@ -2647,7 +2647,7 @@ static void test_getdeviceinfo_structured_endpoint(void)
 		ASSERT_EQ(mds_cat_txn_commit(txn), 0);
 	}
 
-	/* GETDEVICEINFO for ds_id 42 (no SEQUENCE — test-compat mode). */
+	/* GETDEVICEINFO for ds_id 42 (no SEQUENCE -- test-compat mode). */
 	memset(&ops[0], 0, sizeof(ops[0]));
 	ops[0].opnum = OP_GETDEVICEINFO;
 	ops[0].arg.getdeviceinfo.layout_type = LAYOUT4_NFSV4_1_FILES;
@@ -2671,7 +2671,7 @@ static void test_getdeviceinfo_structured_endpoint(void)
 
 
 /* -----------------------------------------------------------------------
- * test_layoutget_flex_files — FLEX_FILES succeeds with a ready DS
+ * test_layoutget_flex_files -- FLEX_FILES succeeds with a ready DS
  * ----------------------------------------------------------------------- */
 
 static void test_layoutget_flex_files(void)
@@ -2720,7 +2720,7 @@ static void test_layoutget_flex_files(void)
 	ops[2].arg.layoutget.offset = 0;
 	ops[2].arg.layoutget.length = UINT64_MAX;
 
-	/* Phase 12 Component A: no proxy → no FH capture → server
+	/* Phase 12 Component A: no proxy -> no FH capture -> server
 	 * enqueues async ds_prepare and returns NFS4ERR_DELAY for the
 	 * client to retry.  Test name kept ("flex_files") because the
 	 * scenario still exercises the FLEX_FILES code path; the
@@ -2735,7 +2735,7 @@ static void test_layoutget_flex_files(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_layoutget_flex_patched_unready_unavailable — no FH = DELAY
+ * test_layoutget_flex_patched_unready_unavailable -- no FH = DELAY
  * ----------------------------------------------------------------------- */
 
 static void test_layoutget_flex_patched_unready_unavailable(void)
@@ -2808,7 +2808,7 @@ static void test_layoutget_flex_patched_unready_unavailable(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_getdeviceinfo_flex_files — GETDEVICEINFO with type 4
+ * test_getdeviceinfo_flex_files -- GETDEVICEINFO with type 4
  * ----------------------------------------------------------------------- */
 
 static void test_getdeviceinfo_flex_files(void)
@@ -2865,7 +2865,7 @@ static void test_getdeviceinfo_flex_files(void)
 
 
 /* -----------------------------------------------------------------------
- * test_layoutget_flex_patched_creds — patched DS gets non-zero creds
+ * test_layoutget_flex_patched_creds -- patched DS gets non-zero creds
  * ----------------------------------------------------------------------- */
 
 static void test_layoutget_flex_patched_creds(void)
@@ -2937,7 +2937,7 @@ static void test_layoutget_flex_patched_creds(void)
 
 	/* Phase 12 Component A: even with a provisioning secret in
 	 * place, the absence of a live proxy means FH capture is
-	 * deferred — server returns NFS4ERR_DELAY for the client to
+	 * deferred -- server returns NFS4ERR_DELAY for the client to
 	 * retry while ds_prepare runs asynchronously. */
 	uint32_t n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, 3);
@@ -3120,7 +3120,7 @@ static void test_lookup_ext_dirent_on_root_shard_with_catalogue(void)
 {
 	/* This test exercises cross-shard ext_dirent resolution with
 	 * catalogue dispatch.  It requires owned child shards with
-	 * separate catalogue handles — not yet supported by the memdb
+	 * separate catalogue handles -- not yet supported by the memdb
 	 * test backend (shard->cat wiring triggers double-free in
 	 * compound_process internals).  Verified passing with a live
 	 * RonDB cluster.  Skipped in offline mode. */
@@ -3289,7 +3289,7 @@ static void test_write_then_getattr_sees_new_size(void)
 
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
-	/* No proxy configured → WRITE fails with NOTSUPP. */
+	/* No proxy configured -> WRITE fails with NOTSUPP. */
 	ASSERT_NE(res[2].status, NFS4_OK);
 
 	close_test_db(db, path);
@@ -3532,7 +3532,7 @@ static void test_rfc8276_listxattrs(void)
 	ASSERT_EQ(res[3].status, NFS4_OK);
 	ASSERT_EQ(res[4].status, NFS4_OK);
 
-	/* LISTXATTRS: cookie=0, large maxcount → get all. */
+	/* LISTXATTRS: cookie=0, large maxcount -> get all. */
 	compound_init(&cd);
 	cd.cat = cat;
 	ops[0] = mk_sequence();
@@ -3579,7 +3579,7 @@ static void test_rfc8276_removexattr(void)
 	ASSERT_EQ(n, (uint32_t)4);
 	ASSERT_EQ(res[3].status, NFS4_OK);
 
-	/* REMOVEXATTR — first call succeeds. */
+	/* REMOVEXATTR -- first call succeeds. */
 	compound_init(&cd);
 	cd.cat = cat;
 	ops[0] = mk_sequence();
@@ -3593,7 +3593,7 @@ static void test_rfc8276_removexattr(void)
 	ASSERT_TRUE(res[3].res.removexattr.change_after >=
 		    res[3].res.removexattr.change_before);
 
-	/* Second remove → NOXATTR. */
+	/* Second remove -> NOXATTR. */
 	compound_init(&cd);
 	cd.cat = cat;
 	ops[0] = mk_sequence();
@@ -3609,11 +3609,11 @@ static void test_rfc8276_removexattr(void)
 }
 
 /**
- * Phase 8b — GET_DIR_DELEGATION with no ddt configured returns the
- * RFC 8881 §18.39.2 "granted = NO" shape:
+ * Phase 8b -- GET_DIR_DELEGATION with no ddt configured returns the
+ * RFC 8881 S18.39.2 "granted = NO" shape:
  *
- *   outer status      = NFS4_OK   (compound continues — RFC
- *                                   §2.6.3.1.1 forbids halting on a
+ *   outer status      = NFS4_OK   (compound continues -- RFC
+ *                                   S2.6.3.1.1 forbids halting on a
  *                                   non-fatal GDD result, otherwise
  *                                   the client's bundled GETATTR is
  *                                   stripped and we'd return EIO)
@@ -3665,9 +3665,9 @@ static void test_get_dir_delegation_unavail(void)
 }
 
 /**
- * Phase 8a — GDD without a current filehandle returns
+ * Phase 8a -- GDD without a current filehandle returns
  * NFS4ERR_NOFILEHANDLE (the current FH names the directory
- * being delegated, per RFC 8881 §18.39.3 "CURRENT_FH:
+ * being delegated, per RFC 8881 S18.39.3 "CURRENT_FH:
  * delegated directory").
  */
 static void test_get_dir_delegation_no_fh(void)
@@ -3696,7 +3696,7 @@ static void test_get_dir_delegation_no_fh(void)
 }
 
 /* -----------------------------------------------------------------------
- * Commit 1 — component4 / UTF-8 validators (pynfs RNM8–11 + COMP3).
+ * Commit 1 -- component4 / UTF-8 validators (pynfs RNM8--11 + COMP3).
  * ----------------------------------------------------------------------- */
 
 /* compound_is_valid_utf8 lives in compound.h (public).
@@ -3711,11 +3711,11 @@ static void test_validate_utf8_well_formed(void)
 {
 	ASSERT_TRUE(compound_is_valid_utf8("", 0));
 	ASSERT_TRUE(compound_is_valid_utf8("hello", 5));
-	/* 2-byte: U+00E9 é */
+	/* 2-byte: U+00E9 e */
 	ASSERT_TRUE(compound_is_valid_utf8("\xC3\xA9", 2));
-	/* 3-byte: U+20AC € */
+	/* 3-byte: U+20AC EUR */
 	ASSERT_TRUE(compound_is_valid_utf8("\xE2\x82\xAC", 3));
-	/* 4-byte: U+1F600 😀 */
+	/* 4-byte: U+1F600  */
 	ASSERT_TRUE(compound_is_valid_utf8("\xF0\x9F\x98\x80", 4));
 }
 
@@ -3763,12 +3763,12 @@ static void test_validate_utf8_rejects_truncated(void)
 
 static void test_validate_utf8_rejects_noncharacters(void)
 {
-	/* U+FFFE (BMP last-1 sentinel) — the exact byte sequence pynfs
+	/* U+FFFE (BMP last-1 sentinel) -- the exact byte sequence pynfs
 	 * RNM8/9 + COMP3 use to drive get_invalid_utf8strings(). */
 	ASSERT_EQ(compound_is_valid_utf8("\xEF\xBF\xBE", 3), false);
 	/* U+FFFF (BMP last sentinel). */
 	ASSERT_EQ(compound_is_valid_utf8("\xEF\xBF\xBF", 3), false);
-	/* U+FDD0..U+FDEF range — first and last. */
+	/* U+FDD0..U+FDEF range -- first and last. */
 	ASSERT_EQ(compound_is_valid_utf8("\xEF\xB7\x90", 3), false); /* FDD0 */
 	ASSERT_EQ(compound_is_valid_utf8("\xEF\xB7\xAF", 3), false); /* FDEF */
 	/* U+1FFFE (supplementary noncharacter). */
@@ -3781,7 +3781,7 @@ static void test_validate_utf8_rejects_noncharacters(void)
 
 static void test_validate_name_basic(void)
 {
-	/* Non-empty, plain-ASCII, no special chars → OK. */
+	/* Non-empty, plain-ASCII, no special chars -> OK. */
 	ASSERT_EQ(compound_validate_name("foo"), NFS4_OK);
 	ASSERT_EQ(compound_validate_name("foo.bar"), NFS4_OK);
 	ASSERT_EQ(compound_validate_name("..."), NFS4_OK);
@@ -3816,7 +3816,7 @@ static void test_validate_name_bad_utf8_inval(void)
 	ASSERT_EQ(compound_validate_name("\xF5"), NFS4ERR_INVAL);
 }
 
-/** GETXATTR/SETXATTR without current FH → NFS4ERR_NOFILEHANDLE. */
+/** GETXATTR/SETXATTR without current FH -> NFS4ERR_NOFILEHANDLE. */
 static void test_rfc8276_xattr_no_fh(void)
 {
 	struct mds_catalogue *cat;
@@ -3906,11 +3906,11 @@ int main(void)
 	RUN_TEST(test_rfc8276_removexattr);
 	RUN_TEST(test_rfc8276_xattr_no_fh);
 
-	/* Phase 8a — GET_DIR_DELEGATION wire compat (RFC 8881 §18.39) */
+	/* Phase 8a -- GET_DIR_DELEGATION wire compat (RFC 8881 S18.39) */
 	RUN_TEST(test_get_dir_delegation_unavail);
 	RUN_TEST(test_get_dir_delegation_no_fh);
 
-	/* Commit 1 — component4 / UTF-8 validators (pynfs RNM8–11 + COMP3) */
+	/* Commit 1 -- component4 / UTF-8 validators (pynfs RNM8--11 + COMP3) */
 	RUN_TEST(test_validate_utf8_well_formed);
 	RUN_TEST(test_validate_utf8_rejects_overlong);
 	RUN_TEST(test_validate_utf8_rejects_surrogates);

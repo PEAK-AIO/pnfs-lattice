@@ -1,7 +1,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# rebalance — admin-triggered mirror relocation between data servers.
+# rebalance -- admin-triggered mirror relocation between data servers.
 #
 # Enterprise build (ENABLE_REBALANCE=ON, the default): links the real
 # implementation in rebalance.c.
@@ -16,5 +16,5 @@ if(ENABLE_REBALANCE)
 else()
     target_sources(pnfs_mds_core PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/rebalance_stub.c)
-    message(STATUS "rebalance: disabled (community build) — using stubs")
+    message(STATUS "rebalance: disabled (community build) -- using stubs")
 endif()

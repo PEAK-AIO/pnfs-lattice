@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalog_stats.h — Atomic counters for authority/image observability.
+ * catalog_stats.h -- Atomic counters for authority/image observability.
  *
  * All counters use relaxed atomics for low-overhead instrumentation.
  * The stats struct is embedded in struct mds_catalogue and exposed

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_prealloc.h — DS placement pre-allocation for multi-MDS mode.
+ * ds_prealloc.h -- DS placement pre-allocation for multi-MDS mode.
  *
  * In multi-MDS deployments, regular files must be DS-backed from
  * creation (no inline catalogue storage) so that any MDS can serve
@@ -110,7 +110,7 @@ enum mds_status ds_prealloc_select_any_online(
  * @brief Ensure a DS file exists for the given fileid + placement.
  *
  * Calls mds_proxy_ensure_ds_file() with the appropriate parameters.
- * Idempotent — safe to call if the file already exists.
+ * Idempotent -- safe to call if the file already exists.
  *
  * @param ctx     Pool context (provides proxy handle).
  * @param ds_id   Target data server.
@@ -166,7 +166,7 @@ void ds_prealloc_set_ds_cache(struct ds_prealloc_ctx *ctx,
 void ds_prealloc_destroy(struct ds_prealloc_ctx *ctx);
 
 /* -----------------------------------------------------------------------
- * Phase C of docs/hpc-nto1-plan.md — wide pre-warm batch.
+ * Phase C of docs/hpc-nto1-plan.md -- wide pre-warm batch.
  *
  * Allocates ONE fileid and synchronously creates + FH-captures every
  * (stripe, mirror) DS file in parallel.  All-or-nothing semantics:

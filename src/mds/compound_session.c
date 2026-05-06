@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * compound_session.c — NFSv4.1 session management ops.
+ * compound_session.c -- NFSv4.1 session management ops.
  */
 
 #include <stdint.h>
@@ -60,11 +60,11 @@ enum nfs4_status op_sequence(struct compound_data *cd,
 		/*
 		 * Replay detected, no cached reply.
 		 *
-		 * RFC 5661 §2.10.6.2 / §15.1.10.2: when the server cannot
+		 * RFC 5661 S2.10.6.2 / S15.1.10.2: when the server cannot
 		 * replay the original reply (because the original was sent
 		 * with sa_cachethis = FALSE so we never cached it), the
 		 * RFC-conformant response is NFS4ERR_RETRY_UNCACHED_REP.
-		 * SEQ_FALSE_RETRY (§15.1.10.6) is reserved for the case
+		 * SEQ_FALSE_RETRY (S15.1.10.6) is reserved for the case
 		 * where the replay's op-array differs from the cached one;
 		 * we don't track that distinction so we conservatively
 		 * always return RETRY_UNCACHED_REP for the no-cache replay
@@ -102,7 +102,7 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §18.35.3 / §18.35.4 argument validation.
+	 * RFC 8881 S18.35.3 / S18.35.4 argument validation.
 	 *
 	 * Any bit set in eia_flags that is not in EXCHGID4_VALID_CLIENT_MASK
 	 * (which deliberately excludes EXCHGID4_FLAG_CONFIRMED_R, the
@@ -115,7 +115,7 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §18.35.3 placement rule — EXCHANGE_ID MUST be the sole
+	 * RFC 8881 S18.35.3 placement rule -- EXCHANGE_ID MUST be the sole
 	 * op in its compound.  Pynfs EID8 testNotOnlyOp drives this with
 	 * [EXCHANGE_ID, PUTROOTFH] expecting NFS4ERR_NOT_ONLY_OP.
 	 */
@@ -150,7 +150,7 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 }
 
 /*
- * RFC 8881 §18.36.3 channel attribute floors.
+ * RFC 8881 S18.36.3 channel attribute floors.
  *
  * The replier MUST return NFS4ERR_TOOSMALL when a client requests a
  * value too small for the replier to honour.  We reject anything
@@ -158,7 +158,7 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
  * pynfs CSESS25 (fore maxresponsesize=0), CSESS28 (fore
  * maxrequestsize=20) and CSESS29 (back maxrequestsize=10) without
  * tripping pynfs SEQ6 (sets ca_maxrequestsize=512 to drive
- * NFS4ERR_REQ_TOO_BIG — must be accepted).  ca_max{operations,
+ * NFS4ERR_REQ_TOO_BIG -- must be accepted).  ca_max{operations,
  * requests} == 0 are also rejected: the negotiated minimum legal
  * COMPOUND must contain at least one op and the slot table must
  * have at least one slot.
@@ -167,10 +167,10 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 #define NFS4_MIN_CHAN_RESPONSE_SIZE 256U
 
 /*
- * RFC 8881 §18.36.1 csa_flags reserved-bits mask.  The defined bits
+ * RFC 8881 S18.36.1 csa_flags reserved-bits mask.  The defined bits
  * are CREATE_SESSION4_FLAG_PERSIST (0x1), _CONN_BACK_CHAN (0x2), and
  * _CONN_RDMA (0x4).  Any other bit set MUST yield NFS4ERR_INVAL per
- * §18.36.3.
+ * S18.36.3.
  */
 #define NFS4_CSA_FLAGS_VALID_MASK 0x7U
 
@@ -187,13 +187,13 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 8881 §18.36.3 argument validation — performed before any
+	 * RFC 8881 S18.36.3 argument validation -- performed before any
 	 * session table state is mutated, so a rejected request leaves
 	 * the client and slot accounting untouched.  These checks run
 	 * BEFORE the NFS4ERR_NOT_ONLY_OP placement check below: pynfs
 	 * CSESS29 sends [SEQUENCE, CREATE_SESSION] with a 10-byte
 	 * back-channel ca_maxrequestsize and expects TOOSMALL, not
-	 * NOT_ONLY_OP — i.e. the arg validators win the tie.  Linux
+	 * NOT_ONLY_OP -- i.e. the arg validators win the tie.  Linux
 	 * NFSD has the same ordering.
 	 */
 	if ((a->csa_flags & ~NFS4_CSA_FLAGS_VALID_MASK) != 0) {
@@ -213,7 +213,7 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 	}
 
 	/*
-	 * RFC 8881 §18.36.3 placement rule — only after args validated.
+	 * RFC 8881 S18.36.3 placement rule -- only after args validated.
 	 * CREATE_SESSION MUST be the sole op in its compound.  Pynfs
 	 * CSESS23 (testNotOnlyOp) drives this with [CREATE_SESSION,
 	 * PUTROOTFH] expecting NOT_ONLY_OP.
@@ -241,14 +241,14 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 	case 0:
 		r->csr_sequence = a->seqid;
 		/*
-		 * RFC 8881 §18.36.4 csr_flags semantics.  The server
+		 * RFC 8881 S18.36.4 csr_flags semantics.  The server
 		 * MUST echo CREATE_SESSION4_FLAG_CONN_BACK_CHAN back
 		 * in csr_flags when it has accepted the requesting
 		 * connection as the backchannel for this session.
 		 * The pre-fix behaviour of always returning 0 caused
 		 * the Linux kernel client (per fs/nfs/nfs4session.c)
 		 * to record "backchannel not bound" and reject every
-		 * subsequent CB_SEQUENCE with NFS4ERR_BADSESSION — the
+		 * subsequent CB_SEQUENCE with NFS4ERR_BADSESSION -- the
 		 * exact symptom in PEAK:AIO Mark's two-client harness
 		 * (Q2 of bugs from mark/PROMPT_FOR_MDS_DEVTEAM.md).
 		 *
@@ -261,7 +261,7 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 		r->csr_flags = (a->csa_flags &
 				 CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
 		/*
-		 * RFC 8881 §2.10.8.3 / §18.36.3 — push the captured
+		 * RFC 8881 S2.10.8.3 / S18.36.3 -- push the captured
 		 * callback security parms onto the new session so the
 		 * CB encoder can emit the right RPC credential body
 		 * (AUTH_NONE void / AUTH_SYS authsys_parms) on every
@@ -270,7 +270,7 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 		 * AUTH_NONE which is the safe baseline.  Errors here
 		 * are fatal-but-best-effort: a missed update means CBs
 		 * fall back to AUTH_NONE for this session, which is
-		 * still a legal flavor per RFC 8881 §2.10.8.3.
+		 * still a legal flavor per RFC 8881 S2.10.8.3.
 		 */
 		(void)session_set_cb_sec(cd->st, r->session_id, &a->cb_sec);
 		/* Bind this client connection as the backchannel transport. */
@@ -307,11 +307,11 @@ enum nfs4_status op_destroy_session(struct compound_data *cd,
 }
 
 /*
- * RFC 8881 §18.33 BACKCHANNEL_CTL — update the captured callback
+ * RFC 8881 S18.33 BACKCHANNEL_CTL -- update the captured callback
  * program number and/or callback security parameters on the current
  * session.
  *
- * The wire form (§18.33.1) carries no session_id; the operation
+ * The wire form (S18.33.1) carries no session_id; the operation
  * applies to the session bound to the leading SEQUENCE of the same
  * COMPOUND.  We therefore require sequence_done (enforced by
  * dispatch_op's NFS4ERR_OP_NOT_IN_SESSION gate) and read the
@@ -321,7 +321,7 @@ enum nfs4_status op_destroy_session(struct compound_data *cd,
  * Memory ownership: a->cb_sec is decoded into op->arg by the codec
  * and lives for the duration of compound_process().  session_set_cb_sec
  * copies the struct under the session-table lock, so we don't take
- * ownership of any pointers — the entire nfs4_cb_sec is by-value.
+ * ownership of any pointers -- the entire nfs4_cb_sec is by-value.
  *
  * Errors:
  *   - NFS4ERR_SERVERFAULT if the session table is missing.
@@ -376,7 +376,7 @@ enum nfs4_status op_backchannel_ctl(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * ACCESS (RFC 8881 §18.1) — mandatory.
+ * ACCESS (RFC 8881 S18.1) -- mandatory.
  *
  * Phase 1: grant all requested access bits (no POSIX ACL enforcement).
  * FIXME: enforce inode mode bits once uid/gid context is available.
@@ -392,7 +392,7 @@ enum nfs4_status op_backchannel_ctl(struct compound_data *cd,
 
 
 /* -----------------------------------------------------------------------
- * RECLAIM_COMPLETE (RFC 8881 §18.51)
+ * RECLAIM_COMPLETE (RFC 8881 S18.51)
  *
  * Signals that the client has finished reclaiming all previously held
  * state.  The grace module tracks per-client completion; once all

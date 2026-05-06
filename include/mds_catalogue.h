@@ -2,24 +2,24 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_catalogue.h — Backend-neutral metadata catalogue interface.
+ * mds_catalogue.h -- Backend-neutral metadata catalogue interface.
  *
  * Decouples the NFS protocol layer from the storage engine.
  * The unit of work is a logical metadata transaction.
  *
  * State classes:
  *
- *   Catalogue data — inode, dirent, stripe-map, xattr, inline,
+ *   Catalogue data -- inode, dirent, stripe-map, xattr, inline,
  *       DS registry, quota, GC queue, fileid allocation.
  *       Hot metadata path.  Authority vtable dispatches to
  *       the RonDB backend.
  *
- *   Recovery-critical coordination — shared 2PC journal,
+ *   Recovery-critical coordination -- shared 2PC journal,
  *       layout_state, ds_layout_idx, client_recovery. Declared in
  *       mds_coordination.h so callers opt into the non-catalogue
  *       state class explicitly.
  *
- *   Ephemeral / optional — open_state, session, DRC.
+ *   Ephemeral / optional -- open_state, session, DRC.
  *       Not part of the catalogue interface.
  *
  * See docs/architecture.md for full design context.
@@ -33,7 +33,7 @@
 
 #include "pnfs_mds.h"
 
-/* Forward declarations — callers see opaque pointers. */
+/* Forward declarations -- callers see opaque pointers. */
 struct mds_catalogue;
 struct mds_cat_txn;
 
@@ -116,7 +116,7 @@ void *mds_catalogue_backend_handle(const struct mds_catalogue *cat);
 /* -----------------------------------------------------------------------
  * Transaction control
  *
- * Every write operation is self-contained by default — the backend
+ * Every write operation is self-contained by default -- the backend
  * handles atomicity internally.  Explicit transactions are provided
  * for callers that need multi-operation atomicity (e.g., cross-
  * directory rename that also updates parent change counters).
@@ -148,7 +148,7 @@ enum mds_status mds_cat_txn_commit(struct mds_cat_txn *txn);
 void mds_cat_txn_abort(struct mds_cat_txn *txn);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Namespace
+ * Catalogue data -- Namespace
  *
  * Each operation is self-contained (atomic commit) when txn is NULL.
  * When txn is non-NULL, the operation joins the caller's transaction.
@@ -171,7 +171,7 @@ enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
 				  uint64_t parent_fileid,
 				  const char *name);
 
-/** Atomic rename: src dirent → dst dirent + parent touches. */
+/** Atomic rename: src dirent -> dst dirent + parent touches. */
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
 				  struct mds_cat_txn *txn,
 				  uint64_t src_parent,
@@ -261,14 +261,14 @@ enum mds_status mds_cat_alloc_fileid(struct mds_catalogue *cat,
 				     uint64_t *fileid);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Low-level inode/dirent ops
+ * Catalogue data -- Low-level inode/dirent ops
  *
  * These supplement the higher-level ns_* operations for callers
  * that need direct inode or dirent access without the composite
  * create/remove/rename semantics.
  * ----------------------------------------------------------------------- */
 
-/** Read a dirent: resolve (parent, name) → (fileid, type). */
+/** Read a dirent: resolve (parent, name) -> (fileid, type). */
 enum mds_status mds_cat_dirent_get(struct mds_catalogue *cat,
 				   uint64_t parent_fileid,
 				   const char *name,
@@ -308,7 +308,7 @@ enum mds_status mds_cat_inode_put(struct mds_catalogue *cat,
 enum mds_status mds_cat_sync(struct mds_catalogue *cat);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Inline data (small file acceleration)
+ * Catalogue data -- Inline data (small file acceleration)
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_inline_get(struct mds_catalogue *cat,
@@ -326,7 +326,7 @@ enum mds_status mds_cat_inline_del(struct mds_catalogue *cat,
 				   uint64_t fileid);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Extended attributes
+ * Catalogue data -- Extended attributes
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_xattr_get(struct mds_catalogue *cat,
@@ -351,7 +351,7 @@ enum mds_status mds_cat_xattr_exists(struct mds_catalogue *cat,
 				     const char *name);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Stripe maps
+ * Catalogue data -- Stripe maps
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_stripe_map_get(struct mds_catalogue *cat,
@@ -397,7 +397,7 @@ enum mds_status mds_cat_stripe_map_scan(struct mds_catalogue *cat,
 					void *ctx);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — DS registry
+ * Catalogue data -- DS registry
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_ds_get(struct mds_catalogue *cat,
@@ -434,7 +434,7 @@ enum mds_status mds_cat_ds_provision_del(struct mds_catalogue *cat,
 					 uint32_t ds_id);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Quota
+ * Catalogue data -- Quota
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_quota_rule_get(struct mds_catalogue *cat,
@@ -460,7 +460,7 @@ enum mds_status mds_cat_quota_usage_put(struct mds_catalogue *cat,
 					const struct mds_quota_usage *usage);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — GC queue
+ * Catalogue data -- GC queue
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_gc_enqueue(struct mds_catalogue *cat,
@@ -507,9 +507,9 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
 
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Shard routing
+ * Catalogue data -- Shard routing
  *
- * Maps fileid → shard_id for cross-shard FH resolution (PUTFH).
+ * Maps fileid -> shard_id for cross-shard FH resolution (PUTFH).
  * ----------------------------------------------------------------------- */
 
 enum mds_status mds_cat_shard_fileid_get(struct mds_catalogue *cat,
@@ -526,7 +526,7 @@ enum mds_status mds_cat_shard_fileid_del(struct mds_catalogue *cat,
 					 uint64_t fileid);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Cross-shard extended dirents
+ * Catalogue data -- Cross-shard extended dirents
  *
  * ext_dirents point from a local parent directory to a child inode
  * on a remote shard.  Used by LOOKUP to cross shard boundaries.
@@ -555,7 +555,7 @@ enum mds_status mds_cat_ext_dirent_del(struct mds_catalogue *cat,
 				       const char *name);
 
 /* -----------------------------------------------------------------------
- * Catalogue data — Cross-shard link anchors
+ * Catalogue data -- Cross-shard link anchors
  *
  * Anchors record that a remote MDS holds a hard link whose target
  * inode lives on this shard.  Used for nlink tracking on rename/unlink.
@@ -633,7 +633,7 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
  *
  * When set, write operations route through the CQ for batched
  * atomic commits + replication.  The catalogue does NOT own the
- * CQ — the caller is responsible for destroying the CQ before
+ * CQ -- the caller is responsible for destroying the CQ before
  * closing the catalogue.
  *
  * @param cat  Catalogue handle.

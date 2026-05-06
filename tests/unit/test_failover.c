@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_failover.c — Unit tests for the failover promotion state machine.
+ * test_failover.c -- Unit tests for the failover promotion state machine.
  *
  * Tests cover: init/destroy, promote happy-path, role guards,
  * partner-alive abort, subtree takeover, grace entry, client
@@ -35,7 +35,7 @@ static int tests_run;
 static int tests_passed;
 static int test_failed;
 
-/* 16 MiB — plenty for unit tests. */
+/* 16 MiB -- plenty for unit tests. */
 #define TEST_MAP_SIZE (16ULL * 1024 * 1024)
 
 #define ASSERT_EQ(a, b) do {                                    \
@@ -334,7 +334,7 @@ static void test_promote_from_non_standby(void)
     ASSERT_EQ(failover_promote(ctx), MDS_OK);
     ASSERT_EQ(failover_get_role(ctx), FAILOVER_PRIMARY);
 
-    /* Second promote must fail — already PRIMARY. */
+    /* Second promote must fail -- already PRIMARY. */
     ASSERT_EQ(failover_promote(ctx), MDS_ERR_PERM);
     ASSERT_EQ(failover_get_role(ctx), FAILOVER_PRIMARY);
 
@@ -346,7 +346,7 @@ static void test_promote_from_non_standby(void)
     free(db_path);
 }
 
-/* 5. Partner alive — promote aborted, stays STANDBY. */
+/* 5. Partner alive -- promote aborted, stays STANDBY. */
 static void test_promote_partner_alive(void)
 {
     struct subtree_map *map = NULL;
@@ -527,7 +527,7 @@ static void test_grace_client_tracking(void)
     free(db_path);
 }
 
-/* 9. Reclaim accepted — grace_client_reclaimed succeeds, count drops. */
+/* 9. Reclaim accepted -- grace_client_reclaimed succeeds, count drops. */
 static void test_reclaim_accepted(void)
 {
     struct subtree_map *map = NULL;
@@ -571,7 +571,7 @@ static void test_reclaim_accepted(void)
     ASSERT_EQ(grace_pending_count(), 1U);
     ASSERT_TRUE(!grace_client_is_recovering(CLIENT_A));
 
-    /* Client B reclaims — auto-exits grace. */
+    /* Client B reclaims -- auto-exits grace. */
     ASSERT_EQ(grace_client_reclaimed(CLIENT_B), 0);
     ASSERT_EQ(grace_pending_count(), 0U);
     ASSERT_TRUE(!grace_is_active());
@@ -635,7 +635,7 @@ static void test_reclaim_rejected_unknown(void)
 }
 
 /* -------------------------------------------------------------------
- * Seq 9 — New tests
+ * Seq 9 -- New tests
  * ------------------------------------------------------------------- */
 
 /* 12. Init succeeds with detect_cb=NULL (authoritative mode). */
@@ -862,7 +862,7 @@ int main(void)
     RUN_TEST(test_reclaim_accepted);
     RUN_TEST(test_reclaim_rejected_unknown);
 
-    /* Seq 9 — New tests */
+    /* Seq 9 -- New tests */
     RUN_TEST(test_init_no_detect_cb);
     RUN_TEST(test_failover_take_over_local);
     RUN_TEST(test_promote_idempotent);

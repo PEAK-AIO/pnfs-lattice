@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * rondb_stubs.c — RonDB-specific fallback implementations for non-RonDB builds.
+ * rondb_stubs.c -- RonDB-specific fallback implementations for non-RonDB builds.
  */
 
 #include "catalogue_rondb.h"

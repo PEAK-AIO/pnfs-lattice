@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_resilver.c — Unit tests for background resilvering.
+ * test_resilver.c -- Unit tests for background resilvering.
  */
 
 #include <assert.h>
@@ -236,7 +236,7 @@ static void test_skips_fully_mirrored(void)
     /* Scan should find nothing degraded. */
     struct test_scan_ctx sc = { .count = 0 };
     mds_cat_stripe_map_scan(db, test_scan_cb, &sc);
-    /* File is fully healthy — scan still finds it, but resilver scan_cb
+    /* File is fully healthy -- scan still finds it, but resilver scan_cb
        would skip it. Let's test the worker-level logic by running init. */
 
     mds_catalogue_close(db);
@@ -409,7 +409,7 @@ static void test_skips_file_with_active_layout(void)
     struct mds_ds_map_entry *ent2 = NULL;
     st = mds_cat_stripe_map_get(db, 100, &sc2, &su2, &mc2, &ent2);
     VERIFY(st == MDS_OK);
-    VERIFY(ent2[1].ds_id == 2);  /* Still DS2 — not replaced */
+    VERIFY(ent2[1].ds_id == 2);  /* Still DS2 -- not replaced */
     free(ent2);
 
     resilver_destroy(rw);
@@ -580,7 +580,7 @@ static void test_layout_state_scan_for_file(void)
     make_tmpdir();
     struct mds_catalogue *db = open_test_db();
 
-    /* No layouts — should return false. */
+    /* No layouts -- should return false. */
     bool exists = true;
     enum mds_status st = mds_coord_layout_scan_for_file(
         db, 42, &exists);
@@ -677,7 +677,7 @@ static void test_restart_after_done(void)
     memset(data2, 0xEF, sizeof(data2));
     write_ds_data(1, 201, 0, 0, data2, sizeof(data2));
 
-    /* Second run — must NOT fail with "already running". */
+    /* Second run -- must NOT fail with "already running". */
     VERIFY(resilver_start(rw, 4) == 0);
     for (int i = 0; i < 100; i++) {
         resilver_status(rw, NULL, NULL, NULL, &state);
@@ -721,7 +721,7 @@ static void test_rejects_short_copy(void)
     ent[1].ds_id = 2; ent[1].nfs_fh_len = 3; memcpy(ent[1].nfs_fh, "fh2", 3);
     create_stripe_map(db, 300, 2, ent);
 
-    /* Write only 512 bytes — inode says 2048. */
+    /* Write only 512 bytes -- inode says 2048. */
     uint8_t data[512];
     memset(data, 0xBB, sizeof(data));
     write_ds_data(1, 300, 0, 0, data, sizeof(data));
@@ -743,7 +743,7 @@ static void test_rejects_short_copy(void)
     }
 
     /* The worker should finish (DONE) but the file should NOT have been
-     * committed — stripe map must still point to DS2 (original). */
+     * committed -- stripe map must still point to DS2 (original). */
     uint32_t sc, su, mc;
     struct mds_ds_map_entry *map_ent = NULL;
     VERIFY(mds_cat_stripe_map_get(db, 300, &sc, &su, &mc, &map_ent) == MDS_OK);
@@ -763,7 +763,7 @@ static void test_rejects_short_copy(void)
  * ----------------------------------------------------------------------- */
 
 /**
- * test_skip_counter_active_layout — verify skipped_active_layout counter.
+ * test_skip_counter_active_layout -- verify skipped_active_layout counter.
  */
 static void test_skip_counter_active_layout(void)
 {
@@ -825,7 +825,7 @@ static void test_skip_counter_active_layout(void)
 }
 
 /**
- * test_skip_counter_active_writer — verify skipped_active_writer counter
+ * test_skip_counter_active_writer -- verify skipped_active_writer counter
  * via open_state_table with a WRITE open.
  */
 static void test_skip_counter_active_writer(void)
@@ -851,7 +851,7 @@ static void test_skip_counter_active_writer(void)
 
     write_ds_data(1, 501, 0, 0, "data", 4);
 
-    /* Open file 501 for writing — triggers active-writer skip. */
+    /* Open file 501 for writing -- triggers active-writer skip. */
     struct open_state_table *ot = NULL;
     VERIFY(open_state_table_init(1, &ot) == 0);
 
@@ -890,7 +890,7 @@ static void test_skip_counter_active_writer(void)
 }
 
 /**
- * test_ext_status_zeroed_on_null — verify resilver_status_ext handles NULL.
+ * test_ext_status_zeroed_on_null -- verify resilver_status_ext handles NULL.
  */
 static void test_ext_status_zeroed_on_null(void)
 {
@@ -905,7 +905,7 @@ static void test_ext_status_zeroed_on_null(void)
 }
 
 /**
- * test_pass_count_increments — verify pass_count after a successful resilver.
+ * test_pass_count_increments -- verify pass_count after a successful resilver.
  */
 static void test_pass_count_increments(void)
 {

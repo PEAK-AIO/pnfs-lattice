@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_layout_commit_aggregator.c — Phase F v1 unit tests.
+ * test_layout_commit_aggregator.c -- Phase F v1 unit tests.
  *
  * Pure data-structure tests against the layout_commit_aggregator
- * module.  No catalogue, no compound, no daemon — just the
+ * module.  No catalogue, no compound, no daemon -- just the
  * aggregator + a synthetic flush callback that records per-fileid
  * snapshots into an in-test buffer.
  */
@@ -280,7 +280,7 @@ static void test_latest_mtime_merge(void)
     struct timespec later_nsec = { .tv_sec = 1700000005,
                                     .tv_nsec = 999 };
 
-    /* Out-of-order submits — final state must reflect the newest. */
+    /* Out-of-order submits -- final state must reflect the newest. */
     ASSERT_EQ(layout_commit_aggregator_submit(agg, 11, 100, later_sec),
               0);
     ASSERT_EQ(layout_commit_aggregator_submit(agg, 11, 200, earlier),
@@ -365,7 +365,7 @@ static void test_flush_fileid_success(void)
     ASSERT_EQ(got.mtime.tv_sec, 100);
     ASSERT_EQ(got.mtime.tv_nsec, 200);
 
-    /* Bucket should now be clean — second flush is a no-op success. */
+    /* Bucket should now be clean -- second flush is a no-op success. */
     bool dirty;
     uint64_t sz; struct timespec out_t;
     ASSERT_EQ(layout_commit_aggregator_peek(agg, 13, &sz, &out_t,
@@ -449,7 +449,7 @@ static void test_flush_all_dirty(void)
         ASSERT_EQ(got.size, fid * 100);
     }
 
-    /* All buckets are now clean — flush_all_dirty drains nothing. */
+    /* All buckets are now clean -- flush_all_dirty drains nothing. */
     rec_clear(&rec);
     flushed = layout_commit_aggregator_flush_all_dirty(agg);
     ASSERT_EQ(flushed, 0u);
@@ -531,7 +531,7 @@ static void test_capacity_eviction(void)
     passed++;
 }
 
-/* QA Phase 4 — eviction-flush regression.
+/* QA Phase 4 -- eviction-flush regression.
  *
  * The pre-fix submit() path freed dirty victims without invoking the
  * flush callback, silently dropping every pending size/mtime update
@@ -556,7 +556,7 @@ static void test_eviction_flushes_dirty(void)
     layout_commit_aggregator_set_flush_fn(agg, rec_flush_fn, &rec);
 
     /* LCA_SHARDS * 4 = 64 total slots.  With 200 distinct fileids,
-     * pigeonhole forces ~ (200 − 64) = 136 evictions, comfortably
+     * pigeonhole forces ~ (200 - 64) = 136 evictions, comfortably
      * below the recorder's MAX_RECORDS=1024 buffer so no callbacks
      * are dropped during the test.  Every eviction must drive a
      * flush callback. */
@@ -610,7 +610,7 @@ static void test_eviction_flushes_dirty(void)
  * silently drop file A's update because file B forced its eviction).
  *
  * Strategy:
- *   1. Init a tiny aggregator (one shard → capacity 4).
+ *   1. Init a tiny aggregator (one shard -> capacity 4).
  *   2. Wire a recording flush callback whose should_fail toggle is
  *      ON.
  *   3. Submit fileids 1..200 with the failing callback.  The first
@@ -667,13 +667,13 @@ static void test_eviction_flush_failure_preserves_victim(void)
     /* Per-Blocker-3 invariant: an eviction that ended in flush
      * failure does NOT count as a successful eviction (we backed
      * out the increment).  So the only evictions counted are the
-     * (rare) clean-victim path — which is unlikely on this trace
+     * (rare) clean-victim path -- which is unlikely on this trace
      * because every bucket starts dirty.  The strong assertion is
-     * “evictions <= flushes_forced” (every counted eviction must
+     * "evictions <= flushes_forced" (every counted eviction must
      * have driven a successful forced flush). */
     ASSERT_TRUE(st.evictions <= st.flushes_forced);
 
-    /* The failing flushes must NOT have appeared in the recorder —
+    /* The failing flushes must NOT have appeared in the recorder --
      * the rec_flush_fn returns -1 before the recording branch when
      * should_fail is set. */
     ASSERT_EQ(rec_count(&rec), 0u);
@@ -686,7 +686,7 @@ static void test_eviction_flush_failure_preserves_victim(void)
         uint64_t sz = 0;
         struct timespec mt = { 0 };
         bool dirty = false;
-        /* The bucket may not be present — a later eviction during
+        /* The bucket may not be present -- a later eviction during
          * a different submit could have legitimately evicted a
          * clean predecessor.  But when present, the bucket must
          * be dirty with size == fid * 10. */
@@ -951,7 +951,7 @@ static void test_periodic_timer(void)
 {
     fprintf(stdout, "  periodic_timer:                   ");
 
-    /* 25 ms tick — enough to fire several times within a 250 ms test. */
+    /* 25 ms tick -- enough to fire several times within a 250 ms test. */
     struct layout_commit_aggregator *agg = NULL;
     ASSERT_EQ(layout_commit_aggregator_init(64, 25, &agg), 0);
 

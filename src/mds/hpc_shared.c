@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * hpc_shared.c — Phase B helpers for the HPC-Shared file mode.
+ * hpc_shared.c -- Phase B helpers for the HPC-Shared file mode.
  *
  * See hpc_shared.h for the public contract.
  */
@@ -184,7 +184,7 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md — wide HPC create.
+ * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md -- wide HPC create.
  *
  * Implementation notes:
  *  - We bypass mds_cat_ns_create here because that path is wired to
@@ -199,11 +199,11 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
  *    stripe map is a single mds_cat_stripe_map_put after FH capture.
  *
  *  - Two failure modes need explicit cleanup:
- *      (a) ds_prealloc_batch failure — ds_prealloc_batch's internal
+ *      (a) ds_prealloc_batch failure -- ds_prealloc_batch's internal
  *          rollback already enqueued GC for any DS-side state it
  *          partially produced.  We only need to remove the inode +
  *          dirent we created in step 2.
- *      (b) mds_cat_stripe_map_put failure — ds_prealloc_batch
+ *      (b) mds_cat_stripe_map_put failure -- ds_prealloc_batch
  *          succeeded so we own real DS files; we GC-enqueue every
  *          slot before removing the inode + dirent.  Without this
  *          the DS files leak forever.
@@ -284,7 +284,7 @@ static enum mds_status hpc_create_inode_and_dirent(
         return st;
     }
 
-    /* Best-effort parent touch.  A failure here is not fatal — the
+    /* Best-effort parent touch.  A failure here is not fatal -- the
      * inode + dirent are already in the txn and will commit; the
      * parent stays at its current change counter, which matches the
      * test_helpers.h convention for direct catalogue writes. */
@@ -373,7 +373,7 @@ enum mds_status hpc_shared_create_wide_layout(
     }
 
     /* Step 2: create inode + dirent in one catalogue txn.  Inode
-     * carries MDS_IFLAG_HPC_SHARED from the start — no follow-up
+     * carries MDS_IFLAG_HPC_SHARED from the start -- no follow-up
      * setattr needed. */
     st = hpc_create_inode_and_dirent(cat, parent_fileid, name,
                                      mode, uid, gid, &child);
@@ -428,7 +428,7 @@ enum mds_status hpc_shared_create_wide_layout(
      * that makes the file visible to NFS clients.
      *
      * If the clear fails, the inode remains in PENDING state but the
-     * stripe map has already been persisted — we cannot leave that
+     * stripe map has already been persisted -- we cannot leave that
      * combination behind, so we fall back to the same rollback as a
      * step 4 failure: delete the stripe map row, GC-enqueue every
      * captured DS FH, and remove the inode + dirent.  Returning IO
@@ -463,14 +463,14 @@ enum mds_status hpc_shared_create_wide_layout(
 }
 
 /* -----------------------------------------------------------------------
- * Phase G — client striping hint helpers (pure functions).
+ * Phase G -- client striping hint helpers (pure functions).
  *
  * No catalogue / compound dependencies; safe to test in isolation.
  * Threshold constants live at file scope so they are uniformly
  * referenced by the decoder, the geometry picker, and the unit tests.
  * ----------------------------------------------------------------------- */
 
-/* Tier thresholds (master plan §5 Phase G). */
+/* Tier thresholds (master plan S5 Phase G). */
 #define HPC_HINT_TIER1_SIZE_BYTES   (1ULL << 40)   /* 1 TiB */
 #define HPC_HINT_TIER1_CLIENT_COUNT (1024U)
 #define HPC_HINT_TIER1_STRIPE_UNIT  (1U << 20)     /* 1 MiB */

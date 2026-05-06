@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * compound_layout.c — pNFS layout ops (LAYOUTGET/RETURN/COMMIT, GETDEVICEINFO, LAYOUTERROR/STATS).
+ * compound_layout.c -- pNFS layout ops (LAYOUTGET/RETURN/COMMIT, GETDEVICEINFO, LAYOUTERROR/STATS).
  */
 
 #include <stdint.h>
@@ -81,15 +81,15 @@ static uint8_t ff_policy_transport(enum ff_transport_policy pol)
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 /* -----------------------------------------------------------------------
- * Layout stateid generation — globally unique per layout grant.
+ * Layout stateid generation -- globally unique per layout grant.
  *
  * Wire format (12 bytes of stateid.other):
  *     [mds_id BE 4B][counter BE 8B]
  *
  * The counter is a single 64-bit monotonic integer.  It MUST never
  * repeat across MDS restarts, because the catalogue keeps layout_state
- * rows from previous runs (placement, stripe map, and — when
- * transient_state_cache is off or the CQ pregrant path fires — layout
+ * rows from previous runs (placement, stripe map, and -- when
+ * transient_state_cache is off or the CQ pregrant path fires -- layout
  * grants themselves) until the client LAYOUTRETURNs or the server GCs.
  * If the counter restarts at 1 after a daemon restart, the new run's
  * LAYOUTGET issues a stateid that already exists in layout_state for a
@@ -99,7 +99,7 @@ static uint8_t ff_policy_transport(enum ff_transport_policy pol)
  * Because the Linux client swallows BAD_STATEID on LAYOUTCOMMIT
  * silently (just drops the pending size update and moves on), the
  * write looks successful to userspace but the MDS never updates the
- * file size — resulting in an apparently-successful cp producing a
+ * file size -- resulting in an apparently-successful cp producing a
  * 0-byte destination.  See git log for the lab reproduction.
  *
  * Fix: seed the counter from CLOCK_REALTIME nanoseconds at the first
@@ -110,7 +110,7 @@ static uint8_t ff_policy_transport(enum ff_transport_policy pol)
  * impossible.
  *
  * Same-shape generators exist in open_state.c and lock_state.c;
- * those paths are being audited separately — both currently rely on
+ * those paths are being audited separately -- both currently rely on
  * the same counter pattern but their rows are cleared on restart
  * under transient_state_cache, so the collision window is narrower.
  * ----------------------------------------------------------------------- */
@@ -125,7 +125,7 @@ static pthread_once_t g_layout_sid_seed_once = PTHREAD_ONCE_INIT;
 /* -----------------------------------------------------------------------
  * In-memory layout-stateid seqid tracker.
  *
- * RFC 8881 §12.5.3 requires a layout stateid's seqid to advance
+ * RFC 8881 S12.5.3 requires a layout stateid's seqid to advance
  * monotonically across LAYOUTGET / LAYOUTRETURN / LAYOUTCOMMIT.  When
  * transient_state_cache=true (lab default) the layout_state row is
  * never written to NDB, so mds_coord_layout_get_by_stateid() always
@@ -134,14 +134,14 @@ static pthread_once_t g_layout_sid_seed_once = PTHREAD_ONCE_INIT;
  * This module-local table records every layout `other` we issue and
  * the latest seqid we returned for it.  Lookup is keyed on the 12-byte
  * `other`; chained hash with a striped mutex.  Entries persist for
- * the lifetime of the daemon — same lifecycle as the layout itself
+ * the lifetime of the daemon -- same lifecycle as the layout itself
  * for transient mode.  Memory is bounded by the number of distinct
  * granted stateids (one per (clientid, fileid) pair on most paths);
  * the hash overhead is sizeof(struct layout_seqid_entry) per entry.
  *
  * Persistent mode (transient_state_cache=false) ALSO updates this
  * table so the in-memory and NDB views stay coherent across daemon
- * runs — but the catalogue probe in layout_pick_stateid() runs first
+ * runs -- but the catalogue probe in layout_pick_stateid() runs first
  * and short-circuits on hit, so this table is the fallback path.
  * ----------------------------------------------------------------------- */
 
@@ -177,7 +177,7 @@ static uint32_t layout_seqid_hash(const uint8_t other[NFS4_OTHER_SIZE])
 
 /*
  * Insert a freshly-allocated layout `other` with seqid = 1.  Idempotent
- * — a duplicate call (same `other`) leaves the existing entry alone
+ * -- a duplicate call (same `other`) leaves the existing entry alone
  * because make_layout_stateid uses a unique counter and the `other`
  * collision space is 2^96 wide.
  */
@@ -253,7 +253,7 @@ void layout_seqid_record_at(const uint8_t other[NFS4_OTHER_SIZE],
 
 /*
  * Look up @other in the table.  On hit, advance the stored seqid by
- * one (with 0xFFFFFFFF → 1 wrap per RFC 8881 §8.2.2) and return the
+ * one (with 0xFFFFFFFF -> 1 wrap per RFC 8881 S8.2.2) and return the
  * NEW seqid via @next_seqid; sets *@hit = true.  On miss, *@hit =
  * false and @next_seqid is untouched.
  */
@@ -287,8 +287,8 @@ void layout_seqid_advance(const uint8_t other[NFS4_OTHER_SIZE],
 
 /*
  * Peek: return the current (last-issued) seqid for @other without
- * advancing it.  Used by LAYOUTRETURN seqid validation — RFC 8881
- * §8.2.2 says a stateid presented with seqid < current is OLD_STATEID,
+ * advancing it.  Used by LAYOUTRETURN seqid validation -- RFC 8881
+ * S8.2.2 says a stateid presented with seqid < current is OLD_STATEID,
  * with seqid > current is BAD_STATEID, and with seqid == current is
  * the latest copy and acceptable.
  *
@@ -323,7 +323,7 @@ bool layout_seqid_peek(const uint8_t other[NFS4_OTHER_SIZE],
 /* Remove an entry from the in-memory tracker.  Idempotent / NULL-safe.
  * Used by op_layoutreturn after the stateid has been accepted so a
  * subsequent op presenting the now-returned stateid sees a clean
- * miss — the caller decides whether that is BAD_STATEID or a fresh
+ * miss -- the caller decides whether that is BAD_STATEID or a fresh
  * grant. */
 void layout_seqid_remove(const uint8_t other[NFS4_OTHER_SIZE])
 {
@@ -385,7 +385,7 @@ void make_layout_stateid(uint32_t mds_id,
 
 	/* Register the new `other` so subsequent LAYOUTGET / LAYOUTCOMMIT
 	 * / LAYOUTRETURN that pass this stateid back can advance the
-	 * seqid (RFC 8881 §12.5.3).  See layout_seqid_advance(). */
+	 * seqid (RFC 8881 S12.5.3).  See layout_seqid_advance(). */
 	layout_seqid_record_new(out->other);
 }
 
@@ -473,11 +473,11 @@ static enum nfs4_status layout_select_grant_range(
 }
 
 /*
- * RFC 8881 §12.5.3 / §8.2.2 — layout stateid renewal.
+ * RFC 8881 S12.5.3 / S8.2.2 -- layout stateid renewal.
  *
  * When a client passes the previously-issued layout stateid as input
  * to LAYOUTGET, the server MUST return the SAME `other` with seqid
- * advanced by one (wrapping 0xFFFFFFFF → 1, since 0 is reserved).
+ * advanced by one (wrapping 0xFFFFFFFF -> 1, since 0 is reserved).
  * Non-layout inputs (open stateid, CLAIM_NULL, special-zero) get a
  * fresh stateid with seqid = 1.
  *
@@ -493,7 +493,7 @@ static enum nfs4_status layout_select_grant_range(
  * compound's FH is treated as renewal.  A miss (or fileid mismatch)
  * is treated as a new grant.  When @cat is NULL (e.g. unit-test
  * harness without a coordination backend), we conservatively fall
- * back to allocating a fresh stateid — the legacy behaviour.
+ * back to allocating a fresh stateid -- the legacy behaviour.
  */
 static void layout_pick_stateid(struct compound_data *cd,
 				const struct nfs4_stateid *client_sid,
@@ -569,7 +569,7 @@ static bool layout_state_is_root_global(const struct compound_data *cd)
 }
 
 /*
- * Phase H of docs/hpc-nto1-plan.md — compatibility filter that
+ * Phase H of docs/hpc-nto1-plan.md -- compatibility filter that
  * prefers RDMA / GPUDirect DSes for HPC-shared inodes when the
  * cluster has any, and falls back to the full required-transport
  * set otherwise.  Plain (non-HPC) inodes go through
@@ -780,7 +780,7 @@ static void layout_clear_ds_pending(struct compound_data *cd, uint64_t fileid)
  * Revoke a layout grant whose entries have unready FHs, and tell the
  * client to retry.
  *
- * Phase 12 Component A (see docs/design-layoutget-decoupling.md §4.1):
+ * Phase 12 Component A (see docs/design-layoutget-decoupling.md S4.1):
  * LAYOUTGET no longer runs synchronous DS NFS RPCs on the hot path.
  * When a placement produces entries with nfs_fh_len == 0, we:
  *
@@ -790,7 +790,7 @@ static void layout_clear_ds_pending(struct compound_data *cd, uint64_t fileid)
  *      ds_prepare fast-path.
  *   3. Enqueue the fileid into ds_prepare so the background worker
  *      populates the FH before the client retries.
- *   4. Return NFS4ERR_DELAY (RFC 8881 §15.1.1.3) — client retries
+ *   4. Return NFS4ERR_DELAY (RFC 8881 S15.1.1.3) -- client retries
  *      with backoff.  We deliberately do NOT return
  *      NFS4ERR_LAYOUTUNAVAILABLE because the Linux client treats
  *      that as a dead path and falls back to proxy I/O through the
@@ -853,7 +853,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	uint32_t i;
 	struct nfs4_stateid client_sid;
 
-	/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker.  Pynfs
+	/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker.  Pynfs
 	 * CSID7 testOpenLayoutGet bundles LAYOUTGET right after OPEN with
 	 * the marker as the layout stateid argument.  Resolve once here
 	 * so all six call sites of layout_pick_stateid below see the same
@@ -864,11 +864,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 	/*
-	 * Phase 6 — wide long-lived layout grant.
+	 * Phase 6 -- wide long-lived layout grant.
 	 *
 	 * Rather than echo the client's requested range and iomode,
 	 * we always grant a read-write, whole-file, long-lived layout.
-	 * RFC 8881 §12.5.3 explicitly allows the server to grant a
+	 * RFC 8881 S12.5.3 explicitly allows the server to grant a
 	 * wider iomode / range than requested; the client may use the
 	 * wider grant for any subsequent I/O without issuing another
 	 * LAYOUTGET.  Combined with return_on_close=false, this lets a
@@ -882,7 +882,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 *
 	 * Concrete effect: a mdtest-style workload that opens a file,
 	 * does one LAYOUTGET, writes some bytes, closes, then reopens
-	 * and writes again no longer needs a second LAYOUTGET — one
+	 * and writes again no longer needs a second LAYOUTGET -- one
 	 * NDB commit saved per file.  Measured wins come from any
 	 * workload where the same file is re-opened within its lease
 	 * window.
@@ -924,7 +924,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 	/*
-	 * Mark's bug — byte-range CB_LAYOUTRECALL.
+	 * Mark's bug -- byte-range CB_LAYOUTRECALL.
 	 *
 	 * Before granting a new layout, scan existing holders on this
 	 * fileid and emit byte-range CB_LAYOUTRECALL to any holder
@@ -936,13 +936,13 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * a whole-file CB_LAYOUTRECALL.
 	 *
 	 * Best-effort: any CB delivery error or catalogue scan failure
-	 * still leaves the catalogue in a coherent state — holders
+	 * still leaves the catalogue in a coherent state -- holders
 	 * whose row was revoked observe NFS4ERR_BAD_STATEID on their
 	 * next LAYOUT*, and the requesting LAYOUTGET below proceeds
 	 * normally.  Skipped when:
 	 *   - cd->lr is unset (test compat / no recall coordinator),
 	 *   - the request's stateid matches the requesting client's
-	 *     existing layout (idempotent renew — no recall needed).
+	 *     existing layout (idempotent renew -- no recall needed).
 	 * The same-client case is handled inside the helper by the
 	 * clientid filter, but we early-out here to avoid the catalogue
 	 * round trip for the common renew path.
@@ -975,7 +975,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 
 	/*
 	 * If the CQ fused a layout pregrant onto the preceding
-	 * OPEN(CREATE), consume it now — before path branching.
+	 * OPEN(CREATE), consume it now -- before path branching.
 	 * Scope is this single compound; layout_pregranted is cleared
 	 * so compound_process skips revoke_unused_pregrant on any
 	 * error return below.  Individual paths reuse
@@ -1019,13 +1019,13 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 	/*
-	 * Phase D of docs/hpc-nto1-plan.md — HPC-Shared layout cache
+	 * Phase D of docs/hpc-nto1-plan.md -- HPC-Shared layout cache
 	 * fast path.
 	 *
 	 * For inodes with MDS_IFLAG_HPC_SHARED, look the stripe map up
 	 * in the per-MDS layout cache before touching the catalogue.
 	 * On hit we still mint a fresh per-client layout stateid (v1
-	 * keeps per-client stateids — no shared stateid until a
+	 * keeps per-client stateids -- no shared stateid until a
 	 * future revision pairs it with the recall-path skip), but we
 	 * skip the cat_stripe_map_get / RonDB-fused read and the
 	 * placement fallback entirely.
@@ -1129,7 +1129,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 				 * Its consumption above cleared layout_pregranted
 				 * so compound_process skips
 				 * revoke_unused_pregrant on any subsequent error
-				 * return — the previously observed fused
+				 * return -- the previously observed fused
 				 * regression (see
 				 * docs/design-post-phase3-candidates.md).
 				 */
@@ -1158,7 +1158,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 				 * the LAYOUTGET hot path.  If the pre-captured
 				 * FH is missing, route through the ds_prepare
 				 * async capture + NFS4ERR_DELAY helper.  See
-				 * docs/design-layoutget-decoupling.md §4.1. */
+				 * docs/design-layoutget-decoupling.md S4.1. */
 				if (!layout_entries_ready_for_grant(
 					    cd, entries,
 					    stripe_count * mirror_count)) {
@@ -1199,7 +1199,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			/* Layout grant already persisted in the fused txn. */
 			r->stateid = fused_sid;
 
-			/* No backfill — if FH is missing, return
+			/* No backfill -- if FH is missing, return
 			 * LAYOUTUNAVAILABLE and let client use proxy I/O. */
 		if (!layout_entries_ready_for_grant(
 			    cd, entries,
@@ -1368,7 +1368,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		 * FHs (prealloc pool was empty at CREATE, or legacy
 		 * stripe_map), enqueue async capture + return DELAY
 		 * instead of LAYOUTUNAVAILABLE.  Done inline because
-		 * no grant has been issued yet — no layout_return to
+		 * no grant has been issued yet -- no layout_return to
 		 * clean up. */
 		if (!layout_entries_ready_for_grant(
 			    cd, entries, stripe_count * mirror_count)) {
@@ -1448,7 +1448,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					&stripe_count, &stripe_unit,
 					&mirror_count, &entries);
 		if (st == MDS_ERR_NOTFOUND) {
-			/* Need placement — read DS registry. */
+			/* Need placement -- read DS registry. */
 			st = cat_ds_list(cd, &ds_list, &ds_count);
 			if (st != MDS_OK || ds_count == 0) {
 				free(ds_list);
@@ -1500,7 +1500,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			/* Phase 12 Component A: no sync FH capture.  The
 			 * post-grant check returns NFS4ERR_DELAY when
 			 * entries have nfs_fh_len == 0.  See
-			 * docs/design-layoutget-decoupling.md §4.1. */
+			 * docs/design-layoutget-decoupling.md S4.1. */
 			(void)i;
 
 			/* Persist new stripe map via catalogue. */
@@ -1557,10 +1557,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * NOTE (Issue #6): Existing files retain their original stripe
 	 * geometry.  Adding DSs to the cluster does not re-stripe
 	 * already-created files.  Stripe expansion would require data
-	 * migration and is not supported — document as a limitation.
+	 * migration and is not supported -- document as a limitation.
 	 */
 
-	/* No backfill — LAYOUTGET must never block on network I/O.
+	/* No backfill -- LAYOUTGET must never block on network I/O.
 	 * If entries have nfs_fh_len == 0 (legacy or failed capture),
 	 * return LAYOUTUNAVAILABLE.  The client falls back to proxy
 	 * I/O through the MDS for these files. */
@@ -1580,7 +1580,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 fill_layoutget_result:
-	/* Phase D of docs/hpc-nto1-plan.md — populate the HPC layout
+	/* Phase D of docs/hpc-nto1-plan.md -- populate the HPC layout
 	 * cache once per LAYOUTGET that produced a fresh stripe map.
 	 * Skipped when the path was a cache hit (the entry is already
 	 * present and this would be a redundant copy).  All branches
@@ -1598,7 +1598,7 @@ fill_layoutget_result:
 	/* Fill result.
 	 *
 	 * Advertise the persisted long-lived grant to the client:
-	 *   - iomode = RW  (server may widen per RFC 8881 §12.5.3)
+	 *   - iomode = RW  (server may widen per RFC 8881 S12.5.3)
 	 *   - offset/length = bounded grant selected above
 	 *   - return_on_close = false  (client keeps the layout across
 	 *     close; returned only on explicit LAYOUTRETURN or when
@@ -1616,14 +1616,14 @@ fill_layoutget_result:
 	r->length = grant_length;
 	r->stripe_unit = stripe_unit;
 
-	/* Phase E + E+ of docs/hpc-nto1-plan.md — byte-range stripe
+	/* Phase E + E+ of docs/hpc-nto1-plan.md -- byte-range stripe
 	 * subsetting with stripe-aligned boundaries.
 	 *
 	 * If the client asked for a narrow byte range (length !=
 	 * UINT64_MAX) and we have a real stripe geometry, restrict the
 	 * returned DS list to the stripes that actually cover it.  The
 	 * authoritative grant range stays whole-file (grant_offset /
-	 * grant_length above) — we only narrow what we emit on the
+	 * grant_length above) -- we only narrow what we emit on the
 	 * wire so the client's per-DS dispatch table is stripe-aligned
 	 * and proportional to the request.
 	 *
@@ -1633,15 +1633,15 @@ fill_layoutget_result:
 	 *   clamped to [0, stripe_count - 1]
 	 *
 	 * The returned (offset, length) pair stays the granted range:
-	 * RFC 8881 §12.5.3 lets the server widen, and Phase D's per-
+	 * RFC 8881 S12.5.3 lets the server widen, and Phase D's per-
 	 * inode layout cache will rely on the cached layout being
 	 * authoritative across narrowed requests.  Only ds[] is
 	 * trimmed.  ffl_stripe_unit (== r->stripe_unit) tells the
 	 * Linux 6.18+ flex-files client which entry covers which byte;
-	 * see RFC 8435 §5.1 and the kernel `dss_id = offset /
+	 * see RFC 8435 S5.1 and the kernel `dss_id = offset /
 	 * stripe_unit` dispatcher.
 	 *
-	 * Single-stripe layouts skip the trim entirely — the legacy
+	 * Single-stripe layouts skip the trim entirely -- the legacy
 	 * stripe_count=1 case stays bit-for-bit identical. */
 	uint32_t emit_start_stripe = 0;
 	uint32_t emit_end_stripe   = (stripe_count > 0)
@@ -1685,15 +1685,15 @@ fill_layoutget_result:
 
 	/* The flex-files form populated below depends on ff_xdr_form:
 	 *
-	 *   FF_XDR_FORM_LEGACY  — N ff_mirror4 entries, each with
+	 *   FF_XDR_FORM_LEGACY  -- N ff_mirror4 entries, each with
 	 *                         ds_count = mirror_count.  Pre-6.18
 	 *                         Linux flex-files clients consume
 	 *                         this shape.
-	 *   FF_XDR_FORM_STRIPED — 1 ff_mirror4 entry whose ds_count
+	 *   FF_XDR_FORM_STRIPED -- 1 ff_mirror4 entry whose ds_count
 	 *                         == stripe_count.  Linux 6.18+
 	 *                         clients consume this as the per-
 	 *                         stripe DS dispatch table (RFC 8435
-	 *                         §5.1).
+	 *                         S5.1).
 	 *
 	 * The actual selection of ff_xdr_form is done after stripe
 	 * geometry is known but before nfs4_res_layoutget_alloc(); see
@@ -1705,18 +1705,18 @@ fill_layoutget_result:
 		want_ff_mirror_count = stripe_count * mirror_count;
 	}
 
-	/* Phase C / Step 6 of docs/hpc-nto1-plan.md — ff_xdr_form
+	/* Phase C / Step 6 of docs/hpc-nto1-plan.md -- ff_xdr_form
 	 * selector.  Plain (non-HPC) inodes always emit the legacy
 	 * one-DS-per-mirror form so existing clients see bit-for-bit
 	 * identical wire output.  HPC-Shared inodes consult
 	 * cd->cfg_hpc_xdr_form:
 	 *
-	 *   AUTO     — striped iff mirror_count == 1 && stripe_count
-	 *              > 1 (the only shape RFC 8435 §5.1 lets us emit
+	 *   AUTO     -- striped iff mirror_count == 1 && stripe_count
+	 *              > 1 (the only shape RFC 8435 S5.1 lets us emit
 	 *              for multi-DS-per-mirror without violating the
 	 *              one-mirror-per-replica constraint).
-	 *   STRIPED  — force striped (lab / 6.18+-only fleets).
-	 *   LEGACY   — force legacy (mixed-kernel fleets).
+	 *   STRIPED  -- force striped (lab / 6.18+-only fleets).
+	 *   LEGACY   -- force legacy (mixed-kernel fleets).
 	 */
 	r->ff_xdr_form = NFS4_FF_XDR_FORM_LEGACY;
 	if (r->layout_type == LAYOUT4_FLEX_FILES && inode_is_hpc_shared) {
@@ -1741,7 +1741,7 @@ fill_layoutget_result:
 			want_ff_mirror_count = 1;
 		}
 	}
-	/* QA review Blocker 1 — honor loga_maxcount per RFC 8881 §18.43.4.
+	/* QA review Blocker 1 -- honor loga_maxcount per RFC 8881 S18.43.4.
 	 *
 	 * Estimate the encoded LAYOUTGET reply size from the geometry we
 	 * are about to emit.  If it would exceed a->maxcount, return
@@ -1770,7 +1770,7 @@ fill_layoutget_result:
 		if (r->layout_type == LAYOUT4_FLEX_FILES) {
 			/* Striped form (want_ff_mirror_count == 1) and legacy
 			 * form both place want_ds_count DS entries on the wire
-			 * — striped puts them inside one ff_mirror4, legacy
+			 * -- striped puts them inside one ff_mirror4, legacy
 			 * spreads them across one DS per mirror.  Either way
 			 * the body cost scales with want_ds_count. */
 			body_bytes = 64
@@ -1852,26 +1852,26 @@ fill_layoutget_result:
 	}
 
 	/* Populate flex-files mirror model if flex layout requested.
-	 * Two shapes per RFC 8435 §5.1:
+	 * Two shapes per RFC 8435 S5.1:
 	 *
-	 *   STRIPED — exactly one ff_mirror4 with ds_count == stripe_count.
+	 *   STRIPED -- exactly one ff_mirror4 with ds_count == stripe_count.
 	 *             The Linux 6.18+ flex-files client treats this as the
 	 *             per-stripe DS dispatch table (dss_id =
 	 *             offset / stripe_unit).  Used for HPC-Shared inodes
 	 *             whose mirror_count == 1 && stripe_count > 1.
 	 *
-	 *   LEGACY  — stripe_count * mirror_count ff_mirror4 entries, each
+	 *   LEGACY  -- stripe_count * mirror_count ff_mirror4 entries, each
 	 *             with ds_count == 1.  Pre-6.18 Linux clients consume
 	 *             this as one DS per mirror per layout segment. */
 	if (r->layout_type == LAYOUT4_FLEX_FILES) {
 		r->ff_flags = 0;
 
 		/*
-		 * RFC 8435 §5.1: ffl_user / ffl_group identify the user
+		 * RFC 8435 S5.1: ffl_user / ffl_group identify the user
 		 * and group the DS must use to access the data on behalf
 		 * of the client.  Pynfs FFLA1 (testFlexLayoutTestAccess)
 		 * requires READ vs RW grants to advertise *different*
-		 * uids and the *same* gid — the canonical RFC 8435
+		 * uids and the *same* gid -- the canonical RFC 8435
 		 * pattern is to use squash semantics for READ grants
 		 * (uid 0 / nobody) and the AUTH_SYS caller's uid for RW
 		 * grants, while group identity stays tied to the inode.
@@ -2054,14 +2054,14 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 			return nst;
 		}
 
-		/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker. */
+		/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker. */
 		nst = compound_resolve_stateid(cd, &a->stateid,
 					       &sid_resolved);
 		if (nst != NFS4_OK) {
 			return nst;
 		}
 
-		/* RFC 8881 §8.2.2 / §12.5.3: the server MUST validate
+		/* RFC 8881 S8.2.2 / S12.5.3: the server MUST validate
 		 * the layout stateid's seqid on LAYOUTRETURN.  A seqid
 		 * older than the latest issued is NFS4ERR_OLD_STATEID;
 		 * a seqid newer than issued is NFS4ERR_BAD_STATEID.
@@ -2069,8 +2069,8 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 		 * The probe lives in the in-memory tracker (the only
 		 * source-of-truth under transient_state_cache=true).
 		 * If the stateid is unknown, accept the LAYOUTRETURN
-		 * — the layout was already cleaned up or never
-		 * issued by this daemon, so RFC 8881 §18.44.3's
+		 * -- the layout was already cleaned up or never
+		 * issued by this daemon, so RFC 8881 S18.44.3's
 		 * "SHOULD accept" applies.  Pynfs FFLOOS
 		 * (testFlexLayoutOldSeqid). */
 		if (layout_seqid_peek(sid_resolved.other, &cur_seqid)) {
@@ -2083,7 +2083,7 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 		}
 
 		/* Delete layout state.  Skip the stripe_map_get
-		 * — layout_return handles index cleanup with
+		 * -- layout_return handles index cleanup with
 		 * NULL ds_ids.  Saves 1 NDB read RT. */
 		if (cd->cat != NULL) {
 			(void)mds_coord_layout_return(
@@ -2118,13 +2118,13 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 		return nst;
 }
 
-	/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker. */
+	/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker. */
 	nst = compound_resolve_stateid(cd, &a->stateid, &sid_resolved);
 	if (nst != NFS4_OK) {
 		return nst;
 	}
 
-	/* Validate the committed layout stateid (RFC 8881 §18.6).
+	/* Validate the committed layout stateid (RFC 8881 S18.6).
 	 * Best-effort: if layout_grant persistence failed (RonDB mode),
 	 * the stateid won't be found.  Accept the LAYOUTCOMMIT anyway
 	 * so the file size gets updated. */
@@ -2144,7 +2144,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 		} else if (lc_st != MDS_ERR_NOTFOUND) {
 			return NFS4ERR_IO;
 		}
-		/* NOTFOUND: layout_grant was best-effort — proceed. */
+		/* NOTFOUND: layout_grant was best-effort -- proceed. */
 	}
 
 	/* Single inode read for all LAYOUTCOMMIT checks. */
@@ -2158,7 +2158,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			return NFS4ERR_IO;
 		}
 
-		/* Phase F of docs/hpc-nto1-plan.md, integration part B —
+		/* Phase F of docs/hpc-nto1-plan.md, integration part B --
 		 * route HPC-Shared LAYOUTCOMMITs through the in-memory
 		 * aggregator instead of writing size/mtime synchronously
 		 * to NDB.  The aggregator's periodic timer flushes
@@ -2180,7 +2180,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				mtime = a->time_modify;
 			} else {
 				/* Server picks now() when client did not
-				 * supply a value (RFC 8881 §18.6). */
+				 * supply a value (RFC 8881 S18.6). */
 				clock_gettime(CLOCK_REALTIME, &mtime);
 			}
 
@@ -2217,7 +2217,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			 *
 			 * QA Phase 4: a submit failure (OOM under capacity
 			 * pressure with no flushable victim) MUST surface
-			 * to the client — silently dropping the size /
+			 * to the client -- silently dropping the size /
 			 * mtime update would leave a writer's persisted
 			 * file shorter than it actually wrote.  Returning
 			 * NFS4ERR_DELAY tells the client to retry the
@@ -2232,7 +2232,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				}
 			}
 
-			/* DS_PENDING clear stays synchronous — a flag
+			/* DS_PENDING clear stays synchronous -- a flag
 			 * bit can't be aggregated.  This typically only
 			 * fires on the very first LAYOUTCOMMIT after
 			 * CREATE for an HPC file. */
@@ -2308,7 +2308,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 		}
 
 	lc_mtime:
-		/* Apply client-supplied mtime (RFC 8881 §18.6).
+		/* Apply client-supplied mtime (RFC 8881 S18.6).
 		 * Re-read if any prior mutation invalidated. */
 		if (a->time_modify_set) {
 			st = cat_getattr(cd,
@@ -2336,10 +2336,10 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
  * NFSv4.2 operation handlers (RFC 7862)
  * ----------------------------------------------------------------------- */
 
-/** IO_ADVISE (RFC 7862 §15.5): acknowledge I/O hints. */
+/** IO_ADVISE (RFC 7862 S15.5): acknowledge I/O hints. */
 
 
-/** LAYOUTERROR (RFC 7862 §15.6): client reports DS I/O error. */
+/** LAYOUTERROR (RFC 7862 S15.6): client reports DS I/O error. */
 /* cppcheck-suppress constParameterPointer */
 enum nfs4_status op_layouterror(struct compound_data *cd,
 				       const struct nfs4_op *op,
@@ -2355,7 +2355,7 @@ enum nfs4_status op_layouterror(struct compound_data *cd,
 }
 
 	/*
-	 * RFC 7862 §15.6 — log client-reported DS error.
+	 * RFC 7862 S15.6 -- log client-reported DS error.
 	 *
 	 * LAYOUTERROR is advisory only: clients may report errors
 	 * caused by MDS-side unresponsiveness (e.g. NDB latency)
@@ -2374,7 +2374,7 @@ enum nfs4_status op_layouterror(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** LAYOUTSTATS (RFC 7862 §15.7): client reports I/O statistics. */
+/** LAYOUTSTATS (RFC 7862 S15.7): client reports I/O statistics. */
 enum nfs4_status op_layoutstats(const struct compound_data *cd,
 				       const struct nfs4_op *op,
 				       struct nfs4_result *res)
@@ -2395,7 +2395,7 @@ enum nfs4_status op_layoutstats(const struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** ALLOCATE (RFC 7862 §15.1): preallocate space. */
+/** ALLOCATE (RFC 7862 S15.1): preallocate space. */
 
 /*
  * Promote an inline file to DS storage if needed.  Returns NFS4_OK if

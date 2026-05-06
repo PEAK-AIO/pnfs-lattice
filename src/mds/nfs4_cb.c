@@ -2,11 +2,11 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * nfs4_cb.c — NFSv4.1 callback channel sender.
+ * nfs4_cb.c -- NFSv4.1 callback channel sender.
  *
  * Sends CB_COMPOUND { CB_SEQUENCE, CB_LAYOUTRECALL } on the session's
  * backchannel (the same TCP connection the client used for its
- * forechannel, per RFC 8881 §2.10.3.1).
+ * forechannel, per RFC 8881 S2.10.3.1).
  */
 
 #include <stdlib.h>
@@ -30,7 +30,7 @@
 
 #define CB_COMPOUND_TAG     "pnfs-mds-cb"
 /*
- * RFC 8881 §2.10.5.2 / §20.1 — callback program version registered
+ * RFC 8881 S2.10.5.2 / S20.1 -- callback program version registered
  * with the client via CREATE_SESSION's cb_program is hardcoded to 1
  * for both NFSv4.1 and NFSv4.2 (the program version on the wire is
  * separate from the protocol minorversion carried inside
@@ -53,7 +53,7 @@ static _Atomic uint32_t cb_default_timeout_ms = CB_DEFAULT_TIMEOUT_BUILTIN;
 void nfs4_cb_set_default_timeout(uint32_t timeout_ms)
 {
     if (timeout_ms < 50) {
-        timeout_ms = 50; /* floor — see header */
+        timeout_ms = 50; /* floor -- see header */
     }
     atomic_store_explicit(&cb_default_timeout_ms, timeout_ms,
                           memory_order_relaxed);
@@ -107,7 +107,7 @@ static void cb_slot_release(struct nfs4_session *s, int slot_idx)
 {
     (void)s;
     (void)slot_idx;
-    /* No-op for now — single-threaded sender, slot reuse is implicit. */
+    /* No-op for now -- single-threaded sender, slot reuse is implicit. */
 }
 
 /* -----------------------------------------------------------------------
@@ -147,7 +147,7 @@ static int send_record(int fd, const uint8_t *data, uint32_t len)
  * ----------------------------------------------------------------------- */
 
 /*
- * RFC 8881 §2.10.8.3 / RFC 5531 §9 — emit the RPC credential per the
+ * RFC 8881 S2.10.8.3 / RFC 5531 S9 -- emit the RPC credential per the
  * captured callback security parameters.  AUTH_NONE (the RFC 8881
  * default for callbacks) emits flavor=0 with an empty (length-zero)
  * body.  AUTH_SYS emits flavor=1 with the authsys_parms tuple
@@ -228,7 +228,7 @@ static bool encode_rpc_call_header(XDR *xdrs, uint32_t xid,
     /* Credential: per session sec parms (AUTH_NONE / AUTH_SYS). */
     if (!encode_rpc_cred(xdrs, sec)) { return false; }
     /* Verifier: AUTH_NONE (flavor=0, body_len=0).  Per RFC 5531
-     * §9.5 the verifier is AUTH_NONE for AUTH_SYS calls. */
+     * S9.5 the verifier is AUTH_NONE for AUTH_SYS calls. */
     v = AUTH_NONE;     if (!xdr_uint32_t(xdrs, &v)) { return false; }
     v = 0;             if (!xdr_uint32_t(xdrs, &v)) { return false; }
     return true;
@@ -248,7 +248,7 @@ static bool encode_cb_compound_header(XDR *xdrs, uint32_t minorversion,
 }
 
     /*
-     * RFC 8881 §20.1 / RFC 7862 §20.1 — minorversion in CB_COMPOUND4args
+     * RFC 8881 S20.1 / RFC 7862 S20.1 -- minorversion in CB_COMPOUND4args
      * MUST match the session's negotiated minorversion (1 for v4.1,
      * 2 for v4.2).  A mismatch returns NFS4ERR_MINOR_VERS_MISMATCH at
      * the client's CB compound dispatcher (pynfs nfs4client.py:182).
@@ -261,7 +261,7 @@ static bool encode_cb_compound_header(XDR *xdrs, uint32_t minorversion,
         return false;
 }
 
-    /* callback_ident (RFC 8881 §2.10.3.1 — 0 for NFSv4.1+) */
+    /* callback_ident (RFC 8881 S2.10.3.1 -- 0 for NFSv4.1+) */
     uint32_t cb_ident = 0;
 
     if (!xdr_uint32_t(xdrs, &cb_ident)) {
@@ -309,7 +309,7 @@ static bool encode_cb_sequence(XDR *xdrs,
         return false;
 }
 
-    /* referring_call_lists<> — empty */
+    /* referring_call_lists<> -- empty */
     uint32_t ref_count = 0;
 
     if (!xdr_uint32_t(xdrs, &ref_count)) {
@@ -322,7 +322,7 @@ static bool encode_cb_sequence(XDR *xdrs,
 static bool encode_cb_recall(XDR *xdrs,
                              const struct nfs4_cb_recall_args *a)
 {
-    /* CB_RECALL4args per RFC 8881 §20.2:
+    /* CB_RECALL4args per RFC 8881 S20.2:
      *   struct CB_RECALL4args {
      *       stateid4 stateid;
      *       bool     truncate;
@@ -360,7 +360,7 @@ static bool encode_cb_recall(XDR *xdrs,
 }
 
 /*
- * Encode one notify4 struct for CB_NOTIFY (RFC 8881 §20.4, §3.3.15).
+ * Encode one notify4 struct for CB_NOTIFY (RFC 8881 S20.4, S3.3.15).
  *
  * We emit exactly one notify4 per nfs4_cb_notify() call.  The
  * notify_mask is a 1-element bitmap with the bit for notify_type set;
@@ -402,7 +402,7 @@ static bool encode_entry4(XDR *xdrs, const char *name, uint32_t name_len,
                           uint64_t cookie)
 {
     /*
-     * entry4 per RFC 8881 §3.3.15 notify_entry4: name + cookie +
+     * entry4 per RFC 8881 S3.3.15 notify_entry4: name + cookie +
      * attrs (fattr4).  Phase 8c emits empty attrs.
      */
     if (!encode_component4(xdrs, name, name_len)) { return false; }
@@ -411,7 +411,7 @@ static bool encode_entry4(XDR *xdrs, const char *name, uint32_t name_len,
     return true;
 }
 
-/* notify_remove4 payload (RFC 8881 §3.3.15). */
+/* notify_remove4 payload (RFC 8881 S3.3.15). */
 static bool encode_notify_remove_body(XDR *sub,
                                       const struct nfs4_cb_notify_args *a)
 {
@@ -520,7 +520,7 @@ static bool encode_cb_layoutrecall(XDR *xdrs,
 }
 
     if (a->recall_type == LAYOUTRECALL4_FILE) {
-        /* fh4 as opaque<NFS4_FHSIZE> — we encode fileid as 8-byte FH */
+        /* fh4 as opaque<NFS4_FHSIZE> -- we encode fileid as 8-byte FH */
         uint64_t fid_be = htobe64(a->fileid);
         uint32_t fh_len = 8;
 
@@ -630,7 +630,7 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
     /*
      * Do NOT recv() the CB reply on this fd.  NFSv4.1 multiplexes
      * fore- and back-channel on the same TCP connection (RFC 8881
-     * §2.10.3.1).  The epoll reader is the sole consumer of inbound
+     * S2.10.3.1).  The epoll reader is the sole consumer of inbound
      * records; recv() here races with it and can steal the client's
      * next fore-channel record (e.g. LAYOUTRETURN), producing -EIO
      * on our decode and stranding the client's op without a reply.

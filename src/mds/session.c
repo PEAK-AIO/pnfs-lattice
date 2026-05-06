@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * session.c — NFSv4.1 session and clientid management.
+ * session.c -- NFSv4.1 session and clientid management.
  *
  * Implements EXCHANGE_ID, CREATE_SESSION, DESTROY_SESSION, and
- * SEQUENCE operations per RFC 8881 §§18.35–18.37, 18.46.
+ * SEQUENCE operations per RFC 8881 SS18.35--18.37, 18.46.
  *
  * Data structures:
  *   - Client hash table: chained, indexed by clientid.
@@ -142,7 +142,7 @@ static struct nfs4_client *find_client_by_id(const struct session_table *st,
 }
 
 /* -----------------------------------------------------------------------
- * Internal: find client by co_ownerid — O(1) via owner_hash
+ * Internal: find client by co_ownerid -- O(1) via owner_hash
  * ----------------------------------------------------------------------- */
 
 static struct nfs4_client *find_client_by_owner(const struct session_table *st,
@@ -458,7 +458,7 @@ static int grace_recovery_scan_cb(uint64_t clientid,
 
 	if (mds_coord_recovery_get(ctx->cat, clientid,
 				   co_buf, &co_len, ver) != MDS_OK) {
-		return 0; /* skip — record vanished or error */
+		return 0; /* skip -- record vanished or error */
 	}
 
 	if (co_len == ctx->co_ownerid_len &&
@@ -472,7 +472,7 @@ static int grace_recovery_scan_cb(uint64_t clientid,
 }
 
 /*
- * Principal-match helper for RFC 8881 §18.35.4 cases 8 / 9 and case 2.
+ * Principal-match helper for RFC 8881 S18.35.4 cases 8 / 9 and case 2.
  *
  * When auth_flavor == 0 either side, principal matching is suppressed
  * (legacy / unit-test path).  Otherwise the (flavor, uid, gid) triple
@@ -613,7 +613,7 @@ int session_exchange_id(struct session_table *st,
 	c = find_client_by_owner(st, co_ownerid, co_ownerid_len);
 
 	/*
-	 * RFC 8881 §18.35.4 — UPDATE branch.
+	 * RFC 8881 S18.35.4 -- UPDATE branch.
 	 *
 	 * The UPDATE flag asserts "there is already a confirmed record
 	 * for this co_ownerid; refresh it".  If no record exists, or the
@@ -621,9 +621,9 @@ int session_exchange_id(struct session_table *st,
 	 * NFS4ERR_NOENT.  Pynfs EID6 / EID6a-d.
 	 *
 	 * For a confirmed record we then validate verifier and principal:
-	 *   verifier mismatch                 → NFS4ERR_NOT_SAME (case 8).
-	 *   verifier match + princ mismatch   → NFS4ERR_PERM     (case 9).
-	 *   both match                        → case 6, return existing.
+	 *   verifier mismatch                 -> NFS4ERR_NOT_SAME (case 8).
+	 *   verifier match + princ mismatch   -> NFS4ERR_PERM     (case 9).
+	 *   both match                        -> case 6, return existing.
 	 */
 	if (update) {
 		if (c == NULL || !c->confirmed) {
@@ -642,7 +642,7 @@ int session_exchange_id(struct session_table *st,
 			rc = SESSION_EID_PERM;
 			goto out;
 		}
-		/* Case 6 — verifier + principal match, return existing. */
+		/* Case 6 -- verifier + principal match, return existing. */
 		c->last_renewed = time(NULL);
 		*out_clientid = c->clientid;
 		if (out_seqid != NULL) {
@@ -657,13 +657,13 @@ int session_exchange_id(struct session_table *st,
 	}
 
 	/*
-	 * RFC 8881 §18.35.4 — non-UPDATE branch.
+	 * RFC 8881 S18.35.4 -- non-UPDATE branch.
 	 *
-	 * Case 1 (no record)               → fresh allocation.
-	 * Case 4 (unconfirmed record)      → record is replaced unconditionally;
+	 * Case 1 (no record)               -> fresh allocation.
+	 * Case 4 (unconfirmed record)      -> record is replaced unconditionally;
 	 *                                    a fresh clientid is minted.
-	 * Case 2 (confirmed + verf + princ)→ renewal, return existing clientid.
-	 * Cases 3/5/7 (confirmed, mismatch)→ record is replaced; a fresh
+	 * Case 2 (confirmed + verf + princ)-> renewal, return existing clientid.
+	 * Cases 3/5/7 (confirmed, mismatch)-> record is replaced; a fresh
 	 *                                    clientid is minted.  We do not
 	 *                                    yet preserve the old record
 	 *                                    until CREATE_SESSION confirms
@@ -687,7 +687,7 @@ int session_exchange_id(struct session_table *st,
 					       cred_uid, cred_gid);
 
 	if (c->confirmed && verf_match && princ_match) {
-		/* Case 2 — renewal, return existing clientid. */
+		/* Case 2 -- renewal, return existing clientid. */
 		c->last_renewed = time(NULL);
 		*out_clientid = c->clientid;
 		if (out_seqid != NULL) {
@@ -768,7 +768,7 @@ int session_create_session(struct session_table *st,
 	}
 
 	/*
-	 * Sequence ID check: RFC 8881 §18.36.4.
+	 * Sequence ID check: RFC 8881 S18.36.4.
 	 * create_seq tracks the expected value.
 	 */
 	if (seqid != c->create_seq) {
@@ -814,7 +814,7 @@ int session_create_session(struct session_table *st,
 		goto out;
 	}
 
-	/* RFC 8881 §2.10.6.1.2: slots start at seq_id 0.
+	/* RFC 8881 S2.10.6.1.2: slots start at seq_id 0.
 	 * Linux kernel 6.8 sends seq_id=1 as the first SEQUENCE
 	 * (slot->seq_nr starts at 0, kernel sends seq_nr+1).
 	 * With seq_id=0, the check (1 == 0+1) accepts it. */
@@ -976,16 +976,16 @@ out:
 /* ----------------------------------------------------------------------- */
 
 /*
- * RFC 8881 §18.50 DESTROY_CLIENTID — destroy a clientid record.
+ * RFC 8881 S18.50 DESTROY_CLIENTID -- destroy a clientid record.
  *
  * Returns 0 on success, -1 on STALE_CLIENTID (clientid not found),
  * -2 on CLIENTID_BUSY (the client still has confirmed sessions, the
- * client must DESTROY_SESSION on each session first per §18.50.3).
+ * client must DESTROY_SESSION on each session first per S18.50.3).
  *
  * Pynfs DESCID3/4/5/6/7/8 drive every leg of this contract:
- *   DESCID3/4   bad clientid → -1 → NFS4ERR_STALE_CLIENTID.
- *   DESCID5/6   client owns at least one session → -2 → CLIENTID_BUSY.
- *   DESCID8     destroy then destroy again → first 0, second -1.
+ *   DESCID3/4   bad clientid -> -1 -> NFS4ERR_STALE_CLIENTID.
+ *   DESCID5/6   client owns at least one session -> -2 -> CLIENTID_BUSY.
+ *   DESCID8     destroy then destroy again -> first 0, second -1.
  *
  * The first call removes the client record from both the clientid hash
  * and the owner hash, so a subsequent find_client_by_id() returns NULL.
@@ -1005,7 +1005,7 @@ int session_destroy_client(struct session_table *st, uint64_t clientid)
 		rc = -1;
 		goto out;
 	}
-	/* RFC 8881 §18.50.3: NFS4ERR_CLIENTID_BUSY when the client
+	/* RFC 8881 S18.50.3: NFS4ERR_CLIENTID_BUSY when the client
 	 * still holds confirmed sessions; the caller must tear those
 	 * down with DESTROY_SESSION first.  Unconfirmed clients (no
 	 * CREATE_SESSION yet) are eligible for destruction here. */
@@ -1210,7 +1210,7 @@ int session_bind_conn(struct session_table *st,
 }
 
 /*
- * RFC 8881 §2.10.8.3 / §18.36 — update the captured callback security
+ * RFC 8881 S2.10.8.3 / S18.36 -- update the captured callback security
  * parameters on a session.  Called by op_create_session immediately
  * after session_create_session, and by op_backchannel_ctl when the
  * client supplies new bca_sec_parms.  A NULL @sec clears the parms
@@ -1245,7 +1245,7 @@ int session_set_cb_sec(struct session_table *st,
 }
 
 /*
- * RFC 8881 §18.33 BACKCHANNEL_CTL — update the callback program
+ * RFC 8881 S18.33 BACKCHANNEL_CTL -- update the callback program
  * number on a session.  No-op when the new value matches.
  */
 int session_set_cb_prog(struct session_table *st,
@@ -1300,7 +1300,7 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
  * lock and invoke @cb.  When @cb returns 1 ("snap consumed"), commit
  * the slot-0 seqid advance back to the session so subsequent CBs on
  * this session use a fresh, monotonic sa_sequenceid per RFC 8881
- * §18.46.4.  Internal helper shared by both iterators below.
+ * S18.46.4.  Internal helper shared by both iterators below.
  */
 static int session_invoke_cb_locked(struct nfs4_session *s,
                                     session_cb_snap_fn cb, void *ctx)
@@ -1316,7 +1316,7 @@ static int session_invoke_cb_locked(struct nfs4_session *s,
     snap.cb_sec = s->cb_sec;
     snap.cb_conn = s->cb_conn;
     /*
-     * RFC 8881 §2.10.5.1 / §18.46.4: CB_SEQUENCE sa_sequenceid MUST
+     * RFC 8881 S2.10.5.1 / S18.46.4: CB_SEQUENCE sa_sequenceid MUST
      * start at 1 and increment by 1 per CB on the slot.  The fd-based
      * callers (delegation/layout conflict-recall) use this snap value
      * verbatim as sa_sequenceid, so we hand them the NEXT id
@@ -1405,7 +1405,7 @@ int session_for_each_with_cb_for_clientid(struct session_table *st,
             continue;
         }
         rc = session_invoke_cb_locked(s, cb, ctx);
-        /* Stop at the first session we visit — we want exactly one
+        /* Stop at the first session we visit -- we want exactly one
          * CB delivery per clientid per call. */
         break;
     }
@@ -1452,7 +1452,7 @@ static void *lease_reaper_thread(void *arg)
 
                     if (c->confirmed &&
                         (uint32_t)(now - c->last_renewed) > st->lease_time_sec * 2) {
-                        /* Expired — unlink and clean dependent state. */
+                        /* Expired -- unlink and clean dependent state. */
                         *pp = c->hash_next;
                         if (st->ot != NULL) {
                             open_state_close_all_for_client(

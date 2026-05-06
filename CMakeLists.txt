@@ -29,7 +29,7 @@ option(ENABLE_RONDB      "Build RonDB catalogue backend"              ON)
 # here.  The defaults are forced OFF so the build always selects the
 # stub variant.  Flipping any of these to ON will fail at build time
 # because the corresponding <name>.c file does not exist; that is
-# intentional — it is the build-system's way of saying "this module
+# intentional -- it is the build-system's way of saying "this module
 # is enterprise-only".
 # ---------------------------------------------------------------------------
 option(ENABLE_RESILVER   "Enable resilver module (enterprise-only)" OFF)
@@ -49,7 +49,7 @@ if(ENABLE_RONDB)
 endif()
 
 # ---------------------------------------------------------------------------
-# Toolchain gate — GCC >= 12.1 is mandatory.
+# Toolchain gate -- GCC >= 12.1 is mandatory.
 #
 # GCC 13.1+ has improved -Wreturn-type coverage at -O0, but the project
 # compiles cleanly on GCC 12.x with -Werror at -O2 (CI default).  The
@@ -60,7 +60,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     if(CMAKE_C_COMPILER_VERSION VERSION_LESS "12.1")
         message(FATAL_ERROR
             "pnfs-mds requires GCC >= 12.1 (found ${CMAKE_C_COMPILER_VERSION}). "
-            "See docs/architecture.md §20 for details.")
+            "See docs/architecture.md section 20 for details.")
     endif()
 else()
     message(WARNING
@@ -69,7 +69,7 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Global compiler settings — C11, strict warnings, K&R style assumed
+# Global compiler settings -- C11, strict warnings, K&R style assumed
 # ---------------------------------------------------------------------------
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -114,14 +114,14 @@ include_directories(
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
-# LMDB removed — RonDB is the only supported backend.
+# LMDB removed -- RonDB is the only supported backend.
 
 # pthreads
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-# libntirpc — NFS RPC + optional RDMA control plane.
+# libntirpc -- NFS RPC + optional RDMA control plane.
 #
 # On Debian/Ubuntu: apt install libntirpc-dev
 # On Rocky/RHEL 10 (not in repos): run deps/build-ntirpc.sh
@@ -138,36 +138,36 @@ if(NOT NTIRPC_LIB OR NOT NTIRPC_INCLUDE_DIR)
 endif()
 message(STATUS "libntirpc: ${NTIRPC_LIB}")
 
-# gRPC + protobuf — inter-MDS communication (optional until implemented)
+# gRPC + protobuf -- inter-MDS communication (optional until implemented)
 # grpc_service.c is currently stubbed; require when Phase 7 lands.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GRPC QUIET grpc)
 pkg_check_modules(PROTOBUF QUIET protobuf)
 if(GRPC_FOUND AND PROTOBUF_FOUND)
     add_compile_definitions(HAVE_GRPC=1)
-    message(STATUS "gRPC found — inter-MDS gRPC service enabled")
+    message(STATUS "gRPC found -- inter-MDS gRPC service enabled")
 else()
-    message(WARNING "gRPC/protobuf not found — inter-MDS gRPC service disabled (stubs only)")
+    message(WARNING "gRPC/protobuf not found -- inter-MDS gRPC service disabled (stubs only)")
 endif()
 
 
-# RonDB — optional distributed catalogue backend
+# RonDB -- optional distributed catalogue backend
 if(ENABLE_RONDB)
     find_package(RonDB)
     if(RONDB_FOUND)
         add_compile_definitions(HAVE_RONDB=1)  # Global: needed by catalogue_rondb.c
-        message(STATUS "RonDB found — RonDB catalogue backend enabled")
+        message(STATUS "RonDB found -- RonDB catalogue backend enabled")
     else()
-        message(WARNING "RonDB not found — RonDB backend disabled")
+        message(WARNING "RonDB not found -- RonDB backend disabled")
         set(ENABLE_RONDB OFF)
     endif()
 endif()
 
-# libbpf — eBPF replication monitoring (optional)
+# libbpf -- eBPF replication monitoring (optional)
 if(ENABLE_EBPF)
     pkg_check_modules(LIBBPF libbpf)
     if(NOT LIBBPF_FOUND)
-        message(WARNING "libbpf not found — eBPF monitoring disabled")
+        message(WARNING "libbpf not found -- eBPF monitoring disabled")
         set(ENABLE_EBPF OFF)
     endif()
 endif()
@@ -180,7 +180,7 @@ add_subdirectory(src/cluster)
 add_subdirectory(src/fsal_obj)
 add_subdirectory(src/mds)
 
-# Optional modules — must come AFTER src/mds so pnfs_mds_core exists
+# Optional modules -- must come AFTER src/mds so pnfs_mds_core exists
 # before each module attempts target_sources() on it.
 add_subdirectory(src/modules)
 
@@ -198,7 +198,7 @@ if(ENABLE_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# QA targets (see scripts/qa-check.sh and CONTRIBUTING.md §10)
+# QA targets (see scripts/qa-check.sh and CONTRIBUTING.md section 10)
 # ---------------------------------------------------------------------------
 
 # Full QA pipeline (all gates)

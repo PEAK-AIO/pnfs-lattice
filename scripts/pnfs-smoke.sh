@@ -2,7 +2,7 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# pNFS quick smoke — one test per op.
+# pNFS quick smoke -- one test per op.
 #
 # Design notes:
 #   * Preconditions (mount-is-nfs4, mount is actually mounted) run
@@ -13,7 +13,7 @@
 #   * Content tests compute an expected md5 BEFORE touching the
 #     server and compare the server-side md5 against it.  The old
 #     "compute md5, drop caches, compute md5 again, compare" path
-#     passed on two empty files (md5 of empty == md5 of empty) — the
+#     passed on two empty files (md5 of empty == md5 of empty) -- the
 #     exact failure mode that hid the recent pNFS write regression.
 #   * Read-back after close catches LAYOUTCOMMIT failures: a broken
 #     LAYOUTCOMMIT reports success to the client but leaves MDS size
@@ -135,7 +135,7 @@ else
     fail "truncate" "size != 0"
 fi
 
-# readdir — touch then list.  Check for at least the 3 names we just
+# readdir -- touch then list.  Check for at least the 3 names we just
 # created, not just "wc -l >= 3" which is too loose.
 touch "$D/a" "$D/b" "$D/c" 2>/dev/null
 if ls "$D" 2>/dev/null | grep -qFxf <(printf 'a\nb\nc\n'); then
@@ -196,7 +196,7 @@ else
     fail "10MB delete" "rm failed"
 fi
 
-# layout advertised — we've already gated the fstype in preconditions;
+# layout advertised -- we've already gated the fstype in preconditions;
 # this confirms the server granted a pNFS layout (the `nfs4` mount
 # option in /proc/mounts).  Kept as a separate check so the panel
 # still counts 13 tests the operator expects.

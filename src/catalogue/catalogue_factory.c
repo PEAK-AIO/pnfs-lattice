@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalogue_factory.c — Backend selection factory for mds_catalogue_open.
+ * catalogue_factory.c -- Backend selection factory for mds_catalogue_open.
  *
  * Dispatches to the appropriate backend constructor based on
  * cfg->catalogue_backend.  Only RonDB is supported.

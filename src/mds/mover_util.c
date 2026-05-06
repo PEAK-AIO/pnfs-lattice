@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mover_util.c — Shared file relocation helper.
+ * mover_util.c -- Shared file relocation helper.
  *
  * Extracted from rebalance.c to share between rebalance and tiering.
  * Supports mirror_count >= 1 (single-copy and mirrored files).
@@ -225,7 +225,7 @@ int mover_relocate_file(const struct mover_ctx *ctx,
         op.args.rebalance_move.gc_fh_len = gc_fh_len;
         st = commit_queue_submit(ctx->cq, &op);
     } else if (ctx->cat != NULL) {
-        /* RonDB mode: no commit queue — write stripe map + GC
+        /* RonDB mode: no commit queue -- write stripe map + GC
          * entry directly via catalogue vtable. */
         st = mds_cat_stripe_map_put(ctx->cat, NULL, fileid,
                                     sc2, su2, mc2, entries2);

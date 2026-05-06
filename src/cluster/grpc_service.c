@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * grpc_service.c — Inter-MDS admin RPC service.
+ * grpc_service.c -- Inter-MDS admin RPC service.
  *
  * Provides programmatic admin API for cluster management operations.
  * Delegates to the cluster_transport admin handlers which implement

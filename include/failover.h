@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * failover.h — Standby promotion for MDS failover.
+ * failover.h -- Standby promotion for MDS failover.
  *
  * When the primary MDS fails, the standby (which has been receiving
  * txn_delta replicas) promotes itself by taking over the primary's
@@ -18,7 +18,7 @@
  *   7. Publish self as ACTIVE+ACTIVE_SERVING
  *   8. Transition to PRIMARY role
  *
- * Demotion/failback is NOT implemented in this version — it requires
+ * Demotion/failback is NOT implemented in this version -- it requires
  * an explicit failback protocol with resync guarantees.
  */
 
@@ -54,7 +54,7 @@ enum failover_role {
  * Configuration for failover_init().
  *
  * detect_cb: returns 0 if partner alive, non-zero if dead.
- *   - In authoritative (etcd) mode: may be NULL — the watch-driven
+ *   - In authoritative (etcd) mode: may be NULL -- the watch-driven
  *     partner-loss callback triggers promotion directly.
  *   - In local/test mode: injectable callback for deterministic control.
  *
@@ -105,9 +105,9 @@ enum mds_status failover_init(const struct failover_cfg *cfg,
  *
  * Two-phase procedure (see header comment for ordering).
  * Returns MDS_OK on success.  Named error codes:
- *   MDS_ERR_PERM  — not in STANDBY state, self-fenced,
+ *   MDS_ERR_PERM  -- not in STANDBY state, self-fenced,
  *                    replication unhealthy, or partner alive.
- *   MDS_ERR_IO    — subtree takeover or recovery load failed.
+ *   MDS_ERR_IO    -- subtree takeover or recovery load failed.
  *
  * @param ctx  Failover context (must be in STANDBY role).
  * @return MDS_OK on success, or error code.
@@ -122,7 +122,7 @@ enum mds_status failover_promote(struct failover_ctx *ctx);
  *
  * The membership entry is deleted while still ACTIVE + ACTIVE_SERVING
  * so that the standby's partner-loss watcher fires and triggers
- * promotion.  No lifecycle transitions (DRAINING/DRAINED) occur —
+ * promotion.  No lifecycle transitions (DRAINING/DRAINED) occur --
  * the freeze + barrier handle the actual quiescing.
  *
  * On failure (barrier timeout, compat mismatch, self-remove error),

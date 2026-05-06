@@ -2,20 +2,20 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * failover.c — Standby promotion and failover logic.
+ * failover.c -- Standby promotion and failover logic.
  *
  * Two-phase promotion ordering (Seq 9):
- *   1. Set internal role → PROMOTING
+ *   1. Set internal role -> PROMOTING
  *   2. Self-fencing guard + replication health gate
  *   3. detect_cb confirmation (if non-NULL)
  *   4. Transfer subtree ownership via failover_take_over
  *   5. Load client recovery records from the coordination backend
  *   6. Enter grace period
  *   7. Publish self as ACTIVE + ACTIVE_SERVING via promote_standby
- *   8. Set internal role → PRIMARY
+ *   8. Set internal role -> PRIMARY
  *
- * Demotion/failback is NOT implemented — requires explicit failback
- * protocol with resync guarantees (see architecture.md §Deferred).
+ * Demotion/failback is NOT implemented -- requires explicit failback
+ * protocol with resync guarantees (see architecture.md SDeferred).
  */
 
 #include <stdlib.h>
@@ -45,7 +45,7 @@ struct failover_ctx {
     struct mds_catalogue *cat;
     uint32_t           grace_period_sec;
 
-    /* Detection callback (optional — NULL in authoritative mode). */
+    /* Detection callback (optional -- NULL in authoritative mode). */
     int              (*detect_cb)(uint32_t partner_id, void *arg);
     void              *detect_arg;
 
@@ -75,7 +75,7 @@ static void clear_taken_state(struct failover_ctx *ctx)
 }
 
 /**
- * Pre-flight checks (phases 2–3): self-fencing, replication health,
+ * Pre-flight checks (phases 2--3): self-fencing, replication health,
  * and detect_cb.  Returns MDS_OK to proceed, or an error code.
  */
 static enum mds_status promote_prechecks(struct failover_ctx *ctx)
@@ -97,7 +97,7 @@ static enum mds_status promote_prechecks(struct failover_ctx *ctx)
         return MDS_ERR_PERM;
     }
 
-    /* Phase 3a (Item 46): Wire-compat check — reject promotion if
+    /* Phase 3a (Item 46): Wire-compat check -- reject promotion if
      * self and partner have different wire_compat_version.  Safety
      * backstop even if operator bypasses CLI. */
     if (ctx->membership != NULL) {
@@ -292,7 +292,7 @@ enum mds_status failover_promote(struct failover_ctx *ctx)
 
     ctx->role = FAILOVER_PROMOTING;
 
-    /* Phases 2–3: Self-fencing, health, detect_cb. */
+    /* Phases 2--3: Self-fencing, health, detect_cb. */
     st = promote_prechecks(ctx);
     if (st != MDS_OK) {
         ctx->role = FAILOVER_STANDBY;
@@ -341,7 +341,7 @@ enum mds_status failover_promote(struct failover_ctx *ctx)
         if (st != MDS_OK) {
             (void)fprintf(stderr,
                     "WARN: promote_standby publish failed: %d "
-                    "(proceeding anyway — subtrees already taken)\n",
+                    "(proceeding anyway -- subtrees already taken)\n",
                     (int)st);
         }
     }
@@ -360,7 +360,7 @@ enum mds_status failover_controlled_demote(struct failover_ctx *ctx,
         return MDS_ERR_INVAL;
     }
 
-    /* Step 1: Role guard — must be PRIMARY. */
+    /* Step 1: Role guard -- must be PRIMARY. */
     if (ctx->role != FAILOVER_PRIMARY) {
         return MDS_ERR_PERM;
     }
@@ -372,7 +372,7 @@ enum mds_status failover_controlled_demote(struct failover_ctx *ctx,
         return MDS_ERR_PERM;
     }
 
-    /* Step 3: Compat check — before any state mutation. */
+    /* Step 3: Compat check -- before any state mutation. */
     if (ctx->membership != NULL) {
         struct cluster_member self_m;
         struct cluster_member partner_m;
@@ -391,11 +391,11 @@ enum mds_status failover_controlled_demote(struct failover_ctx *ctx,
     /* Step 4: Transition to DEMOTING. */
     ctx->role = FAILOVER_DEMOTING;
 
-    /* Step 5: Quiesce — freeze all locally-owned subtrees.
+    /* Step 5: Quiesce -- freeze all locally-owned subtrees.
      * NFS clients hitting frozen subtrees get NFS4ERR_DELAY
      * via the existing compound dispatch check.
      *
-     * No membership lifecycle transitions here — the entry must
+     * No membership lifecycle transitions here -- the entry must
      * remain ACTIVE + ACTIVE_SERVING so that self-removal in
      * step 7 triggers the partner-loss watcher on the standby. */
     st = subtree_map_freeze_owned(ctx->map, ctx->self_id);
@@ -406,7 +406,7 @@ enum mds_status failover_controlled_demote(struct failover_ctx *ctx,
         return MDS_ERR_IO;
     }
 
-    /* Step 6: Replication sync barrier removed — RonDB has native
+    /* Step 6: Replication sync barrier removed -- RonDB has native
      * multi-node consistency, so no standby catch-up step is needed. */
     (void)repl;
 
@@ -425,7 +425,7 @@ enum mds_status failover_controlled_demote(struct failover_ctx *ctx,
         }
     }
 
-    /* Step 8: Terminal state — node is drained and ready to stop.
+    /* Step 8: Terminal state -- node is drained and ready to stop.
      * The operator stops the daemon, upgrades, and restarts as
      * standby.  Subtrees remain frozen (daemon is shutting down). */
     ctx->role = FAILOVER_STANDBY;

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalog_delta.h — Semantic replay record types + delta builder.
+ * catalog_delta.h -- Semantic replay record types + delta builder.
  *
  * Each catalog mutation emits a typed delta record that captures the
  * semantic intent (INODE_UPSERT, DIRENT_PUT, etc.) rather than the

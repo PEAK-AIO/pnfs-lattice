@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_coordination.h — Recovery-critical coordination state interface.
+ * mds_coordination.h -- Recovery-critical coordination state interface.
  *
  * Stage 2 split:
  *   - mds_catalogue.h covers catalogue data (namespace, stripe maps,
@@ -175,7 +175,7 @@ enum mds_status mds_coord_recovery_get(struct mds_catalogue *cat,
 				       uint8_t verifier[8]);
 
 /* -----------------------------------------------------------------------
- * Phase 9D — Recovery ownership bulk operations
+ * Phase 9D -- Recovery ownership bulk operations
  * ----------------------------------------------------------------------- */
 
 /** Callback for recovery_list.  Return 0 to continue, non-zero to stop. */
@@ -197,7 +197,7 @@ enum mds_status mds_coord_recovery_transfer(
 	uint32_t new_mds_id, uint64_t new_boot_epoch);
 
 /* -----------------------------------------------------------------------
- * Phase 9D — Layout grant-owner queries
+ * Phase 9D -- Layout grant-owner queries
  * ----------------------------------------------------------------------- */
 
 /** Callback for layout grant-owner scan. */
@@ -218,7 +218,7 @@ enum mds_status mds_coord_layout_transfer_grant_owner(
 	uint32_t old_mds_id, uint32_t new_mds_id);
 
 /* -----------------------------------------------------------------------
- * Shared protocol state — open/share, locks, delegations, sessions, DRC
+ * Shared protocol state -- open/share, locks, delegations, sessions, DRC
  *
  * These operations coordinate NFS protocol state that must be shared
  * across MDS nodes.  Each row carries (owner_mds_id, owner_boot_epoch)

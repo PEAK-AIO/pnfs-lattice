@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * inode_cache.c — In-memory inode LRU cache.
+ * inode_cache.c -- In-memory inode LRU cache.
  *
  * Hot inodes are cached to avoid catalogue reads on every operation.
  * Cache is invalidated on write-through updates and cross-MDS
@@ -28,8 +28,8 @@
 struct cache_entry {
 	uint64_t            fileid;
 	struct mds_inode    inode;
-	struct cache_entry *prev;      /* LRU list — towards tail (older) */
-	struct cache_entry *next;      /* LRU list — towards head (newer) */
+	struct cache_entry *prev;      /* LRU list -- towards tail (older) */
+	struct cache_entry *next;      /* LRU list -- towards head (newer) */
 	struct cache_entry *hash_next; /* hash chain (singly linked) */
 };
 
@@ -43,7 +43,7 @@ struct inode_cache {
 	/* Single global mutex: the LRU list and count are shared state
 	 * that cannot be protected by per-stripe locks without corruption.
 	 * Shard the entire cache (separate hash+LRU per stripe) for real
-	 * concurrency — tracked as a future optimization. */
+	 * concurrency -- tracked as a future optimization. */
 	pthread_mutex_t      lock;
 };
 
@@ -53,7 +53,7 @@ struct inode_cache {
 
 static uint32_t hash_fileid(uint64_t fileid, uint32_t size)
 {
-	/* splitmix64 — same hash used in session.c and open_state.c. */
+	/* splitmix64 -- same hash used in session.c and open_state.c. */
 	uint64_t h = fileid;
 
 	h ^= h >> 30;
@@ -108,7 +108,7 @@ static void hash_remove(struct inode_cache *ic, struct cache_entry *e)
 }
 
 /* -----------------------------------------------------------------------
- * LRU list helpers — caller must hold ic->lock
+ * LRU list helpers -- caller must hold ic->lock
  * ----------------------------------------------------------------------- */
 
 /** Unlink @e from the LRU doubly-linked list. */
@@ -241,7 +241,7 @@ int inode_cache_put(struct inode_cache *ic, const struct mds_inode *inode)
 
 	pthread_mutex_lock(&ic->lock);
 
-	/* Check if already cached — update + promote. */
+	/* Check if already cached -- update + promote. */
 	e = hash_find(ic, inode->fileid);
 	if (e != NULL) {
 		e->inode = *inode;

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * quota_stub.c — no-op stubs for the user/group quota enforcement
+ * quota_stub.c -- no-op stubs for the user/group quota enforcement
  * module.
  *
  * Linked into pnfs_mds_core when ENABLE_QUOTA=OFF (community build).
@@ -12,16 +12,16 @@
  *   - ctx_create() returns MDS_OK with a NULL handle so callers'
  *     null-checks short-circuit if they bother to check; if they
  *     don't, every subsequent quota_* call is a no-op anyway.
- *   - check_inode() / check_bytes() return MDS_OK — every CREATE,
+ *   - check_inode() / check_bytes() return MDS_OK -- every CREATE,
  *     WRITE, and SETATTR is allowed.
  *   - update_create() / update_remove() / update_bytes() /
- *     update_chown() return MDS_OK — usage counters are not
+ *     update_chown() return MDS_OK -- usage counters are not
  *     tracked.
- *   - get() returns MDS_ERR_NOTFOUND — no rules exist.
+ *   - get() returns MDS_ERR_NOTFOUND -- no rules exist.
  *   - set() / del() return MDS_OK so admin tooling that probes
  *     quota state on a community build does not error out; the
  *     rule is silently ignored.
- *   - space_avail() returns UINT64_MAX for all scopes — every
+ *   - space_avail() returns UINT64_MAX for all scopes -- every
  *     GETATTR sees unlimited space available.
  *
  * The community daemon therefore behaves like an unbounded server:

@@ -2,14 +2,14 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# pNFS MDS test suite — smoke + extended modes.
+# pNFS MDS test suite -- smoke + extended modes.
 #
 # Usage:
 #   ./pnfs-test-suite.sh [smoke|extended]
 #
-# smoke    (default) — one of each pNFS op type, ~15 seconds,
+# smoke    (default) -- one of each pNFS op type, ~15 seconds,
 #                      reports per-op PASS/FAIL/SKIP.
-# extended           — runs smoke first, then rotates all ops for
+# extended           -- runs smoke first, then rotates all ops for
 #                      PNFS_EXTENDED_SECONDS (default 60) to simulate
 #                      sustained mixed workload.  Reports aggregate stats.
 #
@@ -54,7 +54,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Result tracking ──────────────────────────────────────────────
+# -- Result tracking ----------------------------------------------
 
 record_pass() { PASS=$((PASS+1)); RESULTS="${RESULTS}PASS  $1\n"; }
 record_fail() { FAIL=$((FAIL+1)); RESULTS="${RESULTS}FAIL  $1 ($2)\n"; }
@@ -99,7 +99,7 @@ run_test() {
     rm -f "$err_file"
 }
 
-# ── Setup ────────────────────────────────────────────────────────
+# -- Setup --------------------------------------------------------
 
 detect_mount() {
     mountpoint -q -- "$MNT" 2>/dev/null || fatal "$MNT is not a mountpoint"
@@ -111,7 +111,7 @@ detect_mount() {
     mkdir -p "$WORKDIR" || fatal "unable to create $WORKDIR"
 }
 
-# ── Atomic test functions ────────────────────────────────────────
+# -- Atomic test functions ----------------------------------------
 # Each is self-contained: creates its own subdirectory under $WORKDIR,
 # performs the operation, verifies the result, and returns 0/1/77.
 
@@ -239,7 +239,7 @@ t_lock() {
     ' || result=$?
     # timeout returns 124 on timeout, treat as skip (NFS lock issue)
     if [ "$result" -eq 124 ]; then
-        exit 77  # SKIP — NFS lock state hung
+        exit 77  # SKIP -- NFS lock state hung
     fi
     return "$result"
 }
@@ -276,7 +276,7 @@ t_pnfs_advertised() {
         /proc/self/mountstats 2>/dev/null | grep -q 'pnfs=' || exit 77
 }
 
-# ── Smoke mode ───────────────────────────────────────────────────
+# -- Smoke mode ---------------------------------------------------
 
 run_smoke() {
     printf '========================================\n'
@@ -315,7 +315,7 @@ run_smoke() {
     printf '========================================\n'
 }
 
-# ── Extended mode ────────────────────────────────────────────────
+# -- Extended mode ------------------------------------------------
 
 run_extended() {
     printf '=== pNFS Extended Test (%ds) ===\n\n' "$EXTENDED_SECONDS"
@@ -323,13 +323,13 @@ run_extended() {
     # Run smoke first as a gate
     run_smoke
     if [ "$FAIL" -gt 0 ]; then
-        printf '\nSmoke failures detected — skipping extended rotation.\n'
+        printf '\nSmoke failures detected -- skipping extended rotation.\n'
         return 1
     fi
 
     printf '\n--- Extended rotation (%ds) ---\n' "$EXTENDED_SECONDS"
 
-    # Ops to rotate (fast metadata ops only — no large writes)
+    # Ops to rotate (fast metadata ops only -- no large writes)
     local ops=( t_create_read t_stat t_chmod t_rename t_readdir
                 t_remove t_write_4k t_mkdir t_truncate )
     local base_workdir="$WORKDIR"
@@ -381,7 +381,7 @@ run_extended() {
     [ "$op_fail" -eq 0 ]
 }
 
-# ── Main ─────────────────────────────────────────────────────────
+# -- Main ---------------------------------------------------------
 
 case "$MODE" in
     smoke)    detect_mount; run_smoke;;

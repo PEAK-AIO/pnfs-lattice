@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * error.c — Error code mapping between MDS, NFS4, and errno.
+ * error.c -- Error code mapping between MDS, NFS4, and errno.
  */
 
 #include <string.h>

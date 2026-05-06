@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_capacity.c — Live capacity probe for data servers.
+ * ds_capacity.c -- Live capacity probe for data servers.
  *
  * Background thread that calls statvfs() on each DS's mount path
  * periodically and writes the resulting capacity back to the DS
@@ -69,7 +69,7 @@ struct ds_capacity {
  * DS registry row in RonDB via mds_cat_ds_get + mds_cat_ds_put.
  * Read-modify-write preserves admin-controlled fields (state, weight,
  * addr, mode, capabilities, ...) so two MDSes racing on the probe
- * interval cannot trash each other's admin state — they only race on
+ * interval cannot trash each other's admin state -- they only race on
  * the four capacity columns, which are within bytes of each other
  * within any probe interval (LWW is benign).
  * ----------------------------------------------------------------------- */
@@ -181,7 +181,7 @@ uint32_t ds_capacity_derive_auto_weight(uint64_t total_bytes,
  *
  * When @p mode is CAP_WEIGHT_PROPORTIONAL, the derived auto_weight
  * is also written to the cache via ds_cache_set_auto_weight.  The
- * operator weight (info.weight) is never touched here — that path
+ * operator weight (info.weight) is never touched here -- that path
  * stays under mds-admin ds set-weight / ds_weight.<id>.
  *
  * When @p cat is non-NULL, the probe additionally persists
@@ -238,7 +238,7 @@ static int probe_one(struct ds_cache *cache,
 	/*
 	 * Cluster-shared persistence: stamp the live values onto the
 	 * persistent DS registry row so other MDSes can pick them up
-	 * via the periodic reload.  Best-effort — a failure here
+	 * via the periodic reload.  Best-effort -- a failure here
 	 * doesn't roll back the local-cache write that already
 	 * succeeded above.  See capacity_persist_to_catalogue for the
 	 * RMW-safety rationale.
@@ -321,7 +321,7 @@ static void *capacity_thread(void *arg)
 
 	while (atomic_load_explicit(&cap->running, memory_order_acquire)) {
 		/*
-		 * Per-DS probe loop — each successful local statvfs
+		 * Per-DS probe loop -- each successful local statvfs
 		 * also persists to the cluster-shared DS row so peer
 		 * MDSes can pick up the observation.  Pure-metadata
 		 * MDSes (no proxy I/O, no DS mounts) skip this loop

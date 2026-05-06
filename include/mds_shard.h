@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_shard.h — Request-local shard routing for metadata operations.
+ * mds_shard.h -- Request-local shard routing for metadata operations.
  *
  * A shard owns one catalogue handle and one commit queue, covering
  * a subtree of the global namespace.  The shard map provides
@@ -12,7 +12,7 @@
  * Phase 2: single root shard wrapping the daemon-global cat+cq.
  * Phase 3: multi-shard with owned child shards created on split.
  *
- * See docs/architecture.md §4.7.7 for the sharding roadmap.
+ * See docs/architecture.md S4.7.7 for the sharding roadmap.
  */
 
 #ifndef MDS_SHARD_H
@@ -79,7 +79,7 @@ void mds_shard_map_destroy(struct mds_shard_map *map);
 /**
  * @brief Add a non-owning shard for a subtree path.
  *
- * The shard map borrows db and cq — it does NOT free them on
+ * The shard map borrows db and cq -- it does NOT free them on
  * destruction.  Used for the root shard and test shards.
  *
  * If a shard with the same subtree_path already exists, it is replaced.

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_namespace.c — Unit tests for namespace operations.
+ * test_namespace.c -- Unit tests for namespace operations.
  *
  * Each test creates a fresh catalogue environment in a mkdtemp directory,
  * exercises the namespace API, asserts invariants, and cleans up.
@@ -115,7 +115,7 @@ static void close_test_db(struct mds_catalogue *db, char *path)
 }
 
 /* -----------------------------------------------------------------------
- * test_lookup_root — root inode accessible via getattr
+ * test_lookup_root -- root inode accessible via getattr
  * ----------------------------------------------------------------------- */
 
 static void test_lookup_root(void)
@@ -136,7 +136,7 @@ static void test_lookup_root(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_create_file — create a regular file, verify inode + lookup
+ * test_create_file -- create a regular file, verify inode + lookup
  * ----------------------------------------------------------------------- */
 
 static void test_create_file(void)
@@ -180,7 +180,7 @@ static void test_create_file(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_create_directory — nlink bookkeeping
+ * test_create_directory -- nlink bookkeeping
  * ----------------------------------------------------------------------- */
 
 static void test_create_directory(void)
@@ -206,7 +206,7 @@ static void test_create_directory(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_remove_file — create, remove, verify gone
+ * test_remove_file -- create, remove, verify gone
  * ----------------------------------------------------------------------- */
 
 static void test_remove_file(void)
@@ -238,7 +238,7 @@ static void test_remove_file(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_remove_dir_empty_check — NOTEMPTY for non-empty; success for empty
+ * test_remove_dir_empty_check -- NOTEMPTY for non-empty; success for empty
  * ----------------------------------------------------------------------- */
 
 static void test_remove_dir_empty_check(void)
@@ -273,7 +273,7 @@ static void test_remove_dir_empty_check(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_rename_same_dir — rename within a directory
+ * test_rename_same_dir -- rename within a directory
  * ----------------------------------------------------------------------- */
 
 static void test_rename_same_dir(void)
@@ -304,7 +304,7 @@ static void test_rename_same_dir(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_rename_cross_dir — rename directory across parents
+ * test_rename_cross_dir -- rename directory across parents
  * ----------------------------------------------------------------------- */
 
 static void test_rename_cross_dir(void)
@@ -346,7 +346,7 @@ static void test_rename_cross_dir(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_rename_replace — rename over an existing file
+ * test_rename_replace -- rename over an existing file
  * ----------------------------------------------------------------------- */
 
 static void test_rename_replace(void)
@@ -380,7 +380,7 @@ static void test_rename_replace(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_setattr — modify mode and uid, verify ctime bumped
+ * test_setattr -- modify mode and uid, verify ctime bumped
  * ----------------------------------------------------------------------- */
 
 static void test_setattr(void)
@@ -413,7 +413,7 @@ static void test_setattr(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_link — hard link, nlink increment, remove one link
+ * test_link -- hard link, nlink increment, remove one link
  * ----------------------------------------------------------------------- */
 
 static void test_link(void)
@@ -437,7 +437,7 @@ static void test_link(void)
 	ASSERT_EQ(mds_ns_getattr(db, file.fileid, &via_link), MDS_OK);
 	ASSERT_EQ(via_link.nlink, (uint32_t)2);
 
-	/* Remove the original name — inode survives (nlink=1). */
+	/* Remove the original name -- inode survives (nlink=1). */
 	ASSERT_EQ(mds_ns_remove(db, MDS_FILEID_ROOT, "original"), MDS_OK);
 	ASSERT_EQ(mds_ns_getattr(db, file.fileid, &after_remove), MDS_OK);
 	ASSERT_EQ(after_remove.nlink, (uint32_t)1);
@@ -450,7 +450,7 @@ static void test_link(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_link_dir_rejected — hard links to directories are not allowed
+ * test_link_dir_rejected -- hard links to directories are not allowed
  * ----------------------------------------------------------------------- */
 
 static void test_link_dir_rejected(void)
@@ -472,7 +472,7 @@ static void test_link_dir_rejected(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir_basic — list entries in a directory
+ * test_readdir_basic -- list entries in a directory
  * ----------------------------------------------------------------------- */
 
 struct rd_ctx {
@@ -513,7 +513,7 @@ static void test_readdir_basic(void)
 	ASSERT_EQ(mds_ns_readdir(db, MDS_FILEID_ROOT, NULL, rd_cb, &ctx),
 		  MDS_OK);
 
-	/* catalogue keys are sorted — expect alpha, bravo, charlie. */
+	/* catalogue keys are sorted -- expect alpha, bravo, charlie. */
 	ASSERT_EQ(ctx.count, 3);
 	ASSERT_EQ(strcmp(ctx.entries[0].name, "alpha"), 0);
 	ASSERT_EQ(strcmp(ctx.entries[1].name, "bravo"), 0);
@@ -523,7 +523,7 @@ static void test_readdir_basic(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir_pagination — start_after skips earlier entries
+ * test_readdir_pagination -- start_after skips earlier entries
  * ----------------------------------------------------------------------- */
 
 static void test_readdir_pagination(void)
@@ -548,7 +548,7 @@ static void test_readdir_pagination(void)
 				MDS_FTYPE_REG, 0644, 0, 0,
 			       NULL, &tmp), MDS_OK);
 
-	/* Start after "bbb" — should get "ccc" and "ddd". */
+	/* Start after "bbb" -- should get "ccc" and "ddd". */
 	memset(&ctx, 0, sizeof(ctx));
 	ASSERT_EQ(mds_ns_readdir(db, MDS_FILEID_ROOT, "bbb", rd_cb, &ctx),
 		  MDS_OK);
@@ -560,7 +560,7 @@ static void test_readdir_pagination(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir_pagination_difflen — different-length names
+ * test_readdir_pagination_difflen -- different-length names
  * ----------------------------------------------------------------------- */
 
 static void test_readdir_pagination_difflen(void)
@@ -589,7 +589,7 @@ static void test_readdir_pagination_difflen(void)
 				MDS_FTYPE_REG, 0644, 0, 0,
 			       NULL, &tmp), MDS_OK);
 
-	/* Start after "b" — should get "ba" and "c" only. */
+	/* Start after "b" -- should get "ba" and "c" only. */
 	memset(&ctx, 0, sizeof(ctx));
 	ASSERT_EQ(mds_ns_readdir(db, MDS_FILEID_ROOT, "b", rd_cb, &ctx),
 		  MDS_OK);
@@ -601,7 +601,7 @@ static void test_readdir_pagination_difflen(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_readdir_notdir — READDIR on a regular file returns NOTDIR
+ * test_readdir_notdir -- READDIR on a regular file returns NOTDIR
  * ----------------------------------------------------------------------- */
 
 static void test_readdir_notdir(void)

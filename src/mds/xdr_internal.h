@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * xdr_internal.h — Private dispatch header for XDR op-codec modules.
+ * xdr_internal.h -- Private dispatch header for XDR op-codec modules.
  *
  * NOT a public API header.  Only included by xdr_codec.c and the
  * xdr_ops_*.c per-group modules.

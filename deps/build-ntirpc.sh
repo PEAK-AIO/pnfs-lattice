@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deps/build-ntirpc.sh — Build and install libntirpc from source.
+# deps/build-ntirpc.sh -- Build and install libntirpc from source.
 #
 # libntirpc is the NFS-Ganesha TI-RPC library used by pnfs-mds for
 # NFSv4.1 RPC handling.  Debian/Ubuntu ship it as libntirpc-dev, but

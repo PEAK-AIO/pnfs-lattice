@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_gss.h — RPCSEC_GSS context management for NFS auth.
+ * mds_gss.h -- RPCSEC_GSS context management for NFS auth.
  *
  * Handles GSS-API token exchange for Kerberos authentication.
  * Compile-optional: requires libkrb5-dev.

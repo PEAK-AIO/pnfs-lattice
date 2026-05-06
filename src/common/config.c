@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * config.c — INI-style configuration parser.
+ * config.c -- INI-style configuration parser.
  *
  * Populates struct mds_config from /etc/pnfs-mds/mds.conf.
  */
@@ -63,7 +63,7 @@ struct mds_tuning_profile {
     MDS_CFG_SET_DEFAULT_STRIPE_COUNT | MDS_CFG_SET_DEFAULT_MIRROR_COUNT)
 
 static const struct mds_tuning_profile g_profiles[] = {
-    /* default: no bits set → auto-sizing and CQ internal defaults apply.
+    /* default: no bits set -> auto-sizing and CQ internal defaults apply.
      * stripe_count=1, mirror_count=1 means no multi-DS layout. */
     /* name, sets, id, workers, prealloc, batch, flush, max_bytes,
      * queue, stripe, inline_max, ds_prep_q, lease, inline_en,
@@ -85,7 +85,7 @@ static const struct mds_tuning_profile g_profiles[] = {
       32, 2048, 256, 2, 2097152, 8192, 1048576, 4096, 4096, 90, true,
       PLACEMENT_CAPACITY, 4, 1 },
 
-    /* genomics: bioinformatics pipelines — many small files (FASTQ
+    /* genomics: bioinformatics pipelines -- many small files (FASTQ
      * chunks, BAM shards), high metadata rate, moderate file sizes.
      * WEIGHTED_RR + mirror=2 prioritises durability and load balance
      * on per-file reads across replicas. */
@@ -93,7 +93,7 @@ static const struct mds_tuning_profile g_profiles[] = {
       24, 1024, 128, 1, 1048576, 4096, 65536, 16384, 4096, 90, true,
       PLACEMENT_WEIGHTED_RR, 1, 2 },
 
-    /* media: video/render farms — few very large files, low metadata
+    /* media: video/render farms -- few very large files, low metadata
      * rate.  stripe=8 to push concurrent bandwidth; clamps to
      * min(stripe_count, ds_count) when the cluster has fewer DSes
      * (D5 fallback, bumps pnfs_mds_placement_degraded_total). */
@@ -214,7 +214,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->prealloc_pool_size = 128;
     cfg->repl_health_interval_ms = 5000;
     cfg->repl_refuse_writes_on_resync = false;
-    cfg->repl_listen_port = 9401;        /* §11.4 default */
+    cfg->repl_listen_port = 9401;        /* S11.4 default */
     cfg->gpudirect_required = false;
     cfg->nfs_auth_mode = NFS_AUTH_MODE_SYS;
     cfg->krb5_keytab_path[0] = '\0';
@@ -251,7 +251,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * fresh upgrade reproduces today's placement behaviour. */
     cfg->placement_capacity_weighting = CAP_WEIGHT_OFF;
 
-    /* Inline-data / cache sizes — previously had struct fields but
+    /* Inline-data / cache sizes -- previously had struct fields but
      * no INI parser, so operators could not actually tune them.
      * Apply sane defaults here; INI keys override below. */
     cfg->inline_max_size = 65536;          /* 64 KiB */
@@ -281,7 +281,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 
     /* Directory delegations (Phase 8b) default off. */
     cfg->dir_delegations_enabled = false;
-    /* File delegations (RFC 8881 §10.4) default ON.  Operators who
+    /* File delegations (RFC 8881 S10.4) default ON.  Operators who
      * want zero CB_RECALL traffic (e.g. lab harnesses with
      * clientaddr=0.0.0.0) flip the INI key to false; main.c then
      * leaves rpc_cfg.dt = NULL and op_open() short-circuits the
@@ -298,7 +298,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->auto_split_min_children = 4;
 
     /*
-     * Phase C of docs/hpc-nto1-plan.md — wide-stripe HPC defaults.
+     * Phase C of docs/hpc-nto1-plan.md -- wide-stripe HPC defaults.
      * memset() above already left hpc_xdr_form as MDS_HPC_XDR_FORM_AUTO
      * (= 0); set the stripe-count cap explicitly so the daemon falls
      * back to 128 when the operator omits the key.  The cap stays
@@ -689,7 +689,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             cfg->transient_state_cache = (strcmp(val, "true") == 0 ||
                                           strcmp(val, "1") == 0);
         /*
-         * Phase C of docs/hpc-nto1-plan.md — wide-stripe pre-warm.
+         * Phase C of docs/hpc-nto1-plan.md -- wide-stripe pre-warm.
          * Operators on >128-DS clusters bump hpc_max_stripe_count up
          * to MDS_MAX_STRIPES; values outside [1, MDS_MAX_STRIPES] are
          * rejected loudly so a typo cannot silently degrade to a 1-DS
@@ -712,7 +712,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
              * Three string tokens map to the three enum values.
              * Anything else is rejected; we deliberately do not
              * fall back to AUTO silently because operator intent
-             * matters for fleet-wide compatibility (§14).
+             * matters for fleet-wide compatibility (S14).
              */
             if (strcmp(val, "auto") == 0) {
                 cfg->hpc_xdr_form = MDS_HPC_XDR_FORM_AUTO;
@@ -799,7 +799,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                     "(0..65535)\n", v);
             }
 
-        /* mountd_compat — `showmount -e` compatibility responder.
+        /* mountd_compat -- `showmount -e` compatibility responder.
          * See docs/mountd-compat.md.  All keys are optional; the
          * shim stays disabled unless mountd_compat_enabled=true. */
         } else if (strcmp(key, "mountd_compat_enabled") == 0) {
@@ -1021,7 +1021,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             /* Warn on unrecognized config keys. */
             (void)fprintf(stderr,
                 "WARN: unknown config key '%s' "
-                "(value '%s') — ignored\n", key, val);
+                "(value '%s') -- ignored\n", key, val);
         }
     }
 
@@ -1079,7 +1079,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * Default: min(worker_threads, 16).  Override with
      * ndb_conn_pool_size=N in mds.conf (max 64).
      * For 64-MDS clusters, ensure RonDB config.ini has enough
-     * [api] slots: total = num_MDS × ndb_conn_pool_size. */
+     * [api] slots: total = num_MDS x ndb_conn_pool_size. */
     if (cfg->ndb_conn_pool_size == 0) {
         uint32_t wt = cfg->worker_threads;
         if (wt == 0) { wt = 4; }

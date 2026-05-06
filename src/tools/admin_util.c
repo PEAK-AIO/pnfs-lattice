@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * admin_util.c — Shared helpers for the mds-admin CLI tool.
+ * admin_util.c -- Shared helpers for the mds-admin CLI tool.
  */
 
 #include <stdio.h>

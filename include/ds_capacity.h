@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_capacity.h — Live capacity probe for data servers.
+ * ds_capacity.h -- Live capacity probe for data servers.
  *
  * Periodically calls statvfs() on each DS's mount path (as configured
  * via ds_mount_path_fmt) and stamps the results onto the in-memory DS
@@ -49,7 +49,7 @@ struct mds_catalogue;
  *   used  >= total      -> 1 (near-full DS stays selectable)
  *   used  == 0          -> 100 (empty DS; capped)
  *
- * @return A value in {0} ∪ [1, 100].
+ * @return A value in {0} U [1, 100].
  */
 uint32_t ds_capacity_derive_auto_weight(uint64_t total_bytes,
 					uint64_t used_bytes);
@@ -60,7 +60,7 @@ uint32_t ds_capacity_derive_auto_weight(uint64_t total_bytes,
  * @param cache            DS cache to update on each probe cycle.
  * @param cat              Catalogue handle for the cluster-shared
  *                         capacity persistence (RonDB read-modify-
- *                         write).  May be NULL — the probe then
+ *                         write).  May be NULL -- the probe then
  *                         operates in legacy local-only mode and
  *                         neither persists nor reloads from peers.
  * @param mds_id           This MDS's numeric id; recorded as the

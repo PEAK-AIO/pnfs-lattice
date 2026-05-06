@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalog_delta.c — Semantic delta builder + wire serialization.
+ * catalog_delta.c -- Semantic delta builder + wire serialization.
  */
 
 #include <stdlib.h>

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_nfs_rpc.h — Minimal NFS3 RPC client for DS file handle capture.
+ * ds_nfs_rpc.h -- Minimal NFS3 RPC client for DS file handle capture.
  *
  * The MDS needs server-side NFS file handles to include in pNFS
  * layouts.  The standard approach is to MOUNT the DS export via

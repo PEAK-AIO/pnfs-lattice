@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * layout_cache_stub.c — no-op stub implementations of the
+ * layout_cache_stub.c -- no-op stub implementations of the
  * MDS-side layout cache.
  *
  * Linked into pnfs_mds_core when ENABLE_LAYOUT_CACHE=OFF (community
@@ -10,7 +10,7 @@
  *
  * Semantics: caching is disabled.
  *   - init() returns success with a NULL handle.
- *   - get()  always reports a miss (-1) — every LAYOUTGET goes
+ *   - get()  always reports a miss (-1) -- every LAYOUTGET goes
  *     straight to RonDB.  This is correct, just slower; it matches
  *     the behaviour of any deployment that hadn't configured a
  *     layout cache.

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_metrics.h — Daemon-native metrics registry.
+ * mds_metrics.h -- Daemon-native metrics registry.
  *
  * Thread-safe atomic counters for replication, commit, and
  * health observability.  No libbpf dependency.
@@ -83,7 +83,7 @@ struct mds_branch_metrics {
     _Atomic uint64_t ds_prepare_queue_depth;  /**< Current queue occupancy. */
 
     /* DS prealloc pool observability (Phase 12, Component C).
-     * See docs/design-layoutget-decoupling.md §4.3.  These counters
+     * See docs/design-layoutget-decoupling.md S4.3.  These counters
      * let operators answer "is the pool warm enough?" without
      * instrumenting the hot path itself. */
     _Atomic uint64_t prealloc_pops_ok;        /**< Fast-path ring hit. */
@@ -156,7 +156,7 @@ struct mds_branch_metrics {
     _Atomic uint64_t placement_degraded_total;
 
     /*
-     * IO_ADVISE accounting (RFC 7862 §15.5).  io_advise_total
+     * IO_ADVISE accounting (RFC 7862 S15.5).  io_advise_total
      * counts every IO_ADVISE op successfully dispatched; the two
      * per-hint counters count only the hint flavours the server
      * actually acts on (WILLNEED bumps io_tracker to bias tiering

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * dir_delegation.h — NFSv4.1 directory delegation manager (RFC 8881 §10.9).
+ * dir_delegation.h -- NFSv4.1 directory delegation manager (RFC 8881 S10.9).
  *
  * Tracks directory delegations granted to clients via GET_DIR_DELEGATION.
  * When a conflicting namespace mutation arrives, the delegation is
@@ -10,7 +10,7 @@
  * CB_NOTIFY (Phase 8c onward).
  *
  * The state table is keyed on (dir_fileid, clientid) and protected by
- * striped mutexes — same pattern as file-delegation tracking in
+ * striped mutexes -- same pattern as file-delegation tracking in
  * delegation.c, but with one entry per (dir, client) rather than per
  * (fileid, single-writer).
  *
@@ -87,7 +87,7 @@ int dir_deleg_return(struct dir_deleg_table *ddt,
  * @param ddt         Table handle.
  * @param dir_fileid  Directory to check.
  * @param clientid    Caller's clientid (same-client grants never
- *                    conflict per RFC 8881 §10.9.2).
+ *                    conflict per RFC 8881 S10.9.2).
  * @return true if a conflicting grant exists, false otherwise.
  */
 bool dir_deleg_is_writer_present(struct dir_deleg_table *ddt,
@@ -108,7 +108,7 @@ int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
 /** Revoke every delegation held by @p clientid (lease expiry cleanup). */
 void dir_deleg_revoke_client(struct dir_deleg_table *ddt, uint64_t clientid);
 
-/** TEST_STATEID support — check whether a dir-deleg stateid exists. */
+/** TEST_STATEID support -- check whether a dir-deleg stateid exists. */
 bool dir_deleg_stateid_exists(const struct dir_deleg_table *ddt,
 			      const uint8_t other[12]);
 

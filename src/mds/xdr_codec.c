@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * xdr_codec.c — NFSv4.1 XDR encode/decode for COMPOUND requests.
+ * xdr_codec.c -- NFSv4.1 XDR encode/decode for COMPOUND requests.
  *
  * Uses libntirpc XDR primitives for the low-level encoding.
  * This file implements NFSv4.1-specific compound and per-operation
@@ -55,7 +55,7 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
 {
     /* Backward-compatible decode: v0 (8 bytes) or v1 (17 bytes).
      * Pynfs PUTFH2 sends a 3-byte FH ('abc') and expects the server
-     * to return NFS4ERR_BADHANDLE rather than NFS4ERR_BADXDR — so
+     * to return NFS4ERR_BADHANDLE rather than NFS4ERR_BADXDR -- so
      * we now accept any well-formed opaque<NFS4_FHSIZE> payload at
      * decode time and let op_putfh decide the malformed-FH error
      * by checking for the fileid==0 sentinel below. */
@@ -76,7 +76,7 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
         *fileid = be64toh(*(uint64_t *)(buf + 5));
         return true;
     }
-    /* Malformed wire FH — sentinel fileid=0 so op_putfh returns
+    /* Malformed wire FH -- sentinel fileid=0 so op_putfh returns
      * NFS4ERR_BADHANDLE.  fileid 0 is reserved (root is
      * MDS_FILEID_ROOT == 2). */
     *fileid = 0;
@@ -103,7 +103,7 @@ bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
         desc->generation = be32toh(*(uint32_t *)(buf + 13));
         return true;
     }
-    /* Malformed FH — sentinel fileid=0 so op_putfh returns
+    /* Malformed FH -- sentinel fileid=0 so op_putfh returns
      * NFS4ERR_BADHANDLE.  Pynfs PUTFH2 covers the 3-byte case;
      * any other unrecognized format gets the same treatment. */
     desc->fileid = 0;
@@ -134,7 +134,7 @@ bool xdr_nfs4_bitmap_encode(XDR *xdrs, const uint32_t *bm, uint32_t words)
     uint32_t i;
     uint32_t actual_words = words;
 
-    /* Trim trailing zero words — kernel expects minimal encoding. */
+    /* Trim trailing zero words -- kernel expects minimal encoding. */
     while (actual_words > 0 && bm[actual_words - 1] == 0) {
         actual_words--;
     }
@@ -207,7 +207,7 @@ bool xdr_nfs4_time_decode(XDR *xdrs, struct timespec *ts)
 /* -----------------------------------------------------------------------
  * fattr4 encode
  *
- * RFC 8881 §5.1: fattr4 = bitmap4 attrmask + opaque attr_vals<>.
+ * RFC 8881 S5.1: fattr4 = bitmap4 attrmask + opaque attr_vals<>.
  * The attr_vals is itself a length-prefixed opaque containing the
  * XDR-encoded attribute values in bitmap order.
  *
@@ -236,8 +236,8 @@ bool xdr_nfs4_time_decode(XDR *xdrs, struct timespec *ts)
  *   TIME_MODIFY_SET(54) MOUNTED_ON_FILEID(55)
  *   FS_LAYOUT_TYPES(62) LAYOUT_HINT(63)
  * Word 2 (bits 64-95): LAYOUT_BLKSIZE(66)
- *   CHANGE_ATTR_TYPE(79) — RFC 7862 monotonic change-counter hint
- *   XATTR_SUPPORT(82) — RFC 8276
+ *   CHANGE_ATTR_TYPE(79) -- RFC 7862 monotonic change-counter hint
+ *   XATTR_SUPPORT(82) -- RFC 8276
  */
 static const uint32_t k_supported_bitmap[NFS4_BITMAP_WORDS] = {
     /* word 0 */ (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) |
@@ -294,7 +294,7 @@ static bool encode_owner_string(XDR *xdrs, uint64_t id)
  */
 
 /**
- * Encode a pathname4 (RFC 8881 §2.1): component array, not a string.
+ * Encode a pathname4 (RFC 8881 S2.1): component array, not a string.
  * "/" encodes as {count=0}.  "/foo/bar" encodes as {count=2, "foo", "bar"}.
  */
 static bool xdr_encode_pathname4(XDR *xdrs, const char *abspath)
@@ -312,7 +312,7 @@ static bool xdr_encode_pathname4(XDR *xdrs, const char *abspath)
 
 	(void)snprintf(buf, sizeof(buf), "%s", abspath);
 
-	/* Split on '/' — skip leading slash. */
+	/* Split on '/' -- skip leading slash. */
 	char *p = buf;
 	if (*p == '/') { p++; }
 	while (*p != '\0' && ncomp < 32) {
@@ -435,7 +435,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
             return false;
 }
     }
-    /* FATTR4_FS_LOCATIONS (bit 24): fs_locations4 per RFC 8881 §11.12.
+    /* FATTR4_FS_LOCATIONS (bit 24): fs_locations4 per RFC 8881 S11.12.
      * pathname4 = component array: "/" -> {0}, "/x/y" -> {2,"x","y"}.
      *
      * fs_root: path of this filesystem within the referring server.
@@ -525,7 +525,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
      *
      * Two-stage policy:
      *   1. When the caller didn't supply FS-level space values
-     *      (fs_space == NULL — typical when no quota context is
+     *      (fs_space == NULL -- typical when no quota context is
      *      wired into the compound), default to INT64_MAX rather
      *      than literal 0.  Emitting 0 makes statvfs(2) report
      *      Total/Free/Available = 0, which causes many user-space
@@ -549,8 +549,8 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
      *      output regardless of which producer wrote fs_space.
      *
      * INT64_MAX (~9.2 EB) leaves a full 2^63 of headroom before
-     * u64 overflow — safe for any realistic blockres
-     * (sb->s_blocksize <= 1 MiB ⇒ blockres < 2^20 ≪ 2^63) — and
+     * u64 overflow -- safe for any realistic blockres
+     * (sb->s_blocksize <= 1 MiB => blockres < 2^20 << 2^63) -- and
      * still reads as "effectively unlimited" to every consumer
      * we care about.  INT64_MAX is also the convention
      * BSD-derived NFS servers use for unlimited-quota responses,
@@ -622,7 +622,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
 }
     }
 
-    /* pNFS: fs_layout_types (RFC 5661 §5.12.1). */
+    /* pNFS: fs_layout_types (RFC 5661 S5.12.1). */
     if (nfs4_bitmap_test(actual, FATTR4_FS_LAYOUT_TYPES)) {
         uint32_t count = 1;
         uint32_t lt = 4; /* LAYOUT4_FLEX_FILES */
@@ -634,7 +634,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
         }
     }
 
-    /* pNFS: layout_blksize (RFC 5661 §5.12.4). */
+    /* pNFS: layout_blksize (RFC 5661 S5.12.4). */
     if (nfs4_bitmap_test(actual, FATTR4_LAYOUT_BLKSIZE)) {
         uint32_t blksz = 65536;
         if (!xdr_uint32_t(xdrs, &blksz)) {
@@ -642,7 +642,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
         }
     }
 
-    /* FATTR4_CHANGE_ATTR_TYPE (bit 79) — RFC 7862 §10.2.3.
+    /* FATTR4_CHANGE_ATTR_TYPE (bit 79) -- RFC 7862 S10.2.3.
      *
      * Advertises the semantic of our change counter for client-side
      * caching decisions.  We encode MONOTONIC_INCR: every mutation
@@ -655,7 +655,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
      *
      * Bit 79 sits between LAYOUT_BLKSIZE(66) and XATTR_SUPPORT(82)
      * in the word-2 attr-value stream; attrs are emitted in bitmap
-     * order per RFC 8881 §5.1. */
+     * order per RFC 8881 S5.1. */
     if (nfs4_bitmap_test(actual, FATTR4_CHANGE_ATTR_TYPE)) {
         uint32_t ty = NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR;
         if (!xdr_uint32_t(xdrs, &ty)) { return false; }
@@ -663,7 +663,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
 
     /* RFC 8276: xattr_support (bit 82). */
     if (nfs4_bitmap_test(actual, FATTR4_XATTR_SUPPORT)) {
-        int32_t xs = 1; /* true — server supports xattr operations */
+        int32_t xs = 1; /* true -- server supports xattr operations */
         if (!xdr_putbool(xdrs, xs)) {
             return false;
         }
@@ -689,7 +689,7 @@ bool xdr_nfs4_fattr_encode(XDR *xdrs, const struct mds_inode *inode,
      * no referral context, so emitting an empty fs_locations4 would
      * still tag the returned attrs with NFS_ATTR_FATTR_V4_LOCATIONS
      * on the Linux client and cause it to mark the inode as
-     * S_AUTOMOUNT — every newly-accessed directory would then become
+     * S_AUTOMOUNT -- every newly-accessed directory would then become
      * a local sub-mount and rmdir would fail with EBUSY.  Real
      * referrals go through xdr_nfs4_fattr_encode_ex. */
     actual[0] &= ~((uint32_t)1 << FATTR4_FS_LOCATIONS);
@@ -699,7 +699,7 @@ bool xdr_nfs4_fattr_encode(XDR *xdrs, const struct mds_inode *inode,
         return false;
     }
 
-    /* P2: Backpatch encoding — encode directly into outer stream,
+    /* P2: Backpatch encoding -- encode directly into outer stream,
      * then backpatch the length prefix.  Eliminates the temp
      * buffer + memcpy that was the second-biggest XDR overhead. */
     {
@@ -1054,9 +1054,9 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
         return xdr_uint32_t(xdrs, &op->arg.access.access);
     case OP_DELEGRETURN:
         /*
-         * RFC 8881 §18.6.1 DELEGRETURN4args = stateid4 deleg_stateid.
+         * RFC 8881 S18.6.1 DELEGRETURN4args = stateid4 deleg_stateid.
          * op_delegreturn (compound_data_io.c) reads the stateid from
-         * op->arg.close.stateid — the close-arg slot is shared with
+         * op->arg.close.stateid -- the close-arg slot is shared with
          * delegreturn since both ops carry only a stateid.  Pre-fix,
          * the decoder wrote the stateid to a stack-local that went
          * out of scope before dispatch, leaving op->arg.close.stateid
@@ -1064,7 +1064,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
          * special-zero stateid, which never matched a grant; the
          * compound completed with NFS4_OK in the status word but
          * without the encoder's per-op tail (DELEGRETURN was missing
-         * from the encoder switch entirely — fixed below) so the
+         * from the encoder switch entirely -- fixed below) so the
          * client never saw the reply at all and waited 30 s before
          * FIN.  Pynfs DELEG1 hung exactly here.
          */
@@ -1134,7 +1134,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_DESTROY_CLIENTID:
         return xdr_uint64_t(xdrs, &op->arg.destroy_clientid);
     case OP_SECINFO: {
-        /* RFC 8881 §18.29.1 SECINFO4args: component4 name. */
+        /* RFC 8881 S18.29.1 SECINFO4args: component4 name. */
         uint32_t name_len = 0;
         if (!xdr_uint32_t(xdrs, &name_len)) { return false; }
         if (name_len >= MDS_MAX_NAME) { return false; }
@@ -1146,10 +1146,10 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
         return true;
     }
     case OP_SECINFO_NO_NAME:
-        /* RFC 8881 §18.45.1 SECINFO_NO_NAME4args: secinfo_style4. */
+        /* RFC 8881 S18.45.1 SECINFO_NO_NAME4args: secinfo_style4. */
         return xdr_uint32_t(xdrs, &op->arg.secinfo_no_name.style);
     case OP_TEST_STATEID: {
-        /* RFC 8881 §18.48: array of stateids to test. */
+        /* RFC 8881 S18.48: array of stateids to test. */
         uint32_t count, j;
         if (!xdr_uint32_t(xdrs, &count)) {
             return false;
@@ -1170,7 +1170,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     }
     case OP_FREE_STATEID:
         /*
-         * RFC 8881 §18.38.1 FREE_STATEID4args = stateid4 fsa_stateid.
+         * RFC 8881 S18.38.1 FREE_STATEID4args = stateid4 fsa_stateid.
          * Pre-fix the decoder wrote the stateid into a stack-local
          * and dropped it on the floor, leaving op->arg.free_stateid
          * zeroed.  Pynfs CSID9 (testOpenFreestateidClose) caught
@@ -1180,7 +1180,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
          */
         return xdr_nfs4_stateid_decode(xdrs, &op->arg.free_stateid);
     case OP_BIND_CONN_TO_SESSION: {
-        /* RFC 8881 §18.34: session_id(16) + dir(4) + use_rdma(4).
+        /* RFC 8881 S18.34: session_id(16) + dir(4) + use_rdma(4).
          * Reuse destroy_session arg struct for the session_id. */
         uint32_t dir, rdma;
         return xdr_opaque_decode(xdrs,
@@ -1190,7 +1190,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     }
     case OP_BACKCHANNEL_CTL: {
         /*
-         * RFC 8881 §18.33.1 BACKCHANNEL_CTL4args:
+         * RFC 8881 S18.33.1 BACKCHANNEL_CTL4args:
          *   uint32_t            bca_cb_program;
          *   callback_sec_parms4 bca_sec_parms<>;
          *
@@ -1203,7 +1203,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
          *
          * Pynfs DELEG7 (testCBSecParmsChange) verifies that the
          * very next CB_RECALL after this BACKCHANNEL_CTL carries
-         * the new uid/gid — so cb_sec_set MUST be true when at
+         * the new uid/gid -- so cb_sec_set MUST be true when at
          * least one entry was present.
          */
         struct nfs4_arg_backchannel_ctl *a = &op->arg.backchannel_ctl;
@@ -1279,7 +1279,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_LAYOUTCOMMIT:    return decode_op_layoutcommit(xdrs, op);
     case OP_LAYOUTERROR:     return decode_op_layouterror(xdrs, op);
     case OP_LAYOUTSTATS:     return decode_op_layoutstats(xdrs, op);
-    /* Directory delegation (RFC 8881 §18.39) */
+    /* Directory delegation (RFC 8881 S18.39) */
     case OP_GET_DIR_DELEGATION: return decode_op_get_dir_delegation(xdrs, op);
     /* NFSv4.2 operations (RFC 7862) */
     case OP_ALLOCATE:        return decode_op_allocate(xdrs, op);
@@ -1301,7 +1301,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     default:
         /*
          * Unknown op: preserve the raw opnum so dispatch_op() can
-         * return NFS4ERR_OP_ILLEGAL per RFC 8881 §2.10.6.4.
+         * return NFS4ERR_OP_ILLEGAL per RFC 8881 S2.10.6.4.
          * We cannot skip unknown args, so signal the caller to
          * stop decoding further ops by returning true with the
          * raw opnum intact (checked in nfs4_decode_compound_args).
@@ -1346,7 +1346,7 @@ int nfs4_decode_compound_args(XDR *xdrs,
     /*
      * Distinct return code so the caller can translate this to the
      * RFC-mandated NFS4ERR_TOO_MANY_OPS rather than a generic XDR
-     * failure (RFC 5661 §15.2 / RFC 8881 §2.10.6.1.2).  Without this,
+     * failure (RFC 5661 S15.2 / RFC 8881 S2.10.6.1.2).  Without this,
      * the COMPOUND reply ends up with an empty resarray and Linux /
      * pynfs clients crash on resarray[0].
      */
@@ -1369,7 +1369,7 @@ int nfs4_decode_compound_args(XDR *xdrs,
             return -1;
 }
         /*
-         * RFC 8881 §2.10.6.4: if decode_one_op returned an opnum
+         * RFC 8881 S2.10.6.4: if decode_one_op returned an opnum
          * that dispatch_op does not recognise, we cannot decode
          * subsequent ops (unknown arg size).  Stop here and let
          * compound_process return NFS4ERR_OP_ILLEGAL for this op.
@@ -1402,9 +1402,9 @@ int nfs4_decode_compound_args(XDR *xdrs,
         case OP_GET_DIR_DELEGATION:
         case OP_SECINFO:
         case OP_SECINFO_NO_NAME:
-            break;  /* known op — continue decoding */
+            break;  /* known op -- continue decoding */
         default:
-            /* Unknown op — stop decoding, include this op in count. */
+            /* Unknown op -- stop decoding, include this op in count. */
             *op_count = i + 1;
             return 0;
         }
@@ -1418,14 +1418,14 @@ int nfs4_decode_compound_args(XDR *xdrs,
  *
  * Previously GET_DIR_DELEGATION abused the outer op status
  * NFS4ERR_DIRDELEG_UNAVAIL + a trailing bool body.  That outer
- * status halted the compound (RFC 8881 §2.6.3.1.1) and dropped any
+ * status halted the compound (RFC 8881 S2.6.3.1.1) and dropped any
  * bundled trailing GETATTR, producing EIO on Linux clients.  GDD
  * now returns NFS4_OK with the UNAVAIL state carried in the inner
  * gddrnf_status discriminator (see encode_res_get_dir_delegation),
  * so no per-op exception is needed here.
  *
  * LOCK / LOCKT under NFS4ERR_DENIED carry a lock4denied body
- * (RFC 8881 §18.10.4 / §18.11.4): the conflicting range, lock_type,
+ * (RFC 8881 S18.10.4 / S18.11.4): the conflicting range, lock_type,
  * and lock_owner are encoded after the status word so the client
  * can report the conflict to its application.
  */
@@ -1519,27 +1519,27 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
     case OP_READDIR:         return encode_res_readdir(xdrs, r);
     case OP_OPEN:            return encode_res_open(xdrs, r);
     case OP_CLOSE:           return encode_res_close(xdrs, r);
-    /* RFC 8881 §18.10.4 LOCK4res: NFS4_OK → stateid4. */
+    /* RFC 8881 S18.10.4 LOCK4res: NFS4_OK -> stateid4. */
     case OP_LOCK:
         return xdr_nfs4_stateid_encode(xdrs, &r->res.lock.stateid);
-    /* RFC 8881 §18.11.4 LOCKT4res: NFS4_OK → void. */
+    /* RFC 8881 S18.11.4 LOCKT4res: NFS4_OK -> void. */
     case OP_LOCKT:
         return true;
-    /* RFC 8881 §18.12.4 LOCKU4res: NFS4_OK → stateid4. */
+    /* RFC 8881 S18.12.4 LOCKU4res: NFS4_OK -> stateid4. */
     case OP_LOCKU:
         return xdr_nfs4_stateid_encode(xdrs, &r->res.locku.stateid);
     case OP_OPENATTR:        return true; /* status-only */
     /*
-     * RFC 8881 §18.6.4 DELEGRETURN4res — status-only.  The status
+     * RFC 8881 S18.6.4 DELEGRETURN4res -- status-only.  The status
      * word is already emitted by encode_one_result before the
      * switch; nothing follows it on the wire.  Pre-fix this case
      * was missing and fell through to `default: return false;`,
      * which made the caller abort the entire compound encode and
      * silently drop the reply (pynfs DELEG1 hang root cause).
      */
-    case OP_DELEGRETURN:     return true; /* RFC 8881 §18.6.4 */
+    case OP_DELEGRETURN:     return true; /* RFC 8881 S18.6.4 */
     /*
-     * RFC 8881 §18.18.4 OPEN_DOWNGRADE4res — stateid4 on NFS4_OK.
+     * RFC 8881 S18.18.4 OPEN_DOWNGRADE4res -- stateid4 on NFS4_OK.
      * op_open_downgrade stores the new stateid in r->res.close.stateid
      * (close-result slot is shared, same as the close stateid path).
      */
@@ -1595,15 +1595,15 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
     case OP_WRITE_SAME:      return true; /* status-only */
     case OP_CLONE:           return true; /* status-only */
     case OP_RECLAIM_COMPLETE: return true; /* status-only */
-    case OP_FREE_STATEID: return true; /* status-only per RFC 5661 §18.38 */
+    case OP_FREE_STATEID: return true; /* status-only per RFC 5661 S18.38 */
     /*
-     * RFC 8881 §18.33.2 BACKCHANNEL_CTL4res — status-only.  Like
+     * RFC 8881 S18.33.2 BACKCHANNEL_CTL4res -- status-only.  Like
      * DELEGRETURN, the status word is already emitted before the
      * switch and nothing follows it on the wire.
      */
     case OP_BACKCHANNEL_CTL: return true;
     case OP_TEST_STATEID: {
-        /* RFC 8881 §18.48: return per-stateid status. */
+        /* RFC 8881 S18.48: return per-stateid status. */
         const struct nfs4_res_test_stateid *ts = &r->res.test_stateid;
         uint32_t cnt = ts->count;
         uint32_t k;
@@ -1753,7 +1753,7 @@ static bool read_gss_cred_body(XDR *xdrs, uint32_t body_len,
         return false; /* Invalid GSS service */
     }
 
-    /* ctx_handle: opaque<> — length-prefixed. */
+    /* ctx_handle: opaque<> -- length-prefixed. */
     uint32_t hlen;
     if (!xdr_uint32_t(xdrs, &hlen)) {
         return false;
@@ -1822,7 +1822,7 @@ int rpc_decode_call_header(XDR *xdrs, uint32_t *xid,
     }
 
     if (cred_flav == 6 && gss_cred != NULL && cred_len >= 20) {
-        /* RPCSEC_GSS — parse structured credential body. */
+        /* RPCSEC_GSS -- parse structured credential body. */
         memset(gss_cred, 0, sizeof(*gss_cred));
         if (!read_gss_cred_body(xdrs, cred_len, gss_cred)) {
             return -1; /* Malformed GSS credential. */
@@ -1861,7 +1861,7 @@ int rpc_decode_call_header(XDR *xdrs, uint32_t *xid,
             }
         }
     } else if (cred_len > 0) {
-        /* Unknown flavor — skip opaque body. */
+        /* Unknown flavor -- skip opaque body. */
         char skip[400];
         if (!xdr_opaque_decode(xdrs, skip, cred_len)) {
             return -1;

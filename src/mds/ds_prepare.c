@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_prepare.c — Async DS file preparation queue (Epic B).
+ * ds_prepare.c -- Async DS file preparation queue (Epic B).
  *
  * Moves DS file creation off the LAYOUTGET hot path for generic
  * (stock knfsd) data servers.  One worker thread per DS processes
@@ -199,7 +199,7 @@ static bool ds_needs_prepare(struct ds_prepare_ctx *ctx, uint32_t ds_id)
 {
 	(void)ctx;
 	(void)ds_id;
-	/* All DSes are generic (loosely coupled) — always need FH capture. */
+	/* All DSes are generic (loosely coupled) -- always need FH capture. */
 	return true;
 }
 
@@ -266,7 +266,7 @@ static void *worker_thread(void *arg)
 			if (st != MDS_OK ||
 			    recheck.generation != job->generation ||
 			    !(recheck.flags & MDS_IFLAG_DS_PENDING)) {
-				/* Orphan DS file — gc-scan will clean it. */
+				/* Orphan DS file -- gc-scan will clean it. */
 				job_complete(job, DS_PREP_CANCELLED);
 				atomic_fetch_add(&ctx->cancelled, 1);
 				hash_remove(ctx, job);

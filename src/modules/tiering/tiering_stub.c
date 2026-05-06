@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * tiering_stub.c — no-op stub implementations of the tiering API.
+ * tiering_stub.c -- no-op stub implementations of the tiering API.
  *
  * Linked into pnfs_mds_core when ENABLE_TIERING=OFF (community build).
  * The full implementation is in tiering.c in this same directory.
@@ -10,7 +10,7 @@
  * Semantics: tiering is unavailable.  tiering_init() returns success
  * but yields a NULL worker handle so callers that null-check before
  * use short-circuit cleanly.  tiering_start() returns MDS_ERR_INVAL
- * — "tiering is not configured on this host".
+ * -- "tiering is not configured on this host".
  */
 #include "tiering.h"
 

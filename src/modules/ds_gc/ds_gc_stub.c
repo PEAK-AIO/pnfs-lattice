@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_gc_stub.c — no-op stubs for the DS garbage collector worker.
+ * ds_gc_stub.c -- no-op stubs for the DS garbage collector worker.
  *
  * Linked into pnfs_mds_core when ENABLE_DS_GC=OFF (community build).
  * The real implementation is in ds_gc.c.
@@ -14,7 +14,7 @@
  * periodic admin command instead.
  *
  * Both ds_gc_start variants honour the documented "poll_ms == 0
- * disables drainer" contract by returning 0 with *out = NULL — the
+ * disables drainer" contract by returning 0 with *out = NULL -- the
  * stub always behaves as if the operator passed poll_ms=0.
  */
 #include "ds_gc.h"

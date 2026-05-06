@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * backup.h — Online backup + snapshot restore V1.
+ * backup.h -- Online backup + snapshot restore V1.
  *
  * @deprecated All backup APIs return MDS_ERR_NOSUPPORT in RonDB mode.
  * This module has not been ported to the catalogue API.
@@ -63,7 +63,7 @@ struct mds_backup_report {
 /**
  * Create a hot backup of the catalogue.
  *
- * @deprecated Returns MDS_ERR_NOSUPPORT — not ported to RonDB.
+ * @deprecated Returns MDS_ERR_NOSUPPORT -- not ported to RonDB.
  *
  * @param cat       Catalogue handle.
  * @param dest_path Destination path for the backup data file.
@@ -79,7 +79,7 @@ enum mds_status mds_backup_create(struct mds_catalogue *cat,
 /**
  * Verify a backup artifact.
  *
- * @deprecated Returns MDS_ERR_NOSUPPORT — not ported to RonDB.
+ * @deprecated Returns MDS_ERR_NOSUPPORT -- not ported to RonDB.
  *
  * @param backup_path Path to the backup data file.
  * @param out         Report filled with counts and verified flag.
@@ -91,7 +91,7 @@ enum mds_status mds_backup_verify(const char *backup_path,
 /**
  * Restore a backup to a new database path.
  *
- * @deprecated Returns MDS_ERR_NOSUPPORT — not ported to RonDB.
+ * @deprecated Returns MDS_ERR_NOSUPPORT -- not ported to RonDB.
  *
  * @param backup_path  Path to the backup data file.
  * @param dest_db_path Destination path for the restored database.
@@ -105,7 +105,7 @@ enum mds_status mds_backup_restore(const char *backup_path,
 /**
  * Read backup metadata from the `.meta` sidecar file.
  *
- * @deprecated Returns MDS_ERR_NOSUPPORT — not ported to RonDB.
+ * @deprecated Returns MDS_ERR_NOSUPPORT -- not ported to RonDB.
  *
  * @param backup_path Path to the backup data file (`.meta` appended).
  * @param out         Report filled from sidecar fields.

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * ds_health.c — Data server health monitoring.
+ * ds_health.c -- Data server health monitoring.
  *
  * Implements periodic NFS NULL probing and failure detection.
  */
@@ -70,7 +70,7 @@ struct ds_fail_state {
     /* Anti-flapping state. */
     uint32_t recovery_successes;  /* consecutive OK probes while OFFLINE */
     uint64_t cooldown_until_ns;   /* monotonic ns: skip probes until then */
-    uint32_t flap_count;          /* OFFLINE→ONLINE→OFFLINE transitions */
+    uint32_t flap_count;          /* OFFLINE->ONLINE->OFFLINE transitions */
     uint64_t last_online_ns;      /* when DS last transitioned to ONLINE */
 };
 
@@ -397,7 +397,7 @@ static void handle_ds_failure(struct ds_health_monitor *hm, uint32_t ds_id,
         /* Mark offline (may block on CQ). */
         (void)fprintf(stderr,
             "WARN: DS %u failed health check "
-            "(%u consecutive failures) — marking OFFLINE "
+            "(%u consecutive failures) -- marking OFFLINE "
             "(cooldown %llus, flap #%u)\n",
             (unsigned)ds_id,
             (unsigned)hm->fail_threshold,

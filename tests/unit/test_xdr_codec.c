@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_xdr_codec.c — Unit tests for the NFSv4.1 XDR codec.
+ * test_xdr_codec.c -- Unit tests for the NFSv4.1 XDR codec.
  *
  * Each test encodes data into a buffer, then decodes from the same
  * buffer and verifies the round-trip produces identical values.
@@ -225,7 +225,7 @@ static void test_fattr_encode_decode(void)
 }
 
 /*
- * Phase 5 — verify FATTR4_CHANGE_ATTR_TYPE (bit 79, RFC 7862 §10.2.3)
+ * Phase 5 -- verify FATTR4_CHANGE_ATTR_TYPE (bit 79, RFC 7862 S10.2.3)
  * is advertised in supported_attrs and encoded as
  * NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR when requested.  This is the
  * foundation for client-side directory-delegation caching.
@@ -284,11 +284,11 @@ static void test_fattr_change_attr_type_monotonic(void)
 }
 
 /*
- * Phase 5 — regression test for bitmap-order correctness in
+ * Phase 5 -- regression test for bitmap-order correctness in
  * encode_attr_vals().
  *
  * The original CHANGE_ATTR_TYPE landing (commit e11eff4) emitted
- * bit 79 BEFORE bit 66 in the encoder, violating RFC 8881 §5.1's
+ * bit 79 BEFORE bit 66 in the encoder, violating RFC 8881 S5.1's
  * strict bitmap-order requirement for the attr_vals stream.  When
  * a client requested both LAYOUT_BLKSIZE (66) and CHANGE_ATTR_TYPE
  * (79) in the same GETATTR, the bytes were misaligned:
@@ -376,7 +376,7 @@ static void test_fattr_word2_bitmap_order(void)
 
 /*
  * Regression: when xdr_nfs4_fattr_encode is called without an
- * FS-level space context (fs_space == NULL — the default GETATTR
+ * FS-level space context (fs_space == NULL -- the default GETATTR
  * path when no quota subsystem is wired into the compound), the
  * encoder must advertise SPACE_AVAIL / SPACE_FREE / SPACE_TOTAL as
  * INT64_MAX ("effectively unlimited", ~9.2 EB), NOT as literal 0.
@@ -1754,7 +1754,7 @@ static void test_rpc_bad_msg_type_fails(void)
     xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
     {
         uint32_t xid = 1;
-        uint32_t msg_type = 1; /* REPLY, not CALL — should fail */
+        uint32_t msg_type = 1; /* REPLY, not CALL -- should fail */
         uint32_t rpcvers = 2;
 
         xdr_uint32_t(&enc, &xid);
@@ -1959,7 +1959,7 @@ static void test_unknown_opnum_decode(void)
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8a — GET_DIR_DELEGATION (RFC 8881 §18.39) wire round-trips
+ * Phase 8a -- GET_DIR_DELEGATION (RFC 8881 S18.39) wire round-trips
  * ----------------------------------------------------------------------- */
 
 /*
@@ -2187,7 +2187,7 @@ int main(void)
     RUN_TEST(test_unknown_opnum_decode);
     RUN_TEST(test_rpc_cred_flavor_extraction);
 
-    /* Phase 8a — GET_DIR_DELEGATION wire format */
+    /* Phase 8a -- GET_DIR_DELEGATION wire format */
     RUN_TEST(test_get_dir_delegation_decode_round_trip);
     RUN_TEST(test_get_dir_delegation_unavail_body);
 

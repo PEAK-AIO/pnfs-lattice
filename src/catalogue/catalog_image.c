@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * catalog_image.c — Materialized in-memory catalog image.
+ * catalog_image.c -- Materialized in-memory catalog image.
  *
  * Hash maps for inodes (fileid) and dirents (parent+name).
  * Per-directory sorted name arrays for READDIR pagination.
@@ -485,7 +485,7 @@ int catalog_image_dirent_del(struct catalog_image *img,
 }
 
 /* -----------------------------------------------------------------------
- * READDIR — collect matching entries, sort by name, iterate
+ * READDIR -- collect matching entries, sort by name, iterate
  * ----------------------------------------------------------------------- */
 
 struct readdir_entry {

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * hardlink_2pc.c — Cross-subtree hard link two-phase commit.
+ * hardlink_2pc.c -- Cross-subtree hard link two-phase commit.
  *
  * Coordinator (directory MDS): creates external dirent + journal.
  * Participant (inode MDS): creates anchor + adjusts nlink + journal.

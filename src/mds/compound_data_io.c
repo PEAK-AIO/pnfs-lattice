@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * compound_data_io.c — open/close, READ, WRITE, IO_ADVISE, inline promotion.
+ * compound_data_io.c -- open/close, READ, WRITE, IO_ADVISE, inline promotion.
  */
 
 #include <stdint.h>
@@ -61,7 +61,7 @@ static uint64_t ts_delta_ns(const struct timespec *a,
  * ----------------------------------------------------------------------- */
 
 /* -----------------------------------------------------------------------
- * Phase C / Step 5 of docs/hpc-nto1-plan.md — helpers for the
+ * Phase C / Step 5 of docs/hpc-nto1-plan.md -- helpers for the
  * HPC-Shared wide pre-warm fast path inside op_open(CREATE).
  *
  * These helpers are static and only called from op_open below; keeping
@@ -73,7 +73,7 @@ static uint64_t ts_delta_ns(const struct timespec *a,
  * Compute the configured stripe cap for an HPC-Shared CREATE.
  *
  * Two independent caps apply before any client hint:
- *   - cd->cfg_hpc_max_stripe_count (operator knob; 0 → default 128)
+ *   - cd->cfg_hpc_max_stripe_count (operator knob; 0 -> default 128)
  *   - MDS_MAX_STRIPES (compile-time hard ceiling, today 1024)
  */
 static uint32_t op_open_hpc_config_stripe_cap(const struct compound_data *cd)
@@ -157,7 +157,7 @@ static enum mds_status op_open_hpc_wide_create(
 		return MDS_ERR_NOSPC;
 	}
 
-	uint32_t stripe_unit = cd->cfg_stripe_unit;  /* 0 → helper default */
+	uint32_t stripe_unit = cd->cfg_stripe_unit;  /* 0 -> helper default */
 	uint8_t  pref_xport  = cd->gpudirect_required ? DS_TRANSPORT_RDMA : 0;
 	uint32_t pref_caps   = cd->gpudirect_required ? DS_CAP_GPUDIRECT : 0;
 	if (a->layout_hint.present) {
@@ -203,7 +203,7 @@ static enum mds_status op_open_hpc_wide_create(
 }
 
 /**
- * op_open — NFSv4.1 OPEN operation (RFC 8881 §18.16).
+ * op_open -- NFSv4.1 OPEN operation (RFC 8881 S18.16).
  *
  * Supports CLAIM_NULL (open/create by name in current_fh directory)
  * and CLAIM_FH (open current_fh directly).
@@ -278,11 +278,11 @@ enum nfs4_status op_open(struct compound_data *cd,
 
 		/* Optimistic create-first for UNCHECKED4.
 		 *
-		 * CREATEMODE_UNCHECKED4 semantics (RFC 8881 §18.16.3): if
+		 * CREATEMODE_UNCHECKED4 semantics (RFC 8881 S18.16.3): if
 		 * the file does not exist, create it; if it does, open the
 		 * existing one.  No verifier, no error on collision.  For
 		 * mdtest-style workloads with unique filenames the pre-lookup
-		 * is a pure ~220 us NDB miss-read — the dirent negative cache
+		 * is a pure ~220 us NDB miss-read -- the dirent negative cache
 		 * never helps because the name is first-seen.
 		 *
 		 * Skip the pre-lookup and go straight to ns_create; the
@@ -351,7 +351,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 				eff_gid = cd->cred_gid;
 			}
 			/*
-			 * Phase C / Step 5 of docs/hpc-nto1-plan.md — detect
+			 * Phase C / Step 5 of docs/hpc-nto1-plan.md -- detect
 			 * whether the parent is HPC-Shared.  We must re-fetch
 			 * here because the opt_create_first short-circuit may
 			 * have left `inode` holding the parent OR a stale
@@ -373,7 +373,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 
 			/*
 			 * Capture DS ID before create consumes prealloc.
-			 * Skipped for the HPC wide path — that path bypasses
+			 * Skipped for the HPC wide path -- that path bypasses
 			 * the per-DS prealloc rings entirely (it issues a
 			 * synchronous batch placement) and the
 			 * stripe_cached LAYOUTGET fast-path is irrelevant
@@ -450,7 +450,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 							if (pre_create_ds_id != 0) {
 								/* Borrow the stack-local pre_create_ds_id
 								 * for the synchronous commit_queue_submit
-								 * below — see the lifetime contract
+								 * below -- see the lifetime contract
 								 * comment on commit_queue_submit(). */
 								cop.args.create.layout_ds_ids =
 									&pre_create_ds_id;
@@ -483,7 +483,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 				/*
 				 * Direct-catalogue path (cd->cq == NULL).
 				 * Fused shim with per-op diagnostic tracing
-				 * enabled — see docs/benchmark-schema-v6.md.
+				 * enabled -- see docs/benchmark-schema-v6.md.
 				 */
 				uint64_t lg_clientid = 0;
 				uint32_t lg_iomode = 0;
@@ -588,7 +588,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 			/* Phase B HPC-Shared: if the parent directory has
 			 * MDS_IFLAG_HPC_SHARED set, propagate the bit to
 			 * the new child so any later OPEN/LAYOUTGET on it
-			 * picks up the HPC fast paths.  Best-effort —
+			 * picks up the HPC fast paths.  Best-effort --
 			 * inheritance failure does not abort the create.
 			 * cd->current_fh still points at the parent dir at
 			 * this point in op_open(CREATE).
@@ -645,7 +645,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 			 * OPEN epilogue (below) updates it to child.
 			 * compound_inode_get checks current_fh.fileid ==
 			 * fileid, so this won't match until after the
-			 * FH update.  Mark valid=true — the child inode
+			 * FH update.  Mark valid=true -- the child inode
 			 * is authoritative (just created). */
 			cd->current_inode = inode;
 			cd->current_inode_valid = true;
@@ -662,8 +662,8 @@ open_existing:
 				if (a->createmode == CREATEMODE_EXCLUSIVE4 ||
 				    a->createmode == CREATEMODE_EXCLUSIVE4_1) {
 					/*
-					 * RFC 8881 §18.16.3: If file exists and
-					 * verifier matches, this is a replay —
+					 * RFC 8881 S18.16.3: If file exists and
+					 * verifier matches, this is a replay --
 					 * succeed.  If mismatch, reject.
 					 */
 					if (inode.create_verf != a->create_verf) {
@@ -699,7 +699,7 @@ open_existing:
 		break;
 
 	case CLAIM_PREVIOUS:
-		/* RFC 8881 §9.11: reclaim previously held open during grace. */
+		/* RFC 8881 S9.11: reclaim previously held open during grace. */
 		if (!grace_is_active()) {
 			return NFS4ERR_NO_GRACE;
 }
@@ -735,7 +735,7 @@ open_existing:
 	 * credentials and the inode mode bits.
 	 *
 	 * Skip for just-created files: the creator always has access
-	 * (RFC 8881 §18.16.3).  EXCLUSIVE4 creates defer mode to a
+	 * (RFC 8881 S18.16.3).  EXCLUSIVE4 creates defer mode to a
 	 * subsequent SETATTR, so the file has mode 0 at this point.
 	 */
 	if (!just_created && cd->cred_uid != 0) {
@@ -783,39 +783,39 @@ open_existing:
 	}
 
 	/*
-	 * Note: per RFC 8881 §18.51, the client signals completion of
-	 * all reclaims via RECLAIM_COMPLETE — not per individual OPEN.
+	 * Note: per RFC 8881 S18.51, the client signals completion of
+	 * all reclaims via RECLAIM_COMPLETE -- not per individual OPEN.
 	 */
 
 	/*
 	 * Delegation conflict-recall + conditional grant
-	 * (RFC 8881 §10.4 / §18.16.3).
+	 * (RFC 8881 S10.4 / S18.16.3).
 	 *
-	 * Step 1 — recall any other-client delegations that
+	 * Step 1 -- recall any other-client delegations that
 	 * conflict with this OPEN.  deleg_recall_file() snapshots
 	 * each holder's backchannel under the session-table lock,
 	 * sends CB_RECALL on a dup'd fd, then revokes the entry
 	 * regardless of CB outcome.  Best-effort: caller proceeds
 	 * even if some clients are unreachable.
 	 *
-	 * Step 2 — conditionally grant a delegation back to the
-	 * requesting client.  Honors RFC 8881 §18.16.3 WANT_*
+	 * Step 2 -- conditionally grant a delegation back to the
+	 * requesting client.  Honors RFC 8881 S18.16.3 WANT_*
 	 * hints carried in share_access bits 8-11:
-	 *   WANT_NO_DELEG    → r->delegation_type stays NONE
+	 *   WANT_NO_DELEG    -> r->delegation_type stays NONE
 	 *                      (pynfs DELEG4 testNoDeleg gate).
-	 *   WANT_READ_DELEG  → grant READ deleg when share_access
+	 *   WANT_READ_DELEG  -> grant READ deleg when share_access
 	 *                      includes READ.
-	 *   WANT_WRITE_DELEG → grant WRITE deleg when share_access
+	 *   WANT_WRITE_DELEG -> grant WRITE deleg when share_access
 	 *                      includes WRITE.
-	 *   WANT_ANY_DELEG / WANT_NO_PREFERENCE / unset → server
+	 *   WANT_ANY_DELEG / WANT_NO_PREFERENCE / unset -> server
 	 *                      picks based on share_access.
-	 *   WANT_CANCEL      → treated as NO_DELEG (we don't track
+	 *   WANT_CANCEL      -> treated as NO_DELEG (we don't track
 	 *                      pending hints, so cancelling one
 	 *                      degenerates to don't-grant).
 	 *
 	 * Additional preconditions (all must hold):
-	 *   (a) cd->dt != NULL  — deleg table wired,
-	 *   (b) cd->st != NULL  — session table wired so a future
+	 *   (a) cd->dt != NULL  -- deleg table wired,
+	 *   (b) cd->st != NULL  -- session table wired so a future
 	 *       recall can deliver CB_RECALL,
 	 *   (c) deleg_check_conflict reports no residual holder
 	 *       (Step 1 may not have cleared everything on a
@@ -829,7 +829,7 @@ open_existing:
 	 */
 	r->delegation_type = OPEN_DELEGATE_NONE;
 	/*
-	 * Default decline reason for v4.1+ NONE_EXT (RFC 8881 §18.16.4).
+	 * Default decline reason for v4.1+ NONE_EXT (RFC 8881 S18.16.4).
 	 * Zero == WND4_NOT_WANTED, so this is also what compound_process()
 	 * leaves after its memset of the result slot; the explicit
 	 * assignments below override it on paths where a more specific
@@ -861,7 +861,7 @@ open_existing:
 
 			/* Hard-stop: client explicitly asked for no
 			 * delegation.  Skip the grant entirely.
-			 * RFC 8881 §18.16.4: WND4_NOT_WANTED is the
+			 * RFC 8881 S18.16.4: WND4_NOT_WANTED is the
 			 * correct decline reason for both WANT_NO_DELEG
 			 * and WANT_CANCEL. */
 			if (want_hint == OPEN4_SHARE_ACCESS_WANT_NO_DELEG ||
@@ -941,7 +941,7 @@ open_existing:
 				 * residual other-client delegation
 				 * survived the recall pass (e.g. the
 				 * holder's backchannel was unreachable).
-				 * RFC 8881 §18.16.4 — WND4_CONTENTION. */
+				 * RFC 8881 S18.16.4 -- WND4_CONTENTION. */
 				r->none_reason = WND4_CONTENTION;
 			}
 		} else {
@@ -954,11 +954,11 @@ open_existing:
 		}
 	}
 	/* cd->dt == NULL: deleg subsystem is disabled.  none_reason
-	 * stays at WND4_NOT_WANTED — "server not granting" is the
+	 * stays at WND4_NOT_WANTED -- "server not granting" is the
 	 * least misleading reason for a v4.1+ client. */
 deleg_grant_done:
 	/*
-	 * RFC 8881 §18.16.4 wire-form selection.
+	 * RFC 8881 S18.16.4 wire-form selection.
 	 *
 	 * v4.1+ sessions: if we did not grant a delegation, upgrade
 	 * the result discriminator from OPEN_DELEGATE_NONE (legacy
@@ -968,7 +968,7 @@ deleg_grant_done:
 	 * the v4.1+ Linux client expect when the open carried any
 	 * WANT_* hint or hit a conflict.
 	 *
-	 * v4.0 sessions stay on bare NONE — discriminator value 4 is
+	 * v4.0 sessions stay on bare NONE -- discriminator value 4 is
 	 * not part of the v4.0 open_delegation4 union, so emitting
 	 * it would corrupt the wire form for those clients.
 	 */
@@ -1046,18 +1046,18 @@ enum nfs4_status op_close(struct compound_data *cd,
 		return nst;
 }
 
-	/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker.  Pynfs
+	/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker.  Pynfs
 	 * CSID1 testOpenAndClose, CSID3 testOpenWriteClose, CSID10
 	 * testOpenSaveFHLookupRestoreFHClose all bundle CLOSE with the
 	 * marker right after an OPEN.  CSID5 / CSID6 expect BAD_STATEID
 	 * because LOOKUP / a missing producer leaves current_stateid
-	 * unset — compound_resolve_stateid returns BAD_STATEID for both. */
+	 * unset -- compound_resolve_stateid returns BAD_STATEID for both. */
 	nst = compound_resolve_stateid(cd, &a->stateid, &sid_resolved);
 	if (nst != NFS4_OK) {
 		return nst;
 	}
 
-	/* QA Phase 4 + QA review Blocker 4 — final-close drain hook.
+	/* QA Phase 4 + QA review Blocker 4 -- final-close drain hook.
 	 *
 	 * Capture the fileid before the close call so we can decide
 	 * whether to force-flush the LAYOUTCOMMIT aggregator's bucket
@@ -1076,7 +1076,7 @@ enum nfs4_status op_close(struct compound_data *cd,
 	 * see the drift, and rely on the periodic timer to retry on
 	 * its next tick (default 200 ms).  Until that retry succeeds,
 	 * a `stat` against the just-closed file may briefly show a
-	 * size lagging the last write — documented in
+	 * size lagging the last write -- documented in
 	 * docs/hpc-shared-files.md "Limits".  STRICT GETATTR (the
 	 * other path that surfaces the aggregate) DOES propagate
 	 * NFS4ERR_DELAY on flush failure (Blocker 4) because the
@@ -1111,7 +1111,7 @@ enum nfs4_status op_close(struct compound_data *cd,
 
 
 /* -----------------------------------------------------------------------
- * DELEGRETURN handler (RFC 8881 §18.8)
+ * DELEGRETURN handler (RFC 8881 S18.8)
  * ----------------------------------------------------------------------- */
 
 enum nfs4_status op_delegreturn(struct compound_data *cd,
@@ -1123,7 +1123,7 @@ enum nfs4_status op_delegreturn(struct compound_data *cd,
 
 	(void)res;
 
-	/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker.  The
+	/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker.  The
 	 * decoder reuses the close arg union slot for DELEGRETURN's
 	 * stateid (no separate arg struct), so the magic value can
 	 * land here too. */
@@ -1134,7 +1134,7 @@ enum nfs4_status op_delegreturn(struct compound_data *cd,
 	}
 
 	/* File delegation stateid is self-identifying; current_fh is not
-	 * strictly required per RFC 8881 §18.8.  Accept gracefully
+	 * strictly required per RFC 8881 S18.8.  Accept gracefully
 	 * even if the stateid is not found (expired or already returned). */
 	if (cd->dt != NULL) {
 		if (deleg_return(cd->dt, &sid_resolved, cd->clientid) == 0) {
@@ -1146,7 +1146,7 @@ enum nfs4_status op_delegreturn(struct compound_data *cd,
 	 * Fallback: the stateid may belong to a directory delegation
 	 * granted by Phase 8b's dir_deleg_table.  Returning an
 	 * already-revoked or unknown stateid is not an error per RFC
-	 * 8881 §10.11.1, so we swallow the "not found" result.
+	 * 8881 S10.11.1, so we swallow the "not found" result.
 	 */
 	if (cd->ddt != NULL) {
 		(void)dir_deleg_return(cd->ddt, &sid_resolved, cd->clientid);
@@ -1156,7 +1156,7 @@ enum nfs4_status op_delegreturn(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * OPEN_DOWNGRADE handler (RFC 8881 §18.18)
+ * OPEN_DOWNGRADE handler (RFC 8881 S18.18)
  *
  * Reduces the share access/deny on an existing open stateid.
  * For a metadata-only pNFS server, this validates the stateid and
@@ -1181,12 +1181,12 @@ enum nfs4_status op_open_downgrade(struct compound_data *cd,
 		return nst;
 	}
 
-	/* share_access must be non-zero (RFC 8881 §18.18). */
+	/* share_access must be non-zero (RFC 8881 S18.18). */
 	if (a->share_access == 0) {
 		return NFS4ERR_INVAL;
 	}
 
-	/* RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker. */
+	/* RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker. */
 	nst = compound_resolve_stateid(cd, &a->stateid, &sid_resolved);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1194,7 +1194,7 @@ enum nfs4_status op_open_downgrade(struct compound_data *cd,
 
 	/*
 	 * Validate the open stateid.  For a metadata-only MDS, accepting
-	 * the downgrade and bumping the seqid is sufficient — actual
+	 * the downgrade and bumping the seqid is sufficient -- actual
 	 * I/O share enforcement is at the data-server layer.
 	 */
 	{
@@ -1218,7 +1218,7 @@ enum nfs4_status op_open_downgrade(struct compound_data *cd,
 	}
 }
 /* -----------------------------------------------------------------------
- * OPENATTR handler (RFC 8881 §18.17)
+ * OPENATTR handler (RFC 8881 S18.17)
  * ----------------------------------------------------------------------- */
 
 enum nfs4_status op_openattr(struct compound_data *cd,
@@ -1253,7 +1253,7 @@ enum nfs4_status op_openattr(struct compound_data *cd,
 	/* Set current_fh to the xattr namespace for this file. */
 	cd->current_fh.fileid = inode.fileid | XATTR_FH_FLAG;
 	/* FH-encoded subtree ownership: xattr namespace handles wrap
-	 * a base fileid that lives on this MDS — stamp owner_mds_id so a
+	 * a base fileid that lives on this MDS -- stamp owner_mds_id so a
 	 * subsequent GETFH on the xattr handle still routes correctly.
 	 * Generation stays 0: the synthetic xattr-namespace handle is
 	 * not an inode in its own right and has no on-disk generation. */
@@ -1265,7 +1265,7 @@ enum nfs4_status op_openattr(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * Stateid validation for READ / WRITE (RFC 8881 §8.2)
+ * Stateid validation for READ / WRITE (RFC 8881 S8.2)
  *
  * Anonymous stateid (seqid=0, other=all-zeros) is allowed as a bypass.
  * Otherwise the stateid must exist, belong to the current FH, and
@@ -1281,7 +1281,7 @@ static bool is_anonymous_stateid(const struct nfs4_stateid *sid)
 }
 
 /*
- * RFC 8881 §16.2.4 / RFC 5661 §8.2.3 — the special READ_BYPASS
+ * RFC 8881 S16.2.4 / RFC 5661 S8.2.3 -- the special READ_BYPASS
  * stateid (seqid = 0xFFFFFFFF, other = all-1s) bypasses share-deny
  * checks for read-side I/O.  Linux NFSD's nfs4_preprocess_stateid_op
  * also accepts it for ALLOCATE / DEALLOCATE (write-side ops that
@@ -1324,7 +1324,7 @@ enum nfs4_status validate_io_stateid(
 	}
 
 	/*
-	 * RFC 8881 §16.2.4 — resolve CURRENT_STATEID4 marker before
+	 * RFC 8881 S16.2.4 -- resolve CURRENT_STATEID4 marker before
 	 * any other stateid logic.  This covers op_read, op_write,
 	 * op_setattr, op_io_advise, op_allocate, op_deallocate, and
 	 * any other caller that funnels through this validator.
@@ -1336,13 +1336,13 @@ enum nfs4_status validate_io_stateid(
 	}
 	stateid = &sid_resolved;
 
-	/* Test-compat mode: no open-state table → skip validation. */
+	/* Test-compat mode: no open-state table -> skip validation. */
 	if (cd->ot == NULL) {
 		return NFS4_OK;
 }
 
 	/*
-	 * Special stateids (RFC 8881 §16.2.4 / §8.2.3) bypass the
+	 * Special stateids (RFC 8881 S16.2.4 / S8.2.3) bypass the
 	 * full validation: anonymous (all zeros) and READ_BYPASS
 	 * (all ones).  Both are accepted for the data-path ops that
 	 * call this validator (READ, WRITE, SETATTR(size), ALLOCATE,
@@ -1367,7 +1367,7 @@ enum nfs4_status validate_io_stateid(
 		return NFS4ERR_BAD_STATEID;
 }
 
-	/* Seqid must match current state (RFC 8881 §8.2.1). */
+	/* Seqid must match current state (RFC 8881 S8.2.1). */
 	if (stateid->seqid != 0 && stateid->seqid != os.stateid.seqid) {
 		return NFS4ERR_BAD_STATEID;
 }
@@ -1473,7 +1473,7 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	/* From here, failure paths must clear PROMOTING via goto. */
 
 	/*
-	 * Phase 1 — Read inline payload (read-only, own txn).
+	 * Phase 1 -- Read inline payload (read-only, own txn).
 	 *
 	 * Read before any DS-side work so the inline data is captured
 	 * while catalogue still considers the file inline.
@@ -1485,7 +1485,7 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 }
 
 	/*
-	 * Phase 2 — DS placement selection (read-only catalogue).
+	 * Phase 2 -- DS placement selection (read-only catalogue).
 	 */
 	st = cat_ds_list(cd, &ds_list, &ds_count);
 	if (st == MDS_OK && ds_count > 0) {
@@ -1524,7 +1524,7 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	}
 
 	/*
-	 * Phase 3 — Ensure DS files + write data (outside any catalogue txn).
+	 * Phase 3 -- Ensure DS files + write data (outside any catalogue txn).
 	 *
 	 * If MDS crashes after the DS write but before the metadata flip
 	 * below, catalogue still records the file as inline with its data
@@ -1551,7 +1551,7 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	if (ilen > 0) {
 		/*
 		 * Write inline payload to the first mirror of stripe 0.
-		 * Use the direct path — the stripe map does not exist
+		 * Use the direct path -- the stripe map does not exist
 		 * in catalogue yet (created in Phase 4 below).
 		 */
 		st = mds_proxy_write_direct(cd->proxy,
@@ -1566,7 +1566,7 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	}
 
 	/*
-	 * Phase 4 — Metadata flip (catalogue transaction).
+	 * Phase 4 -- Metadata flip (catalogue transaction).
 	 *
 	 * Persist stripe_map, delete inline_data, clear flags.
 	 * After commit, the file is DS-backed.
@@ -1654,7 +1654,7 @@ enum nfs4_status op_read(struct compound_data *cd,
 		uint32_t val_len = 0;
 		enum mds_status st;
 
-		/* Xattrs are atomic — reject partial-offset reads. */
+		/* Xattrs are atomic -- reject partial-offset reads. */
 		if (a->offset != 0) {
 			return NFS4ERR_INVAL;
 }
@@ -1807,7 +1807,7 @@ enum nfs4_status op_write(struct compound_data *cd,
 	if (cd->xattr_obj_set) {
 		enum mds_status st;
 
-		/* Xattrs are atomic — reject partial-offset writes. */
+		/* Xattrs are atomic -- reject partial-offset writes. */
 		if (a->offset != 0) {
 			return NFS4ERR_INVAL;
 		}
@@ -1889,9 +1889,9 @@ enum nfs4_status op_write(struct compound_data *cd,
 					free(sm);
 				} else {
 					/*
-					 * No stripe map exists — the file was
+					 * No stripe map exists -- the file was
 					 * DS_PENDING but never got placed.
-					 * pNFS requires DS backing — fail.
+					 * pNFS requires DS backing -- fail.
 					 */
 					free(sm);
 					return NFS4ERR_NOSPC;
@@ -2067,10 +2067,10 @@ proxy_write:
  * ----------------------------------------------------------------------- */
 
 /**
- * IO_ADVISE (RFC 7862 §15.5): act on client I/O hints.
+ * IO_ADVISE (RFC 7862 S15.5): act on client I/O hints.
  *
- * Per RFC 7862 §15.5.3 the response `hints` bitmap tells the client
- * which hints the server actually acknowledged — a lying echo of the
+ * Per RFC 7862 S15.5.3 the response `hints` bitmap tells the client
+ * which hints the server actually acknowledged -- a lying echo of the
  * full request defeats the client's ability to adapt.  This handler
  * honours exactly the hint bits the MDS can act on:
  *
@@ -2123,7 +2123,7 @@ enum nfs4_status op_io_advise(const struct compound_data *cd,
 
 	/* NORMAL is the "no preference" base; echo it if the client sent
 	 * it so the round-trip is unambiguously confirmed.  The RFC says
-	 * NORMAL has value 0, which is also the "no hint" case — only
+	 * NORMAL has value 0, which is also the "no hint" case -- only
 	 * echo when the client explicitly set some bit. */
 	if (req == 0) {
 		/* Zero-hint IO_ADVISE is a protocol-legal probe.  Acknowledge
@@ -2170,8 +2170,8 @@ enum nfs4_status op_io_advise(const struct compound_data *cd,
 	}
 
 	/* SEQUENTIAL / SEQUENTIAL_BACK / RANDOM / INIT_PROXIMITY
-	 * intentionally drop out of the honored mask — we cannot act on
-	 * them, and RFC 7862 §15.5.3 requires the response mask to
+	 * intentionally drop out of the honored mask -- we cannot act on
+	 * them, and RFC 7862 S15.5.3 requires the response mask to
 	 * describe only what the server acknowledged. */
 
 	r->hints = honored;
@@ -2180,14 +2180,14 @@ enum nfs4_status op_io_advise(const struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** LAYOUTERROR (RFC 7862 §15.6): client reports DS I/O error. */
+/** LAYOUTERROR (RFC 7862 S15.6): client reports DS I/O error. */
 
 
 /* -----------------------------------------------------------------------
- * COMMIT handler (RFC 8881 §18.3)
+ * COMMIT handler (RFC 8881 S18.3)
  *
  * For proxy I/O, flushes the DS file via fsync.  For pNFS direct I/O,
- * the DS handles durability — we return the server write verifier.
+ * the DS handles durability -- we return the server write verifier.
  * ----------------------------------------------------------------------- */
 
 enum nfs4_status op_commit(const struct compound_data *cd,
@@ -2202,7 +2202,7 @@ enum nfs4_status op_commit(const struct compound_data *cd,
 	 * by the DS NFS server.  Accept COMMIT as a no-op.
 	 *
 	 * Return the server boot epoch as the write verifier so that
-	 * clients can detect server restarts (RFC 8881 §18.3).
+	 * clients can detect server restarts (RFC 8881 S18.3).
 	 */
 	res->res.commit.write_verf = cd->write_verf;
 	return NFS4_OK;

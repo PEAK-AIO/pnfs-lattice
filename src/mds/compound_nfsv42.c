@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 /*
- * compound_nfsv42.c — NFSv4.2 space/copy ops (ALLOCATE..CLONE).
+ * compound_nfsv42.c -- NFSv4.2 space/copy ops (ALLOCATE..CLONE).
  */
 
 #include <stdint.h>
@@ -26,7 +26,7 @@
 #include "hpc_shared.h"
 
 
-/** ALLOCATE (RFC 7862 §15.1): preallocate space. */
+/** ALLOCATE (RFC 7862 S15.1): preallocate space. */
 
 /*
  * Promote an inline file to DS storage if needed.  Returns NFS4_OK if
@@ -135,7 +135,7 @@ enum nfs4_status op_allocate(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** DEALLOCATE (RFC 7862 §15.4): punch hole. */
+/** DEALLOCATE (RFC 7862 S15.4): punch hole. */
 enum nfs4_status op_deallocate(struct compound_data *cd,
 				      const struct nfs4_op *op,
 				      struct nfs4_result *res)
@@ -151,7 +151,7 @@ enum nfs4_status op_deallocate(struct compound_data *cd,
 		return nst;
 }
 
-	/* Inline files don't support sparse ops — promote first. */
+	/* Inline files don't support sparse ops -- promote first. */
 	nst = promote_if_inline(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -181,7 +181,7 @@ enum nfs4_status op_deallocate(struct compound_data *cd,
 	return mds_status_to_nfs4(st);
 }
 
-/** SEEK (RFC 7862 §15.11): find next data or hole. */
+/** SEEK (RFC 7862 S15.11): find next data or hole. */
 enum nfs4_status op_seek(struct compound_data *cd,
 				const struct nfs4_op *op,
 				struct nfs4_result *res)
@@ -196,7 +196,7 @@ enum nfs4_status op_seek(struct compound_data *cd,
 		return nst;
 }
 
-	/* Inline files are dense — promote before seeking holes. */
+	/* Inline files are dense -- promote before seeking holes. */
 	nst = promote_if_inline(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -219,7 +219,7 @@ enum nfs4_status op_seek(struct compound_data *cd,
 	return mds_status_to_nfs4(st);
 }
 
-/** READ_PLUS (RFC 7862 §15.10): segmented read. */
+/** READ_PLUS (RFC 7862 S15.10): segmented read. */
 enum nfs4_status op_read_plus(struct compound_data *cd,
 				     const struct nfs4_op *op,
 				     struct nfs4_result *res)
@@ -236,7 +236,7 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 		return nst;
 }
 
-	/* Inline files are dense — promote before hole-aware read. */
+	/* Inline files are dense -- promote before hole-aware read. */
 	nst = promote_if_inline(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -262,7 +262,7 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 			    a->offset, NFS4_CONTENT_DATA,
 			    &hole_off, &hole_eof);
 	if (st != MDS_OK && st != MDS_ERR_IO) {
-		/* No stripe map — file may be empty; return single hole. */
+		/* No stripe map -- file may be empty; return single hole. */
 		r->eof = true;
 		r->seg_count = 1;
 		r->segs[0].content_type = NFS4_CONTENT_HOLE;
@@ -457,7 +457,7 @@ static enum nfs4_status copy_quota_precheck(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** COPY (RFC 7862 §15.2): server-side copy. */
+/** COPY (RFC 7862 S15.2): server-side copy. */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum nfs4_status op_copy(struct compound_data *cd,
 				const struct nfs4_op *op,
@@ -465,7 +465,7 @@ enum nfs4_status op_copy(struct compound_data *cd,
 {
 	/* cppcheck-suppress unreadVariable
 	 * The 'a' / 'r' bindings exist so the dead-but-kept body below
-	 * still compiles — see the TEMP comment under op_copy. */
+	 * still compiles -- see the TEMP comment under op_copy. */
 	/* NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) */
 	const struct nfs4_arg_copy *a = &op->arg.copy;
 	/* cppcheck-suppress unreadVariable */
@@ -475,7 +475,7 @@ enum nfs4_status op_copy(struct compound_data *cd,
 
 	/*
 	 * TEMP: server-side COPY is disabled.  mds_proxy_copy_data
-	 * has a known silent-data-loss bug on small writes — it
+	 * has a known silent-data-loss bug on small writes -- it
 	 * returns the requested byte count without actually writing
 	 * the bytes through to the destination DS, so smoke's
 	 * cp+cat(small) test sees "size=19, content=''".  Returning
@@ -486,7 +486,7 @@ enum nfs4_status op_copy(struct compound_data *cd,
 	 *
 	 * The body below is intentionally left in place so the static
 	 * helper functions (copy_quota_precheck, copy_validate_stateids,
-	 * copy_update_dst_size) keep at least one compileable caller —
+	 * copy_update_dst_size) keep at least one compileable caller --
 	 * stripping them would trip -Wunused-function under -Werror.
 	 */
 	return NFS4ERR_NOTSUPP;
@@ -609,7 +609,7 @@ enum nfs4_status op_copy(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** COPY_NOTIFY (RFC 7862 §15.3): prepare source for inter-server copy. */
+/** COPY_NOTIFY (RFC 7862 S15.3): prepare source for inter-server copy. */
 enum nfs4_status op_copy_notify(const struct compound_data *cd,
 				       const struct nfs4_op *op,
 				       struct nfs4_result *res)
@@ -635,7 +635,7 @@ enum nfs4_status op_copy_notify(const struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** OFFLOAD_CANCEL (RFC 7862 §15.8): cancel async copy. */
+/** OFFLOAD_CANCEL (RFC 7862 S15.8): cancel async copy. */
 enum nfs4_status op_offload_cancel(struct compound_data *cd,
 					  const struct nfs4_op *op,
 					  struct nfs4_result *res)
@@ -661,7 +661,7 @@ enum nfs4_status op_offload_cancel(struct compound_data *cd,
 	return mds_status_to_nfs4(st);
 }
 
-/** OFFLOAD_STATUS (RFC 7862 §15.9): query async copy progress. */
+/** OFFLOAD_STATUS (RFC 7862 S15.9): query async copy progress. */
 enum nfs4_status op_offload_status(struct compound_data *cd,
 					  const struct nfs4_op *op,
 					  struct nfs4_result *res)
@@ -719,7 +719,7 @@ static enum nfs4_status ws_quota_precheck(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** WRITE_SAME (RFC 7862 §15.12): write repeating pattern. */
+/** WRITE_SAME (RFC 7862 S15.12): write repeating pattern. */
 enum nfs4_status op_write_same(struct compound_data *cd,
 				      const struct nfs4_op *op,
 				      struct nfs4_result *res)
@@ -788,7 +788,7 @@ enum nfs4_status op_write_same(struct compound_data *cd,
 	return mds_status_to_nfs4(st);
 }
 
-/** CLONE (RFC 7862 §15.13): clone file data range. */
+/** CLONE (RFC 7862 S15.13): clone file data range. */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum nfs4_status op_clone(struct compound_data *cd,
 				 const struct nfs4_op *op,
@@ -796,7 +796,7 @@ enum nfs4_status op_clone(struct compound_data *cd,
 {
 	/* cppcheck-suppress unreadVariable
 	 * The 'a' binding exists so the dead-but-kept body below still
-	 * compiles — see the TEMP comment under op_clone. */
+	 * compiles -- see the TEMP comment under op_clone. */
 	/* NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) */
 	const struct nfs4_arg_clone *a = &op->arg.clone;
 	enum nfs4_status nst;
@@ -805,7 +805,7 @@ enum nfs4_status op_clone(struct compound_data *cd,
 	(void)res;
 
 	/*
-	 * TEMP: server-side CLONE is disabled — same root cause as
+	 * TEMP: server-side CLONE is disabled -- same root cause as
 	 * op_copy (mds_proxy_copy_data silent-data-loss).  Returning
 	 * NFS4ERR_NOTSUPP forces the Linux client to fall back to
 	 * read+write copy.  Re-enable alongside op_copy.
@@ -920,13 +920,13 @@ enum nfs4_status op_clone(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * RFC 8276 — Extended Attribute Operations
+ * RFC 8276 -- Extended Attribute Operations
  *
  * These four operations implement RFC 8276 extended attributes using
  * the catalogue vtable (RonDB backend).
  * ----------------------------------------------------------------------- */
 
-/** GETXATTR (RFC 8276 §4.2.2): retrieve a single xattr value. */
+/** GETXATTR (RFC 8276 S4.2.2): retrieve a single xattr value. */
 enum nfs4_status op_getxattr(struct compound_data *cd,
 			     const struct nfs4_op *op,
 			     struct nfs4_result *res)
@@ -987,7 +987,7 @@ enum nfs4_status op_getxattr(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** SETXATTR (RFC 8276 §4.2.3): set an xattr with CREATE/REPLACE semantics. */
+/** SETXATTR (RFC 8276 S4.2.3): set an xattr with CREATE/REPLACE semantics. */
 enum nfs4_status op_setxattr(struct compound_data *cd,
 			     const struct nfs4_op *op,
 			     struct nfs4_result *res)
@@ -1127,7 +1127,7 @@ static int listxattrs_cb(const char *name, size_t name_len, void *arg)
 	return 0;
 }
 
-/** LISTXATTRS (RFC 8276 §4.2.4): list xattr names with pagination. */
+/** LISTXATTRS (RFC 8276 S4.2.4): list xattr names with pagination. */
 enum nfs4_status op_listxattrs(struct compound_data *cd,
 			       const struct nfs4_op *op,
 			       struct nfs4_result *res)
@@ -1174,7 +1174,7 @@ enum nfs4_status op_listxattrs(struct compound_data *cd,
 	return NFS4_OK;
 }
 
-/** REMOVEXATTR (RFC 8276 §4.2.5): delete an xattr by name. */
+/** REMOVEXATTR (RFC 8276 S4.2.5): delete an xattr by name. */
 enum nfs4_status op_removexattr(struct compound_data *cd,
 				const struct nfs4_op *op,
 				struct nfs4_result *res)
@@ -1240,7 +1240,7 @@ enum nfs4_status op_removexattr(struct compound_data *cd,
 }
 
 /* -----------------------------------------------------------------------
- * RECLAIM_COMPLETE (RFC 8881 §18.51)
+ * RECLAIM_COMPLETE (RFC 8881 S18.51)
  *
  * Signals that the client has finished reclaiming all previously held
  * state.  The grace module tracks per-client completion; once all

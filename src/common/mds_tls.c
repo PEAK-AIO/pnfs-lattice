@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * mds_tls.c — TLS helper using OpenSSL.
+ * mds_tls.c -- TLS helper using OpenSSL.
  */
 
 #include <stdlib.h>

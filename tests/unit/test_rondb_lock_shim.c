@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_rondb_lock_shim.c — Stage E RonDB lock shim behaviour tests.
+ * test_rondb_lock_shim.c -- Stage E RonDB lock shim behaviour tests.
  *
  * Exercises shared/exclusive compatibility, ownership-safe release,
  * and fencing-epoch propagation against a live RonDB cluster.

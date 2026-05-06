@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * inode_cache.h — In-memory inode LRU cache.
+ * inode_cache.h -- In-memory inode LRU cache.
  *
  * Hot inodes are cached to avoid catalogue reads on every operation.
  * The cache is write-through: callers are responsible for persisting

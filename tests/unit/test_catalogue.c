@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_catalogue.c — Unit tests for the backend-neutral catalogue API.
+ * test_catalogue.c -- Unit tests for the backend-neutral catalogue API.
  *
  * Exercises mds_catalogue_open/close and the catalogue operations
  * against the catalogue backend, verifying parity with the raw catalogue/ns
@@ -134,7 +134,7 @@ static void close_test_cat(struct mds_catalogue *cat, char *path)
 }
 
 /* -----------------------------------------------------------------------
- * 1. test_catalogue_open_close — lifecycle
+ * 1. test_catalogue_open_close -- lifecycle
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_open_close(void)
@@ -154,7 +154,7 @@ static void test_catalogue_open_close(void)
 }
 
 /* -----------------------------------------------------------------------
- * 2. test_catalogue_ns_create_lookup — create + lookup round-trip
+ * 2. test_catalogue_ns_create_lookup -- create + lookup round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_ns_create_lookup(void)
@@ -329,7 +329,7 @@ static void test_catalogue_coordination_dispatch_rejects_null_ds_ids(void)
 					  1234, 5678, NULL, 4),
 		  MDS_ERR_INVAL);
 
-	/* ds_count == 0 with NULL ds_ids stays valid — used by callers
+	/* ds_count == 0 with NULL ds_ids stays valid -- used by callers
 	 * that legitimately want to delete only the layout_state row
 	 * (e.g. layout_recall.c::revoke_layout when ds_id == 0). */
 	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 1234, 5678,
@@ -344,7 +344,7 @@ static void test_catalogue_coordination_dispatch_rejects_null_ds_ids(void)
 }
 
 /* -----------------------------------------------------------------------
- * 3. test_catalogue_ns_setattr_getattr — setattr + getattr round-trip
+ * 3. test_catalogue_ns_setattr_getattr -- setattr + getattr round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_ns_setattr_getattr(void)
@@ -375,7 +375,7 @@ static void test_catalogue_ns_setattr_getattr(void)
 }
 
 /* -----------------------------------------------------------------------
- * 4. test_catalogue_ns_remove — remove + verify NOTFOUND
+ * 4. test_catalogue_ns_remove -- remove + verify NOTFOUND
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_ns_remove(void)
@@ -403,7 +403,7 @@ static void test_catalogue_ns_remove(void)
 }
 
 /* -----------------------------------------------------------------------
- * 5. test_catalogue_ns_readdir — readdir with start_after pagination
+ * 5. test_catalogue_ns_readdir -- readdir with start_after pagination
  * ----------------------------------------------------------------------- */
 
 struct readdir_ctx {
@@ -450,7 +450,7 @@ static void test_catalogue_ns_readdir(void)
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)3);
 
-	/* Readdir with start_after="aaa" — should skip "aaa". */
+	/* Readdir with start_after="aaa" -- should skip "aaa". */
 	memset(&ctx, 0, sizeof(ctx));
 	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, "aaa",
 				     NULL, readdir_counter, &ctx),
@@ -461,7 +461,7 @@ static void test_catalogue_ns_readdir(void)
 }
 
 /* -----------------------------------------------------------------------
- * 5b. test_catalogue_ns_readdir_plus_* — dispatch fallback coverage
+ * 5b. test_catalogue_ns_readdir_plus_* -- dispatch fallback coverage
  *
  * The in-memory test backend leaves auth_ops->ns_readdir_plus NULL,
  * so these cases exercise the null-safe dispatch wrapper in
@@ -604,7 +604,7 @@ static void test_catalogue_ns_readdir_plus_start_after(void)
 }
 
 /* -----------------------------------------------------------------------
- * 5c. test_catalogue_stripe_map_wide — Phase A foundation check
+ * 5c. test_catalogue_stripe_map_wide -- Phase A foundation check
  *
  * Verifies that the catalogue can store and retrieve stripe maps at the
  * Phase A ceiling (MDS_MAX_STRIPES = 1024).  Goes through the full
@@ -689,7 +689,7 @@ static void test_catalogue_stripe_map_wide_round_trip(void)
 }
 
 /* -----------------------------------------------------------------------
- * 6. test_catalogue_layout_grant_return — layout state round-trip
+ * 6. test_catalogue_layout_grant_return -- layout state round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_layout_grant_return(void)
@@ -744,7 +744,7 @@ static void test_catalogue_layout_grant_return(void)
 }
 
 /* -----------------------------------------------------------------------
- * 7. test_catalogue_recovery_put_get_del — client recovery round-trip
+ * 7. test_catalogue_recovery_put_get_del -- client recovery round-trip
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_recovery_put_get_del(void)
@@ -782,12 +782,12 @@ static void test_catalogue_recovery_put_get_del(void)
 }
 
 /* -----------------------------------------------------------------------
- * 8. test_catalogue_txn_commit — txn begin / commit visibility
+ * 8. test_catalogue_txn_commit -- txn begin / commit visibility
  *
  * The original test also exercised the abort path ("create in txn,
  * abort, verify the entry is NOT visible").  That assertion only
  * holds against a backend that implements true transactional
- * rollback — the production RonDB backend does, but the in-memory
+ * rollback -- the production RonDB backend does, but the in-memory
  * test backend (tests/catalogue_memdb.c) writes immediately on
  * mds_cat_ns_create and discards the txn handle.  The abort
  * assertion was therefore testing the BACKEND's transactional
@@ -837,7 +837,7 @@ static void test_catalogue_txn_commit_abort(void)
 }
 
 /* -----------------------------------------------------------------------
- * 9. test_catalogue_escape_hatch — escape hatch returns valid handle
+ * 9. test_catalogue_escape_hatch -- escape hatch returns valid handle
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_escape_hatch(void)
@@ -868,15 +868,15 @@ static void test_catalogue_escape_hatch(void)
 }
 
 /* -----------------------------------------------------------------------
- * 10. test_catalogue_shard_routing_guard — RETIRED.
+ * 10. test_catalogue_shard_routing_guard -- RETIRED.
  *
  * The Phase-12 RonDB-only refactor collapsed the per-shard catalogue
  * routing concept: cd->cat is now the single source of truth, and
  * cat_getattr / cat_on_root_db etc. are thin one-liners over
  * cd->cat (see src/mds/compound_internal.h:cat_on_root_db, line ~422).
- * The old behaviour this test validated — helpers "falling through
+ * The old behaviour this test validated -- helpers "falling through
  * to raw catalogue on cd->db" when cd was swapped to a child shard
- * — no longer exists, and the test's own setup (allocating fileids
+ * -- no longer exists, and the test's own setup (allocating fileids
  * from two memdb instances whose sequences both start at the same
  * base, then asserting the same fileid is NOT visible in the second
  * instance) cannot be satisfied without either teaching memdb about
@@ -1076,7 +1076,7 @@ int main(void)
 	RUN_TEST(test_catalogue_txn_commit_abort);
 	RUN_TEST(test_catalogue_escape_hatch);
 	/* test_catalogue_shard_routing_guard and
-	 * test_catalogue_root_global_helper_routing retired — see
+	 * test_catalogue_root_global_helper_routing retired -- see
 	 * comment at the function definitions. */
 
 	fprintf(stdout, "\ntest_catalogue: %d/%d passed\n",

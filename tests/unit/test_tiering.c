@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_tiering.c — Unit tests for IO tracker and tiering constants.
+ * test_tiering.c -- Unit tests for IO tracker and tiering constants.
  *
  * RonDB-native: no catalogue dependencies.
  */

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * log.c — Component-based logging subsystem.
+ * log.c -- Component-based logging subsystem.
  */
 
 #include <stdio.h>

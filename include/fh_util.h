@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * fh_util.h — Synthetic NFS file-handle helpers.
+ * fh_util.h -- Synthetic NFS file-handle helpers.
  */
 
 #ifndef FH_UTIL_H

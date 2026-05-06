@@ -2,10 +2,10 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * subtree_split.h — Subtree split/merge orchestration.
+ * subtree_split.h -- Subtree split/merge orchestration.
  *
  * Orchestrates the full split/merge workflow:
- *   validate → register → optionally migrate → commit / rollback.
+ *   validate -> register -> optionally migrate -> commit / rollback.
  *
  * The subtree_map stays pure (map-only operations); this module
  * performs the catalogue and migration side effects.

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * test_backup.c — Verify backup API stubs return MDS_ERR_NOSUPPORT.
+ * test_backup.c -- Verify backup API stubs return MDS_ERR_NOSUPPORT.
  *
  * The backup module relied on the legacy backend's backend copy and has
  * not been ported to the catalogue API.  All four public entry points are
@@ -45,7 +45,7 @@ static int tests_passed = 0;
 #define ASSERT_TRUE(x)  ASSERT_EQ(!!(x), 1)
 
 /* -----------------------------------------------------------------------
- * Tests — all backup APIs must return MDS_ERR_NOSUPPORT
+ * Tests -- all backup APIs must return MDS_ERR_NOSUPPORT
  * ----------------------------------------------------------------------- */
 
 static void test_create_returns_nosupport(void)
