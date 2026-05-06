@@ -1,8 +1,11 @@
-# pnfscore — Rocky Linux 10 Installation Guide
+# pnfscore — Rocky Linux 9 / 10 Installation Guide
 
-Single-MDS community edition install on Rocky Linux 10 (RHEL 10 /
-Alma 10 / Fedora 42+ should be near-identical). Every command in this
-guide was verified on Rocky Linux 10.1, kernel 6.12, GCC 14.3.
+Single-MDS community edition install on Rocky Linux 9 or 10 (RHEL /
+Alma / Fedora equivalents should be near-identical). Every command in
+this guide was verified on both:
+
+- **Rocky 9.7** — kernel 5.14, GCC 11.5, cmake 3.26
+- **Rocky 10.1** — kernel 6.12, GCC 14.3, cmake 3.30
 
 ## Lab topology
 
@@ -21,8 +24,8 @@ match your network. The guide assumes a `peak` user with passwordless
 
 ## Prerequisites
 
-- 5 machines (physical or virtual) running Rocky Linux 10.x minimal
-  install.
+- 5 machines (physical or virtual) running Rocky Linux 9.x or 10.x
+  minimal install.
 - All hosts can reach each other on the LAN.
 - Each host has at least 4 GB RAM. The MDS host should have 8 GB+
   because it runs RonDB in addition to pnfs-mds.
@@ -82,13 +85,13 @@ sudo dnf install -y \
 Verify the toolchain:
 
 ```bash
-gcc --version     # should show GCC 14.x
-cmake --version   # should show 3.30+
+gcc --version     # Rocky 9: GCC 11.x, Rocky 10: GCC 14.x
+cmake --version   # Rocky 9: 3.26+, Rocky 10: 3.30+
 ```
 
 ## Step 3 — Build libntirpc from source
 
-Rocky 10 does **not** ship a `libntirpc-dev` package. The pnfscore
+Neither Rocky 9 nor 10 ship a `libntirpc-dev` package. The pnfscore
 repository includes a helper script that builds and installs it:
 
 ```bash
