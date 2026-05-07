@@ -49,108 +49,148 @@ struct dir_deleg_table;
  * ----------------------------------------------------------------------- */
 
 enum nfs4_status {
+	/* ---- POSIX-derived errors (RFC 7530 Table 6) ---- */
 	NFS4_OK              = 0,
 	NFS4ERR_PERM         = 1,
 	NFS4ERR_NOENT        = 2,
 	NFS4ERR_IO           = 5,
+	NFS4ERR_NXIO         = 6,
 	NFS4ERR_ACCES        = 13,
 	NFS4ERR_EXIST        = 17,
 	NFS4ERR_XDEV         = 18,
 	NFS4ERR_NOTDIR       = 20,
 	NFS4ERR_ISDIR        = 21,
 	NFS4ERR_INVAL        = 22,
+	NFS4ERR_FBIG         = 27,
 	NFS4ERR_NOSPC        = 28,
+	NFS4ERR_ROFS         = 30,
+	NFS4ERR_MLINK        = 31,
+	NFS4ERR_NAMETOOLONG  = 63,
 	NFS4ERR_NOTEMPTY     = 66,
+	NFS4ERR_DQUOT        = 69,
 	NFS4ERR_STALE        = 70,
-	/* RFC 8881 S15.1 numeric values are authoritative.  Earlier
-	 * revisions of this enum aliased NFS4ERR_DENIED and
-	 * NFS4ERR_STALE_CLIENTID to 10012, which is in fact
-	 * NFS4ERR_LOCKED on the wire -- pynfs DESCID3/4/8 caught the
-	 * mis-numbering by reporting "got NFS4ERR_LOCKED" when the
-	 * server thought it was sending NFS4ERR_STALE_CLIENTID. */
+
+	/* ---- NFSv4.0 (RFC 7530 Table 6, 10001-10048) ---- */
+	NFS4ERR_BADHANDLE    = 10001,
+	NFS4ERR_BAD_COOKIE   = 10003,
+	NFS4ERR_NOTSUPP      = 10004,
+	NFS4ERR_TOOSMALL     = 10005,
+	NFS4ERR_SERVERFAULT  = 10006,
+	NFS4ERR_BADTYPE      = 10007,
+	NFS4ERR_DELAY        = 10008,
+	NFS4ERR_SAME         = 10009,
 	NFS4ERR_DENIED       = 10010,
 	NFS4ERR_EXPIRED      = 10011,
 	NFS4ERR_LOCKED       = 10012,
 	NFS4ERR_GRACE        = 10013,
-	/* RFC 8881 S15.1.16.5 / S18.35.4 -- EXCHANGE_ID UPDATE with a
-	 * verifier that does not match the existing record's verifier.
-	 * pynfs EID6f testUpdate101. */
-	NFS4ERR_NOT_SAME     = 10027,
 	NFS4ERR_FHEXPIRED    = 10014,
+	NFS4ERR_SHARE_DENIED = 10015,
 	NFS4ERR_WRONGSEC     = 10016,
+	NFS4ERR_CLID_INUSE   = 10017,
 	NFS4ERR_RESOURCE     = 10018,
 	NFS4ERR_MOVED        = 10019,
 	NFS4ERR_NOFILEHANDLE = 10020,
 	NFS4ERR_MINOR_VERS_MISMATCH = 10021,
 	NFS4ERR_STALE_CLIENTID    = 10022,
-	NFS4ERR_BADHANDLE    = 10001,
-	NFS4ERR_NOTSUPP      = 10004,
-	NFS4ERR_SERVERFAULT  = 10006,
-	NFS4ERR_DELAY        = 10008,
-	NFS4ERR_NO_GRACE     = 10033,
-	NFS4ERR_TOOSMALL     = 10005,  /* RFC 8881 S15 -- reply > maxcount. */
-	NFS4ERR_OP_NOT_IN_SESSION = 10071,
+	NFS4ERR_STALE_STATEID     = 10023,
 	NFS4ERR_OLD_STATEID       = 10024,
 	NFS4ERR_BAD_STATEID       = 10025,
-	/* RFC 8881 S15.1 -- FREE_STATEID called against a stateid that
-	 * still has locks (or, per Linux NFSD's interpretation, an open
-	 * stateid that has not been CLOSEd).  Pynfs CSID9. */
-	NFS4ERR_LOCKS_HELD        = 10037,
-	NFS4ERR_SHARE_DENIED      = 10015,
-	NFS4ERR_OPENMODE          = 10038,
-	NFS4ERR_BADSESSION        = 10052,
-	NFS4ERR_BADSLOT           = 10053,
-	NFS4ERR_SEQ_MISORDERED    = 10063,
-	/* RFC 5661 S15.1.10.2 -- the slot's reply was not cached so the
-	 * server cannot replay it.  Returned when the client retries
-	 * a request that was originally sent with sa_cachethis = FALSE
-	 * (RFC 5661 S2.10.6.2 permits the server to either reconstruct
-	 * the reply or return this code; we choose the simpler path).
-	 * Drives pynfs SEQ10b. */
-	NFS4ERR_RETRY_UNCACHED_REP = 10068,
-	NFS4ERR_SEQ_FALSE_RETRY   = 10076,
-	NFS4ERR_LAYOUTUNAVAILABLE = 10058,
-	NFS4ERR_NOMATCHING_LAYOUT = 10049,
-	/* RFC 5661 S15.1.10.10 -- client CB_LAYOUTRECALL response indicating
-	 * I/O in flight; server must NOT preemptively revoke. */
-	NFS4ERR_RECALLCONFLICT    = 10061,
-	/* RFC 5661 S15.1 numeric values are authoritative.  Earlier
-	 * revisions of this enum used the wrong codes for NAMETOOLONG
-	 * (was 10110) and REQ_TOO_BIG (was 10041 -- which is actually
-	 * NFS4ERR_BADNAME on the wire).  pynfs SEQ6 caught the
-	 * REQ_TOO_BIG mis-numbering by reporting "got NFS4ERR_BADNAME"
-	 * when the server thought it was sending REQ_TOO_BIG. */
-	NFS4ERR_NAMETOOLONG       = 63,
-	/* RFC 5661 S15.1.1 -- wire-format errors used by the COMPOUND
-	 * decode-failure path (rpc_server.c).  These MUST be carried in
-	 * a synthesised SEQUENCE result so the resarray is non-empty. */
+	NFS4ERR_BAD_SEQID         = 10026,
+	NFS4ERR_NOT_SAME     = 10027,
+	NFS4ERR_LOCK_RANGE   = 10028,
+	NFS4ERR_SYMLINK      = 10029,
+	NFS4ERR_RESTOREFH    = 10030,
+	NFS4ERR_LEASE_MOVED  = 10031,
+	NFS4ERR_ATTRNOTSUPP  = 10032,
+	NFS4ERR_NO_GRACE     = 10033,
+	NFS4ERR_RECLAIM_BAD  = 10034,
+	NFS4ERR_RECLAIM_CONFLICT = 10035,
 	NFS4ERR_BADXDR            = 10036,
+	NFS4ERR_LOCKS_HELD        = 10037,
+	NFS4ERR_OPENMODE          = 10038,
+	NFS4ERR_BADOWNER          = 10039,
 	NFS4ERR_BADCHAR           = 10040,
 	NFS4ERR_BADNAME           = 10041,
-	NFS4ERR_REQ_TOO_BIG       = 10065,
-	NFS4ERR_TOO_MANY_OPS      = 10070,
-	/* RFC 8881 S15.1.16.4 -- DESTROY_CLIENTID called against a clientid
-	 * that still has confirmed sessions or has not finished cleanup.
-	 * pynfs DESCID5/6 (testDestroyCIDSessionB / testDestroyCIDCSession). */
-	NFS4ERR_CLIENTID_BUSY     = 10074,
-	/* RFC 8881 S15.1.10.10 -- a session/clientid management op was
-	 * combined with another op in violation of the per-op compound
-	 * placement rules (S2.10.6.4 / S18.36.3 / S18.37.3 / S18.50.3).
-	 * pynfs CSESS23, DSESS9004/9005, DESCID7. */
-	NFS4ERR_NOT_ONLY_OP       = 10081,
-	/* RFC 8881 S15.1.1.4 / S18.46.3 -- SEQUENCE must be the first op
-	 * in every COMPOUND that uses session-state.  pynfs SEQ2. */
+	NFS4ERR_BAD_RANGE         = 10042,
+	NFS4ERR_LOCK_NOTSUPP      = 10043,
+	NFS4ERR_OP_ILLEGAL        = 10044,
+	NFS4ERR_DEADLOCK          = 10045,
+	NFS4ERR_FILE_OPEN         = 10046,
+	NFS4ERR_ADMIN_REVOKED     = 10047,
+	NFS4ERR_CB_PATH_DOWN      = 10048,
+
+	/* ---- NFSv4.1 (RFC 8881 S15.1, 10049-10087) ---- */
+	NFS4ERR_BADIOMODE         = 10049,
+	NFS4ERR_BADLAYOUT         = 10050,
+	NFS4ERR_BAD_SESSION_DIGEST = 10051,
+	NFS4ERR_BADSESSION        = 10052,
+	NFS4ERR_BADSLOT           = 10053,
+	NFS4ERR_COMPLETE_ALREADY  = 10054,
+	NFS4ERR_CONN_NOT_BOUND_TO_SESSION = 10055,
+	NFS4ERR_DELEG_ALREADY_WANTED = 10056,
+	NFS4ERR_BACK_CHAN_BUSY    = 10057,
+	NFS4ERR_LAYOUTTRYLATER    = 10058,
+	NFS4ERR_LAYOUTUNAVAILABLE = 10059,
+	NFS4ERR_NOMATCHING_LAYOUT = 10060,
+	NFS4ERR_RECALLCONFLICT    = 10061,
+	NFS4ERR_UNKNOWN_LAYOUTTYPE = 10062,
+	NFS4ERR_SEQ_MISORDERED    = 10063,
 	NFS4ERR_SEQUENCE_POS      = 10064,
-	/* RFC 8881 S15.1.10.4 -- directory delegation not available. */
+	NFS4ERR_REQ_TOO_BIG       = 10065,
+	NFS4ERR_REP_TOO_BIG       = 10066,
+	NFS4ERR_REP_TOO_BIG_TO_CACHE = 10067,
+	NFS4ERR_RETRY_UNCACHED_REP = 10068,
+	NFS4ERR_UNSAFE_COMPOUND   = 10069,
+	NFS4ERR_TOO_MANY_OPS      = 10070,
+	NFS4ERR_OP_NOT_IN_SESSION = 10071,
+	NFS4ERR_HASH_ALG_UNSUPP   = 10072,
+	/* 10073 is unassigned */
+	NFS4ERR_CLIENTID_BUSY     = 10074,
+	NFS4ERR_PNFS_IO_HOLE      = 10075,
+	NFS4ERR_SEQ_FALSE_RETRY   = 10076,
+	NFS4ERR_BAD_HIGH_SLOT     = 10077,
+	NFS4ERR_DEADSESSION       = 10078,
+	NFS4ERR_ENCR_ALG_UNSUPP   = 10079,
+	NFS4ERR_PNFS_NO_LAYOUT    = 10080,
+	NFS4ERR_NOT_ONLY_OP       = 10081,
+	NFS4ERR_WRONG_CRED        = 10082,
+	NFS4ERR_WRONG_TYPE        = 10083,
 	NFS4ERR_DIRDELEG_UNAVAIL  = 10084,
-	/* NFSv4.2 status codes (RFC 7862) */
+	NFS4ERR_REJECT_DELEG      = 10085,
+	NFS4ERR_RETURNCONFLICT    = 10086,
+	NFS4ERR_DELEG_REVOKED     = 10087,
+
+	/* ---- NFSv4.2 (RFC 7862, 10088-10093) ---- */
+	NFS4ERR_PARTNER_NOTSUPP   = 10088,
+	NFS4ERR_PARTNER_NO_AUTH   = 10089,
 	NFS4ERR_UNION_NOTSUPP     = 10090,
+	NFS4ERR_OFFLOAD_DENIED    = 10091,
+	NFS4ERR_WRONG_LFS         = 10092,
+	NFS4ERR_BADLABEL          = 10093,
 	NFS4ERR_OFFLOAD_NO_REQS   = 10094,
+
+	/* ---- RFC 8276 (xattr, 10095-10096) ---- */
 	NFS4ERR_NOXATTR           = 10095,
 	NFS4ERR_XATTR2BIG         = 10096,
-	NFS4ERR_OP_ILLEGAL        = 10044,
-	NFS4ERR_COMPLETE_ALREADY   = 10054,
 };
+
+/* Compile-time guards for critical wire values — catches typos
+ * before they become silent wire-protocol mismatches.  Covers the
+ * codes that were historically wrong in this codebase. */
+_Static_assert(NFS4ERR_SHARE_DENIED == 10015,
+	       "NFS4ERR_SHARE_DENIED wire value mismatch");
+_Static_assert(NFS4ERR_OPENMODE == 10038,
+	       "NFS4ERR_OPENMODE wire value mismatch");
+_Static_assert(NFS4ERR_DEADLOCK == 10045,
+	       "NFS4ERR_DEADLOCK wire value mismatch");
+_Static_assert(NFS4ERR_FILE_OPEN == 10046,
+	       "NFS4ERR_FILE_OPEN wire value mismatch");
+_Static_assert(NFS4ERR_LAYOUTUNAVAILABLE == 10059,
+	       "NFS4ERR_LAYOUTUNAVAILABLE wire value mismatch");
+_Static_assert(NFS4ERR_NOMATCHING_LAYOUT == 10060,
+	       "NFS4ERR_NOMATCHING_LAYOUT wire value mismatch");
+_Static_assert(NFS4ERR_BADIOMODE == 10049,
+	       "NFS4ERR_BADIOMODE wire value mismatch");
 
 /* -----------------------------------------------------------------------
  * NFSv4.1/4.2 operation numbers (RFC 8881 / RFC 7862)
