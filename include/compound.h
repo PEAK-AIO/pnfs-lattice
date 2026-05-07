@@ -96,8 +96,8 @@ enum nfs4_status {
 	 * still has locks (or, per Linux NFSD's interpretation, an open
 	 * stateid that has not been CLOSEd).  Pynfs CSID9. */
 	NFS4ERR_LOCKS_HELD        = 10037,
-	NFS4ERR_SHARE_DENIED      = 10045,
-	NFS4ERR_OPENMODE          = 10046,
+	NFS4ERR_SHARE_DENIED      = 10015,
+	NFS4ERR_OPENMODE          = 10038,
 	NFS4ERR_BADSESSION        = 10052,
 	NFS4ERR_BADSLOT           = 10053,
 	NFS4ERR_SEQ_MISORDERED    = 10063,
