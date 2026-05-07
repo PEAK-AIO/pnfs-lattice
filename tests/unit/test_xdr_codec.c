@@ -1895,7 +1895,7 @@ static void test_unknown_opnum_decode(void)
     {
         /* Compound header: tag, minorversion, op_count */
         uint32_t tlen = 4;
-        char ttag[4] = "test";
+        char ttag[4] = {'t', 'e', 's', 't'};
         uint32_t mv = 1;
         uint32_t cnt = 2;
 
