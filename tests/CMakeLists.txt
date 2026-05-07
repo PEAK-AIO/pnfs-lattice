@@ -357,6 +357,7 @@ target_link_libraries(test_layout_recall PRIVATE
 target_include_directories(test_layout_recall PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src/catalogue
+    ${PROJECT_SOURCE_DIR}/src/mds
     ${PROJECT_SOURCE_DIR}/tests
 )
 add_test(NAME test_layout_recall COMMAND test_layout_recall)
