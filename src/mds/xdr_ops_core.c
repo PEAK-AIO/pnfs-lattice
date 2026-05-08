@@ -424,8 +424,23 @@ bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
     switch (nfs_type) {
     case 1: a->type = MDS_FTYPE_REG;     break;
     case 2: a->type = MDS_FTYPE_DIR;     break;
+    case 3: a->type = MDS_FTYPE_BLKDEV;  break;  /* NF4BLK */
+    case 4: a->type = MDS_FTYPE_CHRDEV;  break;  /* NF4CHR */
     case 5: a->type = MDS_FTYPE_SYMLINK; break;
+    case 6: a->type = MDS_FTYPE_SOCK;    break;  /* NF4SOCK */
+    case 7: a->type = MDS_FTYPE_FIFO;    break;  /* NF4FIFO */
     default: a->type = MDS_FTYPE_REG;    break;
+    }
+
+    /*
+     * RFC 8881 S18.4.2: NF4BLK / NF4CHR carry specdata1 + specdata2
+     * (major/minor device numbers) before the name.  Consume them
+     * so the wire cursor advances past the type-specific data.
+     */
+    if (nfs_type == 3 || nfs_type == 4) {
+        uint32_t specdata1, specdata2;
+        if (!xdr_uint32_t(xdrs, &specdata1)) { return false; }
+        if (!xdr_uint32_t(xdrs, &specdata2)) { return false; }
     }
 
     /* Symlinks carry linkdata (linktext4 = utf8str_cs) before the name. */
