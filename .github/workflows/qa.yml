@@ -49,6 +49,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
+            libssl-dev \
+            libkrb5-dev \
             liblmdb-dev \
             libntirpc-dev \
             libprotobuf-dev \
@@ -129,7 +131,14 @@ jobs:
       - name: Install clang-tidy and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy liblmdb-dev libntirpc-dev
+          sudo apt-get install -y \
+            clang-tidy \
+            libssl-dev \
+            libkrb5-dev \
+            liblmdb-dev \
+            libntirpc-dev \
+            libprotobuf-dev \
+            libgrpc-dev
 
       - name: Download compile_commands.json
         uses: actions/download-artifact@v4
@@ -162,7 +171,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake liblmdb-dev libntirpc-dev \
+            cmake libssl-dev libkrb5-dev \
+            liblmdb-dev libntirpc-dev \
             libprotobuf-dev libgrpc-dev
 
       - name: Configure and build
@@ -192,7 +202,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake valgrind liblmdb-dev libntirpc-dev \
+            cmake valgrind libssl-dev libkrb5-dev \
+            liblmdb-dev libntirpc-dev \
             libprotobuf-dev libgrpc-dev
 
       - name: Configure and build
