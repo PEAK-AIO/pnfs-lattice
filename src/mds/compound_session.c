@@ -392,31 +392,88 @@ enum nfs4_status op_backchannel_ctl(struct compound_data *cd,
 
 
 /* -----------------------------------------------------------------------
- * RECLAIM_COMPLETE (RFC 8881 S18.51)
+ * RECLAIM_COMPLETE (RFC 8881 / RFC 5661 S18.51)
  *
- * Signals that the client has finished reclaiming all previously held
- * state.  The grace module tracks per-client completion; once all
- * tracked clients have sent RECLAIM_COMPLETE, grace period ends.
+ * The wire form has two flavors selected by the rca_one_fs boolean:
+ *
+ *   rca_one_fs = FALSE  -- "global" reclaim complete.  The client
+ *       declares it has finished reclaiming all state for this
+ *       clientid.  RFC 5661 S18.51.4: "If RECLAIM_COMPLETE is invoked
+ *       with rca_one_fs set to FALSE more than once, the second and
+ *       subsequent invocations MUST result in NFS4ERR_COMPLETE_ALREADY
+ *       being returned."  This is the one-shot per clientid.
+ *
+ *   rca_one_fs = TRUE   -- per-filesystem reclaim complete.  The
+ *       client signals that reclaim is done on the current FH's
+ *       filesystem only.  This MUST NOT consume the global one-shot
+ *       and repeated invocations MUST keep returning NFS4_OK -- pynfs
+ *       RECC1 testSupported issues an rca_one_fs=TRUE followed by an
+ *       rca_one_fs=FALSE and expects both to succeed.
+ *
+ * Logic:
+ *   - rca_one_fs == TRUE  -- always NFS4_OK (no one-shot consumption).
+ *   - cd->st == NULL (test compat) -- keep the historical "grace gates
+ *     it" contract for the legacy unit tests that drive op_reclaim_
+ *     complete without a session table.
+ *   - rca_one_fs == FALSE -- use session_client_reclaim_complete()
+ *     as the authoritative test-and-set on the per-client flag.
+ *     Inside grace, additionally retire the client from the recovery
+ *     set (best-effort; -1 from grace_client_reclaimed is harmless
+ *     for a brand-new client that wasn't in the persisted set).
  * ----------------------------------------------------------------------- */
 enum nfs4_status op_reclaim_complete(const struct compound_data *cd,
-					    const struct nfs4_op *op,
-					    struct nfs4_result *res)
+				     const struct nfs4_op *op,
+				     struct nfs4_result *res)
 {
-	(void)op;
+	const struct nfs4_arg_reclaim_complete *a = &op->arg.reclaim_complete;
+	int rc;
+
 	(void)res;
 
 	if (!cd->sequence_done) {
 		return NFS4ERR_OP_NOT_IN_SESSION;
-}
+	}
 
-	if (!grace_is_active()) {
+	/* RFC 5661 S18.51.4: per-filesystem reclaim is independent of
+	 * the global one-shot.  Repeated invocations with rca_one_fs ==
+	 * TRUE MUST keep returning NFS4_OK regardless of whether the
+	 * client has yet sent the global form. */
+	if (a->rca_one_fs) {
+		return NFS4_OK;
+	}
+
+	if (cd->st == NULL) {
+		/* Test/legacy compat: no session table is plumbed in.
+		 * Preserve the historical "grace gates RECLAIM_COMPLETE"
+		 * behaviour for the unit tests that rely on it. */
+		if (!grace_is_active()) {
+			return NFS4ERR_COMPLETE_ALREADY;
+		}
+		if (grace_client_reclaimed(cd->clientid) < 0) {
+			return NFS4ERR_COMPLETE_ALREADY;
+		}
+		return NFS4_OK;
+	}
+
+	rc = session_client_reclaim_complete(cd->st, cd->clientid);
+	if (rc == 1) {
 		return NFS4ERR_COMPLETE_ALREADY;
-}
+	}
+	if (rc < 0) {
+		/* clientid unknown to session table.  cd->clientid is
+		 * normally bound by SEQUENCE so this only fires on a
+		 * synthetic test path that bypasses session lookup. */
+		return NFS4ERR_STALE_CLIENTID;
+	}
 
-	if (grace_client_reclaimed(cd->clientid) < 0) {
-		return NFS4ERR_COMPLETE_ALREADY;
-}
-
+	/* First call -- also retire from the grace recovery set when
+	 * the compound is running inside grace.  grace_client_reclaimed
+	 * returns -1 for clients that aren't in the recovery set
+	 * (brand-new clients during grace, or any client outside grace);
+	 * the failure is harmless and is intentionally ignored. */
+	if (grace_is_active()) {
+		(void)grace_client_reclaimed(cd->clientid);
+	}
 	return NFS4_OK;
 }
 

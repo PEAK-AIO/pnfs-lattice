@@ -1992,6 +1992,10 @@ proxy_write:
 				     a->offset, a->data, a->data_len,
 				     &written);
 		if (st != MDS_OK) {
+			(void)fprintf(stderr,
+				"DBG WRITE: proxy_write failed fh=%llu st=%d checks=%d\n",
+				(unsigned long long)cd->current_fh.fileid,
+				(int)st, (int)proxy_checks_done);
 			return mds_status_to_nfs4(st);
 }
 

@@ -2336,6 +2336,18 @@ enum nfs4_status op_lookupp(struct compound_data *cd,
 	}
 
 	/*
+	 * RFC 8881 S18.14.4: current FH must be a directory.
+	 * Symlinks get NFS4ERR_SYMLINK; other non-dir types get
+	 * NFS4ERR_NOTDIR.  Pynfs LKPP1r/s/f/a/d.
+	 */
+	if (inode.type != MDS_FTYPE_DIR) {
+		if (inode.type == MDS_FTYPE_SYMLINK) {
+			return NFS4ERR_SYMLINK;
+		}
+		return NFS4ERR_NOTDIR;
+	}
+
+	/*
 	 * RFC 8881 S18.14: if the current filehandle is the root
 	 * of the server's namespace, return NFS4ERR_NOENT.
 	 */

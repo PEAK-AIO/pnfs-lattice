@@ -1507,3 +1507,92 @@ void session_table_set_lt(struct session_table *st,
     if (st != NULL) { st->lt = lt; }
 }
 
+/* -----------------------------------------------------------------------
+ * RFC 8881 S18.51 RECLAIM_COMPLETE -- per-client one-shot.
+ *
+ * Atomic test-and-set on the client's reclaim_complete_done flag
+ * under the session-table lock.  Independent of the grace recovery
+ * set so that brand-new (post-grace) clients can call exactly once
+ * and get NFS4_OK; their second call returns NFS4ERR_COMPLETE_ALREADY.
+ *
+ * Returns: 0 on success (first call); 1 if already done;
+ *          -1 if clientid not found.
+ * ----------------------------------------------------------------------- */
+int session_client_reclaim_complete(struct session_table *st,
+				    uint64_t clientid)
+{
+	struct nfs4_client *c;
+	int rc;
+
+	if (st == NULL) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&st->locks[0]);
+	c = find_client_by_id(st, clientid);
+	if (c == NULL) {
+		rc = -1;
+		goto out;
+	}
+	if (c->reclaim_complete_done) {
+		rc = 1;
+		goto out;
+	}
+	c->reclaim_complete_done = true;
+	rc = 0;
+
+out:
+	pthread_mutex_unlock(&st->locks[0]);
+	return rc;
+}
+
+bool session_client_has_reclaimed(struct session_table *st,
+				  uint64_t clientid)
+{
+	struct nfs4_client *c;
+	bool done = true; /* default: allow if client not found */
+
+	if (st == NULL) {
+		return true;
+	}
+	pthread_mutex_lock(&st->locks[0]);
+	c = find_client_by_id(st, clientid);
+	if (c != NULL) {
+		done = c->reclaim_complete_done;
+	}
+	pthread_mutex_unlock(&st->locks[0]);
+	return done;
+}
+
+bool session_client_lease_expired(struct session_table *st,
+				  uint64_t clientid)
+{
+	struct nfs4_client *c;
+	bool expired = false;
+
+	if (st == NULL) {
+		return false;
+	}
+	pthread_mutex_lock(&st->locks[0]);
+	c = find_client_by_id(st, clientid);
+	if (c == NULL) {
+		/*
+		 * Clientid not in the session table -- the record was
+		 * replaced by a subsequent EXCHANGE_ID (case 5) or
+		 * destroyed.  Any open/lock state referencing this
+		 * clientid is orphaned and must be treated as expired
+		 * so courtesy-client revocation can clean it up.
+		 */
+		expired = true;
+	} else {
+		time_t now = time(NULL);
+		if (now > c->last_renewed &&
+		    (uint32_t)(now - c->last_renewed) >=
+		    st->lease_time_sec) {
+			expired = true;
+		}
+	}
+	pthread_mutex_unlock(&st->locks[0]);
+	return expired;
+}
+

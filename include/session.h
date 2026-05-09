@@ -171,6 +171,18 @@ struct nfs4_client {
 	struct nfs4_session *sessions;        /* Linked list of sessions */
 	struct nfs4_client  *hash_next;       /* Client hash chain (by clientid) */
 	struct nfs4_client  *owner_hash_next; /* Owner hash chain (by co_ownerid) */
+	/* RFC 8881 S18.51.4 -- RECLAIM_COMPLETE is per-client one-shot.
+	 * Set by the first successful op_reclaim_complete for this
+	 * clientid; subsequent invocations return NFS4ERR_COMPLETE_ALREADY.
+	 * Both new clients (post-grace) and recovering clients (during
+	 * grace) MUST call RECLAIM_COMPLETE once before performing
+	 * non-reclaim state-modifying operations.  Per-client tracking
+	 * is required because the grace coordinator only knows about
+	 * clients that were in the persisted recovery set; brand-new
+	 * clients arriving after grace would otherwise be told
+	 * COMPLETE_ALREADY on their very first call (pynfs CALLBACK1
+	 * testCbNotifyLockExpiredClient). */
+	bool                 reclaim_complete_done;
 };
 
 /* -----------------------------------------------------------------------
@@ -628,6 +640,39 @@ int session_set_cb_prog(struct session_table *st,
  *         -2 if has confirmed sessions (CLIENTID_BUSY).
  */
 int session_destroy_client(struct session_table *st, uint64_t clientid);
+
+/**
+ * RFC 8881 S18.51 RECLAIM_COMPLETE -- record per-client one-shot.
+ *
+ * Atomically tests-and-sets the per-client reclaim_complete_done
+ * flag under the session table lock.  Independent of the
+ * grace-recovery set so brand-new clients post-grace can call
+ * exactly once and get NFS4_OK.
+ *
+ * @return  0  first call (success).
+ *          1  already done -- caller maps to NFS4ERR_COMPLETE_ALREADY.
+ *         -1  clientid unknown -- caller maps to NFS4ERR_STALE_CLIENTID.
+ */
+int session_client_reclaim_complete(struct session_table *st,
+				    uint64_t clientid);
+
+/**
+ * Check if a client has completed RECLAIM_COMPLETE.
+ * Returns true when the flag is set or when the client is unknown
+ * (defensive: allows the op to proceed rather than blocking on a
+ * stale clientid).
+ */
+bool session_client_has_reclaimed(struct session_table *st,
+				  uint64_t clientid);
+
+/**
+ * Check whether a client's lease has expired (RFC 8881 S8.4.3
+ * courtesy-client support).  Returns true when the clientid is not
+ * in the table (orphaned state) or when now - last_renewed >=
+ * lease_time_sec.
+ */
+bool session_client_lease_expired(struct session_table *st,
+				  uint64_t clientid);
 
 #endif /* SESSION_H */
 /* Lease expiry reaper (R2.2). */
