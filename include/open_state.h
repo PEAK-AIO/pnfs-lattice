@@ -325,4 +325,34 @@ int open_state_downgrade(struct open_state_table *ot,
 void open_state_close_all_for_client(struct open_state_table *ot,
                                      uint64_t clientid);
 
+/**
+ * Check if any OTHER client has an open with WRITE access on @fileid.
+ * Used by the delegation grant path to avoid granting a read delegation
+ * while another client is writing.  RFC 8881 §10.4.  Pynfs DELEG9.
+ *
+ * @return true if at least one other-client write-open exists.
+ */
+bool open_state_has_other_writer(struct open_state_table *ot,
+                                 uint64_t fileid,
+                                 uint64_t clientid);
+
+struct session_table;
+
+/**
+ * Revoke open state on @fileid held by clients whose lease has expired.
+ *
+ * RFC 8881 §8.4.3 courtesy-client support: when an active client's OPEN
+ * hits a share conflict, the server checks whether the conflicting state
+ * belongs to an expired (courtesy) client and, if so, revokes it so the
+ * new OPEN can proceed.
+ *
+ * @param ot   Open state table.
+ * @param st   Session table (used for lease-expiry check).
+ * @param fileid  Target file.
+ * @return Number of open-state entries revoked (0 if none were expired).
+ */
+int open_state_revoke_expired_for_file(struct open_state_table *ot,
+                                       struct session_table *st,
+                                       uint64_t fileid);
+
 #endif /* OPEN_STATE_H */

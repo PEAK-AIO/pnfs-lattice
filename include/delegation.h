@@ -228,4 +228,26 @@ void deleg_revoke_file(struct deleg_table *dt, uint64_t fileid);
 bool deleg_stateid_exists(const struct deleg_table *dt,
                           const uint8_t other[12]);
 
+/**
+ * RFC 8881 §10.2.1: check if a stateid belongs to a revoked delegation.
+ * Returns true if the stateid was revoked (caller should return
+ * NFS4ERR_DELEG_REVOKED).
+ */
+bool deleg_is_revoked(const struct deleg_table *dt,
+                      const uint8_t other[12]);
+
+/**
+ * RFC 8881 §10.2.1: check if the client has any revoked delegation.
+ * Used by SEQUENCE to set SEQ4_STATUS_RECALLABLE_STATE_REVOKED.
+ */
+bool deleg_client_has_revoked(const struct deleg_table *dt,
+                              uint64_t clientid);
+
+/**
+ * RFC 8881 §18.38: free a revoked delegation stateid.
+ * Returns 0 if removed, -1 if not found.
+ */
+int deleg_free_revoked(struct deleg_table *dt,
+                       const uint8_t other[12]);
+
 #endif /* DELEGATION_H */

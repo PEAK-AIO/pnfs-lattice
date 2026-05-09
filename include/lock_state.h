@@ -114,4 +114,16 @@ void lock_release_all_for_client(struct lock_table *lt, uint64_t clientid);
 bool lock_state_exists(const struct lock_table *lt,
                        const uint8_t other[NFS4_OTHER_SIZE]);
 
+struct session_table;
+
+/**
+ * Revoke locks on @fileid held by clients whose lease has expired.
+ * RFC 8881 §8.4.3 courtesy-client support.  Pynfs COUR2.
+ *
+ * @return Number of lock entries revoked.
+ */
+int lock_revoke_expired_for_file(struct lock_table *lt,
+                                 struct session_table *st,
+                                 uint64_t fileid);
+
 #endif /* LOCK_STATE_H */

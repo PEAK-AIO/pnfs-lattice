@@ -374,6 +374,8 @@ struct nfs4_arg_open {
 	uint64_t              uid;
 	uint64_t              gid;
 	struct nfs4_layout_hint layout_hint;
+	/* CLAIM_PREVIOUS only: delegation type being reclaimed. */
+	uint32_t              deleg_type;     /* open_delegation_type4 */
 };
 
 struct nfs4_arg_close {
@@ -421,6 +423,7 @@ struct nfs4_arg_create_session {
 	 * floor we apply (>= 256 bytes for max{request,response}size
 	 * and >= 1 for max{operations,requests}). */
 	uint32_t fore_max_response_size;
+	uint32_t fore_max_response_size_cached;
 	uint32_t back_max_request_size;
 	uint32_t back_max_response_size;
 	uint32_t back_max_operations;
@@ -1622,6 +1625,13 @@ struct compound_data {
 	bool                      current_stateid_set;
 	struct nfs4_stateid       saved_stateid;
 	bool                      saved_stateid_set;
+
+	/* RFC 8881 S2.10.6.1.3 -- per-session response size caps.
+	 * Populated by op_sequence from the bound session's negotiated
+	 * channel attrs.  0 = unlimited (test-compat / no SEQUENCE). */
+	uint32_t                  max_response_size;
+	uint32_t                  max_response_size_cached;
+	uint32_t                  response_size_est; /* running estimate */
 
 	/* Active COMPOUND op stream (valid only during compound_process). */
 	const struct nfs4_op      *ops;

@@ -29,6 +29,7 @@
 
 #include "pnfs_mds.h"
 #include "open_state.h"
+#include "session.h"
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
 
@@ -813,6 +814,34 @@ int open_state_file_has_writers(struct open_state_table *ot, uint64_t fileid)
     return has_writers;
 }
 
+bool open_state_has_other_writer(struct open_state_table *ot,
+                                 uint64_t fileid,
+                                 uint64_t clientid)
+{
+    const struct file_opens *fo;
+    const struct nfs4_open_state *os;
+    bool found = false;
+    uint32_t file_lock_idx;
+
+    if (ot == NULL) {
+        return false;
+    }
+    file_lock_idx = lock_stripe(fileid);
+    pthread_mutex_lock(&ot->locks[file_lock_idx]);
+    fo = find_file_opens(ot, fileid);
+    if (fo != NULL) {
+        for (os = fo->head; os != NULL; os = os->file_next) {
+            if (os->clientid != clientid &&
+                (os->share_access & OPEN4_SHARE_ACCESS_WRITE) != 0) {
+                found = true;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+    return found;
+}
+
 
 void open_state_close_all_for_client(struct open_state_table *ot,
                                      uint64_t clientid)
@@ -965,4 +994,121 @@ int open_state_table_reload(struct open_state_table *ot, void *unused)
 {
     (void)ot; (void)unused;
     return 0; /* Memory-only: nothing to reload. */
+}
+
+/*
+ * RFC 8881 §8.4.3 courtesy-client support: revoke open state on a
+ * single file for all clients whose lease has expired.  Called from
+ * op_open (compound_data_io.c) when a share conflict is detected.
+ *
+ * Three-phase design to avoid an ABBA deadlock with the lease reaper:
+ *   Reaper:   st->locks[0] → ot->locks (via close_all_for_client)
+ *   Us:       ot->locks → st->locks[0] (via session_client_lease_expired)
+ *
+ * Phase 1 — collect unique clientids from the per-file chain under
+ *           the open-state file-stripe lock (no session lock).
+ * Phase 2 — check each collected clientid against the session table
+ *           (no open-state locks held).
+ * Phase 3 — re-acquire open-state locks and remove entries whose
+ *           clientid was marked expired in phase 2.
+ */
+
+/* Bounded scratch buffer for phase-1 client collection.  64 is far
+ * more than any realistic per-file open count. */
+#define REVOKE_MAX_CLIENTS 64
+
+int open_state_revoke_expired_for_file(struct open_state_table *ot,
+                                       struct session_table *st,
+                                       uint64_t fileid)
+{
+    uint64_t cids[REVOKE_MAX_CLIENTS];
+    bool     exp[REVOKE_MAX_CLIENTS];
+    uint32_t n_cids = 0;
+    uint32_t file_lock_idx;
+    uint32_t s, i;
+    int revoked = 0;
+    bool any_expired = false;
+
+    if (ot == NULL || st == NULL) {
+        return 0;
+    }
+
+    file_lock_idx = lock_stripe(fileid);
+
+    /* ---- Phase 1: collect unique clientids (open-state lock only) ---- */
+    pthread_mutex_lock(&ot->locks[file_lock_idx]);
+    {
+        const struct file_opens *fo = find_file_opens(ot, fileid);
+        if (fo != NULL) {
+            const struct nfs4_open_state *os;
+            for (os = fo->head; os != NULL; os = os->file_next) {
+                bool seen = false;
+                for (i = 0; i < n_cids; i++) {
+                    if (cids[i] == os->clientid) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen && n_cids < REVOKE_MAX_CLIENTS) {
+                    cids[n_cids++] = os->clientid;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+
+    if (n_cids == 0) {
+        return 0;
+    }
+
+    /* ---- Phase 2: check lease expiry (session lock only) ---- */
+    for (i = 0; i < n_cids; i++) {
+        exp[i] = session_client_lease_expired(st, cids[i]);
+        if (exp[i]) {
+            any_expired = true;
+        }
+    }
+    if (!any_expired) {
+        return 0;
+    }
+
+    /* ---- Phase 3: remove expired entries (open-state locks only) ---- */
+    pthread_mutex_lock(&ot->locks[file_lock_idx]);
+    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+        pthread_rwlock_wrlock(&ot->stateid_locks[s]);
+    }
+
+    {
+        struct file_opens *fo = find_file_opens(ot, fileid);
+        if (fo != NULL) {
+            struct nfs4_open_state **pp = &fo->head;
+            while (*pp != NULL) {
+                struct nfs4_open_state *os = *pp;
+                bool is_expired = false;
+                for (i = 0; i < n_cids; i++) {
+                    if (cids[i] == os->clientid && exp[i]) {
+                        is_expired = true;
+                        break;
+                    }
+                }
+                if (is_expired) {
+                    *pp = os->file_next;
+                    unhash_stateid(ot, os);
+                    free(os);
+                    revoked++;
+                } else {
+                    pp = &os->file_next;
+                }
+            }
+            if (fo->head == NULL) {
+                maybe_free_file_opens(ot, fileid);
+            }
+        }
+    }
+
+    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+        pthread_rwlock_unlock(&ot->stateid_locks[s]);
+    }
+    pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+    return revoked;
 }

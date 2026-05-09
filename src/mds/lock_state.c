@@ -28,6 +28,7 @@
 
 #include "pnfs_mds.h"
 #include "lock_state.h"
+#include "session.h"
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
 
@@ -583,4 +584,109 @@ bool lock_state_exists(const struct lock_table *lt,
     found = (find_by_sid(st, other) != NULL);
     pthread_mutex_unlock(&st->lock);
     return found;
+}
+
+/*
+ * RFC 8881 §8.4.3 courtesy-client support for byte-range locks.
+ * Same three-phase pattern as open_state_revoke_expired_for_file:
+ *   Phase 1 — collect unique clientids under stripe lock.
+ *   Phase 2 — check lease expiry via session table (no stripe lock).
+ *   Phase 3 — re-acquire stripe lock and remove expired entries.
+ * Pynfs COUR2.
+ */
+#define LOCK_REVOKE_MAX_CLIENTS 64
+
+int lock_revoke_expired_for_file(struct lock_table *lt,
+                                 struct session_table *sst,
+                                 uint64_t fileid)
+{
+    uint64_t cids[LOCK_REVOKE_MAX_CLIENTS];
+    bool     exp[LOCK_REVOKE_MAX_CLIENTS];
+    uint32_t n_cids = 0;
+    uint32_t s_idx, i;
+    int revoked = 0;
+    bool any_expired = false;
+    struct lock_stripe *st;
+
+    if (lt == NULL || sst == NULL) {
+        return 0;
+    }
+
+    s_idx = stripe(fileid);
+    st = &lt->stripes[s_idx];
+
+    /* Phase 1: collect unique clientids. */
+    pthread_mutex_lock(&st->lock);
+    {
+        uint32_t fi = fhash(fileid);
+        struct file_locks *fl;
+        for (fl = st->file_hash[fi]; fl != NULL; fl = fl->hash_next) {
+            if (fl->fileid != fileid) { continue; }
+            const struct lock_entry *e;
+            for (e = fl->head; e != NULL; e = e->file_next) {
+                bool seen = false;
+                for (i = 0; i < n_cids; i++) {
+                    if (cids[i] == e->clientid) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen && n_cids < LOCK_REVOKE_MAX_CLIENTS) {
+                    cids[n_cids++] = e->clientid;
+                }
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&st->lock);
+
+    if (n_cids == 0) { return 0; }
+
+    /* Phase 2: check lease expiry (session lock only). */
+    for (i = 0; i < n_cids; i++) {
+        exp[i] = session_client_lease_expired(sst, cids[i]);
+        if (exp[i]) { any_expired = true; }
+    }
+    if (!any_expired) { return 0; }
+
+    /* Phase 3: remove expired lock entries. */
+    pthread_mutex_lock(&st->lock);
+    {
+        uint32_t fi = fhash(fileid);
+        struct file_locks *fl;
+        for (fl = st->file_hash[fi]; fl != NULL; fl = fl->hash_next) {
+            if (fl->fileid != fileid) { continue; }
+            struct lock_entry **pp = &fl->head;
+            while (*pp != NULL) {
+                struct lock_entry *e = *pp;
+                bool is_expired = false;
+                for (i = 0; i < n_cids; i++) {
+                    if (cids[i] == e->clientid && exp[i]) {
+                        is_expired = true;
+                        break;
+                    }
+                }
+                if (is_expired) {
+                    *pp = e->file_next;
+                    /* Remove from sid hash. */
+                    uint32_t si = shash(e->stateid.other);
+                    struct lock_entry **sp = &st->sid_hash[si];
+                    while (*sp != NULL) {
+                        if (*sp == e) {
+                            *sp = e->sid_next;
+                            break;
+                        }
+                        sp = &(*sp)->sid_next;
+                    }
+                    free(e);
+                    revoked++;
+                } else {
+                    pp = &(*pp)->file_next;
+                }
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&st->lock);
+    return revoked;
 }

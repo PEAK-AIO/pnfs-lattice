@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2026 PeakAIO
- * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 PeakAIO. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-PeakAIO-Proprietary
  *
- * test_layout_recall.c -- Tests for layout recall coordinator and
- * LAYOUTERROR XDR decode (RFC 7862 S15.6).
+ * test_layout_recall.c — Tests for layout recall coordinator and
+ * LAYOUTERROR XDR decode (RFC 7862 §15.6).
  *
  * Covers:
  *   1. Recall coordinator init/destroy lifecycle.
@@ -266,7 +266,7 @@ static void test_layouterror_struct(void)
 }
 
 /* -----------------------------------------------------------------------
- * Mock CB server thread -- reads one RPC record, sends a success reply
+ * Mock CB server thread — reads one RPC record, sends a success reply
  * ----------------------------------------------------------------------- */
 
 struct mock_cb_server_args {
@@ -274,6 +274,8 @@ struct mock_cb_server_args {
     int received;  /* Set to 1 if a record was received. */
     uint32_t layoutrecall_count;
     struct nfs4_stateid last_stateid;
+    uint64_t last_offset;
+    uint64_t last_length;
     /*
      * Status to encode in the synthesised CB_COMPOUND4res header.
      * Default 0 (NFS4_OK) preserves the prior mock behaviour.  Tests
@@ -313,7 +315,9 @@ static bool test_xdr_skip_opaque_auth(XDR *xdrs)
 
 static bool test_decode_cb_layoutrecall_stateid(const uint8_t *buf,
                                                 uint32_t len,
-                                                struct nfs4_stateid *sid)
+                                                struct nfs4_stateid *sid,
+                                                uint64_t *offset,
+                                                uint64_t *length)
 {
     XDR xdrs;
     char session_id[SESSION_ID_SIZE];
@@ -322,7 +326,8 @@ static bool test_decode_cb_layoutrecall_stateid(const uint8_t *buf,
     uint32_t opnum;
     uint32_t recall_type;
     uint32_t ref_count;
-    uint64_t u64;
+    uint64_t decoded_offset;
+    uint64_t decoded_length;
     bool ok = false;
 
     if (buf == NULL || sid == NULL) {
@@ -372,9 +377,15 @@ static bool test_decode_cb_layoutrecall_stateid(const uint8_t *buf,
         goto out;
     }
     if (!test_xdr_skip_opaque_body(&xdrs, NFS4_FHSIZE)) { goto out; }
-    if (!xdr_uint64_t(&xdrs, &u64)) { goto out; } /* offset */
-    if (!xdr_uint64_t(&xdrs, &u64)) { goto out; } /* length */
+    if (!xdr_uint64_t(&xdrs, &decoded_offset)) { goto out; }
+    if (!xdr_uint64_t(&xdrs, &decoded_length)) { goto out; }
     if (!xdr_nfs4_stateid_decode(&xdrs, sid)) { goto out; }
+    if (offset != NULL) {
+        *offset = decoded_offset;
+    }
+    if (length != NULL) {
+        *length = decoded_length;
+    }
 
     ok = true;
 
@@ -423,7 +434,9 @@ static void *mock_cb_server_thread(void *arg)
     uint32_t xid;
     struct nfs4_stateid decoded_sid;
     memcpy(&xid, buf, 4);
-    if (test_decode_cb_layoutrecall_stateid(buf, frag_len, &decoded_sid)) {
+    if (test_decode_cb_layoutrecall_stateid(buf, frag_len, &decoded_sid,
+                                            &a->last_offset,
+                                            &a->last_length)) {
         a->last_stateid = decoded_sid;
         a->layoutrecall_count++;
     }
@@ -438,7 +451,7 @@ static void *mock_cb_server_thread(void *arg)
      */
     uint8_t reply[40];
     uint32_t *rp = (uint32_t *)reply;
-    rp[0] = xid;                    /* xid -- network order from client */
+    rp[0] = xid;                    /* xid — network order from client */
     rp[1] = htonl(1);               /* msg_type = REPLY */
     rp[2] = htonl(0);               /* reply_stat = MSG_ACCEPTED */
     rp[3] = htonl(0);               /* auth flavor = AUTH_NONE */
@@ -494,7 +507,9 @@ static void test_recall_with_cb_success(void)
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
                                      0x40000000, 0, /* AUTH_NONE */
                                      0, 0,
+                                     0, 0,
                                      1, /* minorversion */
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
 
@@ -591,10 +606,12 @@ static void test_recall_cb_fail_still_revokes(void)
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
                                      0x40000000, 0,
                                      0, 0,
+                                     0, 0,
                                      1, /* minorversion */
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
-    /* No bind_conn -- cb_conn is NULL, so CB will be skipped. */
+    /* No bind_conn — cb_conn is NULL, so CB will be skipped. */
 
     layout_recall_set_session_table(lr, st);
 
@@ -610,7 +627,7 @@ static void test_recall_cb_fail_still_revokes(void)
     ASSERT_EQ(mst, MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    /* Fire recall -- CB will fail (no cb_conn), but revoke must succeed. */
+    /* Fire recall — CB will fail (no cb_conn), but revoke must succeed. */
     ASSERT_EQ(layout_recall_for_ds(lr, 8), 0);
 
     /* Layout must be revoked. */
@@ -738,7 +755,10 @@ static void test_byte_range_recall_uses_latest_seqid(void)
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
                                   0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -783,7 +803,91 @@ static void test_byte_range_recall_uses_latest_seqid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 11: Byte-range conflict recall dedupes duplicate rows by clientid
+ * Test 11: Byte-range conflict recall sends the overlap range on the
+ * CB_LAYOUTRECALL wire payload.
+ *
+ * Holder layout:    [1024, 1024 + 8192)
+ * Requesting range: [4096, 4096 + 4096)
+ * Expected recall:  [4096, 4096 + 4096)
+ * ----------------------------------------------------------------------- */
+
+static void test_byte_range_recall_sends_overlap_range(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct session_table *st = NULL;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct mock_cb_server_args mock;
+    pthread_t tid;
+    char *path = make_temp_db_path();
+    uint64_t clientid;
+    uint32_t seqid;
+    uint32_t flags_out;
+    uint8_t session_id[SESSION_ID_SIZE];
+    uint32_t fore = 0;
+    uint32_t back = 0;
+    uint32_t ds_ids[] = {18};
+    uint32_t recalled = 0;
+    int sv[2];
+
+    db = open_test_catalogue(); VERIFY(db != NULL);
+    cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
+    ASSERT_EQ(session_table_init(0, 90, &st), 0);
+    ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"br-range", 8,
+                                  (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
+                                  0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
+    ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
+                                     session_id, &fore, &back,
+                                     NULL, NULL), 0);
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_EQ(session_bind_conn(st, session_id,
+                                (struct rpc_conn *)(void *)sv), 0);
+    layout_recall_set_session_table(lr, st);
+
+    fill_test_layout_stateid(&sid, 1, 0xA8);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 550,
+                                     LAYOUTIOMODE4_RW, 1024, 8192,
+                                     &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    memset(&mock, 0, sizeof(mock));
+    mock.fd = sv[1];
+    ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
+
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 550, clientid + 1,
+                                                   LAYOUTIOMODE4_RW,
+                                                   4096, 4096,
+                                                   LAYOUT4_FLEX_FILES,
+                                                   &recalled),
+              0);
+    pthread_join(tid, NULL);
+
+    ASSERT_EQ(recalled, 1);
+    ASSERT_EQ(mock.received, 1);
+    ASSERT_EQ(mock.layoutrecall_count, 1);
+    ASSERT_EQ(mock.last_offset, 4096);
+    ASSERT_EQ(mock.last_length, 4096);
+
+    close(sv[0]);
+    close(sv[1]);
+    layout_recall_destroy(lr);
+    session_table_destroy(st);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_byte_range_recall_sends_overlap_range\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Test 12: Byte-range conflict recall dedupes duplicate rows by clientid
  * ----------------------------------------------------------------------- */
 
 static void test_byte_range_recall_dedupes_clientid(void)
@@ -833,11 +937,11 @@ static void test_byte_range_recall_dedupes_clientid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 12: Byte-range conflict recall -- transient CB status skips
+ * Test 13: Byte-range conflict recall — transient CB status skips
  * the preemptive revoke, leaving the layout-state row intact so the
  * client's natural LAYOUTRETURN cleans up.
  *
- * RFC 5661 S20.4.2.1 / S15.1.10.10 -- NFS4ERR_RECALLCONFLICT (10061)
+ * RFC 5661 §20.4.2.1 / §15.1.10.10 — NFS4ERR_RECALLCONFLICT (10061)
  * means "client has I/O in flight, will return on completion";
  * NFS4ERR_DELAY (10008) is the equivalent generic "server please retry"
  * status.  The MDS MUST NOT revoke on either, or it will race the
@@ -876,7 +980,10 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
                                   0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -916,7 +1023,7 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
 
     /*
      * Critical assertion: the layout-state row MUST still exist on
-     * the catalogue.  RFC 5661 S20.4.2.1 says the client will send
+     * the catalogue.  RFC 5661 §20.4.2.1 says the client will send
      * LAYOUTRETURN once its I/O drains; if we revoked here the
      * subsequent LAYOUTRETURN would hit NFS4ERR_BAD_STATEID and the
      * client would spin retransmitting.
@@ -940,9 +1047,9 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 13: Byte-range conflict recall -- NFS4ERR_DELAY also skips
+ * Test 14: Byte-range conflict recall — NFS4ERR_DELAY also skips
  * revoke (transient sibling of NFS4ERR_RECALLCONFLICT, RFC 5661
- * S20.4.2.1).
+ * §20.4.2.1).
  * ----------------------------------------------------------------------- */
 
 static void test_byte_range_recall_skip_revoke_on_delay(void)
@@ -974,7 +1081,10 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
                                   0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -1006,7 +1116,7 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
     ASSERT_EQ(recalled, 1);
     ASSERT_EQ(mock.received, 1);
 
-    /* Layout MUST survive the recall -- NFS4ERR_DELAY is transient. */
+    /* Layout MUST survive the recall — NFS4ERR_DELAY is transient. */
     {
         bool has_layout = false;
         enum mds_status mst;
@@ -1026,7 +1136,7 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 14: Byte-range conflict recall -- a TERMINAL CB error (e.g.
+ * Test 15: Byte-range conflict recall — a TERMINAL CB error (e.g.
  * NFS4ERR_BADSESSION) still triggers the authoritative revoke.  This
  * is the negative complement of the two transient-skip tests above.
  * ----------------------------------------------------------------------- */
@@ -1060,7 +1170,10 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
                                   0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -1096,7 +1209,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
      * With the send-only CB model (no recv on the shared fd), the
      * recall coordinator never sees the client's terminal status.
      * cb_status == 0 ("send succeeded") is treated as transient,
-     * so the layout row is preserved -- the client's natural
+     * so the layout row is preserved — the client's natural
      * LAYOUTRETURN cleans it up.  The unlink path has its own
      * forced-revoke logic that does not depend on CB status.
      */
@@ -1118,7 +1231,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     printf("  PASS: test_byte_range_recall_revokes_on_terminal_status\n");
 }
 /* -----------------------------------------------------------------------
- * Test 15: Byte-range conflict recall -- NFS4ERR_NOMATCHING_LAYOUT is
+ * Test 16: Byte-range conflict recall — NFS4ERR_NOMATCHING_LAYOUT is
  * terminal and must not be confused with NFS4ERR_RECALLCONFLICT.
  * RFC 5661/RFC 8881 assign NOMATCHING_LAYOUT=10060 and
  * RECALLCONFLICT=10061; a regression in the enum used 10060 for
@@ -1154,7 +1267,10 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
                                   (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
                                   0, &clientid, &seqid, &flags_out, 0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -1210,7 +1326,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 16: Final-unlink recall forcibly revokes layout-state rows even
+ * Test 17: Final-unlink recall forcibly revokes layout-state rows even
  * for callback statuses that ordinary byte-range conflict recall treats
  * as transient.  This prevents the P04_unlink_held deadlock where the
  * holder answers the CB by sending LAYOUTRETURN after the namespace
@@ -1255,7 +1371,10 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
                                   0, &clientid, &seqid, &flags_out,
                                   0, 0, 0), 0);
     ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
-                                     0x40000000, 0, 0, 0, 1,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
                                      session_id, &fore, &back,
                                      NULL, NULL), 0);
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
@@ -1319,6 +1438,7 @@ int main(void)
     test_cb_layoutrecall_fd_bad_args();
     test_cb_layoutrecall_fd_roundtrip();
     test_byte_range_recall_uses_latest_seqid();
+    test_byte_range_recall_sends_overlap_range();
     test_byte_range_recall_dedupes_clientid();
     test_byte_range_recall_skip_revoke_on_recallconflict();
     test_byte_range_recall_skip_revoke_on_delay();

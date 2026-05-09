@@ -31,6 +31,7 @@
 #include "mds_shard.h"
 #include "inode_cache.h"
 #include "dirent_cache.h"
+#include "delegation.h"
 #include "dir_delegation.h"
 #include "mds_metrics.h"
 
@@ -1285,6 +1286,25 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 			a->lock_owner, a->lock_owner_len,
 			&open_sid_resolved,
 			&res->res.lock.stateid, &conf);
+		/*
+		 * RFC 8881 §8.4.3 courtesy-client support: if the lock
+		 * conflict is with an expired/orphaned client, revoke
+		 * its locks and retry once.  Pynfs COUR2.
+		 */
+		if (rc == NFS4ERR_DENIED && cd->st != NULL) {
+			if (lock_revoke_expired_for_file(
+				cd->lt, cd->st,
+				cd->current_fh.fileid) > 0) {
+				memset(&conf, 0, sizeof(conf));
+				rc = lock_acquire(cd->lt,
+					cd->current_fh.fileid,
+					a->lock_type, a->offset, a->length,
+					cd->clientid,
+					a->lock_owner, a->lock_owner_len,
+					&open_sid_resolved,
+					&res->res.lock.stateid, &conf);
+			}
+		}
 		if (rc == NFS4ERR_DENIED) {
 			res->res.lock.denied.offset = conf.offset;
 			res->res.lock.denied.length = conf.length;
@@ -1437,8 +1457,18 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 					found = true;
 				}
 			}
-			res->res.test_stateid.status_codes[k] =
-				found ? NFS4_OK : NFS4ERR_BAD_STATEID;
+			if (found) {
+				res->res.test_stateid.status_codes[k] = NFS4_OK;
+			} else if (cd->dt != NULL &&
+				   deleg_is_revoked(cd->dt,
+						    ts->stateids[k].other)) {
+				/* RFC 8881 §10.2.1: revoked deleg. */
+				res->res.test_stateid.status_codes[k] =
+					NFS4ERR_DELEG_REVOKED;
+			} else {
+				res->res.test_stateid.status_codes[k] =
+					NFS4ERR_BAD_STATEID;
+			}
 		}
 		return NFS4_OK;
 	}
@@ -1462,6 +1492,13 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		if (cd->lt != NULL) {
 			struct nfs4_stateid fs_sid = fs_resolved;
 			if (lock_release(cd->lt, &fs_sid, 0, 0, 0) == 0) {
+				return NFS4_OK;
+			}
+		}
+		/* RFC 8881 §10.2.1: free a revoked delegation stateid. */
+		if (cd->dt != NULL) {
+			if (deleg_free_revoked(cd->dt,
+					       fs_resolved.other) == 0) {
 				return NFS4_OK;
 			}
 		}

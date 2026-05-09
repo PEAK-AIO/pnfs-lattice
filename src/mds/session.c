@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2026 PeakAIO
- * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 PeakAIO. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-PeakAIO-Proprietary
  *
- * session.c -- NFSv4.1 session and clientid management.
+ * session.c — NFSv4.1 session and clientid management.
  *
  * Implements EXCHANGE_ID, CREATE_SESSION, DESTROY_SESSION, and
- * SEQUENCE operations per RFC 8881 SS18.35--18.37, 18.46.
+ * SEQUENCE operations per RFC 8881 §§18.35–18.37, 18.46.
  *
  * Data structures:
  *   - Client hash table: chained, indexed by clientid.
@@ -142,7 +142,7 @@ static struct nfs4_client *find_client_by_id(const struct session_table *st,
 }
 
 /* -----------------------------------------------------------------------
- * Internal: find client by co_ownerid -- O(1) via owner_hash
+ * Internal: find client by co_ownerid — O(1) via owner_hash
  * ----------------------------------------------------------------------- */
 
 static struct nfs4_client *find_client_by_owner(const struct session_table *st,
@@ -458,7 +458,7 @@ static int grace_recovery_scan_cb(uint64_t clientid,
 
 	if (mds_coord_recovery_get(ctx->cat, clientid,
 				   co_buf, &co_len, ver) != MDS_OK) {
-		return 0; /* skip -- record vanished or error */
+		return 0; /* skip — record vanished or error */
 	}
 
 	if (co_len == ctx->co_ownerid_len &&
@@ -472,7 +472,7 @@ static int grace_recovery_scan_cb(uint64_t clientid,
 }
 
 /*
- * Principal-match helper for RFC 8881 S18.35.4 cases 8 / 9 and case 2.
+ * Principal-match helper for RFC 8881 §18.35.4 cases 8 / 9 and case 2.
  *
  * When auth_flavor == 0 either side, principal matching is suppressed
  * (legacy / unit-test path).  Otherwise the (flavor, uid, gid) triple
@@ -613,7 +613,7 @@ int session_exchange_id(struct session_table *st,
 	c = find_client_by_owner(st, co_ownerid, co_ownerid_len);
 
 	/*
-	 * RFC 8881 S18.35.4 -- UPDATE branch.
+	 * RFC 8881 §18.35.4 — UPDATE branch.
 	 *
 	 * The UPDATE flag asserts "there is already a confirmed record
 	 * for this co_ownerid; refresh it".  If no record exists, or the
@@ -621,9 +621,9 @@ int session_exchange_id(struct session_table *st,
 	 * NFS4ERR_NOENT.  Pynfs EID6 / EID6a-d.
 	 *
 	 * For a confirmed record we then validate verifier and principal:
-	 *   verifier mismatch                 -> NFS4ERR_NOT_SAME (case 8).
-	 *   verifier match + princ mismatch   -> NFS4ERR_PERM     (case 9).
-	 *   both match                        -> case 6, return existing.
+	 *   verifier mismatch                 → NFS4ERR_NOT_SAME (case 8).
+	 *   verifier match + princ mismatch   → NFS4ERR_PERM     (case 9).
+	 *   both match                        → case 6, return existing.
 	 */
 	if (update) {
 		if (c == NULL || !c->confirmed) {
@@ -642,7 +642,7 @@ int session_exchange_id(struct session_table *st,
 			rc = SESSION_EID_PERM;
 			goto out;
 		}
-		/* Case 6 -- verifier + principal match, return existing. */
+		/* Case 6 — verifier + principal match, return existing. */
 		c->last_renewed = time(NULL);
 		*out_clientid = c->clientid;
 		if (out_seqid != NULL) {
@@ -657,13 +657,13 @@ int session_exchange_id(struct session_table *st,
 	}
 
 	/*
-	 * RFC 8881 S18.35.4 -- non-UPDATE branch.
+	 * RFC 8881 §18.35.4 — non-UPDATE branch.
 	 *
-	 * Case 1 (no record)               -> fresh allocation.
-	 * Case 4 (unconfirmed record)      -> record is replaced unconditionally;
+	 * Case 1 (no record)               → fresh allocation.
+	 * Case 4 (unconfirmed record)      → record is replaced unconditionally;
 	 *                                    a fresh clientid is minted.
-	 * Case 2 (confirmed + verf + princ)-> renewal, return existing clientid.
-	 * Cases 3/5/7 (confirmed, mismatch)-> record is replaced; a fresh
+	 * Case 2 (confirmed + verf + princ)→ renewal, return existing clientid.
+	 * Cases 3/5/7 (confirmed, mismatch)→ record is replaced; a fresh
 	 *                                    clientid is minted.  We do not
 	 *                                    yet preserve the old record
 	 *                                    until CREATE_SESSION confirms
@@ -687,7 +687,7 @@ int session_exchange_id(struct session_table *st,
 					       cred_uid, cred_gid);
 
 	if (c->confirmed && verf_match && princ_match) {
-		/* Case 2 -- renewal, return existing clientid. */
+		/* Case 2 — renewal, return existing clientid. */
 		c->last_renewed = time(NULL);
 		*out_clientid = c->clientid;
 		if (out_seqid != NULL) {
@@ -701,16 +701,66 @@ int session_exchange_id(struct session_table *st,
 		goto out;
 	}
 
-	/* Otherwise replace the existing record (cases 3 / 4 / 5 / 7). */
-	unhash_client(st, c);
-	free_client(st, c);
-	c = NULL;
+	/*
+	 * Cases 3 / 4 / 5 / 7: replace the existing record.
+	 *
+	 * RFC 8881 §18.35.4 case 5 (confirmed + verf mismatch +
+	 * principal match): the old confirmed record and its
+	 * sessions MUST survive until the replacement is confirmed
+	 * by CREATE_SESSION.  Pynfs EID5f drives this: sess1 must
+	 * still work after EXCHANGE_ID mints c2, and only become
+	 * BADSESSION after c2's CREATE_SESSION confirms.
+	 *
+	 * For case 5 we keep c alive (in client_hash and
+	 * session_hash) and only remove it from owner_hash so the
+	 * new client takes over the co_ownerid slot.  The old
+	 * clientid is recorded on the new client as
+	 * superseded_clientid and destroyed inside
+	 * session_create_session when the replacement confirms.
+	 *
+	 * Cases 3/7 (principal mismatch or unconfirmed) and case 4
+	 * (unconfirmed) destroy the old record immediately — there
+	 * are no live sessions to protect.
+	 */
+	{
+		bool defer_old = (c->confirmed && princ_match);
+		uint64_t old_clientid = c->clientid;
 
-	rc = session_alloc_new_client(st, co_ownerid, co_ownerid_len,
-				      verifier, auth_flavor,
-				      cred_uid, cred_gid,
-				      out_clientid, out_seqid,
-				      out_flags);
+		if (defer_old) {
+			/* Case 5: remove from owner_hash only. */
+			uint32_t oidx = hash_ownerid(c->co_ownerid,
+						    c->co_ownerid_len);
+			struct nfs4_client **pp;
+			for (pp = &st->owner_hash[oidx]; *pp != NULL;
+			     pp = &(*pp)->owner_hash_next) {
+				if (*pp == c) {
+					*pp = c->owner_hash_next;
+					break;
+				}
+			}
+		} else {
+			unhash_client(st, c);
+			free_client(st, c);
+			old_clientid = 0;
+		}
+		c = NULL;
+
+		rc = session_alloc_new_client(st, co_ownerid,
+					      co_ownerid_len,
+					      verifier, auth_flavor,
+					      cred_uid, cred_gid,
+					      out_clientid, out_seqid,
+					      out_flags);
+		/* Record superseded clientid for deferred destroy
+		 * in session_create_session. */
+		if (rc == SESSION_EID_OK && old_clientid != 0) {
+			struct nfs4_client *nc =
+				find_client_by_id(st, *out_clientid);
+			if (nc != NULL) {
+				nc->superseded_clientid = old_clientid;
+			}
+		}
+	}
 
 out:
 	pthread_mutex_unlock(&st->locks[0]);
@@ -728,7 +778,12 @@ int session_create_session(struct session_table *st,
 			   uint32_t cb_sec_flavor,
 			   uint32_t fore_max_request_size,
 			   uint32_t fore_max_operations,
+			   uint32_t a_fore_max_response_size,
+			   uint32_t a_fore_max_response_size_cached,
 			   uint32_t minorversion,
+			   uint32_t auth_flavor,
+			   uint32_t cred_uid,
+			   uint32_t cred_gid,
 			   uint8_t out_session_id[SESSION_ID_SIZE],
 			   uint32_t *out_fore_slots,
 			   uint32_t *out_back_slots,
@@ -768,10 +823,72 @@ int session_create_session(struct session_table *st,
 	}
 
 	/*
-	 * Sequence ID check: RFC 8881 S18.36.4.
-	 * create_seq tracks the expected value.
+	 * RFC 8881 §18.35.4: "Any unconfirmed record that is
+	 * not confirmed within a lease period SHOULD be removed."
+	 * Check on-demand so CREATE_SESSION on an expired
+	 * unconfirmed clientid returns NFS4ERR_STALE_CLIENTID
+	 * regardless of the background reaper's scan interval.
+	 * Pynfs EID9 (testLeasePeriod) drives this path.
 	 */
-	if (seqid != c->create_seq) {
+	if (!c->confirmed) {
+		time_t now = time(NULL);
+		if (now > c->last_renewed &&
+		    (uint32_t)(now - c->last_renewed) >= st->lease_time_sec) {
+			unhash_client(st, c);
+			free_client(st, c);
+			rc = -1;  /* NFS4ERR_STALE_CLIENTID */
+			goto out;
+		}
+	}
+
+	/*
+	 * RFC 8881 §18.36.4: principal collision check.  When the
+	 * client record is unconfirmed and the CREATE_SESSION caller's
+	 * principal differs from the EXCHANGE_ID caller's, another
+	 * host is trying to confirm a clientid it didn't create.
+	 * Return NFS4ERR_CLID_INUSE.  Pynfs CSESS9.
+	 */
+	if (!c->confirmed &&
+	    !client_principal_matches(c, auth_flavor, cred_uid, cred_gid)) {
+		rc = -4;  /* NFS4ERR_CLID_INUSE */
+		goto out;
+	}
+
+	/*
+	 * Sequence ID check: RFC 8881 §18.36.4.
+	 *
+	 * create_seq is the NEXT expected seqid.  After a successful
+	 * CREATE_SESSION it is incremented, so replay detection fires
+	 * when seqid == create_seq - 1.  RFC 8881 §18.36.4:
+	 * "If csa_sequenceid is equal to the sequence id in the
+	 * client ID's slot, then this is a replay, and the server
+	 * returns the cached result."
+	 */
+	if (seqid == c->create_seq) {
+		/* New request — proceed normally. */
+	} else if (c->last_cs_valid &&
+		   seqid == c->create_seq - 1) {
+		/* Replay — return cached result per RFC 8881 §18.36.4.
+		 * Pynfs CSESS5 / CSESS5a / CSESS5b. */
+		memcpy(out_session_id, c->last_cs_session_id,
+		       SESSION_ID_SIZE);
+		if (out_fore_slots != NULL) {
+			*out_fore_slots = c->last_cs_fore_slots;
+		}
+		if (out_back_slots != NULL) {
+			*out_back_slots = c->last_cs_back_slots;
+		}
+		if (out_fore_max_request_size != NULL) {
+			*out_fore_max_request_size =
+				c->last_cs_fore_max_request_size;
+		}
+		if (out_fore_max_operations != NULL) {
+			*out_fore_max_operations =
+				c->last_cs_fore_max_operations;
+		}
+		rc = 0;  /* NFS4_OK — replay returns the original result */
+		goto out;
+	} else {
 		rc = -2;  /* NFS4ERR_SEQ_MISORDERED */
 		goto out;
 	}
@@ -814,7 +931,7 @@ int session_create_session(struct session_table *st,
 		goto out;
 	}
 
-	/* RFC 8881 S2.10.6.1.2: slots start at seq_id 0.
+	/* RFC 8881 §2.10.6.1.2: slots start at seq_id 0.
 	 * Linux kernel 6.8 sends seq_id=1 as the first SEQUENCE
 	 * (slot->seq_nr starts at 0, kernel sends seq_nr+1).
 	 * With seq_id=0, the check (1 == 0+1) accepts it. */
@@ -822,6 +939,17 @@ int session_create_session(struct session_table *st,
 	s->clientid = clientid;
 	s->minorversion = minorversion;
 	s->max_request_size = actual_max_req;
+	{
+		/* Negotiated ca_maxresponsesize / ca_maxresponsesizecached.
+		 * Use the raw arg values decoded from the wire.  Zero or
+		 * overlarge values default to 1 MiB / 64 KiB. */
+		uint32_t mr = a_fore_max_response_size;
+		uint32_t mrc = a_fore_max_response_size_cached;
+		if (mr == 0U || mr > 1048576U) { mr = 1048576U; }
+		if (mrc == 0U || mrc > 1048576U) { mrc = 65536U; }
+		s->max_response_size = mr;
+		s->max_response_size_cached = mrc;
+	}
 	s->max_operations = actual_max_ops;
 
 	/* Backchannel slots + callback metadata. */
@@ -860,6 +988,29 @@ int session_create_session(struct session_table *st,
 	c->confirmed = true;
 	c->create_seq++;
 	c->last_renewed = time(NULL);
+
+	/* RFC 8881 §18.35.4 case 5: if this client supersedes an
+	 * older confirmed record, destroy the old one now that the
+	 * replacement is confirmed.  Pynfs EID5f. */
+	if (c->superseded_clientid != 0) {
+		struct nfs4_client *old =
+			find_client_by_id(st, c->superseded_clientid);
+		if (old != NULL) {
+			unhash_client(st, old);
+			free_client(st, old);
+		}
+		c->superseded_clientid = 0;
+	}
+
+	/* Cache the result for CREATE_SESSION replay detection
+	 * per RFC 8881 §18.36.4. */
+	c->last_cs_valid = true;
+	memcpy(c->last_cs_session_id, s->session_id, SESSION_ID_SIZE);
+	c->last_cs_fore_slots = actual_fore;
+	c->last_cs_back_slots = actual_back;
+	c->last_cs_csr_flags = 0;  /* Populated by op_create_session caller */
+	c->last_cs_fore_max_request_size = actual_max_req;
+	c->last_cs_fore_max_operations = actual_max_ops;
 
 	/* Persist recovery record for failover.
 	 * Priority: CQ (replicated) > catalogue vtable. */
@@ -929,6 +1080,33 @@ int session_get_limits(struct session_table *st,
 	return rc;
 }
 
+int session_get_response_limits(struct session_table *st,
+				const uint8_t session_id[SESSION_ID_SIZE],
+				uint32_t *out_max_resp,
+				uint32_t *out_max_resp_cached)
+{
+	struct nfs4_session *s;
+	int rc = -1;
+
+	if (st == NULL || session_id == NULL) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&st->locks[0]);
+	s = find_session(st, session_id);
+	if (s != NULL) {
+		if (out_max_resp != NULL) {
+			*out_max_resp = s->max_response_size;
+		}
+		if (out_max_resp_cached != NULL) {
+			*out_max_resp_cached = s->max_response_size_cached;
+		}
+		rc = 0;
+	}
+	pthread_mutex_unlock(&st->locks[0]);
+	return rc;
+}
+
 /* ----------------------------------------------------------------------- */
 
 int session_destroy_session(struct session_table *st,
@@ -976,16 +1154,16 @@ out:
 /* ----------------------------------------------------------------------- */
 
 /*
- * RFC 8881 S18.50 DESTROY_CLIENTID -- destroy a clientid record.
+ * RFC 8881 §18.50 DESTROY_CLIENTID — destroy a clientid record.
  *
  * Returns 0 on success, -1 on STALE_CLIENTID (clientid not found),
  * -2 on CLIENTID_BUSY (the client still has confirmed sessions, the
- * client must DESTROY_SESSION on each session first per S18.50.3).
+ * client must DESTROY_SESSION on each session first per §18.50.3).
  *
  * Pynfs DESCID3/4/5/6/7/8 drive every leg of this contract:
- *   DESCID3/4   bad clientid -> -1 -> NFS4ERR_STALE_CLIENTID.
- *   DESCID5/6   client owns at least one session -> -2 -> CLIENTID_BUSY.
- *   DESCID8     destroy then destroy again -> first 0, second -1.
+ *   DESCID3/4   bad clientid → -1 → NFS4ERR_STALE_CLIENTID.
+ *   DESCID5/6   client owns at least one session → -2 → CLIENTID_BUSY.
+ *   DESCID8     destroy then destroy again → first 0, second -1.
  *
  * The first call removes the client record from both the clientid hash
  * and the owner hash, so a subsequent find_client_by_id() returns NULL.
@@ -1005,7 +1183,7 @@ int session_destroy_client(struct session_table *st, uint64_t clientid)
 		rc = -1;
 		goto out;
 	}
-	/* RFC 8881 S18.50.3: NFS4ERR_CLIENTID_BUSY when the client
+	/* RFC 8881 §18.50.3: NFS4ERR_CLIENTID_BUSY when the client
 	 * still holds confirmed sessions; the caller must tear those
 	 * down with DESTROY_SESSION first.  Unconfirmed clients (no
 	 * CREATE_SESSION yet) are eligible for destruction here. */
@@ -1015,6 +1193,47 @@ int session_destroy_client(struct session_table *st, uint64_t clientid)
 	}
 	unhash_client(st, c);
 	free_client(st, c);
+
+out:
+	pthread_mutex_unlock(&st->locks[0]);
+	return rc;
+}
+
+/* -----------------------------------------------------------------------
+ * RFC 8881 §18.51 RECLAIM_COMPLETE — per-client one-shot.
+ *
+ * Atomic test-and-set on the client's reclaim_complete_done flag
+ * under the session-table lock.  Independent of the grace recovery
+ * set so that brand-new (post-grace) clients can call exactly once
+ * and get NFS4_OK; their second call returns NFS4ERR_COMPLETE_ALREADY.
+ * Pynfs CALLBACK1 testCbNotifyLockExpiredClient drives the
+ * post-grace path.
+ *
+ * Returns: 0 on success (first call); 1 if already done;
+ *          -1 if clientid not found.
+ * ----------------------------------------------------------------------- */
+int session_client_reclaim_complete(struct session_table *st,
+				    uint64_t clientid)
+{
+	struct nfs4_client *c;
+	int rc;
+
+	if (st == NULL) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&st->locks[0]);
+	c = find_client_by_id(st, clientid);
+	if (c == NULL) {
+		rc = -1;
+		goto out;
+	}
+	if (c->reclaim_complete_done) {
+		rc = 1;
+		goto out;
+	}
+	c->reclaim_complete_done = true;
+	rc = 0;
 
 out:
 	pthread_mutex_unlock(&st->locks[0]);
@@ -1210,7 +1429,7 @@ int session_bind_conn(struct session_table *st,
 }
 
 /*
- * RFC 8881 S2.10.8.3 / S18.36 -- update the captured callback security
+ * RFC 8881 §2.10.8.3 / §18.36 — update the captured callback security
  * parameters on a session.  Called by op_create_session immediately
  * after session_create_session, and by op_backchannel_ctl when the
  * client supplies new bca_sec_parms.  A NULL @sec clears the parms
@@ -1245,7 +1464,7 @@ int session_set_cb_sec(struct session_table *st,
 }
 
 /*
- * RFC 8881 S18.33 BACKCHANNEL_CTL -- update the callback program
+ * RFC 8881 §18.33 BACKCHANNEL_CTL — update the callback program
  * number on a session.  No-op when the new value matches.
  */
 int session_set_cb_prog(struct session_table *st,
@@ -1300,7 +1519,7 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
  * lock and invoke @cb.  When @cb returns 1 ("snap consumed"), commit
  * the slot-0 seqid advance back to the session so subsequent CBs on
  * this session use a fresh, monotonic sa_sequenceid per RFC 8881
- * S18.46.4.  Internal helper shared by both iterators below.
+ * §18.46.4.  Internal helper shared by both iterators below.
  */
 static int session_invoke_cb_locked(struct nfs4_session *s,
                                     session_cb_snap_fn cb, void *ctx)
@@ -1316,7 +1535,7 @@ static int session_invoke_cb_locked(struct nfs4_session *s,
     snap.cb_sec = s->cb_sec;
     snap.cb_conn = s->cb_conn;
     /*
-     * RFC 8881 S2.10.5.1 / S18.46.4: CB_SEQUENCE sa_sequenceid MUST
+     * RFC 8881 §2.10.5.1 / §18.46.4: CB_SEQUENCE sa_sequenceid MUST
      * start at 1 and increment by 1 per CB on the slot.  The fd-based
      * callers (delegation/layout conflict-recall) use this snap value
      * verbatim as sa_sequenceid, so we hand them the NEXT id
@@ -1405,7 +1624,7 @@ int session_for_each_with_cb_for_clientid(struct session_table *st,
             continue;
         }
         rc = session_invoke_cb_locked(s, cb, ctx);
-        /* Stop at the first session we visit -- we want exactly one
+        /* Stop at the first session we visit — we want exactly one
          * CB delivery per clientid per call. */
         break;
     }
@@ -1425,12 +1644,19 @@ int session_for_each_with_cb_for_clientid(struct session_table *st,
 static void *lease_reaper_thread(void *arg)
 {
     struct session_table *st = arg;
-    uint32_t shard;
+    uint32_t lease = st->lease_time_sec > 0 ? st->lease_time_sec : 90;
 
     while (atomic_load(&st->reaper_running)) {
         {
+            /* Sleep for half the lease period so expired records
+             * are caught within a reasonable window.  The on-demand
+             * check in session_create_session handles the
+             * correctness-critical path; this loop is for garbage
+             * collection of records nobody asks about. */
+            uint32_t interval = lease / 2;
+            if (interval < 10) { interval = 10; }
             struct timespec ts = {
-                .tv_sec = st->lease_time_sec > 0 ? st->lease_time_sec : 90,
+                .tv_sec = interval,
                 .tv_nsec = 0,
             };
             (void)nanosleep(&ts, NULL);
@@ -1441,19 +1667,43 @@ static void *lease_reaper_thread(void *arg)
 
         time_t now = time(NULL);
 
-        for (shard = 0; shard < 16; shard++) {
-            pthread_mutex_lock(&st->locks[shard]);
-            for (uint32_t b = 0; b < CLIENT_HASH_BUCKETS; b++) {
-                struct nfs4_client **pp = &st->client_hash[b];
-                while (*pp != NULL) {
-                    struct nfs4_client *c = *pp;
-                    uint32_t cs = (uint32_t)(c->clientid % 16);
-                    if (cs != shard) { pp = &c->hash_next; continue; }
+        /* All session-table mutations use locks[0]; the reaper
+         * must use the same lock to avoid racing with
+         * session_exchange_id / session_create_session. */
+        pthread_mutex_lock(&st->locks[0]);
+        for (uint32_t b = 0; b < CLIENT_HASH_BUCKETS; b++) {
+            struct nfs4_client **pp = &st->client_hash[b];
+            while (*pp != NULL) {
+                struct nfs4_client *c = *pp;
+                bool expired = false;
 
-                    if (c->confirmed &&
-                        (uint32_t)(now - c->last_renewed) > st->lease_time_sec * 2) {
-                        /* Expired -- unlink and clean dependent state. */
-                        *pp = c->hash_next;
+                if (now <= c->last_renewed) {
+                    pp = &c->hash_next;
+                    continue;
+                }
+                uint32_t age = (uint32_t)(now - c->last_renewed);
+
+                if (!c->confirmed && age >= lease) {
+                    /* RFC 8881 §18.35.4: unconfirmed records
+                     * not confirmed within a lease period
+                     * SHOULD be removed. */
+                    expired = true;
+                } else if (c->confirmed && age > lease * 2) {
+                    /* Confirmed clients get 2× lease grace
+                     * (they actively renew via SEQUENCE). */
+                    expired = true;
+                }
+
+                if (expired) {
+                    /* Advance the bucket-chain pointer past c
+                     * before unhash removes c from the chain. */
+                    *pp = c->hash_next;
+                    /* unhash_client unlinks from owner_hash;
+                     * the client_hash unlink above is redundant
+                     * with unhash_client's client_hash walk, but
+                     * harmless (walk finds nothing). */
+                    unhash_client(st, c);
+                    if (c->confirmed) {
                         if (st->ot != NULL) {
                             open_state_close_all_for_client(
                                 st->ot, c->clientid);
@@ -1462,20 +1712,18 @@ static void *lease_reaper_thread(void *arg)
                             lock_release_all_for_client(
                                 st->lt, c->clientid);
                         }
-                        /* Layout state cleanup on lease expiry. */
                         if (st->cat != NULL) {
                             (void)mds_coord_layout_del_all_for_client(
                                 st->cat, c->clientid);
                         }
-                        destroy_client_sessions(st, c);
-                        free(c);
-                    } else {
-                        pp = &c->hash_next;
                     }
+                    free_client(st, c);
+                } else {
+                    pp = &c->hash_next;
                 }
             }
-            pthread_mutex_unlock(&st->locks[shard]);
         }
+        pthread_mutex_unlock(&st->locks[0]);
     }
     return NULL;
 }
@@ -1495,6 +1743,37 @@ void session_table_stop_reaper(struct session_table *st)
     pthread_join(st->reaper_tid, NULL);
 }
 
+bool session_client_lease_expired(struct session_table *st,
+                                  uint64_t clientid)
+{
+    struct nfs4_client *c;
+    bool expired = false;
+
+    if (st == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&st->locks[0]);
+    c = find_client_by_id(st, clientid);
+    if (c == NULL) {
+        /*
+         * Clientid not in the session table — the record was
+         * replaced by a subsequent EXCHANGE_ID (case 5) or
+         * destroyed.  Any open/lock state referencing this
+         * clientid is orphaned and must be treated as expired
+         * so courtesy-client revocation can clean it up.
+         */
+        expired = true;
+    } else {
+        time_t now = time(NULL);
+        if (now > c->last_renewed &&
+            (uint32_t)(now - c->last_renewed) >= st->lease_time_sec) {
+            expired = true;
+        }
+    }
+    pthread_mutex_unlock(&st->locks[0]);
+    return expired;
+}
+
 void session_table_set_ot(struct session_table *st,
                           struct open_state_table *ot)
 {
@@ -1505,94 +1784,5 @@ void session_table_set_lt(struct session_table *st,
                           struct lock_table *lt)
 {
     if (st != NULL) { st->lt = lt; }
-}
-
-/* -----------------------------------------------------------------------
- * RFC 8881 S18.51 RECLAIM_COMPLETE -- per-client one-shot.
- *
- * Atomic test-and-set on the client's reclaim_complete_done flag
- * under the session-table lock.  Independent of the grace recovery
- * set so that brand-new (post-grace) clients can call exactly once
- * and get NFS4_OK; their second call returns NFS4ERR_COMPLETE_ALREADY.
- *
- * Returns: 0 on success (first call); 1 if already done;
- *          -1 if clientid not found.
- * ----------------------------------------------------------------------- */
-int session_client_reclaim_complete(struct session_table *st,
-				    uint64_t clientid)
-{
-	struct nfs4_client *c;
-	int rc;
-
-	if (st == NULL) {
-		return -1;
-	}
-
-	pthread_mutex_lock(&st->locks[0]);
-	c = find_client_by_id(st, clientid);
-	if (c == NULL) {
-		rc = -1;
-		goto out;
-	}
-	if (c->reclaim_complete_done) {
-		rc = 1;
-		goto out;
-	}
-	c->reclaim_complete_done = true;
-	rc = 0;
-
-out:
-	pthread_mutex_unlock(&st->locks[0]);
-	return rc;
-}
-
-bool session_client_has_reclaimed(struct session_table *st,
-				  uint64_t clientid)
-{
-	struct nfs4_client *c;
-	bool done = true; /* default: allow if client not found */
-
-	if (st == NULL) {
-		return true;
-	}
-	pthread_mutex_lock(&st->locks[0]);
-	c = find_client_by_id(st, clientid);
-	if (c != NULL) {
-		done = c->reclaim_complete_done;
-	}
-	pthread_mutex_unlock(&st->locks[0]);
-	return done;
-}
-
-bool session_client_lease_expired(struct session_table *st,
-				  uint64_t clientid)
-{
-	struct nfs4_client *c;
-	bool expired = false;
-
-	if (st == NULL) {
-		return false;
-	}
-	pthread_mutex_lock(&st->locks[0]);
-	c = find_client_by_id(st, clientid);
-	if (c == NULL) {
-		/*
-		 * Clientid not in the session table -- the record was
-		 * replaced by a subsequent EXCHANGE_ID (case 5) or
-		 * destroyed.  Any open/lock state referencing this
-		 * clientid is orphaned and must be treated as expired
-		 * so courtesy-client revocation can clean it up.
-		 */
-		expired = true;
-	} else {
-		time_t now = time(NULL);
-		if (now > c->last_renewed &&
-		    (uint32_t)(now - c->last_renewed) >=
-		    st->lease_time_sec) {
-			expired = true;
-		}
-	}
-	pthread_mutex_unlock(&st->locks[0]);
-	return expired;
 }
 
