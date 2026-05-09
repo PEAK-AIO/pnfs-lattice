@@ -36,29 +36,22 @@ jobs:
   # -----------------------------------------------------------------------
   build:
     name: Build (${{ matrix.compiler }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # gcc-15 is shipped as the default compiler in Ubuntu 26.04 LTS
-        # but is not packaged in the 24.04 default repos, so route that
-        # row to the 26.04 runner image.  All other rows stay on
-        # ubuntu-latest (currently 24.04).
-        include:
-          - compiler: gcc-11
-            os: ubuntu-latest
-          - compiler: gcc-12
-            os: ubuntu-latest
-          - compiler: gcc
-            os: ubuntu-latest
-          - compiler: gcc-14
-            os: ubuntu-latest
-          - compiler: gcc-15
-            os: ubuntu-26.04
-          - compiler: clang
-            os: ubuntu-latest
+        compiler: [gcc-11, gcc-12, gcc, gcc-14, gcc-15, clang]
     steps:
       - uses: actions/checkout@v4
+
+      # gcc-15 is the default compiler on Ubuntu 26.04 LTS but is not
+      # packaged in the 24.04 default repos that ubuntu-latest currently
+      # uses.  Add the toolchain PPA only for that row so the installer
+      # below can find the package; other compiler rows are unaffected.
+      - name: Add toolchain PPA (gcc-15 only)
+        if: matrix.compiler == 'gcc-15'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
 
       - name: Install dependencies
         run: |
