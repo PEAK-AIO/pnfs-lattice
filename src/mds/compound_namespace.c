@@ -178,16 +178,28 @@ enum nfs4_status op_putrootfh(struct compound_data *cd,
 	(void)op;
 	(void)res;
 	cd->current_fh.fileid = MDS_FILEID_ROOT;
-	/* FH-encoded subtree ownership (suggested by Gaurav Gangalwar's
-	 * code review): stamp the local MDS id on every FH we hand out
-	 * so that PUTFH-starting compounds and longest-prefix path checks
-	 * can resolve the owning node directly from the FH.  Generation
-	 * is 0 for the root inode (no on-disk generation tracked). */
 	cd->current_fh.owner_mds_id = cd->mds_id;
 	cd->current_fh.generation = 0;
 	cd->current_fh_set = true;
 	(void)snprintf(cd->current_path, sizeof(cd->current_path), "/");
 	resolve_and_apply_shard(cd, cd->current_path);
+
+	/* Read the root inode's actual generation so the FH that GETFH
+	 * emits matches the FH that LOOKUPP produces when navigating
+	 * back to the root.  Pynfs LKPP1d verifies FH identity by
+	 * comparing GETFH after PUTROOTFH against GETFH after LOOKUPP;
+	 * a generation mismatch (0 vs the on-disk value) makes the
+	 * test fail.  On catalogue miss (test-compat / no backend),
+	 * generation stays 0 — harmless. */
+	{
+		struct mds_inode root_ino;
+		if (compound_inode_get(cd, MDS_FILEID_ROOT,
+				       &root_ino) == MDS_OK) {
+			cd->current_fh.generation = root_ino.generation;
+			cd->current_inode = root_ino;
+			cd->current_inode_valid = true;
+		}
+	}
 	return NFS4_OK;
 }
 

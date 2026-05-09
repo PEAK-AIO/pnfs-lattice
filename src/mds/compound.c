@@ -33,6 +33,7 @@
 #include "dirent_cache.h"
 #include "delegation.h"
 #include "dir_delegation.h"
+#include "xdr_codec.h"
 #include "mds_metrics.h"
 
 /* Internal counter helper, defined in dir_delegation.c. */
@@ -1385,6 +1386,83 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	case OP_REMOVEXATTR:     return op_removexattr(cd, op, res);
 	case OP_RECLAIM_COMPLETE: return op_reclaim_complete(cd, op, res);
 	case OP_GET_DIR_DELEGATION: return op_get_dir_delegation(cd, op, res);
+	/*
+	 * RFC 8881 §18.31 VERIFY / §18.19 NVERIFY.
+	 *
+	 * Compare the client-supplied fattr4 against the current file's
+	 * attributes.  VERIFY: match → NFS4_OK, mismatch → NOT_SAME.
+	 * NVERIFY: match → SAME, mismatch → NFS4_OK.
+	 *
+	 * Implementation: encode the current inode's attrs using the
+	 * same bitmap into a scratch buffer via xdrmem, then memcmp
+	 * the raw bytes.  Pynfs VF1r testMandFile.
+	 */
+	case OP_VERIFY:
+	case OP_NVERIFY: {
+		const struct nfs4_arg_verify *vf = &op->arg.verify;
+		struct mds_inode vf_inode;
+		enum nfs4_status vf_nst;
+		enum mds_status vf_st;
+		uint32_t vf_bm[NFS4_BITMAP_WORDS];
+		uint32_t vf_bm_words = 0;
+
+		vf_nst = require_current_fh(cd);
+		if (vf_nst != NFS4_OK) { return vf_nst; }
+
+		/* Read the file's current attributes. */
+		vf_st = compound_inode_get(cd, cd->current_fh.fileid,
+					  &vf_inode);
+		if (vf_st != MDS_OK) {
+			return mds_status_to_nfs4(vf_st);
+		}
+
+		/* Parse the bitmap from the client's raw fattr4 so we
+		 * can encode the server's attrs with the same bitmap. */
+		{
+			XDR bm_xdr;
+			xdrmem_create(&bm_xdr,
+				(char *)(uintptr_t)vf->fattr_raw,
+				vf->fattr_raw_len, XDR_DECODE);
+			memset(vf_bm, 0, sizeof(vf_bm));
+			if (!xdr_nfs4_bitmap_decode(&bm_xdr, vf_bm,
+						   NFS4_BITMAP_WORDS,
+						   &vf_bm_words)) {
+				xdr_destroy(&bm_xdr);
+				return NFS4ERR_BADXDR;
+			}
+			xdr_destroy(&bm_xdr);
+		}
+		(void)vf_bm_words; /* bitmap word count consumed by decoder */
+
+		/* Encode the server's current attrs using the same
+		 * bitmap into a scratch buffer. */
+		{
+			uint8_t srv_buf[NFS4_VERIFY_FATTR_MAX];
+			XDR srv_xdr;
+			uint32_t srv_len;
+
+			xdrmem_create(&srv_xdr, (char *)srv_buf,
+				      sizeof(srv_buf), XDR_ENCODE);
+			if (!xdr_nfs4_fattr_encode(&srv_xdr,
+						  &vf_inode, vf_bm)) {
+				xdr_destroy(&srv_xdr);
+				return NFS4ERR_SERVERFAULT;
+			}
+			srv_len = xdr_getpos(&srv_xdr);
+			xdr_destroy(&srv_xdr);
+
+			/* Compare raw fattr4 bytes. */
+			bool match = (srv_len == vf->fattr_raw_len &&
+				      memcmp(srv_buf, vf->fattr_raw,
+					     srv_len) == 0);
+			if (op->opnum == OP_VERIFY) {
+				return match ? NFS4_OK
+					     : NFS4ERR_NOT_SAME;
+			}
+			/* NVERIFY */
+			return match ? NFS4ERR_SAME : NFS4_OK;
+		}
+	}
 
 	/*
 	 * DESTROY_CLIENTID (RFC 8881 S18.50): destroy the named clientid.

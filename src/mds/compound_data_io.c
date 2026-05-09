@@ -30,6 +30,7 @@
 #include "grace.h"
 #include "ds_prepare.h"
 #include "catalogue_rondb.h"
+#include "lock_state.h"
 #include "delegation.h"
 #include "dir_delegation.h"
 #include "inode_cache.h"
@@ -1414,18 +1415,18 @@ enum nfs4_status validate_io_stateid(
 
 	if (open_state_find(cd->ot, stateid, &os) != 0) {
 		/*
+		 * RFC 8881 §16.2.4: a lock stateid produced by LOCK
+		 * is valid for READ/WRITE via current_stateid.  If
+		 * the stateid is not an open stateid, check the lock
+		 * table.  Pynfs CSID4 testLockWriteLocku.
+		 */
+		if (cd->lt != NULL &&
+		    lock_state_exists(cd->lt, stateid->other)) {
+			return NFS4_OK;
+		}
+		/*
 		 * RFC 8881 §10.4: a delegation stateid is valid for
-		 * READ even after the open is CLOSEd.  Check if
-		 * the stateid belongs to a live delegation held by
-		 * this client for this file.  Pynfs DELEG26.
-		 *
-		 * RFC 8881 §10.2.1: if the stateid belonged to a
-		 * delegation that has since been revoked, return
-		 * NFS4ERR_DELEG_REVOKED.  Pynfs DELEG8.
-		 * (We don't currently track revoked stateids, so
-		 * a revoked deleg looks like "not found" — return
-		 * BAD_STATEID.  A future change can track revoked
-		 * deleg stateids and return DELEG_REVOKED.)
+		 * READ even after the open is CLOSEd.  Pynfs DELEG26.
 		 */
 		if (cd->dt != NULL &&
 		    required_access == OPEN4_SHARE_ACCESS_READ &&
@@ -1433,9 +1434,8 @@ enum nfs4_status validate_io_stateid(
 			return NFS4_OK;
 		}
 		/*
-		 * RFC 8881 §10.2.1: if the stateid belonged to a
-		 * revoked delegation, return NFS4ERR_DELEG_REVOKED.
-		 * Pynfs DELEG8 testDelegRevocation.
+		 * RFC 8881 §10.2.1: revoked delegation → DELEG_REVOKED.
+		 * Pynfs DELEG8.
 		 */
 		if (cd->dt != NULL &&
 		    deleg_is_revoked(cd->dt, stateid->other)) {
