@@ -904,7 +904,9 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     int rc;
 
     if (snap == NULL || c == NULL || c->holder == NULL) {
-        (void)fprintf(stderr, "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p\n", (void*)snap, (void*)c);
+        (void)fprintf(stderr,
+            "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p\n",
+            (void *)snap, (void *)c);
         return 0;
     }
     (void)fprintf(stderr,

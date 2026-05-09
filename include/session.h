@@ -133,7 +133,7 @@ struct nfs4_session {
 	uint32_t             max_operations;
 	/* Backchannel state (RFC 8881 §2.10.3.1) */
 	uint32_t             cb_prog;         /* Callback program number */
-	uint32_t             cb_sec_flavor;   /* Callback security flavor (legacy alias for cb_sec.flavor) */
+	uint32_t             cb_sec_flavor;   /* Callback security flavor (legacy alias) */
 	/*
 	 * RFC 8881 §2.10.8.3 / §18.36 — callback security parameters
 	 * captured from CREATE_SESSION's csa_sec_parms<> array.  The
@@ -297,7 +297,7 @@ void session_table_set_shard(struct session_table *st,
  *   - Record exists + no UPDATE + unconfirmed                 → case 4, replace (new clientid).
  *   - Record exists + no UPDATE + confirmed:
  *       verifier match + principal match                       → case 2, return existing (renew).
- *       otherwise                                              → case 3/5/7, replace (new clientid).
+ *       otherwise                                              → case 3/5/7 (new clientid).
  *
  * The new client is "unconfirmed" until CREATE_SESSION succeeds.
  * Principal matching uses (auth_flavor, cred_uid, cred_gid).  When
