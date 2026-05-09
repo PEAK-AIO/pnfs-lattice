@@ -23,6 +23,7 @@
 #include <netinet/tcp.h>
 
 #include "rpc_server.h"
+#include "nfs4_cb.h"    /* nfs4_cb_deliver_reply */
 #include "xdr_codec.h"
 #include "compound.h"
 #include "session.h"
@@ -1515,7 +1516,30 @@ static int conn_read(struct rpc_server *srv, struct rpc_conn *c)
         c->have_frag_hdr = false;
 
         if (c->frag_last) {
-            /* Full record assembled. */
+            /* Full record assembled.
+             *
+             * RFC 8881 §2.10.3.1: the backchannel shares the
+             * forechannel TCP connection.  Callback REPLY records
+             * (msg_type=1) arrive interleaved with client CALL
+             * records.  Peek at msg_type (bytes 4-7) and route
+             * replies to the pending-CB-reply handler instead of
+             * the COMPOUND dispatcher.  Without this demux,
+             * rpc_decode_call_header rejects msg_type!=0 and
+             * drops the connection. */
+            if (c->recv_len >= 8) {
+                uint32_t msg_type =
+                    ((uint32_t)c->recv_buf[4] << 24) |
+                    ((uint32_t)c->recv_buf[5] << 16) |
+                    ((uint32_t)c->recv_buf[6] << 8)  |
+                    ((uint32_t)c->recv_buf[7]);
+                if (msg_type == 1) { /* RPC REPLY */
+                    nfs4_cb_deliver_reply(c->recv_buf,
+                                          c->recv_len);
+                    c->recv_len = 0;
+                    continue; /* Next record. */
+                }
+            }
+
             if (srv->tp != NULL) {
                 return dispatch_to_pool(srv, c);
             }

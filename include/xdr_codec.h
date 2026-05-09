@@ -104,6 +104,8 @@
 #define FATTR4_CHANGE_ATTR_TYPE 79
 /* RFC 8276 extended attribute support (bit 82). */
 #define FATTR4_XATTR_SUPPORT   82
+/* RFC 9480 / draft-ietf-nfsv4-delstid — open_arguments4 (bit 86). */
+#define FATTR4_OPEN_ARGUMENTS  86
 
 /* RFC 7862 S10.2.3 -- values for change_attr_type. */
 #define NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR         0

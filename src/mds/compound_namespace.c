@@ -661,6 +661,27 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	}
 
 	/*
+	 * RFC 8881 §20.1 CB_GETATTR: if another client holds a WRITE
+	 * delegation on this file, the delegation holder may have
+	 * modified size/change locally without writing back.  Issue
+	 * CB_GETATTR to the holder and overlay the returned attrs.
+	 * Pynfs DELEG24/25.
+	 */
+	if (cd->dt != NULL &&
+	    res->res.getattr.inode.type == MDS_FTYPE_REG) {
+		uint64_t cb_size = 0;
+		uint64_t cb_change = 0;
+		if (deleg_cb_getattr_for_file(cd->dt,
+					     cd->current_fh.fileid,
+					     cd->clientid,
+					     &cb_size,
+					     &cb_change) == 0) {
+			res->res.getattr.inode.size = cb_size;
+			res->res.getattr.inode.change = cb_change;
+		}
+	}
+
+	/*
 	 * Populate FS-level SPACE_AVAIL / SPACE_FREE / SPACE_TOTAL.
 	 *
 	 * The reported values reflect, in order of precedence:

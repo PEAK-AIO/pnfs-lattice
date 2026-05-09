@@ -220,6 +220,47 @@ int nfs4_cb_notify_fd(int fd,
 		      uint32_t timeout_ms);
 
 /**
+ * Result of a CB_GETATTR round-trip (RFC 8881 §20.1).
+ */
+struct nfs4_cb_getattr_result {
+	uint64_t size;    /**< FATTR4_SIZE from the delegation holder. */
+	uint64_t change;  /**< FATTR4_CHANGE from the delegation holder. */
+	bool     valid;   /**< true iff the callback succeeded. */
+};
+
+/**
+ * Send CB_GETATTR on a raw fd and read the reply.
+ *
+ * Builds CB_COMPOUND { CB_SEQUENCE, CB_GETATTR }, sends it, reads the
+ * RPC record reply, and parses the returned fattr4 for SIZE + CHANGE.
+ *
+ * @param fd            Connected backchannel socket (caller owns).
+ * @param session_id    16-byte session ID.
+ * @param cb_prog       Callback program number.
+ * @param slot_seq_id   Backchannel slot 0 sequence id.
+ * @param num_cb_slots  Total backchannel slots.
+ * @param minorversion  Session minor version.
+ * @param sec           Callback security parameters.
+ * @param fileid        File whose attrs to query.
+ * @param deleg_stateid Delegation stateid for the file.
+ * @param timeout_ms    Reply timeout (0 = default).
+ * @param out           Receives the result.
+ * @return 0 on success, negative errno on failure.
+ */
+int nfs4_cb_getattr_fd(int fd,
+		       const uint8_t session_id[SESSION_ID_SIZE],
+		       uint32_t cb_prog,
+		       uint32_t slot_seq_id,
+		       uint32_t num_cb_slots,
+		       uint32_t minorversion,
+		       const struct nfs4_cb_sec *sec,
+		       uint64_t fileid,
+		       uint32_t mds_id,
+		       const struct nfs4_stateid *deleg_stateid,
+		       uint32_t timeout_ms,
+		       struct nfs4_cb_getattr_result *out);
+
+/**
  * Override the default callback timeout used when a caller passes
  * timeout_ms=0.  Wired from the INI `cb_recall_timeout_ms` key at
  * daemon startup; safe to call at any point.  Values <50ms are
@@ -227,5 +268,29 @@ int nfs4_cb_notify_fd(int fd,
  * backchannel.
  */
 void nfs4_cb_set_default_timeout(uint32_t timeout_ms);
+
+/* -----------------------------------------------------------------------
+ * Pending CB reply slot — multiplexed backchannel reply delivery
+ *
+ * RFC 8881 §2.10.3.1: the backchannel shares the forechannel TCP
+ * connection.  The RPC record reader must demux incoming REPLY
+ * records (msg_type=1) and route them here so synchronous CB
+ * operations (CB_GETATTR) can receive their replies.
+ * ----------------------------------------------------------------------- */
+
+/** One-time init.  Call from daemon startup before any CB send. */
+void nfs4_cb_pending_reply_init(void);
+
+/**
+ * Deliver a callback reply record from the RPC reader.
+ *
+ * Called by the epoll/conn_read path when it reads an RPC record
+ * with msg_type == 1 (REPLY).  If a pending slot is waiting, the
+ * record is copied and the waiter is signalled.
+ *
+ * @param buf  Complete RPC record (without the 4-byte frag header).
+ * @param len  Record length.
+ */
+void nfs4_cb_deliver_reply(const uint8_t *buf, uint32_t len);
 
 #endif /* NFS4_CB_H */

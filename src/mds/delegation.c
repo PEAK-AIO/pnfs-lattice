@@ -179,6 +179,94 @@ struct deleg_table {
     pthread_mutex_t             revoked_lock;
 };
 
+/* Forward declarations for CB_GETATTR (defined after hash helpers). */
+static uint32_t deleg_hash(uint64_t fileid);
+static void lock_stripe(struct deleg_table *dt, uint64_t fileid);
+static void unlock_stripe(struct deleg_table *dt, uint64_t fileid);
+
+/* -----------------------------------------------------------------------
+ * CB_GETATTR for write-delegated files (RFC 8881 §20.1)
+ *
+ * Looks up the WRITE delegation holder for a fileid, snapshots the
+ * holder's backchannel metadata, sends CB_GETATTR on a dup'd fd,
+ * recvs the reply, and returns the holder's reported size + change.
+ * Returns -1 if no write delegation exists or the CB fails.
+ * ----------------------------------------------------------------------- */
+
+int deleg_cb_getattr_for_file(struct deleg_table *dt,
+                              uint64_t fileid,
+                              uint64_t requesting_clientid,
+                              uint64_t *out_size,
+                              uint64_t *out_change)
+{
+    if (dt == NULL || dt->st == NULL) {
+        return -1;
+    }
+
+    /* Find the WRITE delegation holder under the stripe lock. */
+    uint64_t holder_clientid = 0;
+    struct nfs4_stateid holder_sid;
+    bool found = false;
+
+    lock_stripe(dt, fileid);
+    {
+        uint32_t idx = deleg_hash(fileid);
+        struct deleg_entry *e = dt->buckets[idx];
+        while (e != NULL) {
+            if (e->fileid == fileid &&
+                e->deleg_type == OPEN_DELEGATE_WRITE &&
+                e->clientid != requesting_clientid) {
+                holder_clientid = e->clientid;
+                holder_sid = e->stateid;
+                found = true;
+                break;
+            }
+            e = e->hash_next;
+        }
+    }
+    unlock_stripe(dt, fileid);
+
+    if (!found) {
+        return -1;
+    }
+
+    /* Snapshot the holder's backchannel metadata (same pattern as
+     * deleg_recall_file uses for CB_RECALL). */
+    struct deleg_cb_lookup_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.want_clientid = holder_clientid;
+    ctx.fd = -1;
+
+    session_for_each_with_cb(dt->st, deleg_cb_lookup_cb, &ctx);
+    if (!ctx.found || ctx.fd < 0) {
+        return -1;
+    }
+
+    /* Send CB_GETATTR and recv reply on the dup'd fd. */
+    struct nfs4_cb_getattr_result result;
+    int rc = nfs4_cb_getattr_fd(ctx.fd,
+                                ctx.session_id,
+                                ctx.cb_prog,
+                                ctx.slot_seq_id,
+                                ctx.num_cb_slots,
+                                ctx.minorversion,
+                                &ctx.cb_sec,
+                                fileid,
+                                dt->mds_id,
+                                &holder_sid,
+                                5000, /* 5s timeout */
+                                &result);
+    close(ctx.fd);
+
+    if (rc != 0 || !result.valid) {
+        return -1;
+    }
+
+    if (out_size != NULL)   { *out_size = result.size; }
+    if (out_change != NULL) { *out_change = result.change; }
+    return 0;
+}
+
 /* -----------------------------------------------------------------------
  * Hash helpers
  * ----------------------------------------------------------------------- */

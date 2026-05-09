@@ -870,6 +870,7 @@ int main(int argc, char *argv[])
 	 * timeout.  Both are safe to call at any time and take effect
 	 * for the next RPC that asks for the default (timeout_ms=0).
 	 */
+	nfs4_cb_pending_reply_init();
 	nfs4_cb_set_default_timeout(cfg.cb_recall_timeout_ms);
 	dir_deleg_set_default_timeout(cfg.dir_deleg_recall_timeout_ms);
 

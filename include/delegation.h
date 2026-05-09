@@ -250,4 +250,25 @@ bool deleg_client_has_revoked(const struct deleg_table *dt,
 int deleg_free_revoked(struct deleg_table *dt,
                        const uint8_t other[12]);
 
+/**
+ * RFC 8881 §20.1: issue CB_GETATTR to a WRITE delegation holder.
+ *
+ * If @p fileid has an active WRITE delegation from a client other
+ * than @p requesting_clientid, snapshot the holder's backchannel
+ * metadata, send CB_GETATTR, receive the reply, and return the
+ * holder's reported size + change.
+ *
+ * @param dt                 Delegation table (NULL → -1).
+ * @param fileid             Target file.
+ * @param requesting_clientid Client doing GETATTR (exclude from CB).
+ * @param out_size           Receives holder's size.
+ * @param out_change         Receives holder's change.
+ * @return 0 on success, -1 if no write deleg or CB failed.
+ */
+int deleg_cb_getattr_for_file(struct deleg_table *dt,
+                              uint64_t fileid,
+                              uint64_t requesting_clientid,
+                              uint64_t *out_size,
+                              uint64_t *out_change);
+
 #endif /* DELEGATION_H */

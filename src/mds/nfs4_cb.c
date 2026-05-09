@@ -13,10 +13,13 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <poll.h>
 #include <arpa/inet.h>
 #include <stdatomic.h>
+#include <pthread.h>
+#include <time.h>
 #include <rpc/xdr.h>
 
 #include "nfs4_cb.h"
@@ -1002,4 +1005,387 @@ int nfs4_cb_layoutrecall_fd(int fd,
 
     /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Pending CB reply slot — multiplexed backchannel reply delivery
+ *
+ * RFC 8881 §2.10.3.1: the backchannel shares the forechannel TCP
+ * connection (BIND_CONN_TO_SESSION).  The epoll record reader
+ * (conn_read) is the sole consumer of incoming records.  A
+ * synchronous CB like CB_GETATTR cannot recv() on a dup'd fd
+ * because the reader would consume the reply first.  Instead,
+ * the reader detects msg_type==1 (REPLY) and delivers the record
+ * here; the CB sender blocks on the condvar.
+ *
+ * Single-slot: only one synchronous CB round-trip at a time.
+ * This is fine because CB_GETATTR is the only synchronous CB,
+ * and it is always called while processing a single COMPOUND.
+ * ----------------------------------------------------------------------- */
+
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    uint32_t        xid;        /**< XID the waiter expects. */
+    uint8_t        *buf;        /**< Caller-provided receive buffer. */
+    uint32_t        buf_size;   /**< Capacity of buf. */
+    uint32_t        reply_len;  /**< Actual reply length delivered. */
+    bool            waiting;    /**< A sender is waiting for a reply. */
+    bool            delivered;  /**< Reply has been delivered. */
+} cb_pending_reply;
+
+void nfs4_cb_pending_reply_init(void)
+{
+    pthread_mutex_init(&cb_pending_reply.lock, NULL);
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&cb_pending_reply.cond, &attr);
+    pthread_condattr_destroy(&attr);
+    cb_pending_reply.waiting = false;
+    cb_pending_reply.delivered = false;
+}
+
+static void cb_pending_register(uint32_t xid, uint8_t *buf, uint32_t bufsz)
+{
+    pthread_mutex_lock(&cb_pending_reply.lock);
+    cb_pending_reply.xid = xid;
+    cb_pending_reply.buf = buf;
+    cb_pending_reply.buf_size = bufsz;
+    cb_pending_reply.reply_len = 0;
+    cb_pending_reply.delivered = false;
+    cb_pending_reply.waiting = true;
+    pthread_mutex_unlock(&cb_pending_reply.lock);
+}
+
+/** Block until the reply is delivered or timeout_ms expires.
+ *  Returns reply length, or -1 on timeout. */
+static int cb_pending_wait(uint32_t timeout_ms)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec  += timeout_ms / 1000;
+    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec  += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+
+    int ret = -1;
+    pthread_mutex_lock(&cb_pending_reply.lock);
+    while (!cb_pending_reply.delivered) {
+        int rc = pthread_cond_timedwait(&cb_pending_reply.cond,
+                                       &cb_pending_reply.lock, &ts);
+        if (rc != 0) { break; } /* ETIMEDOUT or error */
+    }
+    if (cb_pending_reply.delivered) {
+        ret = (int)cb_pending_reply.reply_len;
+    }
+    pthread_mutex_unlock(&cb_pending_reply.lock);
+    return ret;
+}
+
+static void cb_pending_unregister(void)
+{
+    pthread_mutex_lock(&cb_pending_reply.lock);
+    cb_pending_reply.waiting = false;
+    cb_pending_reply.delivered = false;
+    cb_pending_reply.buf = NULL;
+    pthread_mutex_unlock(&cb_pending_reply.lock);
+}
+
+void nfs4_cb_deliver_reply(const uint8_t *buf, uint32_t len)
+{
+    pthread_mutex_lock(&cb_pending_reply.lock);
+    if (cb_pending_reply.waiting && !cb_pending_reply.delivered) {
+        uint32_t copy = (len < cb_pending_reply.buf_size)
+                            ? len : cb_pending_reply.buf_size;
+        memcpy(cb_pending_reply.buf, buf, copy);
+        cb_pending_reply.reply_len = copy;
+        cb_pending_reply.delivered = true;
+        pthread_cond_signal(&cb_pending_reply.cond);
+    }
+    /* If no waiter, silently discard (fire-and-forget CB reply). */
+    pthread_mutex_unlock(&cb_pending_reply.lock);
+}
+
+/* -----------------------------------------------------------------------
+ * CB_GETATTR (RFC 8881 §20.1) — synchronous round-trip
+ *
+ * Unlike the fire-and-forget CB_RECALL / CB_LAYOUTRECALL senders,
+ * CB_GETATTR MUST read the reply to extract the delegation holder's
+ * current size + change.  The reply is delivered via the pending
+ * slot above, routed from the epoll record reader.
+ * ----------------------------------------------------------------------- */
+
+static bool encode_cb_getattr(XDR *xdrs, uint64_t fileid, uint32_t mds_id,
+                              const struct nfs4_stateid *deleg_sid)
+{
+    uint32_t opnum = OP_CB_GETATTR;
+    if (!xdr_uint32_t(xdrs, &opnum)) { return false; }
+    /* nfs_fh4 — v1 cluster-global FH matching the delegation grant.
+     * RFC 8881 §20.1: the FH MUST match the one the client holds. */
+    if (!xdr_nfs4_fh_encode_v1(xdrs, mds_id, fileid, 1)) { return false; }
+    /* bitmap4 requesting CHANGE(3) + SIZE(4). */
+    uint32_t bm_words = 1;
+    uint32_t bm_w0 = (1u << 3) | (1u << 4); /* CHANGE + SIZE */
+    if (!xdr_uint32_t(xdrs, &bm_words)) { return false; }
+    if (!xdr_uint32_t(xdrs, &bm_w0)) { return false; }
+    (void)deleg_sid; /* CB_GETATTR does not carry a stateid on the wire */
+    return true;
+}
+
+/**
+ * Parse a CB_GETATTR reply to extract size + change.
+ * The reply wire form is:
+ *   RPC reply header, then CB_COMPOUND4res:
+ *     status(4) tag(var) resarray_count(4)
+ *     CB_SEQUENCE result (opnum+status + body)
+ *     CB_GETATTR result (opnum+status + fattr4 on OK)
+ */
+static int decode_cb_getattr_reply(const uint8_t *buf, uint32_t len,
+                                   struct nfs4_cb_getattr_result *out)
+{
+    XDR xdrs;
+    uint32_t v;
+    out->valid = false;
+
+    xdrmem_create(&xdrs, (char *)(uintptr_t)buf, len, XDR_DECODE);
+
+    /* RPC reply header: xid(4) msg_type(4)=1 reply_stat(4)=0
+     *                   verf_flavor(4) verf_len(4) verf_body(var)
+     *                   accept_stat(4)=0 */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* xid */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* msg_type */
+    if (v != 1) { goto fail; } /* must be REPLY */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* reply_stat */
+    if (v != 0) { goto fail; } /* MSG_ACCEPTED */
+    /* verifier: flavor + len + body */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* verf flavor */
+    { uint32_t vlen;
+      if (!xdr_uint32_t(&xdrs, &vlen)) { goto fail; }
+      if (vlen > 0) {
+          char skip[400];
+          if (vlen > sizeof(skip)) { goto fail; }
+          if (!xdr_opaque_decode(&xdrs, skip, vlen)) { goto fail; }
+      }
+    }
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* accept_stat */
+    if (v != 0) { goto fail; } /* SUCCESS */
+
+    /* CB_COMPOUND4res: status(4) + tag(var) + resarray_count(4) */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* compound status */
+    if (v != 0) { goto fail; } /* NFS4_OK */
+    { uint32_t tlen;
+      if (!xdr_uint32_t(&xdrs, &tlen)) { goto fail; }
+      if (tlen > 0) {
+          char skip[64];
+          if (tlen > sizeof(skip)) { goto fail; }
+          if (!xdr_opaque_decode(&xdrs, skip, tlen)) { goto fail; }
+      }
+    }
+    uint32_t res_count;
+    if (!xdr_uint32_t(&xdrs, &res_count)) { goto fail; }
+    if (res_count < 2) { goto fail; }
+
+    /* Skip CB_SEQUENCE result: opnum(4) + status(4) + body. */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* opnum */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* status */
+    if (v != 0) { goto fail; }
+    /* CB_SEQUENCE4resok per RFC 8881 §20.9.3:
+     *   session_id(16) + sequenceid(4) + slotid(4)
+     *   + highest_slotid(4) + target_highest_slotid(4)
+     *
+     * NOTE: unlike the fore-channel SEQUENCE4resok (§18.46),
+     * CB_SEQUENCE4resok does NOT include csr_status_flags.
+     * The peek below is defensive: if an implementation adds
+     * an extra field, we consume it instead of misaligning. */
+    { char sid[16];
+      if (!xdr_opaque_decode(&xdrs, sid, 16)) { goto fail; }
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!xdr_uint32_t(&xdrs, &v)) { goto fail; }
+    }
+    /* Peek: if the next word is NOT the CB_GETATTR opnum (3),
+     * assume it is status_flags and consume it. */
+    {
+        uint32_t peek_pos = xdr_getpos(&xdrs);
+        uint32_t peek_val;
+        if (!xdr_uint32_t(&xdrs, &peek_val)) { goto fail; }
+        if (peek_val != OP_CB_GETATTR) {
+            /* Was status_flags — consumed; next read is opnum. */
+        } else {
+            /* Was the opnum itself — rewind so the outer
+             * CB_GETATTR parse reads it. */
+            xdr_setpos(&xdrs, peek_pos);
+        }
+    }
+
+    /* CB_GETATTR result: opnum(4) + status(4) + fattr4 on OK. */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* opnum */
+    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* status */
+    if (v != 0) { goto fail; }
+
+    /* fattr4 = bitmap4 + opaque attr_vals<> */
+    uint32_t bm[3] = {0};
+    uint32_t bm_count;
+    if (!xdr_uint32_t(&xdrs, &bm_count)) { goto fail; }
+    for (uint32_t i = 0; i < bm_count && i < 3; i++) {
+        if (!xdr_uint32_t(&xdrs, &bm[i])) { goto fail; }
+    }
+    /* Skip any bitmap words beyond what we handle. */
+    for (uint32_t i = 3; i < bm_count; i++) {
+        if (!xdr_uint32_t(&xdrs, &v)) { goto fail; }
+    }
+    uint32_t attr_len;
+    if (!xdr_uint32_t(&xdrs, &attr_len)) { goto fail; }
+    /* Parse attr_vals in bitmap order. */
+    bool has_change = (bm[0] & (1u << 3)) != 0;
+    bool has_size   = (bm[0] & (1u << 4)) != 0;
+    if (has_change) {
+        if (!xdr_uint64_t(&xdrs, &out->change)) { goto fail; }
+    }
+    if (has_size) {
+        if (!xdr_uint64_t(&xdrs, &out->size)) { goto fail; }
+    }
+    out->valid = true;
+    xdr_destroy(&xdrs);
+    return 0;
+
+fail:
+    xdr_destroy(&xdrs);
+    return -1;
+}
+
+int nfs4_cb_getattr_fd(int fd,
+                       const uint8_t session_id[SESSION_ID_SIZE],
+                       uint32_t cb_prog,
+                       uint32_t slot_seq_id,
+                       uint32_t num_cb_slots,
+                       uint32_t minorversion,
+                       const struct nfs4_cb_sec *sec,
+                       uint64_t fileid,
+                       uint32_t mds_id,
+                       const struct nfs4_stateid *deleg_stateid,
+                       uint32_t timeout_ms,
+                       struct nfs4_cb_getattr_result *out)
+{
+    char msg_buf[CB_MAX_MSG_SIZE];
+    XDR xdrs;
+    uint32_t xid;
+    int rc;
+
+    if (fd < 0 || session_id == NULL || out == NULL) {
+        return -EINVAL;
+    }
+    memset(out, 0, sizeof(*out));
+    if (timeout_ms == 0) {
+        timeout_ms = cb_default_timeout();
+    }
+
+    xid = atomic_fetch_add(&cb_xid_counter, 1);
+
+    /* Encode CB_COMPOUND { CB_SEQUENCE, CB_GETATTR }. */
+    xdrmem_create(&xdrs, msg_buf, sizeof(msg_buf), XDR_ENCODE);
+    if (!encode_rpc_call_header(&xdrs, xid, cb_prog, 1, sec)) {
+        xdr_destroy(&xdrs);
+        return -EIO;
+    }
+    if (!encode_cb_compound_header(&xdrs, minorversion, 2)) {
+        xdr_destroy(&xdrs);
+        return -EIO;
+    }
+    uint32_t highest_slot = (num_cb_slots > 0) ? num_cb_slots - 1 : 0;
+    if (!encode_cb_sequence(&xdrs, session_id, 0,
+                            slot_seq_id, highest_slot)) {
+        xdr_destroy(&xdrs);
+        return -EIO;
+    }
+    if (!encode_cb_getattr(&xdrs, fileid, mds_id, deleg_stateid)) {
+        xdr_destroy(&xdrs);
+        return -EIO;
+    }
+    uint32_t msg_len = xdr_getpos(&xdrs);
+    xdr_destroy(&xdrs);
+
+    /* Send. */
+    rc = send_record(fd, (uint8_t *)msg_buf, msg_len);
+    if (rc != 0) {
+        return -EIO;
+    }
+
+    /* Receive reply directly on the dup'd fd.
+     *
+     * The dup'd fd shares the underlying socket with the rpc_conn
+     * monitored by the epoll thread.  When a threadpool is active,
+     * dispatch_to_pool() disables EPOLLIN on the requesting
+     * connection while its COMPOUND is being processed on the
+     * worker.  If the backchannel is bound to the SAME connection
+     * (BIND_CONN_TO_SESSION on the forechannel), the epoll thread
+     * will NOT read from this socket until the worker finishes.
+     * Direct recv on the dup'd fd is safe in that window.
+     *
+     * If the backchannel is on a DIFFERENT connection whose
+     * EPOLLIN is still active, the reply is routed through
+     * nfs4_cb_deliver_reply() instead (see conn_read demux).
+     * We try the pending slot first (fast path for separate
+     * connections), then fall back to direct recv. */
+    uint8_t reply_buf[CB_MAX_MSG_SIZE];
+    cb_pending_register(xid, reply_buf, sizeof(reply_buf));
+
+    /* Short poll: give the epoll reader ~50 ms to deliver if the
+     * reply is on a different connection. */
+    int reply_len = cb_pending_wait(50);
+    if (reply_len >= 0) {
+        /* Fast path: epoll reader delivered the reply. */
+        cb_pending_unregister();
+        rc = decode_cb_getattr_reply(reply_buf, (uint32_t)reply_len, out);
+        return (rc == 0 && out->valid) ? 0 : -EIO;
+    }
+    cb_pending_unregister();
+
+    /* Slow path: epoll thread can't read (EPOLLIN disabled on our
+     * connection, or the reply just hasn't arrived).  Do a blocking
+     * recv with SO_RCVTIMEO on the dup'd fd.
+     *
+     * The dup'd fd shares the O_NONBLOCK flag with the original
+     * connection fd (set by handle_epoll_accept).  SO_RCVTIMEO has
+     * no effect on non-blocking sockets — recv returns EAGAIN
+     * immediately.  Clear O_NONBLOCK so the recv actually blocks. */
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0 && (flags & O_NONBLOCK)) {
+            fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+        struct timeval tv;
+        tv.tv_sec  = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    /* Read the 4-byte record-mark header. */
+    uint32_t frag_hdr_be;
+    {
+        size_t got = 0;
+        while (got < 4) {
+            ssize_t n = recv(fd, (uint8_t *)&frag_hdr_be + got,
+                            4 - got, 0);
+            if (n <= 0) { return -ETIMEDOUT; }
+            got += (size_t)n;
+        }
+    }
+    uint32_t payload_len = ntohl(frag_hdr_be) & 0x7FFFFFFFu;
+    if (payload_len > sizeof(reply_buf)) {
+        return -EIO;
+    }
+    {
+        size_t got = 0;
+        while (got < payload_len) {
+            ssize_t n = recv(fd, reply_buf + got,
+                            payload_len - got, 0);
+            if (n <= 0) { return -ETIMEDOUT; }
+            got += (size_t)n;
+        }
+    }
+    rc = decode_cb_getattr_reply(reply_buf, payload_len, out);
+    return (rc == 0 && out->valid) ? 0 : -EIO;
 }

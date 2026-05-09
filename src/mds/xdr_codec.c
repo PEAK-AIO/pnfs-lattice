@@ -250,7 +250,8 @@ static const uint32_t k_supported_bitmap[NFS4_BITMAP_WORDS] = {
                 (1u << (48-32)) | (1u << (52-32)) | (1u << (53-32)) |
                 (1u << (54-32)) | (1u << (55-32)) | (1u << (62-32)) |
                 (1u << (FATTR4_LAYOUT_HINT - 32)),
-    /* word 2 */ (1u << (66-64)) | (1u << (79-64)) | (1u << (82-64)),
+    /* word 2 */ (1u << (66-64)) | (1u << (79-64)) | (1u << (82-64)) |
+                (1u << (FATTR4_OPEN_ARGUMENTS - 64)),
 };
 
 static void build_supported_bitmap(uint32_t sup[NFS4_BITMAP_WORDS])
@@ -667,6 +668,37 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
         if (!xdr_putbool(xdrs, xs)) {
             return false;
         }
+    }
+
+    /* RFC 9480: open_arguments4 (bit 86).
+     *
+     * Advertises which OPEN share-access, share-deny, want, claim,
+     * and create-mode values the server supports.  Each field is a
+     * bitmap4 (counted array of uint32) where bit N means
+     * "enum value N is supported".  Pynfs DELEG24/25 gate on this
+     * attribute being present in SUPPORTED_ATTRS.
+     */
+    if (nfs4_bitmap_test(actual, FATTR4_OPEN_ARGUMENTS)) {
+        /* oa_share_access: READ(1) WRITE(2) BOTH(3) */
+        { uint32_t n = 1, w = (1u<<1)|(1u<<2)|(1u<<3);
+          if (!xdr_uint32_t(xdrs, &n)) { return false; }
+          if (!xdr_uint32_t(xdrs, &w)) { return false; } }
+        /* oa_share_deny: NONE(0) READ(1) WRITE(2) BOTH(3) */
+        { uint32_t n = 1, w = (1u<<0)|(1u<<1)|(1u<<2)|(1u<<3);
+          if (!xdr_uint32_t(xdrs, &n)) { return false; }
+          if (!xdr_uint32_t(xdrs, &w)) { return false; } }
+        /* oa_share_access_want: ANY(3) NO(4) CANCEL(5) DELEG_TIMESTAMPS(20) */
+        { uint32_t n = 1, w = (1u<<3)|(1u<<4)|(1u<<5)|(1u<<20);
+          if (!xdr_uint32_t(xdrs, &n)) { return false; }
+          if (!xdr_uint32_t(xdrs, &w)) { return false; } }
+        /* oa_open_claim: NULL(0) PREVIOUS(1) FH(4) */
+        { uint32_t n = 1, w = (1u<<0)|(1u<<1)|(1u<<4);
+          if (!xdr_uint32_t(xdrs, &n)) { return false; }
+          if (!xdr_uint32_t(xdrs, &w)) { return false; } }
+        /* oa_create_mode: UNCHECKED(0) GUARDED(1) EXCLUSIVE4_1(3) */
+        { uint32_t n = 1, w = (1u<<0)|(1u<<1)|(1u<<3);
+          if (!xdr_uint32_t(xdrs, &n)) { return false; }
+          if (!xdr_uint32_t(xdrs, &w)) { return false; } }
     }
     return true;
 }
