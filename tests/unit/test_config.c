@@ -286,6 +286,61 @@ static void test_mountd_compat_port_out_of_range(void)
     unlink(path);
 }
 
+/* -------------------------------------------------------------------
+ * admin_allowed_hosts tests
+ * ------------------------------------------------------------------- */
+
+static void test_admin_allowed_hosts_default_empty(void)
+{
+    char path[128];
+    struct mds_config cfg;
+    ASSERT_EQ(write_tmp_ini("", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.admin_allowed_host_count, 0);
+    unlink(path);
+}
+
+static void test_admin_allowed_hosts_parse(void)
+{
+    char path[128];
+    struct mds_config cfg;
+    ASSERT_EQ(write_tmp_ini(
+        "admin_allowed_hosts = 192.168.1.10, 10.0.0.5, 172.16.0.100\n",
+        path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.admin_allowed_host_count, 3);
+    ASSERT_TRUE(strcmp(cfg.admin_allowed_hosts[0], "192.168.1.10") == 0);
+    ASSERT_TRUE(strcmp(cfg.admin_allowed_hosts[1], "10.0.0.5") == 0);
+    ASSERT_TRUE(strcmp(cfg.admin_allowed_hosts[2], "172.16.0.100") == 0);
+    unlink(path);
+}
+
+static void test_admin_allowed_hosts_overflow(void)
+{
+    char path[128];
+    struct mds_config cfg;
+    /* 33 entries -- limit is 32; the last one is dropped. */
+    char ini[2048];
+    int off = 0;
+    off += snprintf(ini + off, sizeof(ini) - (size_t)off,
+                    "admin_allowed_hosts = ");
+    for (int i = 0; i < 33 && off < (int)sizeof(ini) - 20; i++) {
+        if (i > 0) {
+            off += snprintf(ini + off, sizeof(ini) - (size_t)off, ", ");
+        }
+        off += snprintf(ini + off, sizeof(ini) - (size_t)off,
+                        "10.0.0.%d", i);
+    }
+    off += snprintf(ini + off, sizeof(ini) - (size_t)off, "\n");
+    (void)off;
+    ASSERT_EQ(write_tmp_ini(ini, path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.admin_allowed_host_count, 32);
+    /* Entry 32 (10.0.0.32) must NOT appear. */
+    ASSERT_TRUE(strcmp(cfg.admin_allowed_hosts[31], "10.0.0.31") == 0);
+    unlink(path);
+}
+
 int main(void)
 {
     fprintf(stdout, "test_config (RonDB-native)\n");
@@ -310,6 +365,11 @@ int main(void)
     RUN_TEST(test_mountd_compat_parse);
     RUN_TEST(test_mountd_compat_export_overflow);
     RUN_TEST(test_mountd_compat_port_out_of_range);
+
+    /* admin_allowed_hosts. */
+    RUN_TEST(test_admin_allowed_hosts_default_empty);
+    RUN_TEST(test_admin_allowed_hosts_parse);
+    RUN_TEST(test_admin_allowed_hosts_overflow);
 
     fprintf(stdout, "\n  %d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

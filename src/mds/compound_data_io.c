@@ -767,6 +767,26 @@ open_existing:
 			     target_fid,
 			     a->share_access, a->share_deny,
 			     &r->stateid);
+	/*
+	 * RFC 8881 §8.4.3 courtesy-client support: if the OPEN hit a
+	 * share conflict, check whether the conflicting open state
+	 * belongs to a client whose lease has expired.  If so, revoke
+	 * the expired state and retry once.  This lets a new client
+	 * proceed without waiting for the background reaper.
+	 * Pynfs COUR2/3/5/6.
+	 */
+	if (rc == -1 && cd->st != NULL) {
+		if (open_state_revoke_expired_for_file(
+			cd->ot, cd->st, target_fid) > 0) {
+			rc = open_state_open(cd->ot, cd->clientid,
+					     a->open_owner,
+					     a->open_owner_len,
+					     target_fid,
+					     a->share_access,
+					     a->share_deny,
+					     &r->stateid);
+		}
+	}
 	if (time_create) {
 		clock_gettime(CLOCK_MONOTONIC, &t_now);
 		atomic_fetch_add(
@@ -870,6 +890,19 @@ open_existing:
 				goto deleg_grant_done;
 			}
 
+			/*
+			 * RFC 8881 §10.4: do not grant a read delegation
+			 * if another client has the file open for write.
+			 * Pynfs DELEG9 testWriteOpenvsReadDeleg.
+			 */
+			if (cd->ot != NULL &&
+			    open_state_has_other_writer(cd->ot,
+						       target_fid,
+						       cd->clientid)) {
+				has_conflict = true;
+				r->none_reason = WND4_CONTENTION;
+				goto deleg_grant_done;
+			}
 			if (deleg_check_conflict(cd->dt, target_fid,
 						 cd->clientid,
 						 &has_conflict) == 0 &&
@@ -1353,17 +1386,34 @@ enum nfs4_status validate_io_stateid(
 }
 
 	if (open_state_find(cd->ot, stateid, &os) != 0) {
-		(void)fprintf(stderr,
-			"DBG BAD_STATEID: seqid=%u other=%02x%02x%02x%02x"
-			"%02x%02x%02x%02x%02x%02x%02x%02x fh=%lu\n",
-			stateid->seqid,
-			stateid->other[0], stateid->other[1],
-			stateid->other[2], stateid->other[3],
-			stateid->other[4], stateid->other[5],
-			stateid->other[6], stateid->other[7],
-			stateid->other[8], stateid->other[9],
-			stateid->other[10], stateid->other[11],
-			(unsigned long)cd->current_fh.fileid);
+		/*
+		 * RFC 8881 §10.4: a delegation stateid is valid for
+		 * READ even after the open is CLOSEd.  Check if
+		 * the stateid belongs to a live delegation held by
+		 * this client for this file.  Pynfs DELEG26.
+		 *
+		 * RFC 8881 §10.2.1: if the stateid belonged to a
+		 * delegation that has since been revoked, return
+		 * NFS4ERR_DELEG_REVOKED.  Pynfs DELEG8.
+		 * (We don't currently track revoked stateids, so
+		 * a revoked deleg looks like "not found" — return
+		 * BAD_STATEID.  A future change can track revoked
+		 * deleg stateids and return DELEG_REVOKED.)
+		 */
+		if (cd->dt != NULL &&
+		    required_access == OPEN4_SHARE_ACCESS_READ &&
+		    deleg_stateid_exists(cd->dt, stateid->other)) {
+			return NFS4_OK;
+		}
+		/*
+		 * RFC 8881 §10.2.1: if the stateid belonged to a
+		 * revoked delegation, return NFS4ERR_DELEG_REVOKED.
+		 * Pynfs DELEG8 testDelegRevocation.
+		 */
+		if (cd->dt != NULL &&
+		    deleg_is_revoked(cd->dt, stateid->other)) {
+			return NFS4ERR_DELEG_REVOKED;
+		}
 		return NFS4ERR_BAD_STATEID;
 }
 

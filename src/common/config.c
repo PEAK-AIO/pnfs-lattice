@@ -227,6 +227,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
              "127.0.0.1");
     cfg->cluster_allowed_peer_count = 0;
     cfg->cluster_max_conns = 16;
+    cfg->admin_allowed_host_count = 0;
     (void)snprintf(cfg->ds_mount_path_fmt, sizeof(cfg->ds_mount_path_fmt),
              "/mnt/ds%%u");
 
@@ -609,6 +610,22 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 if (idx + 1 > cfg->cluster_allowed_peer_count) {
                     cfg->cluster_allowed_peer_count = (uint32_t)(idx + 1);
 }
+            }
+        } else if (strcmp(key, "admin_allowed_hosts") == 0) {
+            /* Comma-separated list of IPv4 addresses. */
+            char buf[CFG_LINE_MAX];
+            (void)snprintf(buf, sizeof(buf), "%s", val);
+            char *saveptr = NULL;
+            char *tok = strtok_r(buf, ",", &saveptr);
+            while (tok != NULL && cfg->admin_allowed_host_count < 32) {
+                char *h = strip_whitespace(tok);
+                if (*h != '\0') {
+                    (void)snprintf(
+                        cfg->admin_allowed_hosts[cfg->admin_allowed_host_count],
+                        sizeof(cfg->admin_allowed_hosts[0]), "%s", h);
+                    cfg->admin_allowed_host_count++;
+                }
+                tok = strtok_r(NULL, ",", &saveptr);
             }
 
         /* Data servers: ds_count and ds[N] = host:/export */

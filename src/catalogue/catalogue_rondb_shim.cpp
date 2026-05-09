@@ -4903,10 +4903,11 @@ int rondb_shim_xattr_del(void *handle, uint64_t fileid,
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
-        if (err.code != 626 &&
-            err.classification != NdbError::NoDataFound) {
-            return rondb_report_error(err, "xattr_del commit");
+        if (err.code == 626 ||
+            err.classification == NdbError::NoDataFound) {
+            return 1; /* NOTFOUND — RFC 8276 §4.2.5 requires NOXATTR */
         }
+        return rondb_report_error(err, "xattr_del commit");
     }
 
     rondb_get_ndb(state)->closeTransaction(tx);

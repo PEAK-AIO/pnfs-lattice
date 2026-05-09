@@ -152,24 +152,31 @@ struct deleg_entry {
     uint64_t              recall_sent_ns;
 };
 
+/*
+ * RFC 8881 §10.2.1: revoked delegation stateids.  When a delegation
+ * is forcibly revoked (conflict-recall), the stateid is moved here
+ * so subsequent ops return NFS4ERR_DELEG_REVOKED (not BAD_STATEID).
+ * Entries are freed by FREE_STATEID or by client-destroy cleanup.
+ * Protected by revoked_lock (separate from stripe locks).
+ */
+struct deleg_revoked_entry {
+    uint8_t  other[NFS4_OTHER_SIZE];
+    uint64_t clientid;
+    struct deleg_revoked_entry *next;
+};
+
 struct deleg_table {
     struct deleg_entry  **buckets;     /* [DELEG_HASH_SIZE] */
     pthread_mutex_t       stripe_locks[DELEG_STRIPE_COUNT];
     uint32_t              mds_id;
     _Atomic uint64_t      sid_counter; /* Stateid sequence */
     struct mds_catalogue *cat;         /* RonDB (shared-attr). */
-    /*
-     * Borrowed session-table reference used to snapshot the holder's
-     * backchannel metadata (session_id, cb_prog, slot_seq_id, fd) when
-     * deleg_recall_file() needs to send CB_RECALL.  Set once at daemon
-     * startup; outlives every grant in the table.  NULL means "no CB";
-     * recalls degrade to silent revoke (legacy behaviour).
-     */
     struct session_table *st;
     uint64_t              boot_epoch;
-    /* When true, deleg_grant keeps grants in memory only.
-     * Mirrors `skip_transient_ndb` used by layout / open-state paths. */
     bool                  skip_transient_ndb;
+    /* Revoked-stateid tracking (RFC 8881 §10.2.1). */
+    struct deleg_revoked_entry *revoked_head;
+    pthread_mutex_t             revoked_lock;
 };
 
 /* -----------------------------------------------------------------------
@@ -251,6 +258,7 @@ int deleg_table_init(uint32_t mds_id, struct deleg_table **out)
     for (int i = 0; i < DELEG_STRIPE_COUNT; i++) {
         pthread_mutex_init(&dt->stripe_locks[i], NULL);
     }
+    pthread_mutex_init(&dt->revoked_lock, NULL);
 
     *out = dt;
     return 0;
@@ -276,6 +284,17 @@ void deleg_table_destroy(struct deleg_table *dt)
     for (int s = 0; s < DELEG_STRIPE_COUNT; s++) {
         pthread_mutex_destroy(&dt->stripe_locks[s]);
     }
+
+    /* Free revoked-stateid list. */
+    {
+        struct deleg_revoked_entry *re = dt->revoked_head;
+        while (re != NULL) {
+            struct deleg_revoked_entry *rn = re->next;
+            free(re);
+            re = rn;
+        }
+    }
+    pthread_mutex_destroy(&dt->revoked_lock);
 
     /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
     free(dt->buckets);
@@ -519,6 +538,25 @@ int deleg_recall_file(struct deleg_table *dt,
             (void)mds_coord_deleg_del(dt->cat, e->stateid.other);
         }
         *pp = e->hash_next;
+
+        /*
+         * RFC 8881 §10.2.1: move the stateid to the revoked set
+         * so the client sees DELEG_REVOKED (not BAD_STATEID)
+         * on any subsequent use.  Pynfs DELEG8.
+         */
+        {
+            struct deleg_revoked_entry *re =
+                calloc(1, sizeof(*re));
+            if (re != NULL) {
+                memcpy(re->other, e->stateid.other,
+                       NFS4_OTHER_SIZE);
+                re->clientid = e->clientid;
+                pthread_mutex_lock(&dt->revoked_lock);
+                re->next = dt->revoked_head;
+                dt->revoked_head = re;
+                pthread_mutex_unlock(&dt->revoked_lock);
+            }
+        }
         free(e);
     }
 
@@ -657,6 +695,62 @@ void deleg_revoke_file(struct deleg_table *dt, uint64_t fileid)
     }
 
     unlock_stripe(dt, fileid);
+}
+
+bool deleg_is_revoked(const struct deleg_table *dt,
+                      const uint8_t other[12])
+{
+    if (dt == NULL || other == NULL) { return false; }
+    struct deleg_table *mdt = (struct deleg_table *)dt;
+    pthread_mutex_lock(&mdt->revoked_lock);
+    const struct deleg_revoked_entry *re = mdt->revoked_head;
+    while (re != NULL) {
+        if (memcmp(re->other, other, NFS4_OTHER_SIZE) == 0) {
+            pthread_mutex_unlock(&mdt->revoked_lock);
+            return true;
+        }
+        re = re->next;
+    }
+    pthread_mutex_unlock(&mdt->revoked_lock);
+    return false;
+}
+
+bool deleg_client_has_revoked(const struct deleg_table *dt,
+                              uint64_t clientid)
+{
+    if (dt == NULL) { return false; }
+    struct deleg_table *mdt = (struct deleg_table *)dt;
+    pthread_mutex_lock(&mdt->revoked_lock);
+    const struct deleg_revoked_entry *re = mdt->revoked_head;
+    while (re != NULL) {
+        if (re->clientid == clientid) {
+            pthread_mutex_unlock(&mdt->revoked_lock);
+            return true;
+        }
+        re = re->next;
+    }
+    pthread_mutex_unlock(&mdt->revoked_lock);
+    return false;
+}
+
+int deleg_free_revoked(struct deleg_table *dt,
+                       const uint8_t other[12])
+{
+    if (dt == NULL || other == NULL) { return -1; }
+    pthread_mutex_lock(&dt->revoked_lock);
+    struct deleg_revoked_entry **pp = &dt->revoked_head;
+    while (*pp != NULL) {
+        struct deleg_revoked_entry *re = *pp;
+        if (memcmp(re->other, other, NFS4_OTHER_SIZE) == 0) {
+            *pp = re->next;
+            free(re);
+            pthread_mutex_unlock(&dt->revoked_lock);
+            return 0;
+        }
+        pp = &re->next;
+    }
+    pthread_mutex_unlock(&dt->revoked_lock);
+    return -1;
 }
 
 bool deleg_stateid_exists(const struct deleg_table *dt,

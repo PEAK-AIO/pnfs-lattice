@@ -169,6 +169,10 @@ struct cluster_server {
     struct in_addr     allowed_peers[CT_MAX_PEERS];
     uint32_t           allowed_peer_count;
 
+    /* Admin-only allowed hosts (web UI / monitoring). */
+    struct in_addr     admin_allowed_hosts[32];
+    uint32_t           admin_allowed_host_count;
+
     /* Per-connection threading (Finding 2 remediation). */
     atomic_uint        conn_count;
     uint32_t           max_conns;
@@ -226,11 +230,20 @@ struct cluster_server {
 /**
  * Check if a peer address is in the allowlist.
  * Returns true if allowed (empty list means accept all).
+ *
+ * Two ACLs are checked:
+ *   1. cluster_peer[] -- inter-MDS peers (populated from cluster_peer[N]).
+ *   2. admin_allowed_hosts -- monitoring / web-UI hosts (populated from
+ *      admin_allowed_hosts INI key).  Separated so operators can grant
+ *      admin-port access without adding a host as a cluster member.
+ *
+ * If both lists are empty and TLS is off, loopback-only is enforced.
  */
 static bool peer_is_allowed(const struct cluster_server *srv,
                             const struct sockaddr_in *peer)
 {
-    if (srv->allowed_peer_count == 0) {
+    if (srv->allowed_peer_count == 0 &&
+        srv->admin_allowed_host_count == 0) {
         /* No explicit allowlist.  If TLS is also not configured,
          * restrict to loopback only (3.4: unauthenticated admin
          * transport must not be reachable from the network). */
@@ -239,13 +252,21 @@ static bool peer_is_allowed(const struct cluster_server *srv,
             return (addr >> 24) == 127;
         }
         return true;
-}
+    }
 
+    /* Check cluster peers. */
     for (uint32_t i = 0; i < srv->allowed_peer_count; i++) {
         /* NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) */
         if (peer->sin_addr.s_addr == srv->allowed_peers[i].s_addr) {
             return true;
-}
+        }
+    }
+
+    /* Check admin allowed hosts. */
+    for (uint32_t i = 0; i < srv->admin_allowed_host_count; i++) {
+        if (peer->sin_addr.s_addr == srv->admin_allowed_hosts[i].s_addr) {
+            return true;
+        }
     }
     return false;
 }
@@ -1927,6 +1948,10 @@ enum mds_status cluster_transport_server_start(uint16_t port,
 }
         }
     }
+
+    /* Populate admin allowed hosts from config (if attached later
+     * via cluster_transport_server_set_config). */
+    srv->admin_allowed_host_count = 0;
 
     srv->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (srv->listen_fd < 0) {
@@ -3996,8 +4021,27 @@ void cluster_transport_server_set_migration_tracker(
 void cluster_transport_server_set_config(struct cluster_server *srv,
                                          const struct mds_config *cfg)
 {
-    if (srv != NULL) {
-        srv->cfg = cfg;
+    if (srv == NULL) {
+        return;
+    }
+    srv->cfg = cfg;
+
+    /* Populate admin allowed hosts ACL from config.
+     * This is separate from cluster_peer[] so operators can grant
+     * web-UI / monitoring access without adding an MDS peer. */
+    if (cfg != NULL) {
+        srv->admin_allowed_host_count = 0;
+        for (uint32_t i = 0; i < cfg->admin_allowed_host_count && i < 32; i++) {
+            if (inet_pton(AF_INET, cfg->admin_allowed_hosts[i],
+                          &srv->admin_allowed_hosts[srv->admin_allowed_host_count]) == 1) {
+                srv->admin_allowed_host_count++;
+            }
+        }
+        if (srv->admin_allowed_host_count > 0) {
+            (void)fprintf(stderr,
+                "INFO: admin_allowed_hosts: %u host(s) permitted\n",
+                (unsigned)srv->admin_allowed_host_count);
+        }
     }
 }
 

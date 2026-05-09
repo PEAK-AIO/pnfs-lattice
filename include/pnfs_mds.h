@@ -640,6 +640,20 @@ struct mds_config {
     uint32_t            cluster_allowed_peer_count;
     uint32_t            cluster_max_conns;
 
+    /*
+     * Admin-only allowed hosts.  Separate from cluster_peer[] so
+     * monitoring / web-UI hosts can connect to the admin transport
+     * without being treated as MDS cluster members.  Checked after
+     * the cluster peer ACL: a connection is accepted if the source
+     * IP matches ANY entry in either list (or if TLS is enabled and
+     * neither list is populated).
+     *
+     * INI key:  admin_allowed_hosts = 192.168.1.10, 10.0.0.0/24
+     * Up to 32 entries; plain IPv4 addresses only (no CIDR yet).
+     */
+    char                admin_allowed_hosts[32][64];
+    uint32_t            admin_allowed_host_count;
+
     /* Tuning */
     uint32_t            worker_threads;
     uint32_t            ds_heartbeat_ms;
