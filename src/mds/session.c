@@ -1743,6 +1743,24 @@ void session_table_stop_reaper(struct session_table *st)
     pthread_join(st->reaper_tid, NULL);
 }
 
+bool session_client_has_reclaimed(struct session_table *st,
+                                  uint64_t clientid)
+{
+    struct nfs4_client *c;
+    bool done = true; /* default: allow if client not found */
+
+    if (st == NULL) {
+        return true;
+    }
+    pthread_mutex_lock(&st->locks[0]);
+    c = find_client_by_id(st, clientid);
+    if (c != NULL) {
+        done = c->reclaim_complete_done;
+    }
+    pthread_mutex_unlock(&st->locks[0]);
+    return done;
+}
+
 bool session_client_lease_expired(struct session_table *st,
                                   uint64_t clientid)
 {

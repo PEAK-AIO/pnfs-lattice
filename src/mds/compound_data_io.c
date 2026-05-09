@@ -259,6 +259,33 @@ enum nfs4_status op_open(struct compound_data *cd,
 		return nst;
 }
 
+	/*
+	 * RFC 8881 S18.16.3 / S18.51.3 -- CLAIM_PREVIOUS (reclaim) is
+	 * only valid during the grace period.  Outside grace, reject
+	 * with NFS4ERR_NO_GRACE.  Pynfs RECC2 (testReclaimAfterRECC)
+	 * sends CLAIM_PREVIOUS after RECLAIM_COMPLETE outside grace.
+	 */
+	if (a->claim == CLAIM_PREVIOUS) {
+		if (!grace_is_active()) {
+			return NFS4ERR_NO_GRACE;
+		}
+		/* During grace: reclaim not yet implemented;
+		 * return RECLAIM_BAD as a safe stub. */
+		return NFS4ERR_RECLAIM_BAD;
+	}
+
+	/*
+	 * RFC 5661 S18.51.3: non-reclaim locking ops MUST be deferred
+	 * until RECLAIM_COMPLETE.  Return NFS4ERR_GRACE if the client
+	 * hasn't sent RECLAIM_COMPLETE yet.  CLAIM_PREVIOUS (reclaim)
+	 * is exempt.  Pynfs RECC3 testOpenBeforeRECC.
+	 */
+	if (a->claim != CLAIM_PREVIOUS &&
+	    cd->st != NULL && cd->clientid != 0 &&
+	    !session_client_has_reclaimed(cd->st, cd->clientid)) {
+		return NFS4ERR_GRACE;
+	}
+
 	switch (a->claim) {
 	case CLAIM_NULL:
 		clock_gettime(CLOCK_MONOTONIC, &t_open_start);

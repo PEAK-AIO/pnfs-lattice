@@ -718,6 +718,14 @@ int session_client_reclaim_complete(struct session_table *st,
 bool session_client_lease_expired(struct session_table *st,
                                   uint64_t clientid);
 
+/**
+ * Check if a client has completed RECLAIM_COMPLETE.
+ * RFC 5661 §18.51.3: non-reclaim ops MUST be deferred until the client
+ * sends RECLAIM_COMPLETE.  Returns true if the client has done so.
+ */
+bool session_client_has_reclaimed(struct session_table *st,
+                                  uint64_t clientid);
+
 #endif /* SESSION_H */
 /* Lease expiry reaper (R2.2). */
 int session_table_start_reaper(struct session_table *st);
