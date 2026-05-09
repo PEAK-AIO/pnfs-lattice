@@ -1450,9 +1450,48 @@ static enum mds_status mem_layout_del_all_for_client(struct mds_catalogue *c, ui
     }
     return MDS_OK;
 }
+/*
+ * Iterate every layout-state row whose fileid matches @fid, invoking
+ * @cb once per row with a transient (clientid, stateid, iomode) tuple.
+ *
+ * The coordination-layer callback contract (see
+ * mds_coord_layout_file_iter_cb in include/mds_coordination.h):
+ *   return 0 to continue, non-zero to stop.  The caller (e.g.
+ *   layout_recall byte-range collector) looks up the row's
+ *   (offset, length) via mds_coord_layout_get_by_stateid() keyed on
+ *   stateid->other, so we only need to forward the in-row stateid as-is.
+ *
+ * Implementation mirrors mem_ds_layout_idx_scan above: linear scan of
+ * the bounded m->layouts[] array under the same single-threaded test
+ * harness assumptions (no locking).
+ */
 static enum mds_status mem_layout_iter_file(struct mds_catalogue *c, uint64_t fid,
     mds_coord_layout_file_iter_cb cb, void *ctx)
-{ (void)c;(void)fid;(void)cb;(void)ctx; return MDS_OK; }
+{
+    struct memdb *m;
+
+    if (c == NULL || cb == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    m = c->backend_private;
+    if (m == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    for (uint32_t i = 0; i < MEMDB_MAX_LAYOUTS; i++) {
+        if (!m->layouts[i].used) {
+            continue;
+        }
+        if (m->layouts[i].fileid != fid) {
+            continue;
+        }
+        if (cb(m->layouts[i].clientid,
+               &m->layouts[i].stateid,
+               m->layouts[i].iomode, ctx) != 0) {
+            break;
+        }
+    }
+    return MDS_OK;
+}
 static enum mds_status mem_recovery_list(struct mds_catalogue *c, uint32_t mid,
     mds_recovery_list_cb cb, void *ctx)
 {
