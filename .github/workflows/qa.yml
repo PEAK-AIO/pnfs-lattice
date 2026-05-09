@@ -36,11 +36,27 @@ jobs:
   # -----------------------------------------------------------------------
   build:
     name: Build (${{ matrix.compiler }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        compiler: [gcc-11, gcc-12, gcc, gcc-14, gcc-15, clang]
+        # gcc-15 is shipped as the default compiler in Ubuntu 26.04 LTS
+        # but is not packaged in the 24.04 default repos, so route that
+        # row to the 26.04 runner image.  All other rows stay on
+        # ubuntu-latest (currently 24.04).
+        include:
+          - compiler: gcc-11
+            os: ubuntu-latest
+          - compiler: gcc-12
+            os: ubuntu-latest
+          - compiler: gcc
+            os: ubuntu-latest
+          - compiler: gcc-14
+            os: ubuntu-latest
+          - compiler: gcc-15
+            os: ubuntu-26.04
+          - compiler: clang
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

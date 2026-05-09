@@ -1074,7 +1074,7 @@ struct nfs4_res_open {
 	 */
 	uint32_t            delegation_type;
 	struct nfs4_stateid deleg_stateid;   /* Valid when delegation_type is READ or WRITE */
-	uint32_t            none_reason;     /* WND4_*, valid when delegation_type == OPEN_DELEGATE_NONE_EXT */
+	uint32_t            none_reason;     /* WND4_*, NONE_EXT only */
 	bool                none_will_push;  /* WND4_CONTENTION tail */
 	bool                none_will_signal;/* WND4_RESOURCE tail */
 };
