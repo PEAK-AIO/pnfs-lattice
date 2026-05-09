@@ -477,7 +477,14 @@ static void test_lookupp_discards_child_snapshot(void)
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_create("parent_dir", MDS_FTYPE_DIR, 0755);
-	ops[3] = mk_create("child_file", MDS_FTYPE_REG, 0644);
+	/* RFC 8881 §18.21: LOOKUPP on a non-directory current FH MUST
+	 * return NFS4ERR_NOTDIR.  The compound below exercises the
+	 * inode-cache snapshot invalidation that LOOKUPP performs, so
+	 * the child must itself be a directory for the LOOKUPP step
+	 * to reach the GETATTR.  An earlier revision created a regular
+	 * "child_file" here; that variant is now covered by the
+	 * RFC-conformance pynfs LKPP suite. */
+	ops[3] = mk_create("child_dir", MDS_FTYPE_DIR, 0755);
 
 	n = compound_process(&cd, ops, res, 4);
 	ASSERT_EQ(n, (uint32_t)4);
@@ -491,7 +498,7 @@ static void test_lookupp_discards_child_snapshot(void)
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("parent_dir");
-	ops[3] = mk_lookup("child_file");
+	ops[3] = mk_lookup("child_dir");
 	ops[4] = mk_lookupp();
 	ops[5] = mk_getattr();
 

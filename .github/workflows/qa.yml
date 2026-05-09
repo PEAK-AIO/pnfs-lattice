@@ -193,8 +193,13 @@ jobs:
             -DENABLE_EBPF=OFF
           cmake --build build -j$(nproc)
 
-      - name: Run tests
-        run: cd build && ctest --output-on-failure
+      - name: Run unit tests
+        # Only run unit-labeled tests; integration tests under
+        # tests/integration/ (test_cluster, test_failover,
+        # test_client_lifecycle, bench_create_layout_fusion) need a
+        # live cluster or external services and are out of scope for
+        # this gate.
+        run: cd build && ctest -L unit --output-on-failure
 
   # -----------------------------------------------------------------------
   # Gate 7: Valgrind (daily only -- too slow for every push)
