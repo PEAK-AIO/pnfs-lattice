@@ -1070,7 +1070,18 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		case OP_DELEGRETURN:
 			break;
 		default:
-			return NFS4ERR_OP_NOT_IN_SESSION;
+			/* RFC 8881 S2.10.6.4: unknown opcodes MUST
+			 * return NFS4ERR_OP_ILLEGAL regardless of
+			 * session state.  Let them fall through to
+			 * dispatch_op's default case.  Valid NFSv4.2
+			 * opcodes range 3..75; anything outside that
+			 * range (plus OP_ILLEGAL=10044) is unknown.
+			 * Pynfs COMP5 testUndefined. */
+			if (op->opnum >= OP_ACCESS &&
+			    op->opnum <= OP_REMOVEXATTR) {
+				return NFS4ERR_OP_NOT_IN_SESSION;
+			}
+			break;
 		}
 	}
 
