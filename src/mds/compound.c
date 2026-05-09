@@ -2001,7 +2001,39 @@ uint32_t compound_process(struct compound_data *cd,
 			clock_gettime(CLOCK_MONOTONIC, &t_op_start);
 		}
 
+		/*
+		 * RFC 8881 S2.10.6.1.3: before dispatching, check if the
+		 * accumulated response would exceed ca_maxresponsesize.
+		 * Only enforced after SEQUENCE has populated the cap.
+		 * Per-op estimate: 8 bytes (opnum+status) + 128 bytes
+		 * conservative body.  Pynfs CSESS26 (ca_maxresponsesize=400
+		 * with 4xGETATTR) drives this path.
+		 */
+		if (cd->max_response_size > 0 && i > 0) {
+			uint32_t op_est = 136; /* 8 + 128 body */
+			if (cd->response_size_est + op_est > cd->max_response_size) {
+				results[i].status = NFS4ERR_REP_TOO_BIG;
+				goto op_done;
+			}
+		}
+
 		results[i].status = dispatch_op(cd, &ops[i], &results[i]);
+
+		/*
+		 * RFC 8881 S2.10.6.4: if the operation is unknown, the
+		 * result MUST use OP_ILLEGAL as the opnum, not the raw
+		 * wire value the client sent.  Pynfs COMP5 testUndefined.
+		 */
+		if (results[i].status == NFS4ERR_OP_ILLEGAL) {
+			results[i].opnum = OP_ILLEGAL;
+		}
+
+op_done:
+		/* Update response size estimate for REP_TOO_BIG. */
+		if (cd->max_response_size > 0) {
+			cd->response_size_est += (results[i].status == NFS4_OK)
+				? 136U : 8U;
+		}
 
 		if (do_sample && i < 64) {
 			clock_gettime(CLOCK_MONOTONIC, &t_op_end);
