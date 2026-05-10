@@ -60,4 +60,3 @@ core.*
 
 # QA artifacts
 valgrind-logs/
-build-enterprise/
