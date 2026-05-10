@@ -1380,9 +1380,10 @@ struct nfs4_res_layoutget {
 	uint32_t              ff_mirror_count;
 	struct nfs4_ff_mirror *ff_mirrors; /* heap, sized ff_mirror_count */
 	uint32_t              ff_flags;
+	uint32_t              stripe_lease_duration_ms;
 
 	/*
-	 * Phase C / Step 6 — wire-form selector.  Default LEGACY (= 0)
+	 * Phase C / Step 6 — wire-form selector.
 	 * preserves the pre-feature wire shape.  The populator sets
 	 * STRIPED only after building the multi-DS-per-mirror form
 	 * (single ff_mirror4 with ds_count == stripe_count).  See enum
@@ -1595,9 +1596,10 @@ struct compound_data {
 	 * any future cross-client revoke initiated from a compound op.
 	 * Borrowed: lifetime is the daemon's, set once at startup.
 	 */
-	struct layout_recall     *lr;
+struct layout_recall     *lr;
+	struct stripe_lease_table *slt;  /* NULL = stripe leases disabled */
 	/*
-	 * Direct reference to the daemon's parsed mds_config.  Only used
+	 * Direct reference to the daemon's parsed mds_config.
 	 * by enterprise subsystems (Tier-0 affinitization) that need the
 	 * full config rather than individual cfg_* copies.  NULL in unit
 	 * tests; subsystem code must handle NULL gracefully.
@@ -1658,6 +1660,7 @@ struct compound_data {
 	 * the legacy one-DS-per-mirror form regardless of this setting.
 	 */
 	enum mds_hpc_xdr_form     cfg_hpc_xdr_form;
+	uint32_t                  cfg_stripe_lease_duration_ms;
 	uint64_t                  write_verf;   /* Server boot epoch (writeverf4) */
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */
 	bool                      sequence_done; /* Set by successful SEQUENCE */

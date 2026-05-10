@@ -385,6 +385,7 @@ enum mds_workload_profile {
  * compile-time default when the bit is clear. */
 #define MDS_CFG_SET_HPC_MAX_STRIPE_COUNT   (1ULL << 14)
 #define MDS_CFG_SET_HPC_XDR_FORM           (1ULL << 15)
+#define MDS_CFG_SET_STRIPE_LEASE_DURATION   (1ULL << 16)
 
 /* -----------------------------------------------------------------------
  * Catalogue backend selection
@@ -830,6 +831,14 @@ struct mds_config {
     char                catalog_replay_snapshot_path[MDS_MAX_PATH];
     bool                catalog_replay_rebuild_on_start;
     char                catalog_delta_log_path[MDS_MAX_PATH];
+
+    /*
+     * Stripe lease duration (milliseconds).  When non-zero, LAYOUTGET
+     * grants carry FF_FLAGS_STRIPE_LEASE and the MDS enforces per-
+     * (fileid, range_offset) leases so concurrent clients on the same
+     * stripe must wait or retry.  0 disables.  Default 30000 (30s).
+     */
+    uint32_t            stripe_lease_duration_ms;
 };
 /* NOLINTEND(clang-analyzer-optin.performance.Padding) */
 

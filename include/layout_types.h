@@ -26,6 +26,7 @@ enum layout_iomode {
 #define FF_FLAGS_NO_IO_THRU_MDS    0x00000002
 #define FF_FLAGS_NO_READ_IO        0x00000004
 #define FF_FLAGS_WRITE_ONE_MIRROR  0x00000008
+#define FF_FLAGS_STRIPE_LEASE      0x00000010
 
 /* -----------------------------------------------------------------------
  * Device ID -- identifies a set of DS addresses

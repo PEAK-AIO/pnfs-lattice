@@ -7,6 +7,7 @@ add_library(pnfs_fsal_obj STATIC
     ds_file.c
     placement.c
     referral.c
+    lease_table.c
 )
 
 target_include_directories(pnfs_fsal_obj PUBLIC

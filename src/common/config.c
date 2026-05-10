@@ -307,6 +307,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      */
     cfg->hpc_max_stripe_count = 128;
 
+    /* Stripe lease duration (default 30s). */
+    cfg->stripe_lease_duration_ms = 30000;
+
     fp = fopen(path, "r");
     if (fp == NULL) {
         return MDS_ERR_IO;
@@ -1033,6 +1036,19 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "catalog_delta_log_path") == 0) {
             (void)snprintf(cfg->catalog_delta_log_path,
                 sizeof(cfg->catalog_delta_log_path), "%s", val);
+
+        /* Stripe lease */
+        } else if (strcmp(key, "stripe_lease_duration_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            /* 0 disables; cap at 5 min. */
+            if (v <= 300000UL) {
+                cfg->stripe_lease_duration_ms = (uint32_t)v;
+                cfg->tuning_set |= MDS_CFG_SET_STRIPE_LEASE_DURATION;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: stripe_lease_duration_ms=%lu out of range "
+                    "(0..300000)\n", v);
+            }
 
         } else {
             /* Warn on unrecognized config keys. */

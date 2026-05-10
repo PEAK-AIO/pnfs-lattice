@@ -321,6 +321,16 @@ static struct nfs4_op mk_close(const struct nfs4_stateid *sid)
 	return op;
 }
 
+static struct nfs4_op mk_reclaim_complete(void)
+{
+	struct nfs4_op op;
+
+	memset(&op, 0, sizeof(op));
+	op.opnum = OP_RECLAIM_COMPLETE;
+	op.arg.reclaim_complete.rca_one_fs = false;
+	return op;
+}
+
 static struct nfs4_op mk_setattr(uint32_t mask, uint32_t mode)
 {
 	struct nfs4_op op;
@@ -393,6 +403,20 @@ static void test_full_client_lifecycle(void)
 	memcpy(session_id, res[0].res.create_session.session_id,
 	       SESSION_ID_SIZE);
 	ASSERT_TRUE(res[0].res.create_session.fore_slots > 0);
+
+	/* ===== Phase 1b: RECLAIM_COMPLETE (required before non-reclaim ops) ===== */
+
+	compound_init(&cd);
+	cd.cat = db;
+	cd.st = st;
+	cd.ot = ot;
+	ops[0] = mk_sequence(session_id, 0, slot_seq++);
+	ops[1] = mk_reclaim_complete();
+
+	n = compound_process(&cd, ops, res, 2);
+	ASSERT_EQ(n, (uint32_t)2);
+	ASSERT_EQ(res[0].status, NFS4_OK);
+	ASSERT_EQ(res[1].status, NFS4_OK);
 
 	/* ===== Phase 2: mkdir /workspace ===== */
 
@@ -765,6 +789,18 @@ static void test_share_conflict_lifecycle(void)
 	ASSERT_EQ(res[0].status, NFS4_OK);
 	memcpy(session_id, res[0].res.create_session.session_id,
 	       SESSION_ID_SIZE);
+
+	/* RECLAIM_COMPLETE (required before OPEN). */
+	compound_init(&cd);
+	cd.cat = db;
+	cd.st = st;
+	cd.ot = ot;
+	ops[0] = mk_sequence(session_id, 0, slot_seq++);
+	ops[1] = mk_reclaim_complete();
+	n = compound_process(&cd, ops, res, 2);
+	ASSERT_EQ(n, (uint32_t)2);
+	ASSERT_EQ(res[0].status, NFS4_OK);
+	ASSERT_EQ(res[1].status, NFS4_OK);
 
 	/* Create and OPEN file with DENY_WRITE.
 	 *

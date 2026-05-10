@@ -33,6 +33,14 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
+#include "lease_table.h"    /* stripe lease table (Phase 2) */
+
+/* FF_FLAGS_STRIPE_LEASE lives in layout_types.h, but that header's
+ * enum layout_iomode collides with compound.h's #define macros of the
+ * same names.  Duplicate the single constant here to avoid the clash. */
+#ifndef FF_FLAGS_STRIPE_LEASE
+#define FF_FLAGS_STRIPE_LEASE 0x00000010
+#endif
 
 
 /* -----------------------------------------------------------------------
@@ -973,6 +981,26 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
 	}
 
+	/* Stripe lease conflict check.
+	 *
+	 * When the stripe lease table is active (cd->slt != NULL and
+	 * cd->cfg_stripe_lease_duration_ms > 0), check whether another
+	 * client already holds an unexpired lease on an overlapping
+	 * range of this fileid.  If so, return NFS4ERR_LAYOUTTRYLATER
+	 * so the requesting client retries after a backoff.
+	 *
+	 * Same-client requests are allowed (renewal path). */
+	if (cd->slt != NULL && cd->cfg_stripe_lease_duration_ms > 0) {
+		if (stripe_lease_check_conflict(
+			cd->slt,
+			cd->current_fh.fileid,
+			cd->clientid,
+			grant_offset,
+			grant_length)) {
+			return NFS4ERR_LAYOUTTRYLATER;
+		}
+	}
+
 	/*
 	 * If the CQ fused a layout pregrant onto the preceding
 	 * OPEN(CREATE), consume it now -- before path branching.
@@ -1866,6 +1894,21 @@ fill_layoutget_result:
 	if (r->layout_type == LAYOUT4_FLEX_FILES) {
 		r->ff_flags = 0;
 
+		/* Stripe lease: set flag + duration and acquire the lease. */
+		if (cd->slt != NULL &&
+		    cd->cfg_stripe_lease_duration_ms > 0) {
+			r->ff_flags |= FF_FLAGS_STRIPE_LEASE;
+			r->stripe_lease_duration_ms =
+				cd->cfg_stripe_lease_duration_ms;
+			(void)stripe_lease_acquire(
+				cd->slt,
+				cd->current_fh.fileid,
+				cd->clientid,
+				grant_offset,
+				grant_length,
+				cd->cfg_stripe_lease_duration_ms);
+		}
+
 		/*
 		 * RFC 8435 S5.1: ffl_user / ffl_group identify the user
 		 * and group the DS must use to access the data on behalf
@@ -2097,6 +2140,16 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 		 * LAYOUTGET/RETURN on the same `other` is treated as
 		 * a brand-new layout, not a renewal. */
 		layout_seqid_remove(sid_resolved.other);
+
+		/* Release any stripe lease held by this client for
+		 * the returned range (whole-file for FILE returns). */
+		if (cd->slt != NULL) {
+			stripe_lease_release(
+				cd->slt,
+				cd->current_fh.fileid,
+				cd->clientid,
+				a->offset);
+		}
 	}
 	r->stateid_present = true;
 	memset(&r->stateid, 0, sizeof(r->stateid));

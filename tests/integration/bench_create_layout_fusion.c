@@ -391,6 +391,29 @@ static int bench_bringup_session(struct bench_ctx *c)
 	}
 	memcpy(c->session_id, res[0].res.create_session.session_id,
 	       SESSION_ID_SIZE);
+
+	/* RECLAIM_COMPLETE — required before any non-reclaim op (OPEN).
+	 * RFC 5661 S18.51.3 / pynfs RECC3. */
+	bench_init_cd(c, &cd);
+	memset(res, 0, sizeof(res));
+
+	ops[0].opnum = OP_SEQUENCE;
+	memcpy(ops[0].arg.sequence.session_id, c->session_id,
+	       SESSION_ID_SIZE);
+	ops[0].arg.sequence.slot_id = 0;
+	ops[0].arg.sequence.seq_id = 1;
+	ops[0].arg.sequence.highest_slot_id = 0;
+	ops[0].arg.sequence.cache_this = false;
+
+	memset(&ops[1], 0, sizeof(ops[1]));
+	ops[1].opnum = OP_RECLAIM_COMPLETE;
+
+	n = compound_process(&cd, ops, res, 2);
+	if (n != 2 || res[1].status != NFS4_OK) {
+		fprintf(stderr, "RECLAIM_COMPLETE failed: n=%u status=%d\n",
+			n, n >= 2 ? (int)res[1].status : -1);
+		return -1;
+	}
 	return 0;
 }
 
@@ -843,7 +866,7 @@ int main(int argc, char **argv)
 	struct mode_result fused;
 	struct mode_result unfused;
 	uint32_t iters = BENCH_DEFAULT_ITERS;
-	uint32_t slot_seq = 1;
+	uint32_t slot_seq = 2; /* 1 consumed by RECLAIM_COMPLETE in bringup */
 	double ratio;
 	const char *rondb_conf = NULL;
 	bool skip_transient_ndb = true;

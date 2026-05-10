@@ -13,6 +13,13 @@
 #include "xdr_codec.h"
 #include "xdr_internal.h"
 
+/* FF_FLAGS_STRIPE_LEASE lives in layout_types.h, but that header's
+ * enum layout_iomode collides with compound.h's #define macros of the
+ * same names.  Duplicate the single constant here to avoid the clash. */
+#ifndef FF_FLAGS_STRIPE_LEASE
+#define FF_FLAGS_STRIPE_LEASE 0x00000010
+#endif
+
 /* -----------------------------------------------------------------------
  * pNFS layout XDR decoders
  * ----------------------------------------------------------------------- */
@@ -333,7 +340,19 @@ static bool encode_ff_layout4_footer(XDR *body_xdrs,
         return false;
     }
     uint32_t hint = 0;
-    return xdr_uint32_t(body_xdrs, &hint);
+    if (!xdr_uint32_t(body_xdrs, &hint)) {
+        return false;
+    }
+    /* Append stripe lease duration when FF_FLAGS_STRIPE_LEASE is set.
+     * The client reads this immediately after ffl_stats_collect_hint
+     * and uses it as the per-stripe lease window (ms). */
+    if (flags & FF_FLAGS_STRIPE_LEASE) {
+        uint32_t lease_ms = lg->stripe_lease_duration_ms;
+        if (!xdr_uint32_t(body_xdrs, &lease_ms)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
