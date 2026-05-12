@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>   /* uid_t, gid_t */
 
 #include "pnfs_mds.h"
 
@@ -453,5 +454,22 @@ enum mds_status mds_proxy_set_ds_owner(const struct mds_proxy_ctx *ctx,
                                         uint32_t stripe, uint32_t mirror,
                                         const uint8_t *secret,
                                         uint32_t secret_len);
+
+/**
+ * Set DS file ownership to an explicit uid/gid.
+ *
+ * Loosely coupled, no-secret variant of mds_proxy_set_ds_owner(): the
+ * caller passes the uid/gid that the next layout will advertise in
+ * ffl_user / ffl_group, and this helper chowns the backing DS file to
+ * match so the DS's AUTH_SYS permission check succeeds.  Invoked from
+ * the LAYOUTGET grant path right before mirror entries are populated.
+ *
+ * @return MDS_OK, MDS_ERR_NOTFOUND (ds_id not mounted), MDS_ERR_IO.
+ */
+enum mds_status mds_proxy_set_ds_owner_explicit(
+    const struct mds_proxy_ctx *ctx,
+    uint32_t ds_id, uint64_t fileid,
+    uint32_t stripe, uint32_t mirror,
+    uid_t uid, gid_t gid);
 
 #endif /* PROXY_IO_H */

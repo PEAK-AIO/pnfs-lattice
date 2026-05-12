@@ -1876,3 +1876,41 @@ enum mds_status mds_proxy_fence_ds_file(const struct mds_proxy_ctx *ctx,
 
     return MDS_OK;
 }
+
+enum mds_status mds_proxy_set_ds_owner_explicit(
+    const struct mds_proxy_ctx *ctx,
+    uint32_t ds_id, uint64_t fileid,
+    uint32_t stripe, uint32_t mirror,
+    uid_t uid, gid_t gid)
+{
+    const char *mount;
+    char file_path[MDS_MAX_PATH];
+
+    if (ctx == NULL) {
+        return MDS_ERR_INVAL;
+    }
+
+    mount = find_mount(ctx, ds_id);
+    if (mount == NULL) {
+        return MDS_ERR_NOTFOUND;
+    }
+
+    if (build_ds_path(file_path, sizeof(file_path), mount,
+                      fileid, stripe, mirror) != 0) {
+        return MDS_ERR_IO;
+    }
+
+    /*
+     * Loosely coupled, generic-DS chown: align the DS backing file's
+     * owner with the (uid, gid) the next LAYOUTGET will advertise in
+     * ffl_user / ffl_group, so the DS's AUTH_SYS permission check
+     * accepts the client's READ/WRITE.  Caller is responsible for
+     * passing the same values it will put on the wire; see
+     * compound_layout.c::op_layoutget().
+     */
+    if (chown(file_path, uid, gid) != 0) {
+        return MDS_ERR_IO;
+    }
+
+    return MDS_OK;
+}

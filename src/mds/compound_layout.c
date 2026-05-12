@@ -715,74 +715,6 @@ static enum nfs4_status layout_revoke_grant_entries(
 	return mds_status_to_nfs4(st);
 }
 
-/**
- * Backfill missing NFS file handles for entries that still have
- * nfs_fh_len == 0.  Uses the proxy mount to create/open the DS
- * data file and capture the handle via name_to_handle_at().
- */
-static void layout_backfill_missing_fhs(struct compound_data *cd,
-					uint64_t fileid,
-					uint32_t stripe_count,
-					uint32_t stripe_unit,
-					uint32_t mirror_count,
-					struct mds_ds_map_entry *entries)
-{
-	uint32_t total;
-	uint32_t i;
-	bool need_fh_update = false;
-
-	if (cd == NULL || entries == NULL ||
-	    stripe_count == 0 || mirror_count == 0) {
-		return;
-	}
-	total = stripe_count * mirror_count;
-
-	for (i = 0; i < total; i++) {
-		uint32_t stripe = i / mirror_count;
-		uint32_t mirror = i % mirror_count;
-
-		if (entries[i].nfs_fh_len > 0) {
-			continue;
-		}
-
-		/* Generic DS: sync FH capture via proxy. */
-		if (cd->proxy != NULL) {
-			uint32_t cap = MDS_NFS_FH_MAX;
-			enum mds_status fh_st;
-
-			fh_st = mds_proxy_ensure_ds_file_fh(
-				    cd->proxy, entries[i].ds_id, fileid,
-				    stripe, mirror, entries[i].nfs_fh,
-				    &cap);
-			if (fh_st == MDS_OK) {
-				entries[i].nfs_fh_len = cap;
-				need_fh_update = true;
-			} else {
-				(void)fprintf(stderr,
-					"WARN: FH backfill ds=%u "
-					"fid=%lu s=%u m=%u "
-					"failed: %d\n",
-					(unsigned)entries[i].ds_id,
-					(unsigned long)fileid,
-					stripe, mirror,
-					(int)fh_st);
-			}
-		} else {
-			(void)fprintf(stderr,
-				"WARN: FH backfill skipped "
-				"(no proxy) ds=%u fid=%lu\n",
-				(unsigned)entries[i].ds_id,
-				(unsigned long)fileid);
-		}
-	}
-
-	if (need_fh_update && cd->cat != NULL) {
-		(void)mds_cat_stripe_map_put(cd->cat, NULL, fileid,
-					    stripe_count, stripe_unit,
-					    mirror_count, entries);
-	}
-}
-
 static void layout_clear_ds_pending(struct compound_data *cd, uint64_t fileid)
 {
 	struct mds_inode inode;
@@ -1943,6 +1875,47 @@ fill_layoutget_result:
 				? cd->cred_uid
 				: 0U;
 		const uint32_t ffl_group_value = (uint32_t)inode.gid;
+
+		/*
+		 * Align DS backing-file ownership with the credentials
+		 * we are about to advertise in ffl_user / ffl_group.
+		 * Without this, files created by the MDS sit as
+		 * root:root 0600 and the DS denies any READ that
+		 * arrives with the caller's real uid (RFC 8435 S2.2.1
+		 * loosely-coupled model).  Best-effort: a chown failure
+		 * is logged but does not fail the layout grant -- the
+		 * client will simply observe NFS4ERR_ACCESS on the DS
+		 * READ/WRITE and retry, matching today's behaviour.
+		 */
+		if (cd->proxy != NULL && entries != NULL) {
+			const uint32_t total =
+				stripe_count * mirror_count;
+			for (uint32_t idx = 0; idx < total; idx++) {
+				const uint32_t stripe = idx / mirror_count;
+				const uint32_t mirror = idx % mirror_count;
+				enum mds_status own_st;
+
+				own_st = mds_proxy_set_ds_owner_explicit(
+					cd->proxy, entries[idx].ds_id,
+					cd->current_fh.fileid,
+					stripe, mirror,
+					(uid_t)ffl_user_value,
+					(gid_t)ffl_group_value);
+				if (own_st != MDS_OK) {
+					(void)fprintf(stderr,
+						"WARN: layout chown failed "
+						"ds=%u fid=%lu s=%u m=%u "
+						"uid=%u gid=%u: %d\n",
+						(unsigned)entries[idx].ds_id,
+						(unsigned long)
+						cd->current_fh.fileid,
+						stripe, mirror,
+						(unsigned)ffl_user_value,
+						(unsigned)ffl_group_value,
+						(int)own_st);
+				}
+			}
+		}
 
 		if (r->ff_xdr_form == NFS4_FF_XDR_FORM_STRIPED &&
 		    r->ff_mirror_count == 1 && r->ds_count > 0) {
