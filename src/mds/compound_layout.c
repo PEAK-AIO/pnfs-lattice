@@ -445,19 +445,36 @@ static enum nfs4_status layout_select_grant_range(
 	}
 
 	*grant_offset = a->offset;
-	if (a->length != UINT64_MAX) {
-		if (a->length > UINT64_MAX - a->offset) {
-			return NFS4ERR_INVAL;
-		}
-		*grant_length = a->length;
-		return NFS4_OK;
-	}
 
+	/* Overflow check for finite requests. */
+	if (a->length != UINT64_MAX &&
+	    a->length > UINT64_MAX - a->offset) {
+		return NFS4ERR_INVAL;
+	}
 	if (a->offset == UINT64_MAX) {
 		return NFS4ERR_INVAL;
 	}
 
+	/*
+	 * RFC 8881 S18.43.3: the server MAY return a layout that covers
+	 * a byte range larger than requested.  Always widen the grant to
+	 * at least the stripe unit or the remaining file size so a
+	 * single LAYOUTGET during writeback (which requests exactly one
+	 * 4KiB page) covers the entire dirty range.  Without this the
+	 * kernel client sends one LAYOUTGET per dirty page, creating a
+	 * storm of ~65,000 serialized RPCs for a 250MB file that
+	 * overwhelms the MDS and causes close() to hang.
+	 *
+	 * The floor is the client's requested length (may be 4K or
+	 * UINT64_MAX); the ceiling is MDS_LAYOUT_GRANT_MAX_LENGTH
+	 * (1 GiB) applied by layout_clamp_grant_length() below.
+	 */
 	window = configured_stripe_unit > 0 ? configured_stripe_unit : 65536ULL;
+	/* Use the client's requested length as a floor so we never
+	 * grant less than what was asked. */
+	if (a->length != UINT64_MAX && a->length > window) {
+		window = a->length;
+	}
 	if (a->minlength != UINT64_MAX && a->minlength > window) {
 		window = a->minlength;
 	}
