@@ -6,14 +6,106 @@
  */
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "mds_metrics.h"
+#include "mds_histogram.h"
+#include "mds_op_metrics.h"
+#include "pnfs_mds.h"
 #include "catalog_stats.h"
 
 /* Global metrics instance (zero-initialized). */
 struct mds_metrics g_metrics;
 struct mds_branch_metrics g_branch_metrics;
+
+/*
+ * Optional pointer to the RPC dispatcher threadpool.  Set by main.c
+ * after the pool is created so the Prometheus renderer can include
+ * dispatcher-saturation metrics.  Stored as a relaxed atomic pointer
+ * so reset to NULL at shutdown is race-safe with concurrent scrapes.
+ */
+static _Atomic(struct threadpool *) g_metrics_rpc_tp = NULL;
+
+void mds_metrics_set_rpc_threadpool(struct threadpool *tp)
+{
+    atomic_store_explicit(&g_metrics_rpc_tp, tp, memory_order_release);
+}
+
+/*
+ * Render the RPC dispatcher section.  Returns bytes appended or -1
+ * on truncation.  Safe to call with no pool registered; emits 0
+ * bytes in that case.
+ */
+static int render_rpc_threadpool(char *buf, size_t cap)
+{
+    struct threadpool *tp;
+    struct threadpool_stats st;
+    int n;
+    int total = 0;
+    int rc;
+
+    tp = atomic_load_explicit(&g_metrics_rpc_tp, memory_order_acquire);
+    if (tp == NULL || buf == NULL || cap == 0) {
+        return 0;
+    }
+
+    threadpool_get_stats(tp, &st);
+
+    n = snprintf(buf, cap,
+        "# HELP pnfs_mds_rpc_worker_total "
+            "Total RPC dispatcher worker threads.\n"
+        "# TYPE pnfs_mds_rpc_worker_total gauge\n"
+        "pnfs_mds_rpc_worker_total %u\n"
+        "# HELP pnfs_mds_rpc_worker_active "
+            "Workers currently executing a request "
+            "(== worker_total means saturated).\n"
+        "# TYPE pnfs_mds_rpc_worker_active gauge\n"
+        "pnfs_mds_rpc_worker_active %u\n"
+        "# HELP pnfs_mds_rpc_queue_depth "
+            "Requests waiting in the dispatcher queue.\n"
+        "# TYPE pnfs_mds_rpc_queue_depth gauge\n"
+        "pnfs_mds_rpc_queue_depth %u\n"
+        "# HELP pnfs_mds_rpc_queue_capacity "
+            "Maximum dispatcher queue capacity.\n"
+        "# TYPE pnfs_mds_rpc_queue_capacity gauge\n"
+        "pnfs_mds_rpc_queue_capacity %u\n"
+        "# HELP pnfs_mds_rpc_submitted_total "
+            "RPC requests accepted onto the dispatcher queue.\n"
+        "# TYPE pnfs_mds_rpc_submitted_total counter\n"
+        "pnfs_mds_rpc_submitted_total %lu\n"
+        "# HELP pnfs_mds_rpc_completed_total "
+            "RPC requests finished by worker threads.\n"
+        "# TYPE pnfs_mds_rpc_completed_total counter\n"
+        "pnfs_mds_rpc_completed_total %lu\n"
+        "# HELP pnfs_mds_rpc_queue_full_total "
+            "RPC submissions rejected because the queue was full.\n"
+        "# TYPE pnfs_mds_rpc_queue_full_total counter\n"
+        "pnfs_mds_rpc_queue_full_total %lu\n"
+        "# HELP pnfs_mds_rpc_queue_wait_seconds "
+            "Time each request spent queued before a worker picked "
+            "it up (dispatcher backlog latency).\n",
+        (unsigned)st.worker_total,
+        (unsigned)st.worker_active,
+        (unsigned)st.queue_depth,
+        (unsigned)st.queue_capacity,
+        (unsigned long)st.submitted_total,
+        (unsigned long)st.completed_total,
+        (unsigned long)st.queue_full_total);
+    if (n < 0 || (size_t)n >= cap) {
+        return -1;
+    }
+    total += n;
+
+    rc = mds_histogram_render(st.queue_wait_hist,
+                              "pnfs_mds_rpc_queue_wait_seconds",
+                              buf + total, cap - (size_t)total);
+    if (rc < 0) {
+        return -1;
+    }
+    total += rc;
+    return total;
+}
 
 void mds_metrics_reset(void)
 {
@@ -428,6 +520,29 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->open_create_total_count));
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+        return -1;
+    }
+    base += extra;
+
+    /*
+     * Append the RPC dispatcher section if a threadpool has been
+     * registered (see mds_metrics_set_rpc_threadpool).  Emits 0
+     * bytes when unregistered, so community builds are unaffected.
+     */
+    extra = render_rpc_threadpool(buf + base, cap - (size_t)base);
+    if (extra < 0) {
+        return -1;
+    }
+    base += extra;
+
+    /*
+     * Append per-NFS-op + per-catalogue-op + per-op*phase
+     * latency histograms.  These are always-on; the renderer
+     * skips (op, phase) cells that have no observations so the
+     * output stays compact when nothing has happened yet.
+     */
+    extra = mds_op_metrics_render(buf + base, cap - (size_t)base);
+    if (extra < 0) {
         return -1;
     }
     return base + extra;

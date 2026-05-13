@@ -12,12 +12,62 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
 #include "catalogue_internal.h"
 #include "commit_queue.h"
 #include "migration.h"
+#include "mds_op_metrics.h"
+
+/* -----------------------------------------------------------------------
+ * Catalogue-op latency instrumentation
+ *
+ * CAT_TIMED wraps every vtable invocation: when observability is
+ * enabled, it stamps the monotonic clock, enters the CATALOGUE
+ * phase for the duration of the call, then records both the per-
+ * cat-op histogram and pops the phase.  When disabled (build-time
+ * or runtime), the macro falls through to a bare call to `expr`
+ * with no clock reads, no phase tracker work, and no atomic adds.
+ *
+ * Reading the clock costs ~25 ns on modern x86 (vDSO TSC); the two
+ * relaxed atomic adds for the histogram + sum/count are ~10 ns.
+ * Negligible against a typical RonDB round-trip of 100-300 us, but
+ * the kill-switch lets operators verify "no observability" cost
+ * profiles without recompiling.
+ * ----------------------------------------------------------------------- */
+#if MDS_OP_METRICS_BUILD_ENABLED
+
+static inline uint64_t cat_now_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+#define CAT_TIMED(catop, expr) ({                                  \
+    enum mds_status _cat_st;                                       \
+    if (__builtin_expect(mds_op_metrics_enabled(), 1)) {           \
+        uint64_t _cat_a = cat_now_ns();                            \
+        mds_phase_enter(MDS_PHASE_CATALOGUE);                      \
+        _cat_st = (expr);                                          \
+        mds_phase_leave();                                         \
+        mds_cat_op_observe((catop), cat_now_ns() - _cat_a);        \
+    } else {                                                       \
+        _cat_st = (expr);                                          \
+    }                                                              \
+    _cat_st;                                                       \
+})
+
+#else  /* !MDS_OP_METRICS_BUILD_ENABLED */
+
+#define CAT_TIMED(catop, expr) ((void)(catop), (expr))
+
+#endif
 
 /* -----------------------------------------------------------------------
  * Lifecycle
@@ -147,8 +197,9 @@ enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_create(cat, txn, parent_fileid, name,
-                                    type, mode, uid, gid, prealloc, out);
+    return CAT_TIMED(MDS_CATOP_NS_CREATE,
+        cat->auth_ops->ns_create(cat, txn, parent_fileid, name,
+                                 type, mode, uid, gid, prealloc, out));
 }
 
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
@@ -159,7 +210,8 @@ enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_remove(cat, txn, parent_fileid, name);
+    return CAT_TIMED(MDS_CATOP_NS_REMOVE,
+        cat->auth_ops->ns_remove(cat, txn, parent_fileid, name));
 }
 
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
@@ -172,8 +224,9 @@ enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_rename(cat, txn, src_parent, src_name,
-                                    dst_parent, dst_name);
+    return CAT_TIMED(MDS_CATOP_NS_RENAME,
+        cat->auth_ops->ns_rename(cat, txn, src_parent, src_name,
+                                 dst_parent, dst_name));
 }
 
 enum mds_status mds_cat_ns_link(struct mds_catalogue *cat,
@@ -185,8 +238,9 @@ enum mds_status mds_cat_ns_link(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_link(cat, txn, parent_fileid, name,
-                                  target_fileid);
+    return CAT_TIMED(MDS_CATOP_NS_LINK,
+        cat->auth_ops->ns_link(cat, txn, parent_fileid, name,
+                               target_fileid));
 }
 
 enum mds_status mds_cat_ns_lookup(struct mds_catalogue *cat,
@@ -197,7 +251,8 @@ enum mds_status mds_cat_ns_lookup(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_lookup(cat, parent_fileid, name, child);
+    return CAT_TIMED(MDS_CATOP_NS_LOOKUP,
+        cat->auth_ops->ns_lookup(cat, parent_fileid, name, child));
 }
 
 enum mds_status mds_cat_ns_getattr(struct mds_catalogue *cat,
@@ -207,7 +262,8 @@ enum mds_status mds_cat_ns_getattr(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_getattr(cat, fileid, inode);
+    return CAT_TIMED(MDS_CATOP_NS_GETATTR,
+        cat->auth_ops->ns_getattr(cat, fileid, inode));
 }
 
 enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
@@ -219,7 +275,8 @@ enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_setattr(cat, txn, fileid, attrs, mask);
+    return CAT_TIMED(MDS_CATOP_NS_SETATTR,
+        cat->auth_ops->ns_setattr(cat, txn, fileid, attrs, mask));
 }
 
 enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
@@ -231,8 +288,9 @@ enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_readdir(cat, parent_fileid, start_after,
-                                     txn, cb, ctx);
+    return CAT_TIMED(MDS_CATOP_NS_READDIR,
+        cat->auth_ops->ns_readdir(cat, parent_fileid, start_after,
+                                  txn, cb, ctx));
 }
 
 /* -----------------------------------------------------------------------
@@ -302,9 +360,10 @@ enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
 
     /* Fast path: backend implements the fused op. */
     if (cat->auth_ops->ns_readdir_plus != NULL) {
-        return cat->auth_ops->ns_readdir_plus(cat, parent_fileid,
-                                              start_after, txn,
-                                              cb, ctx);
+        return CAT_TIMED(MDS_CATOP_NS_READDIR_PLUS,
+            cat->auth_ops->ns_readdir_plus(cat, parent_fileid,
+                                           start_after, txn,
+                                           cb, ctx));
     }
 
     /* Fallback: ns_readdir + ns_getattr per entry. */
@@ -374,7 +433,8 @@ enum mds_status mds_cat_ns_nlink_adjust(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->ns_nlink_adjust(cat, fileid, delta);
+    return CAT_TIMED(MDS_CATOP_NS_NLINK_ADJUST,
+        cat->auth_ops->ns_nlink_adjust(cat, fileid, delta));
 }
 
 enum mds_status mds_cat_alloc_fileid(struct mds_catalogue *cat,
@@ -384,7 +444,8 @@ enum mds_status mds_cat_alloc_fileid(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->alloc_fileid(cat, txn, fileid);
+    return CAT_TIMED(MDS_CATOP_ALLOC_FILEID,
+        cat->auth_ops->alloc_fileid(cat, txn, fileid));
 }
 
 /* -----------------------------------------------------------------------
@@ -423,8 +484,9 @@ enum mds_status mds_cat_dirent_put(struct mds_catalogue *cat,
         cat->auth_ops->dirent_put == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->dirent_put(cat, txn, parent_fileid, name,
-                                     child_fileid, child_type);
+    return CAT_TIMED(MDS_CATOP_DIRENT_PUT,
+        cat->auth_ops->dirent_put(cat, txn, parent_fileid, name,
+                                  child_fileid, child_type));
 }
 
 enum mds_status mds_cat_dirent_del(struct mds_catalogue *cat,
@@ -436,7 +498,8 @@ enum mds_status mds_cat_dirent_del(struct mds_catalogue *cat,
         cat->auth_ops->dirent_del == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->dirent_del(cat, txn, parent_fileid, name);
+    return CAT_TIMED(MDS_CATOP_DIRENT_DEL,
+        cat->auth_ops->dirent_del(cat, txn, parent_fileid, name));
 }
 
 /** Readdir callback for mds_cat_dir_is_empty: stop on first entry. */
@@ -481,7 +544,8 @@ enum mds_status mds_cat_inode_del(struct mds_catalogue *cat,
         cat->auth_ops->inode_del == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->inode_del(cat, txn, fileid);
+    return CAT_TIMED(MDS_CATOP_INODE_DEL,
+        cat->auth_ops->inode_del(cat, txn, fileid));
 }
 
 enum mds_status mds_cat_inode_put(struct mds_catalogue *cat,
@@ -494,7 +558,8 @@ enum mds_status mds_cat_inode_put(struct mds_catalogue *cat,
     if (cat->auth_ops->inode_put == NULL) {
         return MDS_ERR_NOSUPPORT;
     }
-    return cat->auth_ops->inode_put(cat, txn, inode);
+    return CAT_TIMED(MDS_CATOP_INODE_PUT,
+        cat->auth_ops->inode_put(cat, txn, inode));
 }
 
 enum mds_status mds_cat_sync(struct mds_catalogue *cat)
@@ -731,7 +796,8 @@ enum mds_status mds_cat_inline_get(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->inline_get(cat, fileid, buf, buflen, outlen);
+    return CAT_TIMED(MDS_CATOP_INLINE_GET,
+        cat->auth_ops->inline_get(cat, fileid, buf, buflen, outlen));
 }
 
 enum mds_status mds_cat_inline_put(struct mds_catalogue *cat,
@@ -742,7 +808,8 @@ enum mds_status mds_cat_inline_put(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->inline_put(cat, txn, fileid, buf, len);
+    return CAT_TIMED(MDS_CATOP_INLINE_PUT,
+        cat->auth_ops->inline_put(cat, txn, fileid, buf, len));
 }
 
 enum mds_status mds_cat_inline_del(struct mds_catalogue *cat,
@@ -825,9 +892,10 @@ enum mds_status mds_cat_stripe_map_get(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->stripe_map_get(cat, fileid, stripe_count,
-                                         stripe_unit, mirror_count,
-                                         entries);
+    return CAT_TIMED(MDS_CATOP_STRIPE_MAP_GET,
+        cat->auth_ops->stripe_map_get(cat, fileid, stripe_count,
+                                      stripe_unit, mirror_count,
+                                      entries));
 }
 
 enum mds_status mds_cat_stripe_map_put(struct mds_catalogue *cat,
@@ -841,9 +909,10 @@ enum mds_status mds_cat_stripe_map_put(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->stripe_map_put(cat, txn, fileid,
-                                         stripe_count, stripe_unit,
-                                         mirror_count, entries);
+    return CAT_TIMED(MDS_CATOP_STRIPE_MAP_PUT,
+        cat->auth_ops->stripe_map_put(cat, txn, fileid,
+                                      stripe_count, stripe_unit,
+                                      mirror_count, entries));
 }
 
 enum mds_status mds_cat_stripe_map_del(struct mds_catalogue *cat,
@@ -853,7 +922,8 @@ enum mds_status mds_cat_stripe_map_del(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->auth_ops->stripe_map_del(cat, txn, fileid);
+    return CAT_TIMED(MDS_CATOP_STRIPE_MAP_DEL,
+        cat->auth_ops->stripe_map_del(cat, txn, fileid));
 }
 
 enum mds_status mds_cat_stripe_map_scan(struct mds_catalogue *cat,
@@ -1277,9 +1347,10 @@ enum mds_status mds_coord_layout_grant(struct mds_catalogue *cat,
         (ds_count > 0 && ds_ids == NULL)) {
         return MDS_ERR_INVAL;
     }
-    return cat->coord_ops->layout_grant(cat, txn, clientid, fileid,
-                                        iomode, offset, length,
-                                        stateid, ds_ids, ds_count);
+    return CAT_TIMED(MDS_CATOP_LAYOUT_GRANT,
+        cat->coord_ops->layout_grant(cat, txn, clientid, fileid,
+                                     iomode, offset, length,
+                                     stateid, ds_ids, ds_count));
 }
 
 enum mds_status mds_coord_layout_return(struct mds_catalogue *cat,
@@ -1297,9 +1368,10 @@ enum mds_status mds_coord_layout_return(struct mds_catalogue *cat,
         (ds_count > 0 && ds_ids == NULL)) {
         return MDS_ERR_INVAL;
     }
-    return cat->coord_ops->layout_return(cat, txn, stateid_other,
-                                         clientid, fileid,
-                                         ds_ids, ds_count);
+    return CAT_TIMED(MDS_CATOP_LAYOUT_RETURN,
+        cat->coord_ops->layout_return(cat, txn, stateid_other,
+                                      clientid, fileid,
+                                      ds_ids, ds_count));
 }
 
 enum mds_status mds_coord_layout_get_by_stateid(
@@ -1312,10 +1384,11 @@ enum mds_status mds_coord_layout_get_by_stateid(
     if (cat == NULL || cat->coord_ops == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat->coord_ops->layout_get_by_stateid(cat, stateid_other,
-                                                  clientid, fileid,
-                                                  iomode, offset,
-                                                  length, seqid);
+    return CAT_TIMED(MDS_CATOP_LAYOUT_LOOKUP,
+        cat->coord_ops->layout_get_by_stateid(cat, stateid_other,
+                                              clientid, fileid,
+                                              iomode, offset,
+                                              length, seqid));
 }
 
 enum mds_status mds_coord_layout_scan_for_file(

@@ -35,6 +35,7 @@
 #include "grace.h"
 #include "commit_queue.h"
 #include "mds_shard.h"
+#include "mds_op_metrics.h"
 #include <stdbool.h>
 
 /* -----------------------------------------------------------------------
@@ -1325,6 +1326,8 @@ int session_sequence_check(struct session_table *st,
 	if (st == NULL || session_id == NULL) {
 		return -1;
 	}
+
+	MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
 	shard = session_id_shard(session_id);
 	pthread_mutex_lock(&st->locks[shard]);

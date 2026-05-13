@@ -264,6 +264,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->cb_recall_timeout_ms = 5000;
     cfg->dir_deleg_recall_timeout_ms = 5000;
     cfg->metrics_http_port = 9090;
+    cfg->metrics_op_enabled = true;
 
     /* mountd compatibility responder (`showmount -e`).  Enabled
      * by default; binds UDP+TCP on 0.0.0.0:20048, registers with the
@@ -818,6 +819,13 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                     "WARN: metrics_http_port=%lu out of range "
                     "(0..65535)\n", v);
             }
+        } else if (strcmp(key, "metrics_op_enabled") == 0) {
+            /* Master kill-switch for per-op + per-cat-op + per-
+             * op*phase latency histograms.  Default true.  Set to
+             * false to take observability off the hot path entirely
+             * without recompiling. */
+            cfg->metrics_op_enabled =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
 
         /* mountd_compat -- `showmount -e` compatibility responder.
          * See docs/mountd-compat.md.  All keys are optional; the

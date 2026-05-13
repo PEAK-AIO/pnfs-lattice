@@ -31,6 +31,7 @@
 #include "session.h"
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
+#include "mds_op_metrics.h"
 
 /* ----------------------------------------------------------------------- */
 
@@ -307,6 +308,8 @@ int lock_acquire(struct lock_table *lt,
 
     (void)open_stateid; /* Validated at compound level */
 
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
+
     s = stripe(fileid);
     st = &lt->stripes[s];
     pthread_mutex_lock(&st->lock);
@@ -415,6 +418,8 @@ int lock_test(struct lock_table *lt,
     /* RFC 8881: length=0 means "lock to end of file". */
     if (length == 0) { length = UINT64_MAX; }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
+
     s = stripe(fileid);
     st = &lt->stripes[s];
     pthread_mutex_lock(&st->lock);
@@ -468,6 +473,8 @@ int lock_release(struct lock_table *lt,
     if (lt == NULL || lock_stateid == NULL) {
         return NFS4ERR_INVAL;
     }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
     /* Derive stripe from the stateid -- no unprotected dereference. */
     s = stateid_stripe(lock_stateid->other);

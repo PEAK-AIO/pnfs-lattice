@@ -41,6 +41,7 @@
 #include "proxy_io.h"
 #include "mds_catalogue.h"
 #include "ds_nfs_rpc.h"
+#include "mds_op_metrics.h"
 
 /* -----------------------------------------------------------------------
  * Internal types
@@ -561,6 +562,8 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
         return st;
     }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
     /*
      * Spanning loop: iterate across stripe boundaries, reading from
      * the correct DS for each stripe unit in sequence.  Each iteration
@@ -708,6 +711,8 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
         return st;
     }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
     /*
      * Spanning loop: iterate across stripe boundaries, writing to
      * every mirror of each stripe unit in sequence.
@@ -823,6 +828,8 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
     if (ctx == NULL) {
         return MDS_ERR_INVAL;
 }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
 
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {
@@ -969,6 +976,8 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
     if (ds_id >= MDS_PROXY_MAX_DS || !ctx->mounts[ds_id].registered) {
         return MDS_ERR_NOTFOUND;
     }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
 
     mount = find_mount(ctx, ds_id);
 
@@ -1773,6 +1782,8 @@ enum mds_status mds_proxy_truncate_ds_file(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
 }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {
         return MDS_ERR_NOTFOUND;
@@ -1808,6 +1819,8 @@ enum mds_status mds_proxy_unlink_ds_file(const struct mds_proxy_ctx *ctx,
     if (ctx == NULL) {
         return MDS_ERR_INVAL;
     }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
 
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {
@@ -1857,6 +1870,8 @@ enum mds_status mds_proxy_fence_ds_file(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
     }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {
         return MDS_ERR_NOTFOUND;
@@ -1889,6 +1904,8 @@ enum mds_status mds_proxy_set_ds_owner_explicit(
     if (ctx == NULL) {
         return MDS_ERR_INVAL;
     }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
 
     mount = find_mount(ctx, ds_id);
     if (mount == NULL) {

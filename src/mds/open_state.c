@@ -32,6 +32,7 @@
 #include "session.h"
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
+#include "mds_op_metrics.h"
 
 /* -----------------------------------------------------------------------
  * Hash table sizing
@@ -514,6 +515,8 @@ int open_state_open(struct open_state_table *ot,
         return -3;
 }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
+
     file_lock_idx = lock_stripe(fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
 
@@ -704,6 +707,8 @@ int open_state_close(struct open_state_table *ot,
         return -1;
 }
 
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
+
     stateid_lock_idx = stateid_lock_stripe(stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
     os = find_by_other(ot, stateid->other);
@@ -783,6 +788,8 @@ int open_state_find(struct open_state_table *ot,
     if (ot == NULL || stateid == NULL || out == NULL) {
         return -1;
 }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
     stateid_lock_idx = stateid_lock_stripe(stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
@@ -894,6 +901,9 @@ int open_state_downgrade(struct open_state_table *ot,
     if (ot == NULL || stateid == NULL || out_stateid == NULL) {
         return -1;
     }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_STATE);
+
     stateid_lock_idx = stateid_lock_stripe(stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
 

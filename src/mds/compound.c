@@ -35,6 +35,7 @@
 #include "dir_delegation.h"
 #include "xdr_codec.h"
 #include "mds_metrics.h"
+#include "mds_op_metrics.h"
 
 /* Internal counter helper, defined in dir_delegation.c. */
 void dir_deleg_count_conflict_unavail(struct dir_deleg_table *ddt);
@@ -2028,7 +2029,44 @@ uint32_t compound_process(struct compound_data *cd,
 			}
 		}
 
-		results[i].status = dispatch_op(cd, &ops[i], &results[i]);
+		{
+			/*
+			 * Per-op latency observability.  Captures wall-
+			 * clock around dispatch_op (does NOT include XDR
+			 * encode of the result -- that's RPC layer).
+			 * Phase tracker stays armed for the duration so
+			 * any catalogue / state / ds_io scope inside the
+			 * handler gets credited.
+			 *
+			 * Gated on mds_op_metrics_enabled() so disabling
+			 * observability at runtime collapses the whole
+			 * block to a bare dispatch_op call.
+			 */
+			if (__builtin_expect(mds_op_metrics_enabled(), 1)) {
+				enum mds_op_class _opc =
+					mds_op_class_from_opnum(ops[i].opnum);
+				struct timespec _t_op_a, _t_op_b;
+
+				clock_gettime(CLOCK_MONOTONIC, &_t_op_a);
+				mds_phase_begin_op();
+				results[i].status = dispatch_op(cd, &ops[i],
+								&results[i]);
+				mds_phase_end_op(_opc);
+				clock_gettime(CLOCK_MONOTONIC, &_t_op_b);
+				{
+					uint64_t _ns = (uint64_t)
+						(_t_op_b.tv_sec -
+						 _t_op_a.tv_sec) *
+						1000000000ULL +
+						(uint64_t)(_t_op_b.tv_nsec -
+							   _t_op_a.tv_nsec);
+					mds_op_observe_total(_opc, _ns);
+				}
+			} else {
+				results[i].status = dispatch_op(cd, &ops[i],
+								&results[i]);
+			}
+		}
 
 		/*
 		 * RFC 8881 S2.10.6.4: if the operation is unknown, the

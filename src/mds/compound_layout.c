@@ -34,6 +34,7 @@
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
 #include "lease_table.h"    /* stripe lease table (Phase 2) */
+#include "mds_op_metrics.h" /* CAT_TIMED-equivalent for direct fused call */
 
 /* FF_FLAGS_STRIPE_LEASE lives in layout_types.h, but that header's
  * enum layout_iomode collides with compound.h's #define macros of the
@@ -859,7 +860,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 }
 
 	/* Must be a regular file. */
-	st = compound_inode_get(cd, cd->current_fh.fileid, &inode);
+	MDS_TIME_CAT_OP(MDS_CATOP_INODE_GET,
+		st = compound_inode_get(cd, cd->current_fh.fileid, &inode));
 	if (st != MDS_OK) {
 		return mds_status_to_nfs4(st);
 }
@@ -918,15 +920,16 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			req_iomode_for_recall = LAYOUTIOMODE4_RW;
 		}
 
-		(void)layout_recall_byte_range_for_holders(
-			cd->lr,
-			cd->current_fh.fileid,
-			cd->clientid,
-			req_iomode_for_recall,
-			grant_offset,
-			grant_length,
-			a->layout_type,
-			&recalled);
+		MDS_TIME_CAT_OP(MDS_CATOP_LAYOUT_RECALL_SCAN,
+			(void)layout_recall_byte_range_for_holders(
+				cd->lr,
+				cd->current_fh.fileid,
+				cd->clientid,
+				req_iomode_for_recall,
+				grant_offset,
+				grant_length,
+				a->layout_type,
+				&recalled));
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
 	}
 
@@ -980,13 +983,16 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 */
 	if (inode.flags & MDS_IFLAG_DS_PENDING) {
 		clear_ds_pending_on_success = true;
-		prep_state = compound_ds_prepare_check(cd, cd->current_fh.fileid);
+		MDS_TIME_CAT_OP(MDS_CATOP_DS_PREPARE_CHECK,
+			prep_state = compound_ds_prepare_check(
+				cd, cd->current_fh.fileid));
 		if (prep_state == -1 && cd->ds_prepare != NULL) {
 			compound_maybe_enqueue_ds_prepare(cd, &inode);
 			/* Re-check after enqueue; result consumed
 			 * only for side-effect (queue priming). */
-			(void)compound_ds_prepare_check(
-				cd, cd->current_fh.fileid);
+			MDS_TIME_CAT_OP(MDS_CATOP_DS_PREPARE_CHECK,
+				(void)compound_ds_prepare_check(
+					cd, cd->current_fh.fileid));
 		}
 		/* Fall through to the LAYOUTGET path.  FH capture
 		 * happens during placement (new files only).
@@ -1141,9 +1147,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					    stripe_count * mirror_count)) {
 					enum nfs4_status ds;
 
-					ds = layout_revoke_unready_grant(
-						cd, &fast_sid, entries,
-						stripe_count * mirror_count);
+					MDS_TIME_CAT_OP(
+						MDS_CATOP_LAYOUT_REVOKE_GRANT,
+						ds = layout_revoke_unready_grant(
+							cd, &fast_sid, entries,
+							stripe_count * mirror_count));
 					free(entries);
 					return ds;
 				}
@@ -1164,13 +1172,31 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			struct nfs4_stateid fused_sid;
 			layout_pick_stateid(cd, &client_sid, &fused_sid);
 
-		st = catalogue_rondb_layoutget_fused(
-			cd->cat, cd->current_fh.fileid,
-			&stripe_count, &stripe_unit,
-			&mirror_count, &entries,
-			&fused_sid, cd->clientid,
-			grant_iomode, grant_offset, grant_length,
-			cd->mds_id);
+		/* Direct-from-compound call: not in the catalogue vtable
+		 * (CAT_TIMED only wraps vtable dispatch), so we time it
+		 * inline.  Skipped cleanly when observability is off. */
+		{
+			bool _t = mds_op_metrics_enabled();
+			uint64_t _t0 = 0;
+
+			if (_t) {
+				_t0 = mds_op_metrics_now_ns();
+				mds_phase_enter(MDS_PHASE_CATALOGUE);
+			}
+			st = catalogue_rondb_layoutget_fused(
+				cd->cat, cd->current_fh.fileid,
+				&stripe_count, &stripe_unit,
+				&mirror_count, &entries,
+				&fused_sid, cd->clientid,
+				grant_iomode, grant_offset, grant_length,
+				cd->mds_id);
+			if (_t) {
+				mds_phase_leave();
+				mds_cat_op_observe(
+					MDS_CATOP_LAYOUTGET_FUSED,
+					mds_op_metrics_now_ns() - _t0);
+			}
+		}
 
 		if (st == MDS_OK) {
 			/* Layout grant already persisted in the fused txn. */
@@ -1545,8 +1571,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		    cd, entries, stripe_count * mirror_count)) {
 		enum nfs4_status revoke_status;
 
-		revoke_status = layout_revoke_unready_grant(
-			cd, &r->stateid, entries, stripe_count * mirror_count);
+		MDS_TIME_CAT_OP(MDS_CATOP_LAYOUT_REVOKE_GRANT,
+			revoke_status = layout_revoke_unready_grant(
+				cd, &r->stateid, entries,
+				stripe_count * mirror_count));
 		free(entries);
 		return revoke_status;
 	}

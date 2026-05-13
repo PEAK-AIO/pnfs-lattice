@@ -7,7 +7,9 @@ add_library(pnfs_common STATIC
     heartbeat.c
     config.c
     error.c
+    mds_histogram.c
     mds_metrics.c
+    mds_op_metrics.c
     mds_tls.c
 )
 

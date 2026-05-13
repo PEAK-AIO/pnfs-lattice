@@ -177,6 +177,19 @@ extern struct mds_branch_metrics g_branch_metrics;
 #define MDS_METRICS_VERSION_V1  1  /**< Fixed 50-byte global snapshot. */
 #define MDS_METRICS_VERSION_V2  2  /**< Global + branch + per-shard. */
 
+/**
+ * Register the RPC dispatcher threadpool for Prometheus export.
+ *
+ * Once set, `mds_metrics_prometheus_v2()` appends a
+ * `pnfs_mds_rpc_worker_*` / `pnfs_mds_rpc_queue_*` section to its
+ * output, so operators can see worker saturation, queue depth, and
+ * queue-wait latency on /metrics without a separate endpoint.
+ *
+ * Pass NULL to unregister (e.g. during shutdown).  Thread-safe.
+ */
+struct threadpool;
+void mds_metrics_set_rpc_threadpool(struct threadpool *tp);
+
 /** Global metrics instance. */
 extern struct mds_metrics g_metrics;
 

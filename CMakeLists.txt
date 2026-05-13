@@ -20,6 +20,15 @@ option(ENABLE_EBPF       "Build eBPF replication monitoring programs" ON)
 option(ENABLE_ADMIN_CLI  "Build the mds-admin CLI tool"               ON)
 option(ENABLE_TESTS      "Build unit and integration tests"           ON)
 option(ENABLE_RONDB      "Build RonDB catalogue backend"              ON)
+# Compile-time kill-switch for per-op latency / phase / cat-op
+# histograms.  OFF removes every observation site from the binary
+# (defines MDS_OP_METRICS_DISABLE), leaving only the dispatcher
+# metrics in threadpool.c.  Default ON: runtime toggling via
+# `metrics_op_enabled = false` in mds.conf is usually preferable.
+option(ENABLE_OP_METRICS "Compile per-op latency / phase histograms"  ON)
+if(NOT ENABLE_OP_METRICS)
+    add_compile_definitions(MDS_OP_METRICS_DISABLE=1)
+endif()
 
 # ---------------------------------------------------------------------------
 # Community-edition module gates.

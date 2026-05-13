@@ -15,7 +15,12 @@ if(ENABLE_OBSERVABILITY)
     target_sources(pnfs_mds_core PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/metrics_http.c)
 else()
+    # Community build: ship a real, minimal HTTP /metrics endpoint
+    # so operators can scrape Prometheus without the enterprise
+    # observability module.  The legacy no-op stub is still
+    # available at metrics_http_stub.c for builds that genuinely
+    # want zero networking surface.
     target_sources(pnfs_mds_core PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/metrics_http_stub.c)
-    message(STATUS "observability: disabled (community build) -- using stubs")
+        ${CMAKE_CURRENT_SOURCE_DIR}/metrics_http_lite.c)
+    message(STATUS "observability: community build -- using metrics_http_lite")
 endif()

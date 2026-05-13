@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+"""pnfs-mds-top -- compact operational view of pNFS MDS metrics.
+
+Fetches the Prometheus /metrics endpoint from one or more MDS hosts,
+parses the histograms, and renders a dashboard that highlights:
+
+    * dispatcher worker saturation + queue depth + queue-wait latency
+    * per-NFS-op latency (count, rate, p50/p95/p99)
+    * per-catalogue-op latency (count, rate, p50/p95/p99)
+    * per-phase breakdown (PROTOCOL / STATE / CATALOGUE / DS_IO)
+
+Examples:
+
+    # one-shot snapshot of localhost:9090
+    pnfs-mds-top
+
+    # one-shot for the three lab MDSes
+    pnfs-mds-top 10.114.1.10 10.114.1.4 10.114.1.33
+
+    # live view, refresh every 2 seconds (rates use snapshot delta)
+    pnfs-mds-top -w 2 10.114.1.10
+
+    # filter to a single section
+    pnfs-mds-top --only ops 10.114.1.10
+
+The script bypasses HTTP_PROXY/HTTPS_PROXY automatically, because lab
+networks (10.x) are almost always being eaten by an outbound corp
+proxy that returns HTML errors.
+"""
+
+import argparse
+import re
+import sys
+import time
+import urllib.request
+from collections import defaultdict
+
+
+# Match `metric_name{labels} value` or `metric_name value`.
+# Prometheus is line-oriented; the parser tolerates trailing tokens
+# (timestamps) but never expects them in our output.
+_METRIC_LINE_RE = re.compile(
+    r'^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)'
+    r'(?:\{(?P<labels>[^}]*)\})?'
+    r'\s+(?P<value>\S+)'
+)
+_LABEL_RE = re.compile(r'(\w+)="([^"]*)"')
+
+
+# ----------------------------- fetch + parse -----------------------------
+
+def fetch(url, timeout):
+    """GET `url` with proxy disabled.  Returns body as text."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(url, headers={'User-Agent': 'pnfs-mds-top'})
+    with opener.open(req, timeout=timeout) as r:
+        return r.read().decode('utf-8', errors='replace')
+
+
+def parse(text):
+    """Parse Prometheus exposition format.
+
+    Returns: { (name, frozenset(labels.items())): float }
+    """
+    out = {}
+    for line in text.splitlines():
+        if not line or line[0] == '#':
+            continue
+        m = _METRIC_LINE_RE.match(line)
+        if not m:
+            continue
+        labels = {}
+        if m.group('labels'):
+            for lm in _LABEL_RE.finditer(m.group('labels')):
+                labels[lm.group(1)] = lm.group(2)
+        try:
+            v = float(m.group('value'))
+        except ValueError:
+            continue
+        out[(m.group('name'), frozenset(labels.items()))] = v
+    return out
+
+
+# --------------------------- histogram helpers ---------------------------
+
+def _bucket_le(s):
+    """Convert a Prometheus le label to a float (with +Inf -> math.inf)."""
+    if s == '+Inf':
+        return float('inf')
+    return float(s)
+
+
+def histogram_groups(samples, base, group_label):
+    """Group bucket / sum / count samples by `group_label`.
+
+    `group_label=None` means a single, unlabeled histogram (e.g. the
+    queue-wait histogram).
+
+    When the daemon emits multiple series sharing the same
+    `group_label` value but differing on other labels (e.g.
+    `pnfs_mds_op_phase_seconds{op=X,phase=Y}` is one such series per
+    op for each phase Y), this function aggregates them correctly:
+
+      * cumulative bucket counts are summed per `le` value
+      * `_count` and `_sum` are summed across all matching series
+
+    That matches what Prometheus does for
+    `sum by (phase) (rate(...))`.  Returns:
+
+        { group_value: {
+            'buckets': [(le_seconds, cumulative_count), ...],
+            'count':   total_count,
+            'sum':     total_sum_seconds,
+          } }
+    """
+    bucket = base + '_bucket'
+    count_ = base + '_count'
+    sum_   = base + '_sum'
+
+    # key -> {le_seconds: cumulative_count}
+    bucket_by_le = defaultdict(lambda: defaultdict(int))
+    counts = defaultdict(int)
+    sums   = defaultdict(float)
+    seen   = set()
+
+    for (name, labels), val in samples.items():
+        ld = dict(labels)
+        key = '' if group_label is None else ld.get(group_label, '')
+        if name == bucket:
+            le = ld.get('le')
+            if le is None:
+                continue
+            bucket_by_le[key][_bucket_le(le)] += int(val)
+            seen.add(key)
+        elif name == count_:
+            counts[key] += int(val)
+            seen.add(key)
+        elif name == sum_:
+            sums[key] += val
+            seen.add(key)
+
+    out = {}
+    for key in seen:
+        b = sorted(bucket_by_le[key].items(), key=lambda x: x[0])
+        out[key] = {
+            'buckets': b,
+            'count':   counts.get(key, 0),
+            'sum':     sums.get(key, 0.0),
+        }
+    return out
+
+
+def quantile(buckets, q):
+    """Estimate the q-quantile (0..1) from a cumulative-count bucket list.
+
+    Linear interpolation inside the matching bucket; +Inf clamps to the
+    last finite bucket's upper edge.  Returns seconds, or None.
+    """
+    if not buckets:
+        return None
+    total = buckets[-1][1]
+    if total <= 0:
+        return None
+
+    target = q * total
+    prev_le, prev_count = 0.0, 0
+    last_finite = 0.0
+    for le, count in buckets:
+        if le != float('inf'):
+            last_finite = le
+        if count >= target:
+            if le == float('inf'):
+                return last_finite
+            if count == prev_count:
+                return le
+            frac = (target - prev_count) / (count - prev_count)
+            return prev_le + frac * (le - prev_le)
+        prev_le = 0.0 if le == float('inf') else le
+        prev_count = count
+    return None
+
+
+# ----------------------------- formatting -------------------------------
+
+def fmt_dur(seconds):
+    if seconds is None:
+        return '   -   '
+    ns = seconds * 1e9
+    if ns < 1000:
+        return f'{ns:5.0f}ns'
+    us = ns / 1000
+    if us < 1000:
+        return f'{us:5.1f}us'
+    ms = us / 1000
+    if ms < 1000:
+        return f'{ms:5.1f}ms'
+    return f'{ms/1000:5.1f}s '
+
+
+def fmt_rate(r):
+    if r is None:
+        return '    -'
+    if r < 0:
+        r = 0
+    if r < 1:
+        return f'{r:5.2f}'
+    if r < 1000:
+        return f'{r:5.1f}'
+    if r < 1_000_000:
+        return f'{r/1000:4.1f}k'
+    return f'{r/1_000_000:4.1f}M'
+
+
+def fmt_int(n):
+    if n is None:
+        return '       -'
+    if n < 1000:
+        return f'{n:>8}'
+    if n < 1_000_000:
+        return f'{n/1000:>7.1f}k'
+    if n < 1_000_000_000:
+        return f'{n/1_000_000:>7.1f}M'
+    return f'{n/1_000_000_000:>7.1f}G'
+
+
+# ----------------------------- rendering -------------------------------
+
+PAD = '  '
+
+def _scalar(samples, name):
+    return samples.get((name, frozenset()), 0)
+
+
+def render_dispatcher(s, prev, dt):
+    out = ['DISPATCHER']
+
+    w_total  = int(_scalar(s, 'pnfs_mds_rpc_worker_total'))
+    w_active = int(_scalar(s, 'pnfs_mds_rpc_worker_active'))
+    q_depth  = int(_scalar(s, 'pnfs_mds_rpc_queue_depth'))
+    q_cap    = int(_scalar(s, 'pnfs_mds_rpc_queue_capacity'))
+
+    busy_pct = (100.0 * w_active / w_total) if w_total else 0.0
+    q_pct    = (100.0 * q_depth / q_cap) if q_cap else 0.0
+
+    out.append(f'{PAD}workers     {w_active:>4} / {w_total:<4}  ({busy_pct:5.1f}% busy)')
+    out.append(f'{PAD}queue       {q_depth:>4} / {q_cap:<4}  ({q_pct:5.1f}% full)')
+
+    def cnt(label, name):
+        cur = int(_scalar(s, name))
+        if prev is not None and dt:
+            was = int(prev.get((name, frozenset()), 0))
+            rate = (cur - was) / dt
+            out.append(f'{PAD}{label:<12} {fmt_int(cur)}  ({fmt_rate(rate)}/s)')
+        else:
+            out.append(f'{PAD}{label:<12} {fmt_int(cur)}')
+
+    cnt('submitted',  'pnfs_mds_rpc_submitted_total')
+    cnt('completed',  'pnfs_mds_rpc_completed_total')
+    cnt('queue_full', 'pnfs_mds_rpc_queue_full_total')
+
+    qh = histogram_groups(s, 'pnfs_mds_rpc_queue_wait_seconds', None).get('')
+    if qh and qh['count'] > 0:
+        p50 = quantile(qh['buckets'], 0.50)
+        p95 = quantile(qh['buckets'], 0.95)
+        p99 = quantile(qh['buckets'], 0.99)
+        mean = qh['sum'] / qh['count'] if qh['count'] else None
+        out.append(f'{PAD}queue_wait   p50={fmt_dur(p50)}  '
+                   f'p95={fmt_dur(p95)}  p99={fmt_dur(p99)}  '
+                   f'mean={fmt_dur(mean)}')
+    return out
+
+
+def _render_hist_table(title, header_left, hist, prev_hist, dt,
+                       order=None, top=12):
+    out = [title]
+    out.append(f'{PAD}{header_left:<14} {"count":>8}  {"rate/s":>6}  '
+               f'   p50      p95      p99      mean')
+    out.append(f'{PAD}{"-"*14} {"-"*8}  {"-"*6}  '
+               f'-------  -------  -------  -------')
+
+    rows = []
+    for key, h in hist.items():
+        if h['count'] == 0 and not (prev_hist and key in prev_hist):
+            continue
+        rate = None
+        if prev_hist is not None and dt and key in prev_hist:
+            rate = (h['count'] - prev_hist[key]['count']) / dt
+        rows.append((key, h, rate))
+
+    if order is not None:
+        order_idx = {o: i for i, o in enumerate(order)}
+        rows.sort(key=lambda r: order_idx.get(r[0], 1_000_000))
+    else:
+        rows.sort(key=lambda r: (r[2] or 0, r[1]['count']), reverse=True)
+        rows = rows[:top]
+
+    if not rows:
+        out.append(f'{PAD}(no observations)')
+        return out
+
+    for key, h, rate in rows:
+        p50 = quantile(h['buckets'], 0.50)
+        p95 = quantile(h['buckets'], 0.95)
+        p99 = quantile(h['buckets'], 0.99)
+        mean = h['sum'] / h['count'] if h['count'] else None
+        out.append(f'{PAD}{key:<14} {fmt_int(h["count"])}  {fmt_rate(rate)}  '
+                   f'{fmt_dur(p50)}  {fmt_dur(p95)}  {fmt_dur(p99)}  '
+                   f'{fmt_dur(mean)}')
+    return out
+
+
+def render(samples, prev, dt, sections):
+    blocks = []
+    if 'dispatcher' in sections:
+        blocks.append('\n'.join(render_dispatcher(samples, prev, dt)))
+    if 'ops' in sections:
+        hist = histogram_groups(samples, 'pnfs_mds_op_latency_seconds', 'op')
+        ph   = (histogram_groups(prev, 'pnfs_mds_op_latency_seconds', 'op')
+                if prev else None)
+        blocks.append('\n'.join(_render_hist_table(
+            'NFS OPS (top 12 by rate, p50/p95/p99 across-bucket interpolation)',
+            'op', hist, ph, dt)))
+    if 'cats' in sections:
+        hist = histogram_groups(samples, 'pnfs_mds_cat_op_latency_seconds', 'cat_op')
+        ph   = (histogram_groups(prev, 'pnfs_mds_cat_op_latency_seconds', 'cat_op')
+                if prev else None)
+        blocks.append('\n'.join(_render_hist_table(
+            'CATALOGUE OPS (top 12 by rate)',
+            'cat_op', hist, ph, dt)))
+    if 'phases' in sections:
+        hist = histogram_groups(samples, 'pnfs_mds_op_phase_seconds', 'phase')
+        ph   = (histogram_groups(prev, 'pnfs_mds_op_phase_seconds', 'phase')
+                if prev else None)
+        blocks.append('\n'.join(_render_hist_table(
+            'PHASE BREAKDOWN (time spent in each phase inside an NFS op)',
+            'phase', hist, ph, dt,
+            order=['protocol', 'state', 'catalogue', 'ds_io'])))
+    return '\n\n'.join(blocks)
+
+
+# -------------------------------- main ---------------------------------
+
+def normalize_url(h):
+    if '://' not in h:
+        if ':' not in h:
+            h = h + ':9090'
+        h = 'http://' + h
+    if not h.rstrip('/').endswith('/metrics'):
+        h = h.rstrip('/') + '/metrics'
+    return h
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog='pnfs-mds-top',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__)
+    p.add_argument('hosts', nargs='*', default=['localhost:9090'],
+                   help='MDS host[:port] (default: localhost:9090)')
+    p.add_argument('-w', '--watch', type=float, metavar='SEC',
+                   help='refresh every SEC seconds (rates from delta)')
+    p.add_argument('-n', '--iterations', type=int, default=0,
+                   help='stop after N refreshes in watch mode')
+    p.add_argument('-t', '--timeout', type=float, default=3.0,
+                   help='HTTP timeout seconds (default 3)')
+    p.add_argument('--only', default='all',
+                   choices=['all', 'dispatcher', 'ops', 'cats', 'phases'],
+                   help='render only one section')
+    args = p.parse_args()
+
+    sections = (['dispatcher', 'ops', 'cats', 'phases']
+                if args.only == 'all' else [args.only])
+
+    prev_snap = {h: None for h in args.hosts}
+    prev_t    = None
+    iters     = 0
+    is_tty    = sys.stdout.isatty()
+
+    while True:
+        now = time.time()
+        dt  = (now - prev_t) if prev_t is not None else None
+
+        chunks = []
+        for h in args.hosts:
+            url = normalize_url(h)
+            try:
+                text = fetch(url, args.timeout)
+            except Exception as e:
+                chunks.append(f'== {h} ==\nERROR: {e}\n')
+                continue
+            samples = parse(text)
+            body = render(samples, prev_snap[h], dt, sections)
+            ts = time.strftime('%H:%M:%S', time.localtime(now))
+            hdr = (f'== {h}  @  {ts}'
+                   + (f'  (Δ {dt:.1f}s)' if dt else '  (no rate yet)'))
+            sep = '=' * max(78, len(hdr))
+            chunks.append(f'{sep}\n{hdr}\n{sep}\n{body}\n')
+            prev_snap[h] = samples
+        prev_t = now
+
+        if args.watch and is_tty:
+            sys.stdout.write('\x1b[2J\x1b[H')
+        sys.stdout.write('\n'.join(chunks))
+        sys.stdout.flush()
+
+        iters += 1
+        if not args.watch:
+            return
+        if args.iterations and iters >= args.iterations:
+            return
+        try:
+            time.sleep(args.watch)
+        except KeyboardInterrupt:
+            return
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

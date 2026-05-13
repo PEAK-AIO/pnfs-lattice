@@ -54,6 +54,8 @@
 #include "dir_delegation.h"
 #include "nfs4_cb.h"
 #include "metrics_http.h"
+#include "mds_metrics.h"
+#include "mds_op_metrics.h"
 #include "mountd_compat.h"
 #ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
@@ -301,6 +303,15 @@ int main(int argc, char *argv[])
 
 	/* 1a. Initialise grace subsystem (must precede any RPC path). */
 	grace_init();
+
+	/* 1a'. Apply the master kill-switch for the per-op latency,
+	 * per-catalogue-op latency, and per-op*phase histograms.  When
+	 * disabled, every observation site takes a one-load early-return
+	 * path; the dispatcher metrics in threadpool.c stay always-on. */
+	mds_op_metrics_set_enabled(cfg.metrics_op_enabled);
+	(void)fprintf(stderr,
+		"INFO: op_metrics=%s\n",
+		cfg.metrics_op_enabled ? "on" : "off");
 
 	/* 1b. Block SIGINT/SIGTERM before any worker threads.
 	 *     All subsequently created threads inherit the blocked mask;
@@ -1335,6 +1346,10 @@ int main(int argc, char *argv[])
 		}
 	}
 	rpc_cfg.tp = rpc_tp;
+	/* Publish the pool to the metrics renderer so /metrics
+	 * exports pnfs_mds_rpc_worker_* / pnfs_mds_rpc_queue_*
+	 * gauges and the queue-wait histogram. */
+	mds_metrics_set_rpc_threadpool(rpc_tp);
 		rpc_cfg.ds_hm      = ds_hm;
 		rpc_cfg.smap       = smap;
 		rpc_cfg.membership = membership;
@@ -1724,6 +1739,7 @@ cleanup:
 	 * but BEFORE destroying any rpc_server.  Workers hold raw
 	 * pointers to rpc_server / rpc_conn -- the pool must be
 	 * fully joined before that memory is freed. */
+	mds_metrics_set_rpc_threadpool(NULL);
 	threadpool_destroy(rpc_tp);
 	rpc_tp = NULL;
 

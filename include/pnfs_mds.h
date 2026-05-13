@@ -608,6 +608,23 @@ struct mds_config {
     uint16_t            metrics_http_port;
 
     /*
+     * Master kill-switch for the per-op latency, per-catalogue-op
+     * latency, and per-op*phase observability built on top of the
+     * mds_op_metrics module.  When false, all `mds_phase_*`,
+     * `mds_op_observe_*`, and `mds_cat_op_observe` callers take an
+     * early-return path on a single relaxed atomic load (~1-2 ns).
+     *
+     * The dispatcher metrics in threadpool.c (worker saturation,
+     * queue depth, queue-wait histogram) are NOT gated by this
+     * flag; they remain cheap enough to leave always-on.
+     *
+     * Default: true.  Set `metrics_op_enabled = false` in mds.conf
+     * to disable at startup without recompiling.  Toggle at runtime
+     * via mds_op_metrics_set_enabled().
+     */
+    bool                metrics_op_enabled;
+
+    /*
      * `showmount -e` compatibility responder (mountd_compat).
      *
      * The MDS is an NFSv4.1 / pNFS server and does NOT speak NFSv3
@@ -908,12 +925,58 @@ void heartbeat_destroy(struct heartbeat_ctx *ctx);
  * ----------------------------------------------------------------------- */
 
 struct threadpool;
+struct mds_histogram;
 
 typedef void (*tp_work_fn)(void *arg);
 
 int  threadpool_create(uint32_t count, struct threadpool **out);
 int  threadpool_submit(struct threadpool *tp, tp_work_fn fn, void *arg);
 void threadpool_destroy(struct threadpool *tp);
+
+/**
+ * Point-in-time snapshot of dispatcher health.  Lets operators
+ * answer the "are we worker-starved?" question directly:
+ *
+ *   - worker_active == worker_total      => fully saturated
+ *   - queue_depth     >  0  for long     => backlog forming
+ *   - queue_wait_ns_sum / queue_wait_count >> p99 op latency
+ *                                        => dispatcher is the bottleneck
+ *   - queue_full_total      > 0          => clients getting RST/ECONNRESET
+ *
+ * `queue_wait_hist` is a live pointer into the threadpool; the
+ * Prometheus renderer drains it with relaxed atomic loads.
+ */
+struct threadpool_stats {
+	uint32_t  worker_total;
+	uint32_t  worker_active;
+	uint32_t  queue_depth;
+	uint32_t  queue_capacity;
+	uint64_t  submitted_total;
+	uint64_t  completed_total;
+	uint64_t  queue_full_total;
+	uint64_t  queue_wait_ns_sum;
+	uint64_t  queue_wait_count;
+	struct mds_histogram *queue_wait_hist;
+};
+
+/**
+ * Capture a snapshot of the threadpool's live counters.
+ *
+ * Safe to call from any thread; takes the pool mutex briefly to
+ * read queue_depth and queue_capacity consistently.  Other fields
+ * are loaded atomically without serialisation.
+ *
+ * (Named with the `_get_` infix so the symbol does not collide
+ *  with the `struct threadpool_stats` type when the header is
+ *  included from C++ translation units -- gcc -Werror=shadow
+ *  flags a same-named function vs. struct as hiding the
+ *  implicit constructor.)
+ *
+ * @param tp   Pool handle (may be NULL; out is zeroed).
+ * @param out  Caller-provided snapshot buffer.
+ */
+void threadpool_get_stats(struct threadpool *tp,
+			  struct threadpool_stats *out);
 
 
 #endif /* PNFS_MDS_H */
