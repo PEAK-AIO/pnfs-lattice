@@ -1060,13 +1060,19 @@ int session_get_limits(struct session_table *st,
 		       uint32_t *out_max_ops)
 {
 	struct nfs4_session *s;
+	uint32_t shard;
 	int rc = -1;
 
 	if (st == NULL || session_id == NULL) {
 		return -1;
 	}
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* Shard lock -- read-only after find_session.  Matches the
+	 * pattern used by session_sequence_check (the SEQUENCE hot path).
+	 * Mutators of the session_hash chain (session_destroy_session)
+	 * additionally take the same shard lock to interlock with us. */
+	shard = session_id_shard(session_id);
+	pthread_mutex_lock(&st->locks[shard]);
 	s = find_session(st, session_id);
 	if (s != NULL) {
 		if (out_max_req != NULL) {
@@ -1077,7 +1083,7 @@ int session_get_limits(struct session_table *st,
 		}
 		rc = 0;
 	}
-	pthread_mutex_unlock(&st->locks[0]);
+	pthread_mutex_unlock(&st->locks[shard]);
 	return rc;
 }
 
@@ -1087,13 +1093,15 @@ int session_get_response_limits(struct session_table *st,
 				uint32_t *out_max_resp_cached)
 {
 	struct nfs4_session *s;
+	uint32_t shard;
 	int rc = -1;
 
 	if (st == NULL || session_id == NULL) {
 		return -1;
 	}
 
-	pthread_mutex_lock(&st->locks[0]);
+	shard = session_id_shard(session_id);
+	pthread_mutex_lock(&st->locks[shard]);
 	s = find_session(st, session_id);
 	if (s != NULL) {
 		if (out_max_resp != NULL) {
@@ -1104,7 +1112,7 @@ int session_get_response_limits(struct session_table *st,
 		}
 		rc = 0;
 	}
-	pthread_mutex_unlock(&st->locks[0]);
+	pthread_mutex_unlock(&st->locks[shard]);
 	return rc;
 }
 
@@ -1115,13 +1123,29 @@ int session_destroy_session(struct session_table *st,
 {
 	struct nfs4_session *s;
 	struct nfs4_client *c;
+	uint32_t shard;
 	int rc = 0;
 
 	if (st == NULL || session_id == NULL) {
 		return -1;
 }
 
+	/* Two-lock acquire: locks[0] protects the session_hash chain and
+	 * the per-client sessions list (multi-key mutation).  The
+	 * per-shard lock interlocks with readers (sequence_check,
+	 * get_limits, set_cb_*, etc.) that walk the same chain under
+	 * just locks[shard].  Always acquire locks[0] FIRST, then
+	 * locks[shard], to avoid a deadlock with any future code that
+	 * holds locks[shard] and tries to take locks[0].
+	 *
+	 * Today no reader holds locks[shard] and tries to take locks[0]
+	 * so the ordering is uncontested; documenting the rule here
+	 * keeps the next change honest. */
+	shard = session_id_shard(session_id);
 	pthread_mutex_lock(&st->locks[0]);
+	if (shard != 0) {
+		pthread_mutex_lock(&st->locks[shard]);
+	}
 
 	s = find_session(st, session_id);
 	if (s == NULL) {
@@ -1148,6 +1172,9 @@ int session_destroy_session(struct session_table *st,
 	free_session(s);
 
 out:
+	if (shard != 0) {
+		pthread_mutex_unlock(&st->locks[shard]);
+	}
 	pthread_mutex_unlock(&st->locks[0]);
 	return rc;
 }
@@ -1415,19 +1442,21 @@ int session_bind_conn(struct session_table *st,
 		      struct rpc_conn *conn)
 {
 	struct nfs4_session *s;
+	uint32_t shard;
 
 	if (st == NULL || session_id == NULL || conn == NULL) {
 		return -1;
 }
 
-	pthread_mutex_lock(&st->locks[0]);
+	shard = session_id_shard(session_id);
+	pthread_mutex_lock(&st->locks[shard]);
 	s = find_session(st, session_id);
 	if (s == NULL) {
-		pthread_mutex_unlock(&st->locks[0]);
+		pthread_mutex_unlock(&st->locks[shard]);
 		return -1;
 	}
 	s->cb_conn = conn;
-	pthread_mutex_unlock(&st->locks[0]);
+	pthread_mutex_unlock(&st->locks[shard]);
 	return 0;
 }
 
@@ -1446,14 +1475,16 @@ int session_set_cb_sec(struct session_table *st,
                        const struct nfs4_cb_sec *sec)
 {
     struct nfs4_session *s;
+    uint32_t shard;
 
     if (st == NULL || session_id == NULL) {
         return -1;
     }
-    pthread_mutex_lock(&st->locks[0]);
+    shard = session_id_shard(session_id);
+    pthread_mutex_lock(&st->locks[shard]);
     s = find_session(st, session_id);
     if (s == NULL) {
-        pthread_mutex_unlock(&st->locks[0]);
+        pthread_mutex_unlock(&st->locks[shard]);
         return -1;
     }
     if (sec != NULL) {
@@ -1462,7 +1493,7 @@ int session_set_cb_sec(struct session_table *st,
         memset(&s->cb_sec, 0, sizeof(s->cb_sec));
     }
     s->cb_sec_flavor = s->cb_sec.flavor;
-    pthread_mutex_unlock(&st->locks[0]);
+    pthread_mutex_unlock(&st->locks[shard]);
     return 0;
 }
 
@@ -1475,18 +1506,20 @@ int session_set_cb_prog(struct session_table *st,
                         uint32_t cb_prog)
 {
     struct nfs4_session *s;
+    uint32_t shard;
 
     if (st == NULL || session_id == NULL) {
         return -1;
     }
-    pthread_mutex_lock(&st->locks[0]);
+    shard = session_id_shard(session_id);
+    pthread_mutex_lock(&st->locks[shard]);
     s = find_session(st, session_id);
     if (s == NULL) {
-        pthread_mutex_unlock(&st->locks[0]);
+        pthread_mutex_unlock(&st->locks[shard]);
         return -1;
     }
     s->cb_prog = cb_prog;
-    pthread_mutex_unlock(&st->locks[0]);
+    pthread_mutex_unlock(&st->locks[shard]);
     return 0;
 }
 
