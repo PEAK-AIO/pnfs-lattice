@@ -252,7 +252,51 @@ static void rondb_destroy_handle(rondb_shim_handle *state)
         return;
     }
 
-    /* Phase 3: stop flush threads and destroy async Ndb objects. */
+    /* Phase 3: stop flush threads and destroy async Ndb objects.
+     *
+     * Drain prerequisite: before signalling stop we MUST be sure no
+     * caller is still parked on result.cv waiting for a callback.
+     * The async callback only fires from inside the flush thread's
+     * pollNdb() call; if we set stop and join while in_flight > 0,
+     * the parked caller will block forever on its condvar.
+     *
+     * Today no caller path is wired to rondb_async_exec so
+     * in_flight is always 0 here.  This loop is a no-op in current
+     * production; it exists as the prerequisite for the future
+     * caller-side wiring (see the ndb_async_writes opt-in path).
+     *
+     * Cap the drain wall-clock at 30 s so a wedged RonDB cluster
+     * cannot hang process exit indefinitely.  After the cap we
+     * proceed with stop+join anyway; any still-parked callers will
+     * hit a real hang, but at least the diagnostic stderr lets the
+     * operator see what happened. */
+    for (int ci = 0; ci < state->conn_count; ci++) {
+        ndb_conn_ctx *ctx = &state->conn_ctxs[ci];
+        if (ctx->ndb == nullptr) {
+            continue;
+        }
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(30);
+        while (ctx->in_flight.load(std::memory_order_acquire) > 0) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::fprintf(stderr,
+                    "WARN: rondb shim conn[%d] shutdown drain timed out "
+                    "with in_flight=%d; proceeding with stop+join "
+                    "(parked callers will hang)\n",
+                    ci,
+                    ctx->in_flight.load(std::memory_order_acquire));
+                break;
+            }
+            /* Yield to the flush thread.  We deliberately do not take
+             * ndb_mutex here: the flush thread holds it across its
+             * sendPreparedTransactions()+pollNdb() cycle, and we want
+             * that cycle to run, fire the async callback, and wake
+             * the parked caller.  Sleep briefly so we don't burn CPU
+             * spinning while the flush thread does the work. */
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
     for (int ci = 0; ci < state->conn_count; ci++) {
         ndb_conn_ctx *ctx = &state->conn_ctxs[ci];
         if (ctx->ndb != nullptr) {
