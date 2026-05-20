@@ -321,6 +321,13 @@ static int send_queue_drain(struct rpc_conn *c)
  * Attempts immediate writev.  If EAGAIN is hit, remaining data is
  * queued in the connection's send_buf for EPOLLOUT-driven drain.
  * Returns 0 on success (or queued), -1 on fatal error.
+ *
+ * Thread safety: acquires c->send_lock for the duration of the
+ * writev+queue_append sequence so that multiple workers cannot
+ * interleave bytes on c->fd nor race on c->send_*.  Previously the
+ * caller (rpc_work_fn) held send_lock across the whole compound;
+ * now that's narrowed to here so EPOLLOUT drain and other workers
+ * are not blocked while a compound is in the catalogue.
  */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
@@ -329,11 +336,13 @@ static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
     uint32_t hdr = htonl(len | 0x80000000U);
     uint8_t hdr_buf[4];
     ssize_t total, sent;
+    int rc = 0;
 
     memcpy(hdr_buf, &hdr, 4);
     total = 4 + (ssize_t)len;
     sent = 0;
 
+    pthread_mutex_lock(&c->send_lock);
     while (sent < total) {
         struct iovec iov[2];
         int iovcnt = 0;
@@ -364,26 +373,33 @@ static int send_record(struct rpc_conn *c, const uint8_t *data, uint32_t len)
                 if (sent < 4) {
                     if (send_queue_append(c, hdr_buf + sent,
                                           4 - (uint32_t)sent) != 0) {
-                        return -1;
-}
+                        rc = -1;
+                        goto out;
+                    }
                     if (send_queue_append(c, data, len) != 0) {
-                        return -1;
-}
+                        rc = -1;
+                        goto out;
+                    }
                 } else {
                     uint32_t data_off = (uint32_t)sent - 4;
 
                     if (send_queue_append(c, data + data_off,
                                           len - data_off) != 0) {
-                        return -1;
-}
+                        rc = -1;
+                        goto out;
+                    }
                 }
-                return 0; /* Queued; caller will register EPOLLOUT. */
+                rc = 0; /* Queued; caller will register EPOLLOUT. */
+                goto out;
             }
-            return -1;
+            rc = -1;
+            goto out;
         }
         sent += n;
     }
-    return 0;
+out:
+    pthread_mutex_unlock(&c->send_lock);
+    return rc;
 }
 
 /** Reply buffer size -- 256 KB is plenty for any single NFS compound. */
@@ -1384,13 +1400,19 @@ static void rpc_work_fn(void *arg)
     struct rpc_conn   *conn = arg;
     struct rpc_server *srv  = conn->wi_srv;
 
-    /* process_rpc_record encodes the reply and calls send_record
-     * internally.  We must hold send_lock around it because
-     * send_record writes to conn->send_buf / conn->fd. */
-    pthread_mutex_lock(&conn->send_lock);
+    /* send_record now acquires conn->send_lock internally around its
+     * writev / send_queue_append sequence (see send_record's docstring).
+     * The outer lock that used to wrap process_rpc_record was overkill:
+     * it serialised the entire catalogue-bound compound, blocking the
+     * EPOLLOUT drain path and starving the conn's write side.
+     *
+     * Concurrent worker dispatch on this same conn is still bounded by
+     * conn->busy (set above by dispatch_to_pool), so only one compound
+     * is in flight per conn for now.  The remaining serialisation we
+     * need -- bytes-on-wire ordering -- is provided by send_lock's
+     * narrower scope inside send_record. */
     (void)process_rpc_record(srv, conn,
                              conn->wi_record, conn->wi_record_len);
-    pthread_mutex_unlock(&conn->send_lock);
 
     atomic_store(&conn->busy, false);
 
