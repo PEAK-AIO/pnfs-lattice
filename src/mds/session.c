@@ -1703,11 +1703,30 @@ static void *lease_reaper_thread(void *arg)
 
         time_t now = time(NULL);
 
-        /* All session-table mutations use locks[0]; the reaper
-         * must use the same lock to avoid racing with
-         * session_exchange_id / session_create_session. */
-        pthread_mutex_lock(&st->locks[0]);
+        /* Walk the client_hash one bucket at a time, releasing
+         * locks[0] between buckets.  The previous implementation
+         * held locks[0] across all CLIENT_HASH_BUCKETS (256)
+         * AND across the per-client open_state / lock / layout
+         * cleanup -- a multi-millisecond stop-the-world for every
+         * SEQUENCE / CREATE_SESSION while the reaper ran.
+         *
+         * Within a single bucket we still hold locks[0] for the
+         * whole expiration sweep + free_client call.  That keeps
+         * the chain mutation safe (free_client -> unhash_session
+         * mutates session_hash under the same lock).  The cost is
+         * bounded: typical buckets hold 0-2 clients, the heavy
+         * open_state_close_all_for_client / lock_release_all path
+         * remains in scope of commits #5/#6.
+         *
+         * Future tightening (out of scope here): move the open/
+         * lock/layout cleanup outside locks[0] by snapshotting
+         * expired clientids first, then doing the I/O afterwards.
+         */
         for (uint32_t b = 0; b < CLIENT_HASH_BUCKETS; b++) {
+            if (!atomic_load(&st->reaper_running)) {
+                break;
+            }
+            pthread_mutex_lock(&st->locks[0]);
             struct nfs4_client **pp = &st->client_hash[b];
             while (*pp != NULL) {
                 struct nfs4_client *c = *pp;
@@ -1758,8 +1777,8 @@ static void *lease_reaper_thread(void *arg)
                     pp = &c->hash_next;
                 }
             }
+            pthread_mutex_unlock(&st->locks[0]);
         }
-        pthread_mutex_unlock(&st->locks[0]);
     }
     return NULL;
 }
