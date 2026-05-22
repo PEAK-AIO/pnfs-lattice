@@ -1563,6 +1563,24 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		/* Invalidate dirent cache for removed entry. */
 		compound_dirent_invalidate(cd, cd->current_fh.fileid,
 					   op->arg.remove.name);
+		/*
+		 * Drop the removed child's inode from the global icache.
+		 * Without this, a subsequent PUTFH on the removed fileid
+		 * (the client may still hold the FH from an earlier OPEN
+		 * or GETFH and use it before getting ESTALE the
+		 * "natural" way) reads the stale alive inode out of
+		 * the icache instead of touching NDB, and downstream
+		 * GETATTR / OPEN observe the file as still present.
+		 * This is the IOR "file cannot be deleted" symptom:
+		 * the unlink returns 0 but a verifying stat still
+		 * succeeds against the stale cache.  rm_fileid is
+		 * captured pre-mutation from cat_lookup above, so it
+		 * is the correct child id even after cat_remove has
+		 * dropped the dirent.
+		 */
+		if (rm_fileid != 0) {
+			compound_inode_invalidate(cd, rm_fileid);
+		}
 		struct mds_inode parent_post;
 		/* Invalidate BEFORE post-mutation re-read. */
 		compound_inode_invalidate(cd, cd->current_fh.fileid);
@@ -1573,7 +1591,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		}
 
 		/* Final unlink of a regular file: schedule DS-side
-		 * data cleanup via the GC queue.  Best-effort —
+		 * data cleanup via the GC queue.  Best-effort --
 		 * failures here do not affect the client-visible
 		 * remove status; the next pass picks up any rows
 		 * we miss. */
