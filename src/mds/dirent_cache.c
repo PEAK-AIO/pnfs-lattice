@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <pthread.h>
 
@@ -56,6 +57,16 @@ struct dc_stripe {
 struct dirent_cache {
     struct dc_stripe  stripes[DC_STRIPES];
     uint32_t          neg_ttl_ms;
+    /*
+     * Global invalidation generation.  Bumped on every invalidate
+     * (single-entry or per-parent).  Callers that race a backend
+     * NOTFOUND against a concurrent CREATE/REMOVE snapshot this
+     * counter before the backend call and re-check it before
+     * inserting a negative entry via
+     * dirent_cache_put_negative_if_unchanged().  See the function's
+     * docstring for the TOCTOU race it closes.
+     */
+    _Atomic uint64_t  inval_gen;
 };
 
 /* -----------------------------------------------------------------------
@@ -382,6 +393,100 @@ int dirent_cache_put_negative(struct dirent_cache *dc,
     return dc_put_internal(dc, parent_fileid, name, 0, 0);
 }
 
+uint64_t dirent_cache_read_gen(const struct dirent_cache *dc)
+{
+    if (dc == NULL) {
+        return 0;
+    }
+    /*
+     * acquire ordering pairs with the release-store inside
+     * dirent_cache_invalidate / dirent_cache_invalidate_parent so a
+     * subsequent backend NOTFOUND read on this thread observes any
+     * mutation that bumped the counter before the read started.
+     *
+     * The cast strips const because atomic_load takes a non-const
+     * pointer; reading does not mutate the cache.
+     */
+    return atomic_load_explicit(
+        &((struct dirent_cache *)dc)->inval_gen,
+        memory_order_acquire);
+}
+
+int dirent_cache_put_negative_if_unchanged(struct dirent_cache *dc,
+                                           uint64_t parent_fileid,
+                                           const char *name,
+                                           uint64_t gen_snapshot)
+{
+    uint32_t si;
+    struct dc_stripe *st;
+    struct dc_entry *e;
+
+    if (dc == NULL || name == NULL) {
+        return -1;
+    }
+
+    si = dc_stripe_idx(parent_fileid, name);
+    st = &dc->stripes[si];
+    pthread_mutex_lock(&st->lock);
+
+    /*
+     * Re-check the generation under the stripe lock.  An invalidate
+     * that targets this (parent, name) must acquire this same stripe
+     * lock to remove its entry, so once we hold the lock any racing
+     * invalidate has either already bumped the counter (and we will
+     * see it here) or is blocked behind us (and will run after we
+     * release, harmlessly re-removing our just-inserted entry).
+     *
+     * Invalidations targeting OTHER (parent, name) tuples may have
+     * bumped the counter without racing our insert; we still bail in
+     * that case, which is a conservative false-positive that costs
+     * only a single skipped cache insertion.
+     */
+    if (atomic_load_explicit(&dc->inval_gen,
+                             memory_order_acquire) != gen_snapshot) {
+        pthread_mutex_unlock(&st->lock);
+        return -1;
+    }
+
+    /*
+     * Inline the negative-put body so the gen re-check and the
+     * insert happen atomically under the stripe lock.  Mirrors
+     * dc_put_internal but with child_fid==0 and child_type==0.
+     */
+    e = dc_find(st, parent_fileid, name);
+    if (e != NULL) {
+        e->child_fileid = 0;
+        e->child_type   = 0;
+        e->insert_ms    = monotonic_ms();
+        dc_lru_promote(st, e);
+        pthread_mutex_unlock(&st->lock);
+        return 0;
+    }
+
+    if (st->count >= st->max_entries) {
+        dc_evict_tail(st);
+    }
+
+    e = calloc(1, sizeof(*e));
+    if (e == NULL) {
+        pthread_mutex_unlock(&st->lock);
+        return -1;
+    }
+
+    e->parent_fileid = parent_fileid;
+    (void)snprintf(e->name, sizeof(e->name), "%s", name);
+    e->child_fileid = 0;
+    e->child_type   = 0;
+    e->insert_ms    = monotonic_ms();
+
+    dc_hash_insert(st, e);
+    dc_lru_push_front(st, e);
+    st->count++;
+
+    pthread_mutex_unlock(&st->lock);
+    return 0;
+}
+
 void dirent_cache_invalidate(struct dirent_cache *dc,
                              uint64_t parent_fileid, const char *name)
 {
@@ -392,6 +497,20 @@ void dirent_cache_invalidate(struct dirent_cache *dc,
     if (dc == NULL || name == NULL) {
         return;
     }
+
+    /*
+     * Bump the generation BEFORE we acquire the stripe lock and
+     * BEFORE we touch any per-stripe state.  A concurrent
+     * put_negative_if_unchanged() that has already taken its
+     * generation snapshot will observe the bumped value either
+     * (a) before it acquires the stripe lock and bail out, or
+     * (b) under the stripe lock after we release it and find the
+     *     entry we just removed.  Either ordering is safe; the
+     *     release-store pairs with the acquire-load in read_gen /
+     *     put_negative_if_unchanged.
+     */
+    atomic_fetch_add_explicit(&dc->inval_gen, 1,
+                              memory_order_release);
 
     si = dc_stripe_idx(parent_fileid, name);
     st = &dc->stripes[si];
@@ -411,6 +530,11 @@ void dirent_cache_invalidate_parent(struct dirent_cache *dc,
     if (dc == NULL) {
         return;
     }
+
+    /* Bump generation before scanning -- see dirent_cache_invalidate
+     * for the ordering rationale. */
+    atomic_fetch_add_explicit(&dc->inval_gen, 1,
+                              memory_order_release);
 
     /* Scan each stripe independently (one lock at a time). */
     for (uint32_t si = 0; si < DC_STRIPES; si++) {

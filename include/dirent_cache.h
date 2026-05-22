@@ -70,6 +70,46 @@ int dirent_cache_put_negative(struct dirent_cache *dc,
                               uint64_t parent_fileid, const char *name);
 
 /**
+ * Read the current invalidation generation counter.
+ *
+ * The counter is bumped on every dirent_cache_invalidate and
+ * dirent_cache_invalidate_parent call.  Callers that race a backend
+ * lookup against a concurrent CREATE/REMOVE use it to detect that
+ * the cache state they observed before the lookup may already be
+ * stale.  See dirent_cache_put_negative_if_unchanged for the
+ * intended pattern.
+ */
+uint64_t dirent_cache_read_gen(const struct dirent_cache *dc);
+
+/**
+ * Insert a negative (NOTFOUND) entry only when no invalidation has
+ * happened since @gen_snapshot was taken.
+ *
+ * Closes the TOCTOU race where a concurrent CREATE commits to the
+ * authoritative store between a backend NOTFOUND and the caller's
+ * cache insertion -- without this guard the stale negative entry
+ * would survive the CREATE's invalidate (because the invalidate
+ * runs before the put, and finds no entry to remove) and would
+ * shadow the new file for the negative-cache TTL window.
+ *
+ * Intended use:
+ *
+ *   uint64_t gen = dirent_cache_read_gen(dc);
+ *   st = cat_lookup(...);
+ *   if (st == NOTFOUND) {
+ *       (void)dirent_cache_put_negative_if_unchanged(
+ *           dc, parent, name, gen);
+ *   }
+ *
+ * @return 0 if the entry was inserted, -1 if the generation
+ *         changed (insert skipped) or any input was invalid.
+ */
+int dirent_cache_put_negative_if_unchanged(struct dirent_cache *dc,
+                                           uint64_t parent_fileid,
+                                           const char *name,
+                                           uint64_t gen_snapshot);
+
+/**
  * Remove a specific dirent entry (positive or negative).
  *
  * Called on CREATE, REMOVE, LINK for the affected (parent, name).
