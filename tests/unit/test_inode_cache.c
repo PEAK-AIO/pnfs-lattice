@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>  /* usleep() for TTL tests */
 
 #include "pnfs_mds.h"
 #include "inode_cache.h"
@@ -331,6 +332,58 @@ static void test_single_entry_cache(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_ttl_expiry -- a positive entry older than ttl_ms is a miss
+ * ----------------------------------------------------------------------- */
+
+static void test_ttl_expiry(void)
+{
+	struct inode_cache *ic = NULL;
+	struct mds_inode in, out;
+
+	ASSERT_EQ(inode_cache_init(64, &ic), 0);
+	/* 10 ms TTL so the test stays fast. */
+	inode_cache_set_ttl_ms(ic, 10);
+
+	in = make_inode(100, 4096);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+
+	/* Immediate get is a hit (within TTL). */
+	ASSERT_EQ(inode_cache_get(ic, 100, &out), 0);
+
+	/* Sleep past the TTL; the next get must miss AND evict so the
+	 * stale entry cannot be served again. */
+	usleep(25 * 1000);
+	ASSERT_EQ(inode_cache_get(ic, 100, &out), -1);
+	ASSERT_EQ(inode_cache_count(ic), (uint32_t)0);
+
+	inode_cache_destroy(ic);
+}
+
+/* -----------------------------------------------------------------------
+ * test_ttl_disabled -- ttl_ms == 0 keeps entries until LRU eviction
+ * ----------------------------------------------------------------------- */
+
+static void test_ttl_disabled(void)
+{
+	struct inode_cache *ic = NULL;
+	struct mds_inode in, out;
+
+	ASSERT_EQ(inode_cache_init(64, &ic), 0);
+	/* Default is 0 = disabled; set explicitly for clarity. */
+	inode_cache_set_ttl_ms(ic, 0);
+
+	in = make_inode(100, 4096);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+
+	usleep(25 * 1000);
+	/* Still a hit -- no TTL in effect. */
+	ASSERT_EQ(inode_cache_get(ic, 100, &out), 0);
+	ASSERT_EQ(out.fileid, (uint64_t)100);
+
+	inode_cache_destroy(ic);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -347,6 +400,8 @@ int main(void)
 	RUN_TEST(test_lru_promote_on_put);
 	RUN_TEST(test_many_entries);
 	RUN_TEST(test_single_entry_cache);
+	RUN_TEST(test_ttl_expiry);
+	RUN_TEST(test_ttl_disabled);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

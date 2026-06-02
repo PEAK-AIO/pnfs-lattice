@@ -1363,16 +1363,40 @@ int main(int argc, char *argv[])
 		rpc_cfg.cot        = cot;
 		rpc_cfg.transport  = NULL; /* rename 2PC on-demand per compound */
 
+		/* Cross-MDS cache coherence (active-active): the per-daemon
+		 * dirent/inode caches are NOT invalidated by mutations on a
+		 * peer MDS -- RonDB stays authoritative, but the in-memory
+		 * caches in front of it do not.  Bound the staleness window
+		 * with a positive-entry TTL so a peer's delete+recreate (new
+		 * monotonic fileid) cannot be shadowed by a stale
+		 * name->fileid / inode entry for longer than the TTL.
+		 * Single-MDS keeps the historical behaviour (positive entries
+		 * unbounded, negative 5s): one shared cache is already coherent
+		 * via mutation-time invalidation.  Operator config wins. */
+		uint32_t cache_pos_ttl_ms = cfg.positive_cache_ttl_ms;
+		uint32_t cache_neg_ttl_ms = cfg.negative_cache_ttl_ms;
+		if (cfg.cluster_size > 1) {
+			if (cache_pos_ttl_ms == 0) {
+				cache_pos_ttl_ms = 1000;
+			}
+			if (cache_neg_ttl_ms == 0) {
+				cache_neg_ttl_ms = 1000;
+			}
+		}
+
 		/* Global inode cache (cross-compound LRU). */
 		{
 			struct inode_cache *icache = NULL;
 			uint32_t icache_size = cfg.inode_cache_size > 0
 				? cfg.inode_cache_size : 16384;
 			if (inode_cache_init(icache_size, &icache) == 0) {
+				inode_cache_set_ttl_ms(icache,
+						       cache_pos_ttl_ms);
 				(void)fprintf(stderr,
 					"INFO: inode cache active "
-					"(max=%u entries)\n",
-					(unsigned)icache_size);
+					"(max=%u entries, ttl=%ums)\n",
+					(unsigned)icache_size,
+					(unsigned)cache_pos_ttl_ms);
 			} else {
 				(void)fprintf(stderr,
 					"WARN: inode_cache_init failed\n");
@@ -1395,15 +1419,18 @@ int main(int argc, char *argv[])
 			struct dirent_cache *dcache = NULL;
 			uint32_t dcache_size = cfg.dirent_cache_size > 0
 				? cfg.dirent_cache_size : 32768;
-			uint32_t neg_ttl = cfg.negative_cache_ttl_ms > 0
-				? cfg.negative_cache_ttl_ms : 5000;
+			uint32_t neg_ttl = cache_neg_ttl_ms > 0
+				? cache_neg_ttl_ms : 5000;
 			if (dirent_cache_init(dcache_size, neg_ttl,
 					      &dcache) == 0) {
+				dirent_cache_set_pos_ttl_ms(dcache,
+							    cache_pos_ttl_ms);
 				(void)fprintf(stderr,
 					"INFO: dirent cache active "
-					"(max=%u, neg_ttl=%ums)\n",
+					"(max=%u, neg_ttl=%ums, pos_ttl=%ums)\n",
 					(unsigned)dcache_size,
-					(unsigned)neg_ttl);
+					(unsigned)neg_ttl,
+					(unsigned)cache_pos_ttl_ms);
 			} else {
 				(void)fprintf(stderr,
 					"WARN: dirent_cache_init failed\n");

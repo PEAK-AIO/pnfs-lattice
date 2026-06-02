@@ -18,6 +18,7 @@ add_executable(test_xdr_layout_form unit/test_xdr_layout_form.c)
 add_executable(test_rename_2pc   unit/test_rename_2pc.c)
 add_executable(test_subtree_map  unit/test_subtree_map.c)
 add_executable(test_inode_cache  unit/test_inode_cache.c)
+add_executable(test_dirent_cache unit/test_dirent_cache.c)
 add_executable(test_compound     unit/test_compound.c)
 add_executable(test_cluster_transport unit/test_cluster_transport.c)
 add_executable(test_compound_cluster  unit/test_compound_cluster.c)
@@ -97,6 +98,7 @@ foreach(test_target
     test_rename_2pc
     test_subtree_map
     test_inode_cache
+    test_dirent_cache
     test_compound
     test_cluster_transport
     test_compound_cluster

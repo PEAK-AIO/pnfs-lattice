@@ -5,8 +5,10 @@
  * inode_cache.c -- In-memory inode LRU cache.
  *
  * Hot inodes are cached to avoid catalogue reads on every operation.
- * Cache is invalidated on write-through updates and cross-MDS
- * invalidation messages.
+ * Entries are dropped on write-through invalidation; an optional
+ * positive-entry TTL (inode_cache_set_ttl_ms) additionally bounds how
+ * long a stale inode can be served in active-active deployments, where
+ * a peer MDS mutates the shared catalogue without notifying this cache.
  *
  * Implementation: chained hash table + doubly-linked LRU list.
  * Thread-safe via a single pthread_mutex (sufficient for the
@@ -17,6 +19,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "pnfs_mds.h"
 #include "inode_cache.h"
@@ -28,6 +31,7 @@
 struct cache_entry {
 	uint64_t            fileid;
 	struct mds_inode    inode;
+	uint64_t            insert_ms;  /* monotonic ms at insert (TTL base) */
 	struct cache_entry *prev;      /* LRU list -- towards tail (older) */
 	struct cache_entry *next;      /* LRU list -- towards head (newer) */
 	struct cache_entry *hash_next; /* hash chain (singly linked) */
@@ -40,6 +44,9 @@ struct inode_cache {
 	struct cache_entry  *lru_tail; /* least recently used */
 	uint32_t             count;
 	uint32_t             max_entries;
+	/* Positive-entry TTL in ms (0 = disabled).  Set once at startup
+	 * via inode_cache_set_ttl_ms(); read under ->lock in _get. */
+	uint32_t             ttl_ms;
 	/* Single global mutex: the LRU list and count are shared state
 	 * that cannot be protected by per-stripe locks without corruption.
 	 * Shard the entire cache (separate hash+LRU per stripe) for real
@@ -50,6 +57,15 @@ struct inode_cache {
 /* -----------------------------------------------------------------------
  * Hash helpers
  * ----------------------------------------------------------------------- */
+
+/** Monotonic millisecond clock for TTL accounting. */
+static uint64_t monotonic_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 static uint32_t hash_fileid(uint64_t fileid, uint32_t size)
 {
@@ -224,6 +240,20 @@ int inode_cache_get(struct inode_cache *ic, uint64_t fileid,
 		return -1; /* miss */
 	}
 
+	/* Positive-entry TTL: bound cross-MDS staleness.  When ttl_ms is
+	 * set and this entry has aged past it, evict and report a miss so
+	 * the caller re-reads the authoritative catalogue (which a peer
+	 * MDS may have mutated without invalidating this local cache). */
+	if (ic->ttl_ms != 0 &&
+	    (monotonic_ms() - e->insert_ms) > (uint64_t)ic->ttl_ms) {
+		hash_remove(ic, e);
+		lru_unlink(ic, e);
+		free(e);
+		ic->count--;
+		pthread_mutex_unlock(&ic->lock);
+		return -1; /* expired -> miss */
+	}
+
 	*inode = e->inode;
 	lru_promote(ic, e);
 
@@ -245,6 +275,7 @@ int inode_cache_put(struct inode_cache *ic, const struct mds_inode *inode)
 	e = hash_find(ic, inode->fileid);
 	if (e != NULL) {
 		e->inode = *inode;
+		e->insert_ms = monotonic_ms();
 		lru_promote(ic, e);
 		pthread_mutex_unlock(&ic->lock);
 		return 0;
@@ -264,6 +295,7 @@ int inode_cache_put(struct inode_cache *ic, const struct mds_inode *inode)
 
 	e->fileid = inode->fileid;
 	e->inode  = *inode;
+	e->insert_ms = monotonic_ms();
 
 	hash_insert(ic, e);
 	lru_push_front(ic, e);
@@ -291,6 +323,17 @@ void inode_cache_invalidate(struct inode_cache *ic, uint64_t fileid)
 		ic->count--;
 	}
 
+	pthread_mutex_unlock(&ic->lock);
+}
+
+void inode_cache_set_ttl_ms(struct inode_cache *ic, uint32_t ttl_ms)
+{
+	if (ic == NULL) {
+		return;
+	}
+
+	pthread_mutex_lock(&ic->lock);
+	ic->ttl_ms = ttl_ms;
 	pthread_mutex_unlock(&ic->lock);
 }
 

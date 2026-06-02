@@ -732,6 +732,11 @@ struct mds_config {
     /* Dirent cache (positive + negative entries) */
     uint32_t            dirent_cache_size;     /**< Max cached dirents (0 = default 32768). */
     uint32_t            negative_cache_ttl_ms; /**< Negative entry TTL in ms (0 = default 5000). */
+    /* Positive (name->fileid / inode) cache entry TTL in ms.  0 = unset:
+     * main.c leaves positive entries unbounded on single-MDS and applies
+     * a small bound (~1s) on multi-MDS (cluster_size>1) for cross-MDS
+     * cache coherence.  An explicit non-zero value always wins. */
+    uint32_t            positive_cache_ttl_ms;
 
     /* HPC-Shared layout cache (Phase D of docs/hpc-nto1-plan.md).
      * Max number of cached stripe maps; cache is sharded 16 ways so

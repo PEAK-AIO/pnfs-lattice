@@ -926,6 +926,17 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                     "WARN: negative_cache_ttl_ms=%lu out of range "
                     "(0..3600000)\n", v);
             }
+        } else if (strcmp(key, "positive_cache_ttl_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            /* Cap at 1h.  Zero = unset; main.c then picks a default by
+             * cluster size (0 single-MDS, ~1000 ms multi-MDS). */
+            if (v <= 3600000UL) {
+                cfg->positive_cache_ttl_ms = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: positive_cache_ttl_ms=%lu out of range "
+                    "(0..3600000)\n", v);
+            }
         } else if (strcmp(key, "dir_delegations_enabled") == 0) {
             cfg->dir_delegations_enabled =
                 (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);

@@ -1277,12 +1277,18 @@ static void test_nofilehandle(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_putfh_invalid -- PUTFH with nonexistent fileid returns BADHANDLE.
+ * test_putfh_invalid -- PUTFH with a well-formed but nonexistent fileid
+ * returns NFS4ERR_STALE.
  *
- * RFC 8881 S18.19.4: an unrecognised filehandle MUST yield
- * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Pynfs PUTFH2 (testBadHandle)
- * verifies the same code on the wire path; this unit test mirrors it
- * for the in-process compound path.
+ * fileid 99999 is a structurally valid filehandle (nonzero) that does
+ * not designate any existing object.  RFC 8881 S15.1.2.4: a filehandle
+ * that no longer (or never did) designate a valid object is STALE, not
+ * BADHANDLE.  NFS4ERR_BADHANDLE is reserved for structurally invalid
+ * handles -- the fileid==0 sentinel the decoder emits for a
+ * malformed/too-short FH (pynfs PUTFH2 testBadHandle's 3-byte 'abc'
+ * handle); op_putfh rejects that case separately, before this lookup.
+ * Returning STALE here is what lets a client recover via re-LOOKUP
+ * instead of surfacing EBADHANDLE (errno 521) to userspace.
  * ----------------------------------------------------------------------- */
 
 static void test_putfh_invalid(void)
@@ -1304,7 +1310,7 @@ static void test_putfh_invalid(void)
 
 	n = compound_process(&cd, ops, res, 2);
 	ASSERT_EQ(n, (uint32_t)2);
-	ASSERT_EQ(res[1].status, NFS4ERR_BADHANDLE);
+	ASSERT_EQ(res[1].status, NFS4ERR_STALE);
 
 	close_test_db(db, path);
 }

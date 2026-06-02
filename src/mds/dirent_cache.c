@@ -37,7 +37,7 @@ struct dc_entry {
     char             name[MDS_MAX_NAME + 1];
     uint64_t         child_fileid;  /* 0 = negative entry */
     uint8_t          child_type;
-    uint64_t         insert_ms;     /* monotonic ms (for negative TTL) */
+    uint64_t         insert_ms;     /* monotonic ms at insert (neg+pos TTL) */
     struct dc_entry *prev;          /* LRU list -- towards tail (older) */
     struct dc_entry *next;          /* LRU list -- towards head (newer) */
     struct dc_entry *hash_next;     /* hash chain (singly linked) */
@@ -57,6 +57,10 @@ struct dc_stripe {
 struct dirent_cache {
     struct dc_stripe  stripes[DC_STRIPES];
     uint32_t          neg_ttl_ms;
+    /* Positive-entry TTL in ms (0 = disabled).  Set once at startup
+     * via dirent_cache_set_pos_ttl_ms(); read under a stripe lock in
+     * dirent_cache_get(), same as neg_ttl_ms. */
+    uint32_t          pos_ttl_ms;
     /*
      * Global invalidation generation.  Bumped on every invalidate
      * (single-entry or per-parent).  Callers that race a backend
@@ -239,7 +243,7 @@ static int dc_put_internal(struct dirent_cache *dc,
     if (e != NULL) {
         e->child_fileid = child_fid;
         e->child_type   = child_type;
-        e->insert_ms    = (child_fid == 0) ? monotonic_ms() : 0;
+        e->insert_ms    = monotonic_ms();
         dc_lru_promote(st, e);
         pthread_mutex_unlock(&st->lock);
         return 0;
@@ -260,7 +264,7 @@ static int dc_put_internal(struct dirent_cache *dc,
     (void)snprintf(e->name, sizeof(e->name), "%s", name);
     e->child_fileid = child_fid;
     e->child_type   = child_type;
-    e->insert_ms    = (child_fid == 0) ? monotonic_ms() : 0;
+    e->insert_ms    = monotonic_ms();
 
     dc_hash_insert(st, e);
     dc_lru_push_front(st, e);
@@ -293,6 +297,7 @@ int dirent_cache_init(uint32_t max_entries, uint32_t neg_ttl_ms,
     dc->neg_ttl_ms = (neg_ttl_ms > 0)
                     ? neg_ttl_ms
                     : DIRENT_CACHE_DEFAULT_NEG_TTL_MS;
+    dc->pos_ttl_ms = 0; /* disabled until set via the setter */
 
     per_stripe = (max_entries + DC_STRIPES - 1) / DC_STRIPES;
     hash_per_stripe = per_stripe * 2; /* load factor ~0.5 */
@@ -360,7 +365,17 @@ int dirent_cache_get(struct dirent_cache *dc,
         return 1; /* negative hit */
     }
 
-    /* Positive hit. */
+    /* Positive hit -- enforce the positive-entry TTL when set so a
+     * stale name->fileid mapping cannot outlive a peer-MDS
+     * CREATE/REMOVE/RENAME by more than pos_ttl_ms. */
+    if (dc->pos_ttl_ms != 0) {
+        uint64_t now = monotonic_ms();
+        if ((now - e->insert_ms) > dc->pos_ttl_ms) {
+            dc_evict_entry(st, e);
+            pthread_mutex_unlock(&st->lock);
+            return -1; /* expired -> miss */
+        }
+    }
     if (child_fileid != NULL) {
         *child_fileid = e->child_fileid;
     }
@@ -551,6 +566,15 @@ void dirent_cache_invalidate_parent(struct dirent_cache *dc,
         }
         pthread_mutex_unlock(&st->lock);
     }
+}
+
+void dirent_cache_set_pos_ttl_ms(struct dirent_cache *dc,
+                                 uint32_t pos_ttl_ms)
+{
+    if (dc == NULL) {
+        return;
+    }
+    dc->pos_ttl_ms = pos_ttl_ms;
 }
 
 uint32_t dirent_cache_count(const struct dirent_cache *dc)

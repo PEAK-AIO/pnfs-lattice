@@ -278,11 +278,20 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 		st = compound_inode_get(cd, op->arg.putfh.fh.fileid,
 					&inode);
 		if (st == MDS_ERR_NOTFOUND) {
-			/* RFC 8881 §18.19.4: an unrecognised filehandle is
-			 * NFS4ERR_BADHANDLE, not NFS4ERR_NOENT.  Linux NFSD
-			 * has the same convention (fs/nfsd/nfs4proc.c
-			 * nfsd4_putfh).  Pynfs PUTFH2 expects this code. */
-			return NFS4ERR_BADHANDLE;
+			/* The filehandle is well-formed (the fileid==0
+			 * malformed-FH sentinel is rejected above with
+			 * NFS4ERR_BADHANDLE) but no longer designates an
+			 * existing object: the fileid was deleted, and because
+			 * fileids are monotonic and never reused it will never
+			 * come back.  RFC 8881 §15.1.2.4 — that is a STALE
+			 * filehandle, not a structurally bad one.  Returning
+			 * NFS4ERR_STALE lets the Linux client recover
+			 * transparently (it re-runs LOOKUP and resolves the
+			 * name to the current fileid) instead of surfacing
+			 * EBADHANDLE (errno 521) to userspace.  This is the
+			 * active-active IOR -F -C read-back failure mode where a
+			 * peer MDS served a delete+recreate of the same name. */
+			return NFS4ERR_STALE;
 		}
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);

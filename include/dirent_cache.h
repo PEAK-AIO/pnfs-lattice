@@ -35,6 +35,22 @@ int dirent_cache_init(uint32_t max_entries, uint32_t neg_ttl_ms,
                       struct dirent_cache **out);
 
 /**
+ * Set the positive-entry TTL in milliseconds (0 = disabled, default).
+ *
+ * When non-zero, dirent_cache_get() treats a positive (name->fileid)
+ * entry older than @pos_ttl_ms as a miss and evicts it, bounding how
+ * long a stale name->fileid mapping can be served.  Negative entries
+ * keep using neg_ttl_ms from dirent_cache_init().  Intended for
+ * active-active (multi-MDS) deployments where a CREATE/REMOVE/RENAME
+ * on a peer MDS does not invalidate this daemon's in-memory cache.
+ *
+ * Must be called at startup, before the cache is shared with worker
+ * threads.
+ */
+void dirent_cache_set_pos_ttl_ms(struct dirent_cache *dc,
+                                 uint32_t pos_ttl_ms);
+
+/**
  * Look up a dirent by (parent, name).
  *
  * On hit: copies child_fileid and child_type to out params, returns 0.

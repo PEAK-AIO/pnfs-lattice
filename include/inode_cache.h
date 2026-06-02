@@ -31,6 +31,22 @@ struct inode_cache;
 int inode_cache_init(uint32_t max_entries, struct inode_cache **out);
 
 /**
+ * Set the positive-entry TTL in milliseconds (0 = disabled, default).
+ *
+ * When non-zero, inode_cache_get() treats an entry older than @ttl_ms
+ * as a miss (and evicts it), bounding how long a stale inode can be
+ * served.  Intended for active-active (multi-MDS) deployments where a
+ * mutation on a peer MDS does not invalidate this daemon's in-memory
+ * cache; single-MDS deployments leave it 0 and keep entries valid
+ * until explicit invalidation or LRU eviction.
+ *
+ * Must be called at startup, before the cache is shared with worker
+ * threads; it is not intended to be called concurrently with
+ * inode_cache_get/put.
+ */
+void inode_cache_set_ttl_ms(struct inode_cache *ic, uint32_t ttl_ms);
+
+/**
  * Look up an inode by fileid.
  *
  * On a hit the entry is promoted to MRU position and the inode is
