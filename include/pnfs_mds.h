@@ -710,6 +710,18 @@ struct mds_config {
     /* Sharding (Tier 3 Phase 3) */
     bool                shard_enabled;         /* Master switch. Default false. */
 
+    /*
+     * Cosmetic READDIR filter (default false).  When true, the
+     * daemon omits referral junction directories (the /shardN
+     * partition entries that surface as fs_locations referrals) from
+     * READDIR replies at the namespace ROOT only.  LOOKUP still
+     * resolves them, so `cd /mnt/pnfs/shardN` keeps working -- this
+     * only hides them from a plain `ls /mnt/pnfs`.  Detection is an
+     * exact subtree-map match, so ordinary files and directories are
+     * never affected.
+     */
+    bool                hide_referral_junctions;
+
     /* DS async prepare (Phase 6) */
     uint32_t            ds_prepare_queue_depth; /* Per-DS queue (0 = default 4096). */
     uint32_t            ds_prepare_workers;     /* Worker threads (0 = 1 per DS). */

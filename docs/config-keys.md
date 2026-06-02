@@ -97,6 +97,7 @@ hosts).
 - `auto_split_min_children` — min children eligible.  Default: 4.
 ## Sharding
 - `shard_enabled` — bool master switch.  Default: false.
+- `hide_referral_junctions` — bool.  Default: false.  Cosmetic only.  When true, the `/shardN` referral junction directories are omitted from READDIR replies at the namespace **root only**.  `LOOKUP` still resolves them (so `cd /mnt/pnfs/shardN` works); this just hides them from `ls /mnt/pnfs`.  Hiding is an exact subtree-map match, so ordinary files and directories are never affected.  Caveat: tools that enumerate the root (`find`, `rsync`, `rm -rf /mnt/pnfs`, backup) will not descend into the hidden shards.
 ## What is not (yet) in config
 These knobs exist as hardcoded constants and can be promoted on request:
 - `DS_HEALTH_DEFAULT_INTERVAL` — alias for `ds_heartbeat_ms` today.

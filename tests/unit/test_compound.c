@@ -23,6 +23,7 @@
 #include "ds_prealloc.h"
 #include "test_helpers.h"
 #include "mds_shard.h"
+#include "subtree_map.h"
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -927,6 +928,97 @@ static void test_readdir_pagination(void)
 		ASSERT_TRUE(res[2].res.readdir.eof);
 	}
 
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_readdir_hides_referral_junctions -- cfg_hide_referral_junctions
+ *
+ * With the flag set, the /shardN referral junction directories
+ * registered in the subtree map are omitted from a root READDIR, while
+ * ordinary files and directories remain visible.  With the flag clear
+ * (the default), every entry is listed.
+ * ----------------------------------------------------------------------- */
+
+static void test_readdir_hides_referral_junctions(void)
+{
+	struct mds_catalogue *db;
+	struct subtree_map *smap = NULL;
+	struct compound_data cd;
+	struct nfs4_op ops[8];
+	struct nfs4_result res[8];
+	uint32_t n;
+	uint32_t i;
+	bool saw_shard1 = false;
+	bool saw_data = false;
+	bool saw_alpha = false;
+	char *path;
+
+	db = open_test_db(&path);
+
+	/* Root holds a referral-style dir "shard1", an ordinary dir
+	 * "data", and a regular file "alpha". */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("shard1", MDS_FTYPE_DIR, 0755);
+	ops[3] = mk_putrootfh();
+	ops[4] = mk_create("data", MDS_FTYPE_DIR, 0755);
+	ops[5] = mk_putrootfh();
+	ops[6] = mk_create("alpha", MDS_FTYPE_REG, 0644);
+	n = compound_process(&cd, ops, res, 7);
+	ASSERT_EQ(n, (uint32_t)7);
+
+	/* Subtree map registering /shard1 as a peer-owned partition. */
+	VERIFY(subtree_map_init(NULL, NULL, 1, "self", NULL, &smap) == MDS_OK);
+	VERIFY(subtree_map_add(smap, "/shard1", 2, "peer",
+			       SUBTREE_ACTIVE, 1) == MDS_OK);
+
+	/* Flag OFF -> all three entries visible (default behaviour). */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.smap = smap;
+	cd.cfg_hide_referral_junctions = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_readdir(0);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.readdir.count, (uint32_t)3);
+
+	/* Flag ON -> shard1 hidden; data + alpha still listed. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.smap = smap;
+	cd.cfg_hide_referral_junctions = true;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_readdir(0);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.readdir.count, (uint32_t)2);
+
+	for (i = 0; i < res[2].res.readdir.count; i++) {
+		const char *nm = res[2].res.readdir.entries[i].name;
+		if (strcmp(nm, "shard1") == 0) {
+			saw_shard1 = true;
+		} else if (strcmp(nm, "data") == 0) {
+			saw_data = true;
+		} else if (strcmp(nm, "alpha") == 0) {
+			saw_alpha = true;
+		}
+	}
+	ASSERT_EQ(saw_shard1, false);
+	ASSERT_TRUE(saw_data);
+	ASSERT_TRUE(saw_alpha);
+
+	subtree_map_destroy(smap);
 	close_test_db(db, path);
 }
 
@@ -3876,6 +3968,7 @@ int main(void)
 	RUN_TEST(test_readdir);
 	RUN_TEST(test_readdir_skips_pending_hpc_create);
 	RUN_TEST(test_readdir_pagination);
+	RUN_TEST(test_readdir_hides_referral_junctions);
 	RUN_TEST(test_rename);
 	RUN_TEST(test_link);
 	RUN_TEST(test_setattr);

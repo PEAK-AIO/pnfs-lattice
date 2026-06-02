@@ -1314,6 +1314,7 @@ int main(int argc, char *argv[])
 		rpc_cfg.shard_map  = shard_map;
 		rpc_cfg.gpudirect_required = cfg.gpudirect_required;
 		rpc_cfg.skip_transient_ndb = cfg.transient_state_cache;
+		rpc_cfg.hide_referral_junctions = cfg.hide_referral_junctions;
 
 		/* Kerberos auth: initialize GSS if krb5+ requested. */
 		struct mds_gss_table *gss_tbl = NULL;

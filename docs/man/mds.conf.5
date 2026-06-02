@@ -697,6 +697,29 @@ Minimum children eligible for a split.
 (default
 .BR false ).
 Master switch for the shard router.
+.TP
+.B hide_referral_junctions
+.I bool
+(default
+.BR false ).
+Cosmetic.  When
+.BR true ,
+the
+.I /shardN
+referral junction directories are omitted from
+.B READDIR
+replies at the namespace root only.
+.B LOOKUP
+still resolves them, so
+.I cd /mnt/pnfs/shardN
+keeps working; this only hides them from a plain
+.BR "ls /mnt/pnfs" .
+Hiding is an exact subtree-map match, so ordinary files and
+directories are never affected.  Tools that enumerate the root
+(e.g.\&
+.BR find ,
+.BR rsync )
+will not descend into the hidden shards.
 .SH EXAMPLES
 A minimal 2-MDS lab config for
 .IR mds1 :
