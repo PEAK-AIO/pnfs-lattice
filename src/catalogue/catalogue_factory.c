@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "mds_catalogue.h"
+#include "mds_log.h"
 
 enum mds_status mds_catalogue_open(const struct mds_config *cfg,
 				   struct mds_catalogue **out)
@@ -25,8 +26,8 @@ enum mds_status mds_catalogue_open(const struct mds_config *cfg,
 	}
 #endif
 
-	(void)fprintf(stderr,
-		"ERROR: unsupported catalogue_backend %d\n",
+	MDS_LOG_ERROR(LOG_COMP_CAT,
+		"unsupported catalogue_backend %d",
 		(int)cfg->catalogue_backend);
 	return MDS_ERR_INVAL;
 }

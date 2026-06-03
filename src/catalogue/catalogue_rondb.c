@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "mds_catalogue.h"
+#include "mds_log.h"
 #include "catalogue_internal.h"
 #include "catalogue_rondb.h"
 #include "catalog_image.h"
@@ -146,13 +147,13 @@ enum mds_status mds_rondb_config_load(const char *path,
     fclose(fp);
 
     if (out->connect_string[0] == '\0') {
-        (void)fprintf(stderr,
-            "ERROR: RonDB config missing connect_string\n");
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "RonDB config missing connect_string");
         return MDS_ERR_INVAL;
     }
     if (out->schema_name[0] == '\0') {
-        (void)fprintf(stderr,
-            "ERROR: RonDB config missing schema_name\n");
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "RonDB config missing schema_name");
         return MDS_ERR_INVAL;
     }
 
@@ -171,16 +172,16 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
         return MDS_ERR_INVAL;
     }
     if (cfg->catalog_replay_mode == MDS_REPLAY_JOURNAL) {
-        (void)fprintf(stderr,
-            "ERROR: catalogue_backend=rondb with "
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "catalogue_backend=rondb with "
             "catalog_replay_mode=journal is not supported until a "
-            "RonDB-native replay journal exists\n");
+            "RonDB-native replay journal exists");
         return MDS_ERR_INVAL;
     }
     if (cfg->catalogue_backend_conf[0] == '\0') {
-        (void)fprintf(stderr,
-            "ERROR: catalogue_backend=rondb requires "
-            "catalogue_backend_conf\n");
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "catalogue_backend=rondb requires "
+            "catalogue_backend_conf");
         return MDS_ERR_INVAL;
     }
 
@@ -208,8 +209,8 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
                                      &state->handle);
     }
     if (rc != 0 || state->handle == NULL) {
-        (void)fprintf(stderr,
-            "ERROR: rondb_shim_connect() failed for schema %s\n",
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "rondb_shim_connect() failed for schema %s",
             state->cfg.schema_name);
         free(state);
         free(cat);
@@ -224,9 +225,9 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
      * being parsed correctly.
      */
     rondb_shim_set_async_writes(state->handle, cfg->ndb_async_writes);
-    (void)fprintf(stderr,
-        "INFO: RonDB ndb_async_writes=%s (scaffold; async-aware "
-        "write path pending empirical validation)\n",
+    MDS_LOG_INFO(LOG_COMP_CAT,
+        "RonDB ndb_async_writes=%s (scaffold; async-aware "
+        "write path pending empirical validation)",
         cfg->ndb_async_writes ? "true" : "false");
 
 	cat->backend = MDS_BACKEND_RONDB;
@@ -2743,9 +2744,9 @@ static int rondb_emit_delta(
         h, st->mds_id, st->delta_seqno, st->boot_epoch,
         delta_type, payload, payload_len, now_ns);
     if (rc != 0) {
-        (void)fprintf(stderr,
-            "ERROR: delta_insert failed for seqno=%llu type=%u -- "
-            "mutation will be reported as failed\n",
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "delta_insert failed for seqno=%llu type=%u -- "
+            "mutation will be reported as failed",
             (unsigned long long)st->delta_seqno, (unsigned)delta_type);
         st->delta_seqno--; /* Roll back so the seqno can be reused. */
         return -1;
