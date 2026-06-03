@@ -1897,9 +1897,9 @@ fill_layoutget_result:
 	 * bearing field, not advisory; treat a violation as a server
 	 * bug we want to catch in tests, not a wire condition. */
 	if (r->ds_count > 1 && r->stripe_unit == 0) {
-		(void)fprintf(stderr,
+		MDS_LOG_INFO(LOG_COMP_NFS,
 			"layoutget: BUG \u2014 dss_count=%u with stripe_unit=0; "
-			"client will collapse to single-DS\n",
+			"client will collapse to single-DS",
 			r->ds_count);
 	}
 
@@ -1977,10 +1977,10 @@ fill_layoutget_result:
 					(uid_t)ffl_user_value,
 					(gid_t)ffl_group_value);
 				if (own_st != MDS_OK) {
-					(void)fprintf(stderr,
-						"WARN: layout chown failed "
+					MDS_LOG_WARN(LOG_COMP_NFS,
+						"layout chown failed "
 						"ds=%u fid=%lu s=%u m=%u "
-						"uid=%u gid=%u: %d\n",
+						"uid=%u gid=%u: %d",
 						(unsigned)entries[idx].ds_id,
 						(unsigned long)
 						cd->current_fh.fileid,
@@ -2531,9 +2531,9 @@ enum nfs4_status op_layouterror(struct compound_data *cd,
 	 */
 	{
 		uint32_t ds_id = deviceid_to_ds_id(a->deviceid);
-		(void)fprintf(stderr,
-			"INFO: LAYOUTERROR from client for DS %u "
-			"(advisory, not driving health state)\n",
+		MDS_LOG_INFO(LOG_COMP_NFS,
+			"LAYOUTERROR from client for DS %u "
+			"(advisory, not driving health state)",
 			(unsigned)ds_id);
 	}
 	return NFS4_OK;

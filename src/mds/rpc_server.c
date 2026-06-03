@@ -36,6 +36,7 @@
 #include "cluster_transport.h"
 #include "mds_gss.h"
 #include "mds_shard.h"
+#include "mds_log.h"
 
 /* -----------------------------------------------------------------------
  * Internal structures
@@ -1869,9 +1870,9 @@ static void handle_epoll_accept(struct rpc_server *srv)
             char errbuf[64];
             (void)strerror_r(errno, errbuf,
                              sizeof(errbuf));
-            (void)fprintf(stderr,
-                "WARN: TCP_NODELAY failed on "
-                "fd %d: %s\n", cfd, errbuf);
+            MDS_LOG_WARN(LOG_COMP_NFS,
+                "TCP_NODELAY failed on "
+                "fd %d: %s", cfd, errbuf);
         }
     }
 

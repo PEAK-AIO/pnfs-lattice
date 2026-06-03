@@ -27,6 +27,7 @@
 #include "mds_catalogue.h"
 #include "commit_queue.h"
 #include "mds_shard.h"
+#include "mds_log.h"
 
 /* -----------------------------------------------------------------------
  * Constants
@@ -395,10 +396,10 @@ static void handle_ds_failure(struct ds_health_monitor *hm, uint32_t ds_id,
         pthread_mutex_unlock(&hm->state_lock);
 
         /* Mark offline (may block on CQ). */
-        (void)fprintf(stderr,
-            "WARN: DS %u failed health check "
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "DS %u failed health check "
             "(%u consecutive failures) -- marking OFFLINE "
-            "(cooldown %llus, flap #%u)\n",
+            "(cooldown %llus, flap #%u)",
             (unsigned)ds_id,
             (unsigned)hm->fail_threshold,
             (unsigned long long)(cooldown_ms / 1000),
@@ -531,10 +532,10 @@ static void *health_poll_thread(void *arg)
                     pthread_mutex_unlock(&hm->state_lock);
 
                     if (do_recover) {
-                        (void)fprintf(stderr,
-                            "INFO: DS %u (%s:%u) recovered "
+                        MDS_LOG_INFO(LOG_COMP_MDS,
+                            "DS %u (%s:%u) recovered "
                             "(%u consecutive probes OK) \xe2\x80\x94 "
-                            "marking ONLINE\n",
+                            "marking ONLINE",
                             (unsigned)ds_list[i].ds_id, host,
                             (unsigned)ds_list[i].port,
                             (unsigned)recovery_threshold);
@@ -631,16 +632,16 @@ int ds_health_start(struct ds_health_monitor *hm)
             for (uint32_t i = 0; i < ds_count; i++) {
                 if (ds_list[i].state == DS_ONLINE) { online++; }
             }
-            (void)fprintf(stderr,
-                "INFO: ds_health started: %u DS registered, "
-                "%u ONLINE, interval=%ums, threshold=%u\n",
+            MDS_LOG_INFO(LOG_COMP_MDS,
+                "ds_health started: %u DS registered, "
+                "%u ONLINE, interval=%ums, threshold=%u",
                 (unsigned)ds_count, (unsigned)online,
                 (unsigned)hm->interval_ms,
                 (unsigned)hm->fail_threshold);
             free(ds_list);
         } else {
-            (void)fprintf(stderr,
-                "WARN: ds_health started but ds_list failed\n");
+            MDS_LOG_WARN(LOG_COMP_MDS,
+                "ds_health started but ds_list failed");
         }
     }
 

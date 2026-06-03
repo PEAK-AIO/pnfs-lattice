@@ -38,6 +38,7 @@
 #include "compound.h"     /* NOTIFY4_* constants */
 #include "nfs4_cb.h"
 #include "session.h"
+#include "mds_log.h"
 #include "rpc_server.h"   /* rpc_conn_get_fd */
 
 /* -----------------------------------------------------------------------
@@ -463,10 +464,10 @@ int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
 				cbrc = nfs4_cb_recall(e->session, &ra,
 						      timeout_ms);
 				if (cbrc != 0) {
-					(void)fprintf(stderr,
+					MDS_LOG_INFO(LOG_COMP_MDS,
 						"dir_deleg: CB_RECALL "
 						"dir=%llu client=%llu "
-						"rc=%d \\u2014 revoking\n",
+						"rc=%d \\u2014 revoking",
 						(unsigned long long)e->dir_fileid,
 						(unsigned long long)e->clientid,
 						cbrc);

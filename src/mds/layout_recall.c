@@ -38,6 +38,7 @@
 #include "nfs4_cb.h"
 #include "rpc_server.h"
 #include "mds_shard.h"
+#include "mds_log.h"
 
 /* Default revoke timeout -- used as CB send timeout per client. */
 #define DEFAULT_REVOKE_MS  30000
@@ -207,8 +208,8 @@ static void attempt_cb_for_target(const struct cb_target *t,
                                       1, t->minorversion, &t->cb_sec,
                                       &args, timeout_ms);
     if (rc != 0) {
-        (void)fprintf(stderr, "layout_recall: CB_LAYOUTRECALL to "
-                "clientid=%lu failed (rc=%d) \u2014 will revoke\n",
+        MDS_LOG_ERROR(LOG_COMP_MDS, "layout_recall: CB_LAYOUTRECALL to "
+                "clientid=%lu failed (rc=%d) \u2014 will revoke",
                 (unsigned long)t->clientid, rc);
     }
 }
@@ -713,24 +714,24 @@ static int byte_range_collect_cb(uint64_t clientid,
     }
     effective_stateid = *stateid;
     /* DEBUG-RECALL: log every holder seen for this fileid. */
-    (void)fprintf(stderr,
+    MDS_LOG_INFO(LOG_COMP_MDS,
         "DBG-RECALL: iter fileid=%llu  holder_clientid=0x%llx "
-        "req_clientid=0x%llx holder_iomode=%u req_iomode=%u\n",
+        "req_clientid=0x%llx holder_iomode=%u req_iomode=%u",
         (unsigned long long)c->fileid,
         (unsigned long long)clientid,
         (unsigned long long)c->req_clientid,
         iomode, c->req_iomode);
     if (c->skip_req_client && clientid == c->req_clientid) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> SKIP self\n");
+        MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP self");
         return 0; /* self -- skip */
     }
     if (c->require_iomode_conflict &&
         !iomode_conflicts(iomode, c->req_iomode)) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> SKIP iomode-no-conflict\n");
+        MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP iomode-no-conflict");
         return 0;
     }
     if (c->count >= c->capacity) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> STOP capacity reached\n");
+        MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> STOP capacity reached");
         return 1; /* stop scan; defer surplus to next call */
     }
 
@@ -757,15 +758,15 @@ static int byte_range_collect_cb(uint64_t clientid,
 
     if (layout_seqid_peek(effective_stateid.other, &latest_seqid) &&
         latest_seqid > effective_stateid.seqid) {
-        (void)fprintf(stderr,
-            "DBG-RECALL:  -> stateid seqid clamp row=%u latest=%u\n",
+        MDS_LOG_INFO(LOG_COMP_MDS,
+            "DBG-RECALL:  -> stateid seqid clamp row=%u latest=%u",
             effective_stateid.seqid, latest_seqid);
         effective_stateid.seqid = latest_seqid;
     }
 
-    (void)fprintf(stderr,
+    MDS_LOG_INFO(LOG_COMP_MDS,
         "DBG-RECALL:  -> stateid_lookup hold_off=%llu hold_len=%llu "
-        "req_off=%llu req_len=%llu\n",
+        "req_off=%llu req_len=%llu",
         (unsigned long long)hold_off, (unsigned long long)hold_len,
         (unsigned long long)c->req_offset,
         (unsigned long long)c->req_length);
@@ -773,15 +774,15 @@ static int byte_range_collect_cb(uint64_t clientid,
         if (!range_intersect(c->req_offset, c->req_length,
                               hold_off, hold_len,
                               &inter_off, &inter_len)) {
-            (void)fprintf(stderr, "DBG-RECALL:  -> SKIP disjoint range\n");
+            MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP disjoint range");
             return 0; /* disjoint ranges -- no conflict */
         }
     } else {
         inter_off = c->req_offset;
         inter_len = c->req_length;
     }
-    (void)fprintf(stderr,
-        "DBG-RECALL:  -> ACCEPT inter_off=%llu inter_len=%llu\n",
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "DBG-RECALL:  -> ACCEPT inter_off=%llu inter_len=%llu",
         (unsigned long long)inter_off, (unsigned long long)inter_len);
 
     /*
@@ -815,13 +816,13 @@ static int byte_range_collect_cb(uint64_t clientid,
                 c->holders[k].recall_length = inter_len;
                 c->holders[k].send_cb       = true;
                 c->holders[k].layout_type   = c->req_layout_type;
-                (void)fprintf(stderr,
+                MDS_LOG_INFO(LOG_COMP_MDS,
                     "DBG-RECALL:  -> DEDUP replaced "
-                    "holder[%u] (higher seqid)\n", k);
+                    "holder[%u] (higher seqid)", k);
             } else {
-                (void)fprintf(stderr,
+                MDS_LOG_INFO(LOG_COMP_MDS,
                     "DBG-RECALL:  -> DEDUP kept "
-                    "holder[%u] (existing seqid >=)\n", k);
+                    "holder[%u] (existing seqid >=)", k);
             }
             return 0;
         }
@@ -904,13 +905,13 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     int rc;
 
     if (snap == NULL || c == NULL || c->holder == NULL) {
-        (void)fprintf(stderr,
-            "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p\n",
+        MDS_LOG_INFO(LOG_COMP_MDS,
+            "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p",
             (void *)snap, (void *)c);
         return 0;
     }
-    (void)fprintf(stderr,
-        "DBG-RECALL: cb_one_holder snap.clientid=0x%llx holder.clientid=0x%llx cb_conn=%p\n",
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "DBG-RECALL: cb_one_holder snap.clientid=0x%llx holder.clientid=0x%llx cb_conn=%p",
         (unsigned long long)snap->clientid,
         (unsigned long long)c->holder->clientid,
         (void*)snap->cb_conn);
@@ -918,13 +919,13 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
      * but a same-process race could in theory invoke this from the
      * global iterator path -- keep the explicit check. */
     if (c->holder->clientid != snap->clientid) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> SKIP clientid mismatch\n");
+        MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP clientid mismatch");
         return 0;
     }
     fd = rpc_conn_get_fd(snap->cb_conn);
-    (void)fprintf(stderr, "DBG-RECALL:  -> rpc_conn_get_fd = %d\n", fd);
+    MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> rpc_conn_get_fd = %d", fd);
     if (fd < 0) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> SKIP no backchannel fd\n");
+        MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP no backchannel fd");
         /* No live backchannel -- caller must revoke; we cannot
          * deliver the recall.  The kernel will discover the
          * revoke on its next op against the layout stateid. */
@@ -933,7 +934,7 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     }
     dup_fd = dup(fd);
     if (dup_fd < 0) {
-        (void)fprintf(stderr, "DBG-RECALL:  -> SKIP dup failed errno=%d\n", errno);
+        MDS_LOG_ERROR(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP dup failed errno=%d", errno);
         c->cb_status = CB_NOT_SENT;
         return 0;
     }
@@ -966,9 +967,9 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     args.offset      = c->holder->recall_offset;
     args.length      = c->holder->recall_length;
 
-    (void)fprintf(stderr,
+    MDS_LOG_INFO(LOG_COMP_MDS,
         "DBG-RECALL:  -> sending CB_LAYOUTRECALL fd=%d cb_prog=%u "
-        "slot_seq=%u layout_seq=%u\n",
+        "slot_seq=%u layout_seq=%u",
         dup_fd, snap->cb_prog, snap->slot_seq_id, args.stateid.seqid);
     rc = nfs4_cb_layoutrecall_fd(dup_fd, snap->session_id,
                                  snap->cb_prog,
@@ -976,13 +977,13 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
                                  1, snap->minorversion,
                                  &snap->cb_sec,
                                  &args, c->timeout_ms);
-    (void)fprintf(stderr, "DBG-RECALL:  -> nfs4_cb_layoutrecall_fd rc=%d\n", rc);
+    MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL:  -> nfs4_cb_layoutrecall_fd rc=%d", rc);
     c->cb_status = rc;
     if (rc != 0) {
-        (void)fprintf(stderr,
+        MDS_LOG_INFO(LOG_COMP_MDS,
             "layout_recall: byte-range CB_LAYOUTRECALL "
             "clientid=%llu fileid=%llu off=%llu len=%llu "
-            "rc=%d\n",
+            "rc=%d",
             (unsigned long long)c->holder->clientid,
             (unsigned long long)c->holder->fileid,
             (unsigned long long)args.offset,
@@ -1049,8 +1050,8 @@ static int byte_range_collect_holders(struct layout_recall *lr,
 
     st = mds_coord_layout_iter_file(lr->cat, fileid,
                                      byte_range_collect_cb, &col);
-    (void)fprintf(stderr,
-        "DBG-RECALL: iter_file rc=%d  collected=%u\n",
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "DBG-RECALL: iter_file rc=%d  collected=%u",
         (int)st, col.count);
     if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
         return -EIO;
@@ -1077,7 +1078,7 @@ static void byte_range_dispatch_cb_each(struct layout_recall *lr,
         return;
     }
 
-    (void)fprintf(stderr, "DBG-RECALL: dispatch lr->st=%p col.count=%u\n",
+    MDS_LOG_INFO(LOG_COMP_MDS, "DBG-RECALL: dispatch lr->st=%p col.count=%u",
         (void *)lr->st, holder_count);
     if (lr->st == NULL) {
         return;
@@ -1092,25 +1093,25 @@ static void byte_range_dispatch_cb_each(struct layout_recall *lr,
         int n;
 
         if (!holders[i].send_cb) {
-            (void)fprintf(stderr,
+            MDS_LOG_INFO(LOG_COMP_MDS,
                 "DBG-RECALL:  -> SKIP duplicate CB holder[%u] "
-                "clientid=0x%llx fileid=%llu\n",
+                "clientid=0x%llx fileid=%llu",
                 i,
                 (unsigned long long)holders[i].clientid,
                 (unsigned long long)holders[i].fileid);
             continue;
         }
 
-        (void)fprintf(stderr,
+        MDS_LOG_INFO(LOG_COMP_MDS,
             "DBG-RECALL: session_for_each_with_cb_for_clientid "
-            "holder[%u].clientid=0x%llx\n",
+            "holder[%u].clientid=0x%llx",
             i, (unsigned long long)holders[i].clientid);
         n = session_for_each_with_cb_for_clientid(
             lr->st, holders[i].clientid,
             byte_range_cb_one_holder, &one_ctx);
-        (void)fprintf(stderr,
+        MDS_LOG_INFO(LOG_COMP_MDS,
             "DBG-RECALL:  -> session iterator returned n=%d "
-            "cb_status=%d\n", n, one_ctx.cb_status);
+            "cb_status=%d", n, one_ctx.cb_status);
         cb_status[i] = one_ctx.cb_status;
     }
 }
@@ -1138,19 +1139,19 @@ static void byte_range_revoke_holders(struct layout_recall *lr,
         const int s = (cb_status != NULL) ? cb_status[i] : CB_NOT_SENT;
 
         if (!revoke_transient && byte_range_cb_status_transient(s)) {
-            (void)fprintf(stderr,
+            MDS_LOG_INFO(LOG_COMP_MDS,
                 "DBG-RECALL:  -> SKIP revoke holder[%u] "
                 "clientid=0x%llx fileid=%llu cb_status=%d "
-                "(transient \\u2014 awaiting LAYOUTRETURN)\n",
+                "(transient \\u2014 awaiting LAYOUTRETURN)",
                 i,
                 (unsigned long long)holders[i].clientid,
                 (unsigned long long)holders[i].fileid, s);
             continue;
         }
 
-        (void)fprintf(stderr,
+        MDS_LOG_INFO(LOG_COMP_MDS,
             "DBG-RECALL:  -> revoke holder[%u] "
-            "clientid=0x%llx fileid=%llu cb_status=%d%s\n",
+            "clientid=0x%llx fileid=%llu cb_status=%d%s",
             i,
             (unsigned long long)holders[i].clientid,
             (unsigned long long)holders[i].fileid, s,
@@ -1192,8 +1193,8 @@ int layout_recall_revoke_all_for_unlink(struct layout_recall *lr,
      * row delete below is what prevents a later LAYOUTRETURN from
      * driving PUTFH on a now-stale fileid into migration recovery.
      */
-    (void)fprintf(stderr,
-        "DBG-RECALL: unlink-helper-entry fileid=%llu\n",
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "DBG-RECALL: unlink-helper-entry fileid=%llu",
         (unsigned long long)fileid);
     rc = byte_range_collect_holders(lr, fileid, 0,
                                     LAYOUTIOMODE4_ANY,
@@ -1245,9 +1246,9 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     }
 
     /* DEBUG-RECALL: log every helper invocation. */
-    (void)fprintf(stderr,
+    MDS_LOG_INFO(LOG_COMP_MDS,
         "DBG-RECALL: helper-entry fileid=%llu req_clientid=0x%llx "
-        "req_iomode=%u req_off=%llu req_len=%llu req_layout_type=%u\n",
+        "req_iomode=%u req_off=%llu req_len=%llu req_layout_type=%u",
         (unsigned long long)fileid,
         (unsigned long long)req_clientid,
         req_iomode,

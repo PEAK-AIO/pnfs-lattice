@@ -1247,11 +1247,11 @@ enum nfs4_status op_close(struct compound_data *cd,
 		int frc = layout_commit_aggregator_flush_fileid(
 			cd->lcommit_agg, close_fileid);
 		if (frc < 0) {
-			(void)fprintf(stderr,
-				"WARN: HPC LAYOUTCOMMIT aggregator flush "
+			MDS_LOG_WARN(LOG_COMP_NFS,
+				"HPC LAYOUTCOMMIT aggregator flush "
 				"failed at final CLOSE of fileid=%llu; "
 				"persisted size/mtime will lag until the "
-				"next periodic flush\n",
+				"next periodic flush",
 				(unsigned long long)close_fileid);
 		}
 	}
@@ -2158,8 +2158,8 @@ proxy_write:
 				     a->offset, a->data, a->data_len,
 				     &written);
 		if (st != MDS_OK) {
-			(void)fprintf(stderr,
-				"DBG WRITE: proxy_write failed fh=%llu st=%d checks=%d\n",
+			MDS_LOG_ERROR(LOG_COMP_NFS,
+				"DBG WRITE: proxy_write failed fh=%llu st=%d checks=%d",
 				(unsigned long long)cd->current_fh.fileid,
 				(int)st, (int)proxy_checks_done);
 			return mds_status_to_nfs4(st);

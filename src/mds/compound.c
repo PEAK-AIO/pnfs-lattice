@@ -2149,7 +2149,7 @@ op_done:
 			}
 			(void)snprintf(buf + pos,
 				sizeof(buf) - (size_t)pos, "]\n");
-			(void)fprintf(stderr, "%s", buf);
+			MDS_LOG_INFO(LOG_COMP_NFS, "%s", buf);
 		}
 	}
 

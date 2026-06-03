@@ -20,6 +20,7 @@
 #include "proxy_io.h"
 #include "open_state.h"
 #include "fh_util.h"
+#include "mds_log.h"
 
 /* ----------------------------------------------------------------------- *
  * Constants
@@ -163,8 +164,8 @@ int mover_relocate_file(const struct mover_ctx *ctx,
 
     /* -- Step g: Verify complete copy. -- */
     if (copied != inode.size) {
-        (void)fprintf(stderr, "mover: incomplete copy for file %lu "
-                "(%lu/%lu bytes)\n",
+        MDS_LOG_INFO(LOG_COMP_MDS, "mover: incomplete copy for file %lu "
+                "(%lu/%lu bytes)",
                 (unsigned long)fileid,
                 (unsigned long)copied, (unsigned long)inode.size);
         free(entries);

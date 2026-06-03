@@ -32,6 +32,7 @@
 #include "rpc_server.h" /* rpc_conn_get_fd */
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
+#include "mds_log.h"
 
 /*
  * Maximum number of delegations on a single fileid we recall in one
@@ -612,9 +613,9 @@ int deleg_recall_file(struct deleg_table *dt,
              * but the bound is here to keep stack usage finite if
              * the model ever loosens.
              */
-            (void)fprintf(stderr,
+            MDS_LOG_INFO(LOG_COMP_MDS,
                 "deleg: recall cap %u reached on fileid=%llu; "
-                "deferring surplus entries\n",
+                "deferring surplus entries",
                 (unsigned)DELEG_RECALL_MAX_PER_FILE,
                 (unsigned long long)fileid);
             break;
@@ -700,9 +701,9 @@ int deleg_recall_file(struct deleg_table *dt,
                                  lc.minorversion, &lc.cb_sec,
                                  &ra, timeout_ms);
         if (cbrc != 0) {
-            (void)fprintf(stderr,
+            MDS_LOG_INFO(LOG_COMP_MDS,
                 "deleg: CB_RECALL fileid=%llu client=%llu "
-                "rc=%d \u2014 already revoked\n",
+                "rc=%d \u2014 already revoked",
                 (unsigned long long)targets[i].fileid,
                 (unsigned long long)targets[i].clientid, cbrc);
         }

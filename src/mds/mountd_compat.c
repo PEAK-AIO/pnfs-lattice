@@ -992,8 +992,8 @@ int mountd_compat_start(const struct mds_config *cfg,
     }
 
     if (mc_validate_and_copy_exports(cfg, &ctx->exports) != 0) {
-        (void)fprintf(stderr,
-            "ERROR: mountd_compat: invalid export list\n");
+        MDS_LOG_ERROR(LOG_COMP_MDS,
+            "mountd_compat: invalid export list");
         free(ctx);
         return -1;
     }
@@ -1004,8 +1004,8 @@ int mountd_compat_start(const struct mds_config *cfg,
     ctx->udp_fd = mc_open_udp(cfg->mountd_compat_bind_addr,
                               cfg->mountd_compat_port, &udp_port);
     if (ctx->udp_fd < 0) {
-        (void)fprintf(stderr,
-            "WARN: mountd_compat: UDP bind %s:%u failed: %s\n",
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: UDP bind %s:%u failed: %s",
             cfg->mountd_compat_bind_addr,
             (unsigned)cfg->mountd_compat_port,
             strerror(errno));
@@ -1020,17 +1020,17 @@ int mountd_compat_start(const struct mds_config *cfg,
     ctx->tcp_fd = mc_open_tcp(cfg->mountd_compat_bind_addr,
                               requested_tcp, &tcp_port);
     if (ctx->tcp_fd < 0) {
-        (void)fprintf(stderr,
-            "WARN: mountd_compat: TCP bind %s:%u failed: %s\n",
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: TCP bind %s:%u failed: %s",
             cfg->mountd_compat_bind_addr,
             (unsigned)requested_tcp,
             strerror(errno));
         goto fail;
     }
     if (tcp_port != udp_port) {
-        (void)fprintf(stderr,
-            "WARN: mountd_compat: UDP and TCP bound to different "
-            "ports (udp=%u tcp=%u); rpcbind clients may pick TCP\n",
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: UDP and TCP bound to different "
+            "ports (udp=%u tcp=%u); rpcbind clients may pick TCP",
             (unsigned)udp_port, (unsigned)tcp_port);
     }
     ctx->bound_port = tcp_port;
@@ -1079,8 +1079,8 @@ int mountd_compat_start(const struct mds_config *cfg,
     }
     ctx->thread_started = true;
 
-    (void)fprintf(stderr,
-        "INFO: mountd_compat: listening on %s:%u (udp+tcp)%s\n",
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "mountd_compat: listening on %s:%u (udp+tcp)%s",
         cfg->mountd_compat_bind_addr,
         (unsigned)ctx->bound_port,
         ctx->registered ? ", registered with rpcbind" : "");
