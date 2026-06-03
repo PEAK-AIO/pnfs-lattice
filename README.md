@@ -426,14 +426,13 @@ Key optimisations:
 - DS health monitoring lab verification
 - Kerberos / mTLS lab testing
 
-See `docs/pending.md` for the complete status.
 
 ## Documentation
 
 - `docs/architecture.md` — Single source of truth (23 sections)
-- `docs/LAB_SETUP.md` — Lab cluster deployment
-- `docs/DEPLOY.md` — Deployment guide
-- `docs/multi-mds-test-report.md` — Multi-MDS smoke test results
+- `docs/QUICKSTART.md` — Quick start: build from source (single node or lab cluster)
+- `docs/MANUAL_INSTALL.md` — Step-by-step manual lab install
+- `docs/INSTALL_ROCKY.md` — Rocky Linux 9 / 10 community edition install
 - `CONTRIBUTING.md` — Code style, compiler discipline, patch process
 
 ## License
