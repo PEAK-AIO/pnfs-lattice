@@ -1,16 +1,16 @@
-# Hydra Architecture
-Hydra is a parallel NFS (pNFS, RFC 8881 / RFC 7862) metadata server.  It speaks
+# Lattice Architecture
+Lattice is a parallel NFS (pNFS, RFC 8881 / RFC 7862) metadata server.  It speaks
 NFSv4.1 and NFSv4.2 to clients on the front end and routes bulk file I/O around
 itself by handing clients a layout that points at one or more data servers
 (DSes).  The metadata is kept in a transactional, shared-nothing key-value
-store (RonDB / NDB) so that several Hydra daemons can serve the same namespace
+store (RonDB / NDB) so that several Lattice daemons can serve the same namespace
 simultaneously without a coordinator.
 This document describes the architecture as it stands in the source tree.  It
 is intended for contributors and operators who need to understand how the
 pieces fit together before touching code.
 ## 1. Goals and non-goals
 ### Goals
-- **Active-active metadata.**  Any number of Hydra daemons can serve the same
+- **Active-active metadata.**  Any number of Lattice daemons can serve the same
   filesystem at the same time.  There is no leader, no global lock service,
   and no fail-over event between daemons.
 - **Out-of-band data.**  Clients never read or write file payload through the
@@ -23,14 +23,14 @@ pieces fit together before touching code.
   custom hardware, no kernel patches.  RonDB and the standard Linux NFS
   stack are sufficient.
 ### Non-goals
-- **Embedded local metadata.**  Hydra does not store authoritative metadata
+- **Embedded local metadata.**  Lattice does not store authoritative metadata
   on local disk.  Stateless on restart; the catalogue is the source of truth.
-- **Block storage / direct-attached striping.**  Hydra is a metadata service.
+- **Block storage / direct-attached striping.**  Lattice is a metadata service.
   Stripe placement is calculated by the MDS but the actual blocks live on
   data servers that present a regular file-per-stripe interface.
-- **Cross-cluster replication / DR.**  A single Hydra deployment is one
+- **Cross-cluster replication / DR.**  A single Lattice deployment is one
   RonDB cluster.  Cross-cluster replication is delegated to RonDB's own
-  binlog tooling and is out of Hydra's scope.
+  binlog tooling and is out of Lattice's scope.
 ## 2. System view
 ```mermaid
 flowchart LR
@@ -38,10 +38,10 @@ flowchart LR
         c1[Linux pNFS client]
         c2[Linux pNFS client]
     end
-    subgraph mds[Hydra MDS cluster]
-        m1[hydra-mds 1]
-        m2[hydra-mds 2]
-        m3[hydra-mds N]
+    subgraph mds[Lattice MDS cluster]
+        m1[lattice-pnfs 1]
+        m2[lattice-pnfs 2]
+        m3[lattice-pnfs N]
     end
     subgraph ndb[RonDB cluster]
         ndbA[(NDB data node)]
@@ -67,7 +67,7 @@ A request flows like this:
 The MDS never sees data bytes during the steady state.  The MDS does see
 COMMITs and SETATTR(size=...) which it persists to the catalogue.
 ## 3. Process model
-A single Hydra binary (`hydra-mds`, `src/mds/main.c`) runs as one Linux
+A single Lattice binary (`lattice-pnfs`, `src/mds/main.c`) runs as one Linux
 process per node.  Inside that process there is no fork: every subsystem is
 threads sharing one address space.
 | Thread group | Source | Role |
@@ -147,12 +147,12 @@ Op handlers are split across files by topic:
 Each op returns an `enum nfs4_status`; the encoder (`xdr_codec.c`) turns the
 result union into a wire reply.
 ## 6. Catalogue (metadata backend)
-Hydra abstracts its metadata store behind a small C ABI in
+Lattice abstracts its metadata store behind a small C ABI in
 `include/mds_catalogue.h`.  Two backends ship in tree:
 - **RonDB / NDB** (production) — `src/catalogue/catalogue_rondb_shim.cpp`
   wraps the NDB C++ API behind a narrow C surface.  The shim opens NDB
   cluster connections, manages a per-thread `Ndb` object, and exposes a
-  one-call-one-transaction interface to the rest of Hydra.
+  one-call-one-transaction interface to the rest of Lattice.
 - **memdb** (tests) — `src/catalogue/catalogue_memdb.c` is an in-memory
   hash-table backend used by the unit tests so the suite has no external
   dependency.
@@ -184,7 +184,7 @@ Every mutating MDS op compiles down to **one NDB transaction**.  Examples:
   atomically.
 ### Cross-MDS coordination
 For a small set of operations that span more than one logical row group
-across shards or MDSes, Hydra layers a higher-level protocol on top of the
+across shards or MDSes, Lattice layers a higher-level protocol on top of the
 catalogue:
 - `src/cluster/rename_2pc.c` — cross-shard rename when the deployment is
   sharded (the single-RonDB-cluster case collapses into one NDB txn; this
@@ -193,7 +193,7 @@ catalogue:
   link directory in different shards).  Disabled by default until the
   surrounding plumbing is complete.
 ## 7. pNFS layout path
-Hydra serves two pNFS layout types:
+Lattice serves two pNFS layout types:
 - **Flex-files** (default) — DS endpoints are NFSv3, one file per stripe.
 - **NFSv4.1 file layout** — DS endpoints are NFSv4.1.
 Both share the same in-MDS pipeline:
@@ -271,7 +271,7 @@ grace window after daemon start.
   `mds_gss` build option.
 - TLS: `mds_tls.c` provides per-listener TLS; configurable per export.
 ### Back-channel
-NFSv4.1 sessions carry an explicit back-channel.  Hydra uses it for:
+NFSv4.1 sessions carry an explicit back-channel.  Lattice uses it for:
 - `CB_RECALL` of file delegations.
 - `CB_LAYOUTRECALL` of pNFS layouts.
 - `CB_NOTIFY` for directory delegations (RFC 8881 §10.6).
@@ -312,8 +312,8 @@ gRPC over TCP for the cluster transport (`src/cluster/cluster_transport.c`,
   consumed by `pnfs-soak-report.sh` for trend analysis (RSS slope, error
   rate, GC backlog).
 ## 12. Configuration model
-Hydra reads a single INI file (default `/etc/hydra-mds/mds.conf`).  Keys are
-namespaced by subsystem; the canonical reference is `man hydra-mds.conf`
+Lattice reads a single INI file (default `/etc/lattice-pnfs/mds.conf`).  Keys are
+namespaced by subsystem; the canonical reference is `man lattice-pnfs.conf`
 (`docs/man/`).  Important groups:
 - `[server]` — listen addresses, worker counts, lease time.
 - `[catalogue]` — backend selection, NDB connection string.
@@ -324,7 +324,7 @@ namespaced by subsystem; the canonical reference is `man hydra-mds.conf`
 - `[security]` — TLS / GSS settings.
 All keys have safe defaults; a minimal config can be a half-dozen lines.
 ## 13. Limits and known constraints
-- One RonDB cluster per Hydra deployment.  Multi-cluster federation is
+- One RonDB cluster per Lattice deployment.  Multi-cluster federation is
   out of scope for the core; the 2PC modules exist as building blocks but
   are not exposed as a supported configuration.
 - Maximum stripe count and mirror count are fixed at compile time by
@@ -351,7 +351,7 @@ All keys have safe defaults; a minimal config can be a half-dozen lines.
   `compound_layout.c` to mint and return the new layout, and provide a
   device-info encoder in `xdr_codec.c`.
 ## 15. HPC-Shared file mode (N-to-1 wide stripe)
-Hydra ships an opt-in per-inode mode for the N-to-1 HPC workload
+Lattice ships an opt-in per-inode mode for the N-to-1 HPC workload
 pattern (many compute clients writing into the same file at
 distinct byte ranges).  When the `MDS_IFLAG_HPC_SHARED` bit is set,
 LAYOUTGET emits a wide stripe geometry, prefers RDMA / GPUDirect DSes
