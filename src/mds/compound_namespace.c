@@ -2287,6 +2287,41 @@ static int readdir_plus_cat_cb(const struct mds_cat_dirent *entry,
 	 */
 	if (entry->name[0] == '\0') { return 0; }
 
+	/*
+	 * Cosmetic referral-junction hiding (opt-in, default off).
+	 *
+	 * When cfg_hide_referral_junctions is set, omit the /shardN
+	 * referral junction directories from READDIR at the namespace
+	 * ROOT only.  These are the per-MDS partition entries the
+	 * kernel crosses via an fs_locations referral; some operators
+	 * prefer them hidden from a plain `ls /`.
+	 *
+	 * Safety:
+	 *   - Root only (parent fileid == MDS_FILEID_ROOT).
+	 *   - Directories only.
+	 *   - EXACT subtree-map match (no longest-prefix fallback), so
+	 *     an ordinary file or directory whose name is not a
+	 *     registered partition is never hidden.
+	 *   - LOOKUP is unaffected, so `cd /mnt/pnfs/shardN` still
+	 *     works; this only drops the entry from the listing.
+	 */
+	if (f->cd != NULL && f->cd->cfg_hide_referral_junctions &&
+	    f->cd->smap != NULL &&
+	    f->cd->current_fh.fileid == MDS_FILEID_ROOT &&
+	    entry->type == MDS_FTYPE_DIR) {
+		char jpath[MDS_MAX_PATH];
+		int jn = snprintf(jpath, sizeof(jpath), "/%s", entry->name);
+
+		if (jn > 0 && (size_t)jn < sizeof(jpath)) {
+			struct subtree_entry se;
+
+			if (subtree_map_lookup_exact(f->cd->smap, jpath,
+						     &se) == MDS_OK) {
+				return 0; /* hidden referral junction */
+			}
+		}
+	}
+
 	if (!f->past_cookie) {
 		if (f->cookie_fileid == 0) {
 			f->past_cookie = true;

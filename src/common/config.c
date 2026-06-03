@@ -242,6 +242,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Sharding defaults (Tier 3 Phase 3) */
     cfg->shard_enabled = false;
 
+    /* Cosmetic: keep referral junctions visible in READDIR by default. */
+    cfg->hide_referral_junctions = false;
+
     /* Transient state caching (default: on for single-MDS perf) */
     cfg->transient_state_cache = true;
 
@@ -1020,6 +1023,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "shard_enabled") == 0) {
             cfg->shard_enabled = (strcmp(val, "true") == 0 ||
                                   strcmp(val, "1") == 0);
+        } else if (strcmp(key, "hide_referral_junctions") == 0) {
+            cfg->hide_referral_junctions =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
 
         /* Authority / image split */
         } else if (strcmp(key, "catalog_image_mode") == 0) {

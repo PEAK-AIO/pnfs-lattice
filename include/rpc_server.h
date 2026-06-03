@@ -129,6 +129,7 @@ struct rpc_server_config {
     const struct rename_2pc_transport *transport; /**< Rename 2PC (may be NULL). */
     bool gpudirect_required; /**< Require 0 for placement. */
     bool skip_transient_ndb; /**< Skip NDB for open/layout state. */
+    bool hide_referral_junctions; /**< Hide /shardN referral junctions from root READDIR. */
     enum nfs_auth_mode min_auth; /**< Minimum NFS auth level. */
     struct mds_gss_table *gss_tbl; /**< GSS context table (NULL if SYS). */
     struct threadpool *tp; /**< Worker pool for COMPOUND dispatch (NULL = inline). */

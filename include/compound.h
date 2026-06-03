@@ -1734,6 +1734,12 @@ struct layout_recall     *lr;
 	 * transient_state_cache flag. */
 	bool                      skip_transient_ndb;
 
+	/* Cosmetic READDIR filter: when true, op_readdir omits referral
+	 * junction directories (the /shardN partition entries) from
+	 * listings at the namespace ROOT.  LOOKUP is unaffected.  Set
+	 * from cfg.hide_referral_junctions at compound init. */
+	bool                      cfg_hide_referral_junctions;
+
 	/* RFC 8881 §16.2.4 — current stateid tracking.
 	 *
 	 * Updated by ops that PRODUCE a stateid (OPEN, OPEN_DOWNGRADE,

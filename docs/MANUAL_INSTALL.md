@@ -566,8 +566,9 @@ mount | grep /mnt/pnfs
 ls /mnt/pnfs
 ```
 
-Because the cluster is multi-MDS, the namespace root is a **referral
-map**, not a writable directory. You should see one entry per MDS:
+Because the cluster is multi-MDS, the namespace root is an ordinary
+writable directory (mode `0755`, owned by `root`) that also holds one
+referral entry per MDS. You should see one entry per MDS:
 
 ```
 shard1  shard2  shard3
@@ -576,8 +577,11 @@ shard1  shard2  shard3
 Each `shardN` is an NFSv4 `fs_locations` referral to the MDS that owns
 it (`shard1` → mds1 @ 10.10.10.50, `shard2` → mds2 @ 10.10.10.51,
 `shard3` → mds3 @ 10.10.10.55). The kernel crosses the referral the
-first time you `cd` into a shard; all reads and writes must happen
-**inside** a shard — never at the root.
+first time you `cd` into a shard. Writing directly at the root works
+too — the shared RonDB catalogue makes root-level entries visible from
+every MDS — but prefer working **inside** a shard so metadata load is
+spread across MDSes via the referrals instead of landing entirely on
+the MDS you mounted.
 
 To mount at boot, append to `/etc/fstab`:
 
@@ -588,8 +592,9 @@ echo '10.10.10.50:/ /mnt/pnfs nfs4 vers=4.2,nconnect=8,_netdev 0 0' | sudo tee -
 ## Step 12 — Smoke test
 
 From the client. Pick any shard as the workdir — the example uses
-`shard1`. Writes at `/mnt/pnfs` directly will fail with `EROFS` or
-`ENOENT` because the root is a referral map, not a real directory.
+`shard1`. Writing directly at `/mnt/pnfs` also works (the root is a
+normal writable directory), but using a shard exercises the per-MDS
+referral path.
 
 ```bash
 SHARD=/mnt/pnfs/shard1    # or shard2 / shard3
@@ -679,11 +684,12 @@ the client.
   `ss -tn state established '( dport = :2049 )'` should show a
   connection to 10.10.10.50. If not, check `ss -tln | grep :2049` on
   mds1; `pnfs-mds` may not have started.
-- **Writes at `/mnt/pnfs/<file>` return `EROFS` / `Permission denied`
-  / `No such file or directory`** — the root of the namespace is a
-  referral map in multi-MDS mode; it is not writable. Write inside
-  `/mnt/pnfs/shard1`, `/mnt/pnfs/shard2`, or `/mnt/pnfs/shard3`
-  instead.
+- **Writes at `/mnt/pnfs/<file>` return `Permission denied`** — the
+  namespace root is owned by `root` with mode `0755`, so only `root`
+  may create entries directly at the root. This is ordinary POSIX
+  permission, not a read-only filesystem. Use `sudo`, or create your
+  files inside `/mnt/pnfs/shard1`, `/mnt/pnfs/shard2`, or
+  `/mnt/pnfs/shard3`.
 - **`rm: cannot remove '...': Device or resource busy`** — on NFS,
   removing a directory while the current shell is still `cd`'d into
   it fails because the kernel holds a reference to the open
