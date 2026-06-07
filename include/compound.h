@@ -1614,6 +1614,7 @@ struct layout_recall     *lr;
 	bool                      saved_fh_set;
 	uint32_t                  mds_id;       /* This MDS node numeric ID */
 	uint32_t                  cfg_stripe_unit; /* Config stripe_unit_bytes (0 = default 64KiB) */
+	bool                      cfg_auto_widen_lease_on_4k;
 	/*
 	 * Phase 1 placement policy dispatch.  cfg_placement_policy_enabled
 	 * gates the new path; when false, LAYOUTGET's new-file branch uses

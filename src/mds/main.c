@@ -1294,6 +1294,7 @@ int main(int argc, char *argv[])
 		rpc_cfg.port       = cfg.self.nfs_port;
 		rpc_cfg.mds_id     = cfg.self.id;
 		rpc_cfg.stripe_unit = cfg.stripe_unit_bytes;
+		rpc_cfg.auto_widen_lease_on_4k = cfg.auto_widen_lease_on_4k;
 		rpc_cfg.placement_policy = cfg.placement_policy;
 		rpc_cfg.placement_policy_enabled = cfg.placement_policy_enabled;
 		rpc_cfg.default_stripe_count = cfg.default_stripe_count;

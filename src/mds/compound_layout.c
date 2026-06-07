@@ -902,6 +902,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			? cd->cfg_stripe_unit
 			: 65536ULL;
 	}
+	if (cd->cfg_auto_widen_lease_on_4k &&
+	    a->minlength == 4096 &&
+	    a->length == UINT64_MAX) {
+		lease_length = UINT64_MAX; /* capped to grant_length below */
+	}
 	/*
 	 * Floor: clamp lease_length up to the configured stripe
 	 * unit (or 64 KiB if unconfigured) so the smallest possible

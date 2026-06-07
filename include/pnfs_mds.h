@@ -680,6 +680,7 @@ struct mds_config {
     uint32_t            worker_threads;
     uint32_t            ds_heartbeat_ms;
     uint32_t            stripe_unit_bytes;
+    bool                auto_widen_lease_on_4k;
     /* Phase 3: default stripe geometry for new files' layouts.
      * Both default to 1 (no striping, no mirroring) unless a
      * profile sets them or an explicit INI key overrides. */
