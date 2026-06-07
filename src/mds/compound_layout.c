@@ -848,6 +848,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	const uint32_t grant_iomode = LAYOUTIOMODE4_RW;
 	uint64_t grant_offset = 0;
 	uint64_t grant_length = UINT64_MAX;
+	uint64_t lease_offset = 0;
+	uint64_t lease_length = UINT64_MAX;
+	uint64_t recall_offset = 0;
+	uint64_t recall_length = UINT64_MAX;
 
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
@@ -881,6 +885,35 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 	}
+	/* Decouple stripe-lease and recall scope from the grant scope.
+	 *
+	 * The grant range (returned to the client on the wire) is widened
+	 * by layout_select_grant_range() up to MDS_LAYOUT_GRANT_MAX_LENGTH
+	 * (1 GiB) to avoid per-page LAYOUTGET storms during writeback.
+	 *
+	 * The stripe-lease range, however, should track what the client
+	 * actually intends to write -- taken from loga_minlength
+	 * (RFC 5661 18.43.2, RFC 8881 18.43.3).  Without this decoupling,
+	 * two clients writing disjoint sub-GiB regions of the same
+	 * logical file would always see a lease-scope conflict even
+	 * though the underlying byte ranges do not overlap.
+	 *
+	 * Fall back to the configured stripe unit when the client did
+	 * not supply a meaningful minlength.  Never let the lease exceed
+	 * the grant. */
+	lease_offset = a->offset;
+	if (a->minlength != UINT64_MAX && a->minlength > 0) {
+		lease_length = a->minlength;
+	} else {
+		lease_length = cd->cfg_stripe_unit > 0
+			? cd->cfg_stripe_unit
+			: 65536ULL;
+	}
+	if (lease_length > grant_length) {
+		lease_length = grant_length;
+	}
+	recall_offset = lease_offset;
+	recall_length = lease_length;
 
 	/*
 	 * Mark's bug -- byte-range CB_LAYOUTRECALL.
@@ -949,8 +982,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 				cd->current_fh.fileid,
 				cd->clientid,
 				req_iomode_for_recall,
-				grant_offset,
-				grant_length,
+				recall_offset,
+				recall_length,
 				a->layout_type,
 				&recalled));
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
@@ -970,8 +1003,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			cd->slt,
 			cd->current_fh.fileid,
 			cd->clientid,
-			grant_offset,
-			grant_length)) {
+			lease_offset,
+			lease_length)) {
 			return NFS4ERR_LAYOUTTRYLATER;
 		}
 	}
@@ -1928,8 +1961,8 @@ fill_layoutget_result:
 				cd->slt,
 				cd->current_fh.fileid,
 				cd->clientid,
-				grant_offset,
-				grant_length,
+				lease_offset,
+				lease_length,
 				cd->cfg_stripe_lease_duration_ms);
 		}
 
