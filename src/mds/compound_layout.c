@@ -407,11 +407,24 @@ void make_layout_stateid(uint32_t mds_id,
  * functionally equivalent for finite workloads while letting the
  * server emit byte-range CB_LAYOUTRECALLs.
  */
-#define MDS_LAYOUT_GRANT_MAX_LENGTH (1ULL << 30) /* 1 GiB */
+#define MDS_LAYOUT_GRANT_MAX_LENGTH_DEFAULT (1ULL << 36) /* 64 GiB */
+
+static _Atomic(uint64_t) mds_layout_grant_max_length =
+	MDS_LAYOUT_GRANT_MAX_LENGTH_DEFAULT;
+
+void compound_layout_set_grant_max_length(uint64_t bytes)
+{
+	uint64_t cap = bytes;
+
+	if (cap < 65536ULL) {
+		cap = 65536ULL;
+	}
+	atomic_store(&mds_layout_grant_max_length, cap);
+}
 
 static uint64_t layout_clamp_grant_length(uint64_t offset, uint64_t length)
 {
-	uint64_t cap = MDS_LAYOUT_GRANT_MAX_LENGTH;
+	uint64_t cap = atomic_load(&mds_layout_grant_max_length);
 
 	if (offset >= UINT64_MAX - 1ULL) {
 		return 0;
@@ -460,7 +473,7 @@ static enum nfs4_status layout_select_grant_range(
 	 * overwhelms the MDS and causes close() to hang.
 	 *
 	 * The floor is the client's requested length (may be 4K or
-	 * UINT64_MAX); the ceiling is MDS_LAYOUT_GRANT_MAX_LENGTH
+	 * UINT64_MAX); the ceiling is layout_grant_max_length_bytes
 	 * (1 GiB) applied by layout_clamp_grant_length() below.
 	 */
 	window = configured_stripe_unit > 0 ? configured_stripe_unit : 65536ULL;
@@ -881,7 +894,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	/* Decouple stripe-lease and recall scope from the grant scope.
 	 *
 	 * The grant range (returned to the client on the wire) is widened
-	 * by layout_select_grant_range() up to MDS_LAYOUT_GRANT_MAX_LENGTH
+	 * by layout_select_grant_range() up to layout_grant_max_length_bytes
 	 * (1 GiB) to avoid per-page LAYOUTGET storms during writeback.
 	 *
 	 * The stripe-lease range, however, should track what the client

@@ -15,6 +15,7 @@
 
 #include "pnfs_mds.h"
 #include "rpc_server.h"
+#include "compound.h"
 #include "mds_gss.h"
 #include "mds_tls.h"
 #include "copy_offload.h"
@@ -1295,6 +1296,8 @@ int main(int argc, char *argv[])
 		rpc_cfg.mds_id     = cfg.self.id;
 		rpc_cfg.stripe_unit = cfg.stripe_unit_bytes;
 		rpc_cfg.auto_widen_lease_on_4k = cfg.auto_widen_lease_on_4k;
+		compound_layout_set_grant_max_length(
+			cfg.layout_grant_max_length_bytes);
 		rpc_cfg.placement_policy = cfg.placement_policy;
 		rpc_cfg.placement_policy_enabled = cfg.placement_policy_enabled;
 		rpc_cfg.default_stripe_count = cfg.default_stripe_count;

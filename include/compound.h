@@ -1794,6 +1794,7 @@ struct layout_recall     *lr;
  * @param cat  Catalogue handle used for namespace operations.
  */
 void compound_init(struct compound_data *cd);
+void compound_layout_set_grant_max_length(uint64_t bytes);
 
 /**
  * RFC 8881 §1.7 / §14.4 — UTF-8 well-formedness check.
