@@ -33,7 +33,8 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
-#include "lease_table.h"    /* stripe lease table (Phase 2) */
+#include "lease_table.h"
+#include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "mds_op_metrics.h" /* CAT_TIMED-equivalent for direct fused call */
 
 
@@ -1029,13 +1030,28 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 *
 	 * Same-client requests are allowed (renewal path). */
 	if (cd->slt != NULL && cd->cfg_stripe_lease_duration_ms > 0) {
-		if (stripe_lease_check_conflict(
-			cd->slt,
-			cd->current_fh.fileid,
-			cd->clientid,
-			lease_offset,
-			lease_length)) {
+		/* Patch 0005: per-DS-stripe lease keying.  Decompose the
+		 * logical lease range into per-stripe slices and conflict-
+		 * check each one against the lease table.  Slicing fails
+		 * closed -- on error we return TRYLATER. */
+		struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
+		uint32_t _slt_unit = cd->cfg_stripe_unit ? cd->cfg_stripe_unit : 65536U;
+		int _slt_n = lease_range_to_stripe_slices(
+			lease_offset, lease_length, _slt_unit,
+			_slt_slices, MDS_MAX_STRIPES);
+		if (_slt_n < 0) {
 			return NFS4ERR_LAYOUTTRYLATER;
+		}
+		for (int _slt_i = 0; _slt_i < _slt_n; _slt_i++) {
+			if (stripe_lease_check_conflict(
+				cd->slt,
+				cd->current_fh.fileid,
+				cd->clientid,
+				_slt_slices[_slt_i].stripe_index,
+				_slt_slices[_slt_i].ds_offset,
+				_slt_slices[_slt_i].ds_length)) {
+				return NFS4ERR_LAYOUTTRYLATER;
+			}
 		}
 	}
 
@@ -1990,13 +2006,27 @@ fill_layoutget_result:
 		 * via stripe_lease_check_conflict at LAYOUTGET entry. */
 		if (cd->slt != NULL &&
 		    cd->cfg_stripe_lease_duration_ms > 0) {
-			(void)stripe_lease_acquire(
-				cd->slt,
-				cd->current_fh.fileid,
-				cd->clientid,
-				lease_offset,
-				lease_length,
-				cd->cfg_stripe_lease_duration_ms);
+			/* Patch 0005: per-DS-stripe lease keying.  Acquire one
+			 * lease entry per stripe slice; best-effort -- the
+			 * conflict check at LAYOUTGET entry already ruled out
+			 * cross-client collisions. */
+			struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
+			uint32_t _slt_unit = cd->cfg_stripe_unit
+				? cd->cfg_stripe_unit : 65536U;
+			int _slt_n = lease_range_to_stripe_slices(
+				lease_offset, lease_length, _slt_unit,
+				_slt_slices, MDS_MAX_STRIPES);
+			for (int _slt_i = 0; _slt_i < _slt_n; _slt_i++) {
+				(void)stripe_lease_acquire(
+					cd->slt,
+					cd->current_fh.fileid,
+					cd->clientid,
+					0U, /* ds_id: tracing only */
+					_slt_slices[_slt_i].stripe_index,
+					_slt_slices[_slt_i].ds_offset,
+					_slt_slices[_slt_i].ds_length,
+					cd->cfg_stripe_lease_duration_ms);
+			}
 		}
 
 		/*
@@ -2275,11 +2305,12 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 		/* Release any stripe lease held by this client for
 		 * the returned range (whole-file for FILE returns). */
 		if (cd->slt != NULL) {
-			stripe_lease_release(
+			/* Patch 0005: LAYOUTRETURN4_FILE -- whole-file return
+			 * semantics don't need slice reconstruction. */
+			stripe_lease_release_all_for(
 				cd->slt,
 				cd->current_fh.fileid,
-				cd->clientid,
-				a->offset);
+				cd->clientid);
 		}
 	}
 	r->stateid_present = true;

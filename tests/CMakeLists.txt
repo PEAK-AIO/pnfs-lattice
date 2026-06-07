@@ -366,3 +366,30 @@ target_include_directories(test_layout_recall PRIVATE
 )
 add_test(NAME test_layout_recall COMMAND test_layout_recall)
 set_tests_properties(test_layout_recall PROPERTIES LABELS "unit")
+
+# -------------------------------------------------------------------
+# Patch 0005 -- per-DS-stripe lease keying unit tests (standalone).
+#
+# These tests build the implementation files directly so they avoid
+# pulling in the full MDS / NDB stack and run in well under a second.
+# -------------------------------------------------------------------
+
+add_executable(test_lease_stripe_map
+    unit/test_lease_stripe_map.c
+    ${PROJECT_SOURCE_DIR}/src/fsal_obj/lease_stripe_map.c)
+target_include_directories(test_lease_stripe_map PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME test_lease_stripe_map COMMAND test_lease_stripe_map)
+set_tests_properties(test_lease_stripe_map PROPERTIES LABELS "unit")
+
+add_executable(test_lease_table
+    unit/test_lease_table.c
+    ${PROJECT_SOURCE_DIR}/src/fsal_obj/lease_stripe_map.c
+    ${PROJECT_SOURCE_DIR}/src/fsal_obj/lease_table.c)
+target_compile_definitions(test_lease_table PRIVATE _POSIX_C_SOURCE=200809L)
+target_include_directories(test_lease_table PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src/fsal_obj)
+target_link_libraries(test_lease_table PRIVATE pthread)
+add_test(NAME test_lease_table COMMAND test_lease_table)
+set_tests_properties(test_lease_table PROPERTIES LABELS "unit")
