@@ -909,6 +909,25 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			? cd->cfg_stripe_unit
 			: 65536ULL;
 	}
+	/*
+	 * Floor: clamp lease_length up to the configured stripe
+	 * unit (or 64 KiB if unconfigured) so the smallest possible
+	 * lease still aligns with the smallest sensible on-wire
+	 * I/O unit.  Strict-N-to-1 clients already send
+	 * loga_minlength >= stripe_unit, so this floor is a no-op
+	 * for them.  Defends the non-strict path (e.g. Linux
+	 * page-cache writeback issuing loga_minlength = 4096)
+	 * from creating one-page leases that fragment the lease
+	 * table.
+	 */
+	{
+		uint64_t lease_floor = cd->cfg_stripe_unit > 0
+			? cd->cfg_stripe_unit
+			: 65536ULL;
+		if (lease_length < lease_floor) {
+			lease_length = lease_floor;
+		}
+	}
 	if (lease_length > grant_length) {
 		lease_length = grant_length;
 	}
