@@ -141,11 +141,23 @@ struct rondb_shim_handle {
 
     /* Phase 3: per-connection async contexts (flush threads). */
     ndb_conn_ctx            conn_ctxs[NDB_CONN_POOL_MAX];
+
+    /* Liveness generation for thread-local Ndb caching.  Each handle
+     * instance is stamped with a globally unique generation at
+     * creation; rondb_destroy_handle re-stamps it before deleting the
+     * pooled Ndb objects, so cached tl_ndb pointers recorded by OTHER
+     * threads (which remember the generation they cached under) are
+     * invalidated instead of dangling. */
+    std::atomic<uint64_t>   generation{0};
 };
+
+/* Source of unique handle generations (never reused across handles). */
+static std::atomic<uint64_t> g_rondb_handle_generation{1};
 
 /* Thread-local Ndb pointer -- one per calling thread, lazily created. */
 static thread_local Ndb *tl_ndb = nullptr;
 static thread_local rondb_shim_handle *tl_ndb_owner = nullptr;
+static thread_local uint64_t tl_ndb_gen = 0;
 
 /**
  * Return a thread-local Ndb object for the given handle.
@@ -161,8 +173,13 @@ static Ndb *rondb_get_ndb(rondb_shim_handle *state)
         return nullptr;
     }
 
-    /* Fast path: already have an Ndb for this thread + handle. */
-    if (tl_ndb != nullptr && tl_ndb_owner == state) {
+    /* Fast path: already have an Ndb for this thread + handle.  The
+     * cached pointer is valid only if BOTH the owner pointer AND the
+     * recorded generation match: a destroyed handle (or a new handle
+     * reusing the same address) carries a different generation, so a
+     * stale tl_ndb is re-created instead of dereferenced. */
+    if (tl_ndb != nullptr && tl_ndb_owner == state &&
+        tl_ndb_gen == state->generation.load(std::memory_order_acquire)) {
         return tl_ndb;
     }
 
@@ -196,6 +213,7 @@ static Ndb *rondb_get_ndb(rondb_shim_handle *state)
 
     tl_ndb = ndb;
     tl_ndb_owner = state;
+    tl_ndb_gen = state->generation.load(std::memory_order_acquire);
     return ndb;
 };
 
@@ -266,6 +284,16 @@ static void rondb_destroy_handle(rondb_shim_handle *state)
         }
     }
 
+    /* Invalidate every thread's cached tl_ndb for this handle BEFORE
+     * deleting the pooled Ndb objects: rondb_get_ndb compares each
+     * thread's recorded generation against this counter, so threads
+     * other than the caller re-create their Ndb instead of using a
+     * dangling pointer.  A fresh unique value (not +1) guarantees no
+     * later handle can ever match a stale recorded generation. */
+    state->generation.store(
+        g_rondb_handle_generation.fetch_add(1, std::memory_order_relaxed),
+        std::memory_order_release);
+
     /* Delete all thread-local Ndb objects from the pool. */
     {
         std::lock_guard<std::mutex> lock(state->pool_mutex);
@@ -279,6 +307,7 @@ static void rondb_destroy_handle(rondb_shim_handle *state)
     if (tl_ndb_owner == state) {
         tl_ndb = nullptr;
         tl_ndb_owner = nullptr;
+        tl_ndb_gen = 0;
     }
 
     /* Destroy all pooled connections. */
@@ -716,6 +745,10 @@ int rondb_shim_connect_pool(const char *connect_string,
     if (state == nullptr) {
         return -1;
     }
+    /* Stamp a unique liveness generation (see rondb_get_ndb). */
+    state->generation.store(
+        g_rondb_handle_generation.fetch_add(1, std::memory_order_relaxed),
+        std::memory_order_release);
     std::memset(state->connections, 0, sizeof(state->connections));
     state->conn_count = pool_size;  /* target; actual may be fewer */
     state->connection = nullptr;
@@ -2578,6 +2611,13 @@ int rondb_shim_fileid_batch_alloc(void *handle, uint32_t batch_size,
     std::strncpy(key_buf, RONDB_META_KEY_FILEID, sizeof(key_buf) - 1);
     op->equal(RONDB_META_COL_KEY, key_buf);
     val_attr = op->getValue(RONDB_META_COL_VAL, nullptr);
+    /* getValue can fail (e.g. op exhaustion); the NdbRecAttr is
+     * dereferenced after execute, so a NULL here must abort. */
+    if (val_attr == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "fileid_alloc getValue");
+    }
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -4930,6 +4970,13 @@ int rondb_shim_xattr_get(void *handle, uint64_t fileid,
                 rondb_get_ndb(state)->closeTransaction(tx);
                 return -1;
             }
+            /* Report only the bytes actually copied: callers (e.g.
+             * READLINK via inline_get) NUL-terminate / memcpy using
+             * *val_outlen, so reporting the full blob length for a
+             * short buffer would write past the caller's buffer.  No
+             * caller implements a grow-and-retry loop on this length.
+             * (val_buf == NULL keeps full-length size-query semantics.) */
+            *val_outlen = to_read;
         }
     }
 
@@ -5733,10 +5780,33 @@ int rondb_shim_ns_create(void *handle,
                 op_sm->setValue(RONDB_SM_COL_STRIPE_UNIT, (Uint32)65536);
                 op_sm->setValue(RONDB_SM_COL_MIRROR_CNT, (Uint32)1);
             }
-            /* Stripe entries: one per stripe. */
+            /* Stripe entries: one per stripe.  The wire layout (see
+             * the serializer in catalogue_rondb.c) is variable-length
+             * per entry -- [ds_id u32][fh_len u32][fh bytes] -- so
+             * walk an offset cursor and bound every read against
+             * stripe_len.  The previous fixed 8-byte stride both
+             * over-read the buffer and mis-indexed entries whenever
+             * stripe_count > 1. */
+            uint32_t s_off = 0;
             for (uint32_t si = 0; si < stripe_count; si++) {
-                uint32_t ds_id = fdb_get_u32(stripe_buf + si * 8);
-                uint32_t fh_len = fdb_get_u32(stripe_buf + si * 8 + 4);
+                if (s_off + 8 > stripe_len) {
+                    rondb_get_ndb(state)->closeTransaction(tx);
+                    std::fprintf(stderr,
+                        "ERROR: ns_create stripe buffer overrun: "
+                        "entry %u header at %u exceeds len %u\n",
+                        si, s_off, stripe_len);
+                    return -1;
+                }
+                uint32_t ds_id = fdb_get_u32(stripe_buf + s_off);
+                uint32_t fh_len = fdb_get_u32(stripe_buf + s_off + 4);
+                if (fh_len > stripe_len - s_off - 8) {
+                    rondb_get_ndb(state)->closeTransaction(tx);
+                    std::fprintf(stderr,
+                        "ERROR: ns_create stripe buffer overrun: "
+                        "entry %u fh_len %u exceeds len %u\n",
+                        si, fh_len, stripe_len);
+                    return -1;
+                }
                 NdbOperation *op_se = tx->getNdbOperation(se_tbl);
                 if (op_se != nullptr) {
                     op_se->insertTuple();
@@ -5749,7 +5819,7 @@ int rondb_shim_ns_create(void *handle,
                         uint8_t fh_vb[130];
                         uint32_t fh_vb_len = 0;
                         if (rondb_encode_varbinary_value(
-                                stripe_buf + si * 8 + 8,
+                                stripe_buf + s_off + 8,
                                 fh_len, 1U, fh_vb,
                                 sizeof(fh_vb), &fh_vb_len) == 0) {
                             op_se->setValue(RONDB_SE_COL_NFS_FH,
@@ -5763,6 +5833,7 @@ int rondb_shim_ns_create(void *handle,
                                        (const char *)empty_vb, 1);
                     }
                 }
+                s_off += 8 + fh_len;
             }
         }
     }
@@ -5936,9 +6007,28 @@ int rondb_shim_ns_create_with_layout(
                 op_sm->setValue(RONDB_SM_COL_MIRROR_CNT, (Uint32)1);
                 track(op_sm, "stripe_map");
             }
+            /* Variable-length entry walk with bounds checks -- see the
+             * matching loop in rondb_shim_ns_create above. */
+            uint32_t s_off = 0;
             for (uint32_t si = 0; si < stripe_count; si++) {
-                uint32_t ds_id = fdb_get_u32(stripe_buf + si * 8);
-                uint32_t fh_len = fdb_get_u32(stripe_buf + si * 8 + 4);
+                if (s_off + 8 > stripe_len) {
+                    rondb_get_ndb(state)->closeTransaction(tx);
+                    std::fprintf(stderr,
+                        "ERROR: ns_create_wl stripe buffer overrun: "
+                        "entry %u header at %u exceeds len %u\n",
+                        si, s_off, stripe_len);
+                    return -1;
+                }
+                uint32_t ds_id = fdb_get_u32(stripe_buf + s_off);
+                uint32_t fh_len = fdb_get_u32(stripe_buf + s_off + 4);
+                if (fh_len > stripe_len - s_off - 8) {
+                    rondb_get_ndb(state)->closeTransaction(tx);
+                    std::fprintf(stderr,
+                        "ERROR: ns_create_wl stripe buffer overrun: "
+                        "entry %u fh_len %u exceeds len %u\n",
+                        si, fh_len, stripe_len);
+                    return -1;
+                }
                 NdbOperation *op_se = tx->getNdbOperation(se_tbl);
                 if (op_se != nullptr) {
                     op_se->insertTuple();
@@ -5951,7 +6041,7 @@ int rondb_shim_ns_create_with_layout(
                         uint8_t fh_vb[130];
                         uint32_t fh_vb_len = 0;
                         if (rondb_encode_varbinary_value(
-                                stripe_buf + si * 8 + 8,
+                                stripe_buf + s_off + 8,
                                 fh_len, 1U, fh_vb,
                                 sizeof(fh_vb), &fh_vb_len) == 0) {
                             op_se->setValue(RONDB_SE_COL_NFS_FH,
@@ -5965,6 +6055,7 @@ int rondb_shim_ns_create_with_layout(
                     }
                     track(op_se, "stripe_entry");
                 }
+                s_off += 8 + fh_len;
             }
         }
     }
@@ -7662,6 +7753,12 @@ int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out)
     std::strncpy(key_buf, RONDB_META_KEY_GC_SEQ, sizeof(key_buf) - 1);
     op->equal(RONDB_META_COL_KEY, key_buf);
     val_attr = op->getValue(RONDB_META_COL_VAL, nullptr);
+    /* See fileid_batch_alloc: NULL NdbRecAttr must abort before use. */
+    if (val_attr == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_seq_alloc getValue");
+    }
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -9721,6 +9818,12 @@ static int rondb_shim_alloc_counter_range(void *handle,
     std::strncpy(key_buf, key_name, sizeof(key_buf) - 1);
     op->equal(RONDB_META_COL_KEY, key_buf);
     val_attr = op->getValue(RONDB_META_COL_VAL, nullptr);
+    /* See fileid_batch_alloc: NULL NdbRecAttr must abort before use. */
+    if (val_attr == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "alloc_range getValue");
+    }
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -10000,10 +10103,15 @@ int rondb_shim_delta_insert(void *handle,
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
-        /* Duplicate key (constraint violation) is not fatal for
-         * changefeed -- the record was already inserted. */
+        /* Duplicate key (constraint violation): a row with this
+         * (source_mds_id, seqno) already exists -- typically a stale
+         * post-crash seqno counter colliding with rows from the
+         * previous incarnation.  Return the DISTINCT value 1 so the
+         * caller can advance its seqno and retry; returning 0 here
+         * would acknowledge a delta that was never written, silently
+         * dropping it from the changefeed. */
         if (err.classification == NdbError::ConstraintViolation) {
-            return 0;
+            return 1;
         }
         return rondb_report_error(err, "delta_insert commit");
     }

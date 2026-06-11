@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <sys/random.h>
 #include <time.h>
 #include <gssapi/gssapi.h>
@@ -28,6 +29,13 @@ struct gss_ctx_entry {
 
 struct mds_gss_table {
     gss_cred_id_t  server_cred;
+    /*
+     * Guards every read/write of contexts[] (slot claim, sequence
+     * window updates, eviction, lookup).  RPC worker threads call
+     * into this table concurrently; without the lock a context can
+     * be memset by evict/destroy while another thread walks it.
+     */
+    pthread_mutex_t      lock;
     struct gss_ctx_entry contexts[MAX_GSS_CONTEXTS];
 };
 
@@ -50,6 +58,11 @@ int mds_gss_init(const char *keytab_path, const char *principal,
         return -1;
     }
 
+    if (pthread_mutex_init(&tbl->lock, NULL) != 0) {
+        free(tbl);
+        return -1;
+    }
+
     /* Acquire server credentials. */
     OM_uint32 major, minor;
     gss_name_t server_name = GSS_C_NO_NAME;
@@ -63,6 +76,7 @@ int mds_gss_init(const char *keytab_path, const char *principal,
                                 GSS_C_NT_HOSTBASED_SERVICE,
                                 &server_name);
         if (GSS_ERROR(major)) {
+            (void)pthread_mutex_destroy(&tbl->lock);
             free(tbl);
             return -1;
         }
@@ -78,6 +92,7 @@ int mds_gss_init(const char *keytab_path, const char *principal,
     }
 
     if (GSS_ERROR(major)) {
+        (void)pthread_mutex_destroy(&tbl->lock);
         free(tbl);
         return -1;
     }
@@ -97,6 +112,7 @@ uint32_t mds_gss_evict_idle(struct mds_gss_table *tbl,
     time_t now = time(NULL);
     uint32_t evicted = 0;
 
+    pthread_mutex_lock(&tbl->lock);
     for (uint32_t i = 0; i < MAX_GSS_CONTEXTS; i++) {
         struct gss_ctx_entry *e = &tbl->contexts[i];
         if (!e->established) {
@@ -113,6 +129,7 @@ uint32_t mds_gss_evict_idle(struct mds_gss_table *tbl,
             evicted++;
         }
     }
+    pthread_mutex_unlock(&tbl->lock);
     return evicted;
 }
 
@@ -124,12 +141,15 @@ void mds_gss_destroy(struct mds_gss_table *tbl)
 
     OM_uint32 minor;
 
+    pthread_mutex_lock(&tbl->lock);
     for (uint32_t i = 0; i < MAX_GSS_CONTEXTS; i++) {
         if (tbl->contexts[i].gss_ctx != GSS_C_NO_CONTEXT) {
             (void)gss_delete_sec_context(&minor,
                 &tbl->contexts[i].gss_ctx, GSS_C_NO_BUFFER);
         }
     }
+    pthread_mutex_unlock(&tbl->lock);
+    (void)pthread_mutex_destroy(&tbl->lock);
 
     if (tbl->server_cred != GSS_C_NO_CREDENTIAL) {
         (void)gss_release_cred(&minor, &tbl->server_cred);
@@ -158,6 +178,14 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
     *out_len = 0;
     *complete = false;
 
+    /*
+     * Held for the whole accept: gss_accept_sec_context() updates
+     * the slot's gss_ctx in place (multi-leg continuation), so the
+     * slot must stay claimed and stable across the crypto call.
+     * Context establishment is rare; serializing it is acceptable.
+     */
+    pthread_mutex_lock(&tbl->lock);
+
     uint32_t slot = UINT32_MAX;
 
     if (gss_proc == RPCSEC_GSS_CONTINUE_INIT &&
@@ -175,6 +203,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
             }
         }
         if (slot == UINT32_MAX) {
+            pthread_mutex_unlock(&tbl->lock);
             return -1; /* Handle not found. */
         }
     } else {
@@ -188,6 +217,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
             }
         }
         if (slot == UINT32_MAX) {
+            pthread_mutex_unlock(&tbl->lock);
             return -1; /* No free slots. */
         }
     }
@@ -213,6 +243,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
     );
 
     if (GSS_ERROR(major)) {
+        pthread_mutex_unlock(&tbl->lock);
         return -1;
     }
 
@@ -221,6 +252,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
         if (*out_token == NULL) {
             OM_uint32 rel;
             (void)gss_release_buffer(&rel, &out_buf);
+            pthread_mutex_unlock(&tbl->lock);
             return -1;
         }
         memcpy(*out_token, out_buf.value, out_buf.length);
@@ -240,6 +272,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
         uint32_t hid;
         if (getrandom(&hid, sizeof(hid), 0) !=
                 (ssize_t)sizeof(hid)) {
+            pthread_mutex_unlock(&tbl->lock);
             return -1;
         }
         if (hid == 0) {
@@ -268,6 +301,7 @@ int mds_gss_accept_token(struct mds_gss_table *tbl,
         *complete = true;
     }
 
+    pthread_mutex_unlock(&tbl->lock);
     return 0;
 }
 
@@ -284,6 +318,7 @@ int mds_gss_destroy_context(struct mds_gss_table *tbl,
     memcpy(&hid_be, ctx_handle, 4);
     uint32_t hid = be32toh(hid_be);
 
+    pthread_mutex_lock(&tbl->lock);
     for (uint32_t i = 0; i < MAX_GSS_CONTEXTS; i++) {
         if (tbl->contexts[i].handle_id == hid &&
                 tbl->contexts[i].established) {
@@ -297,9 +332,11 @@ int mds_gss_destroy_context(struct mds_gss_table *tbl,
             }
             memset(&tbl->contexts[i], 0,
                    sizeof(tbl->contexts[i]));
+            pthread_mutex_unlock(&tbl->lock);
             return 0;
         }
     }
+    pthread_mutex_unlock(&tbl->lock);
 
     return -1; /* Not found. */
 }
@@ -320,6 +357,9 @@ int mds_gss_validate(struct mds_gss_table *tbl,
     memcpy(&hid_be, cred->ctx_handle, 4);
     uint32_t hid = be32toh(hid_be);
 
+    /* The sequence window is read-modify-write state; the lock makes
+     * the replay check + bitmap update atomic across workers. */
+    pthread_mutex_lock(&tbl->lock);
     for (uint32_t i = 0; i < MAX_GSS_CONTEXTS; i++) {
         if (tbl->contexts[i].handle_id == hid &&
             tbl->contexts[i].established) {
@@ -331,6 +371,7 @@ int mds_gss_validate(struct mds_gss_table *tbl,
                 tbl->contexts[i].seq_window_low;
             uint32_t seq = cred->seq_num;
             if (seq <= low) {
+                pthread_mutex_unlock(&tbl->lock);
                 return -1; /* Below window. */
             }
             uint32_t offset = seq - low;
@@ -351,6 +392,7 @@ int mds_gss_validate(struct mds_gss_table *tbl,
             uint64_t bit = (uint64_t)1
                 << (offset - 1);
             if (tbl->contexts[i].seq_seen & bit) {
+                pthread_mutex_unlock(&tbl->lock);
                 return -1; /* Replay. */
             }
             tbl->contexts[i].seq_seen |= bit;
@@ -368,9 +410,11 @@ int mds_gss_validate(struct mds_gss_table *tbl,
             } else {
                 *service = cred->service;
             }
+            pthread_mutex_unlock(&tbl->lock);
             return 0;
         }
     }
+    pthread_mutex_unlock(&tbl->lock);
 
     return -1;  /* Unknown or unestablished context. */
 }
@@ -382,19 +426,28 @@ static gss_ctx_id_t find_gss_ctx(struct mds_gss_table *tbl,
                                   const uint8_t *handle,
                                   uint32_t handle_len)
 {
+    gss_ctx_id_t ctx = GSS_C_NO_CONTEXT;
+
     if (tbl == NULL || handle == NULL || handle_len < 4) {
         return GSS_C_NO_CONTEXT;
     }
     uint32_t hid_be;
     memcpy(&hid_be, handle, 4);
     uint32_t hid = be32toh(hid_be);
+    /* The lock protects the table walk only.  The returned ctx is
+     * used by callers outside the lock; a concurrent destroy/evict
+     * of the same handle can still delete it mid-use (residual
+     * lifetime risk -- fixing it needs per-context refcounting). */
+    pthread_mutex_lock(&tbl->lock);
     for (uint32_t i = 0; i < MAX_GSS_CONTEXTS; i++) {
         if (tbl->contexts[i].handle_id == hid &&
                 tbl->contexts[i].established) {
-            return tbl->contexts[i].gss_ctx;
+            ctx = tbl->contexts[i].gss_ctx;
+            break;
         }
     }
-    return GSS_C_NO_CONTEXT;
+    pthread_mutex_unlock(&tbl->lock);
+    return ctx;
 }
 
 /* -------------------------------------------------------

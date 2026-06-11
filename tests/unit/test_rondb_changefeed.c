@@ -183,10 +183,12 @@ static void test_delta_seqno_save_load(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_delta_duplicate_insert_is_idempotent
+ * test_delta_duplicate_insert
  *
- * Insert the same (source_mds_id, seqno) twice -- should succeed
- * (constraint violation treated as success).
+ * Insert the same (source_mds_id, seqno) twice -- the second insert
+ * should return 1 (duplicate detected, constraint violation) rather
+ * than 0 (fresh insert succeeded).  The caller uses this to bump
+ * the seqno past already-used keys after a crash.
  * ----------------------------------------------------------------------- */
 
 static void test_delta_duplicate_insert(void)
@@ -197,9 +199,9 @@ static void test_delta_duplicate_insert(void)
     uint8_t payload[] = { 0x01 };
     ASSERT_EQ(rondb_shim_delta_insert(g_handle, 77, 1, 2000, 1,
                                        payload, 1, 100), 0);
-    /* Duplicate -- should return 0 (idempotent). */
+    /* Duplicate -- should return 1 (constraint violation). */
     ASSERT_EQ(rondb_shim_delta_insert(g_handle, 77, 1, 2000, 1,
-                                       payload, 1, 100), 0);
+                                       payload, 1, 100), 1);
 
     /* Clean up. */
     ASSERT_EQ(rondb_shim_delta_trim(g_handle, 77, 1), 0);

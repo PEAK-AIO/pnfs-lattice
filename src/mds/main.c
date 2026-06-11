@@ -280,6 +280,7 @@ int main(int argc, char *argv[])
 	uint16_t bound_port = 0;
 	uint32_t started_count = 0;
 	struct mountd_compat_ctx *mountd_compat = NULL;
+	struct metrics_http_ctx *mhttp = NULL;
 
 	/* Force line-buffered stderr so worker-thread diagnostics
 	 * reach the systemd journal promptly (glibc defaults to
@@ -1705,13 +1706,14 @@ int main(int argc, char *argv[])
 
 	/* 9b. Prometheus metrics HTTP endpoint.
 	 * Port 0 disables the endpoint; non-zero binds 0.0.0.0:<port>.
-	 * Configurable via `metrics_http_port` INI key (default 9090). */
+	 * Configurable via `metrics_http_port` INI key (default 9090).
+	 * The handle is kept so shutdown can stop+join the scrape
+	 * thread BEFORE the RPC threadpool it reads from is destroyed
+	 * (see the metrics_http_stop call in cleanup). */
 	if (cfg.metrics_http_port > 0) {
-		struct metrics_http_ctx *mhttp = NULL;
 		if (metrics_http_start(cfg.metrics_http_port, cat,
-				       &mhttp) == 0) {
-			/* mhttp cleaned up at process exit. */
-			(void)mhttp;
+				       &mhttp) != 0) {
+			mhttp = NULL;
 		}
 	}
 
@@ -1779,6 +1781,16 @@ cleanup:
 			(void)pthread_join(rpc_threads[li], NULL);
 		}
 	}
+
+	/* Stop+join the metrics HTTP scrape thread BEFORE destroying
+	 * the RPC threadpool: a concurrent /metrics render may have
+	 * loaded the registered pool pointer and still be calling
+	 * threadpool_get_stats on it.  The NULL store below only stops
+	 * NEW scrapes from seeing the pool -- it does not make the
+	 * destroy safe against an in-flight render (atomicity is not
+	 * lifetime).  Joining the listener first does. */
+	metrics_http_stop(mhttp);
+	mhttp = NULL;
 
 	/* Drain the RPC worker pool AFTER epoll loops have exited
 	 * but BEFORE destroying any rpc_server.  Workers hold raw

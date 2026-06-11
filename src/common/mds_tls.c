@@ -144,6 +144,14 @@ int mds_tls_wrap(struct mds_tls_ctx *ctx, int fd,
                 return -1;
             }
         }
+    }
+
+    /* Clients always verify the peer chain against the configured
+     * CA, even when no expected_hostname is supplied -- the client
+     * SSL_CTX is created with require_peer=false (SSL_VERIFY_NONE),
+     * so without this any certificate would be accepted.  Hostname
+     * pinning above remains an additional check when provided. */
+    if (!is_server) {
         SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
     }
 

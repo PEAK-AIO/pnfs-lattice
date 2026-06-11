@@ -194,9 +194,81 @@ static void apply_member_remove(struct cluster_membership *ctx,
  * JSON serialisation (used by tests)
  * ----------------------------------------------------------------------- */
 
+/**
+ * Escape a string for safe embedding inside a JSON string literal.
+ *
+ * Backslash and double quote are prefixed with a backslash; control
+ * characters (< 0x20) are emitted as \u00XX.  Reads at most src_max
+ * bytes from src (stopping at NUL) and always NUL-terminates dst.
+ * Output that would not fit is truncated at the last whole escape
+ * sequence -- never mid-sequence.
+ *
+ * @param dst      Destination buffer (always NUL-terminated on return).
+ * @param dst_cap  Capacity of dst in bytes (must be > 0).
+ * @param src      Source string (may lack NUL within src_max).
+ * @param src_max  Maximum bytes to read from src.
+ */
+static void json_escape(char *dst, size_t dst_cap,
+                        const char *src, size_t src_max)
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t out = 0;
+
+    if (dst == NULL || dst_cap == 0) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    for (size_t i = 0; i < src_max && src[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)src[i];
+
+        if (c == '\\' || c == '"') {
+            if (out + 2 >= dst_cap) {
+                break;
+            }
+            dst[out++] = '\\';
+            dst[out++] = (char)c;
+        } else if (c < 0x20) {
+            if (out + 6 >= dst_cap) {
+                break;
+            }
+            dst[out++] = '\\';
+            dst[out++] = 'u';
+            dst[out++] = '0';
+            dst[out++] = '0';
+            dst[out++] = hex[(c >> 4) & 0x0F];
+            dst[out++] = hex[c & 0x0F];
+        } else {
+            if (out + 1 >= dst_cap) {
+                break;
+            }
+            dst[out++] = (char)c;
+        }
+    }
+    dst[out] = '\0';
+}
+
 int member_to_json(const struct cluster_member *m,
                            char *buf, size_t cap)
 {
+    /* hostname and cluster_addr originate from remote peers; escape
+     * them so a crafted value cannot break out of the JSON string.
+     * Worst case expansion is 6x (every byte becomes \u00XX). */
+    char host_esc[sizeof(m->hostname) * 6 + 1];
+    char addr_esc[sizeof(m->cluster_addr) * 6 + 1];
+
+    if (m == NULL) {
+        return -1;
+    }
+
+    json_escape(host_esc, sizeof(host_esc),
+                m->hostname, sizeof(m->hostname));
+    json_escape(addr_esc, sizeof(addr_esc),
+                m->cluster_addr, sizeof(m->cluster_addr));
+
     return snprintf(buf, cap,
         "{\"hostname\":\"%s\","
         "\"nfs_port\":%" PRIu16 ","
@@ -206,9 +278,9 @@ int member_to_json(const struct cluster_member *m,
         "\"partner_id\":%" PRIu32 ","
         "\"cluster_addr\":\"%s\","
         "\"wire_compat\":%" PRIu32 "}",
-        m->hostname, m->nfs_port, m->grpc_port,
+        host_esc, m->nfs_port, m->grpc_port,
         (int)m->role, (int)m->lifecycle,
-        m->failover_partner_id, m->cluster_addr,
+        m->failover_partner_id, addr_esc,
         m->wire_compat_version);
 }
 

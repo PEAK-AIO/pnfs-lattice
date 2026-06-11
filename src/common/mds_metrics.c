@@ -22,8 +22,11 @@ struct mds_branch_metrics g_branch_metrics;
 /*
  * Optional pointer to the RPC dispatcher threadpool.  Set by main.c
  * after the pool is created so the Prometheus renderer can include
- * dispatcher-saturation metrics.  Stored as a relaxed atomic pointer
- * so reset to NULL at shutdown is race-safe with concurrent scrapes.
+ * dispatcher-saturation metrics.  The atomic store/load only makes
+ * the POINTER hand-off race-safe; it does NOT extend the pool's
+ * lifetime.  A scrape that loaded the pointer before the NULL store
+ * may still be dereferencing the pool, so main.c must stop+join the
+ * metrics HTTP server (metrics_http_stop) before threadpool_destroy.
  */
 static _Atomic(struct threadpool *) g_metrics_rpc_tp = NULL;
 

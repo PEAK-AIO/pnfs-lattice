@@ -1454,25 +1454,35 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			 * no-op path is bit-identical to pre-feature
 			 * behaviour.
 			 */
+			/* Phase A WRR: overlay operator-configured
+			 * weights from the DS cache so the WRR
+			 * dispatcher does not collapse to uniform on
+			 * 3rd-party DSes that never populate
+			 * total_bytes / used_bytes. */
+			if (cd->cfg_placement_policy_enabled &&
+			    cd->ds_cache != NULL) {
+				ds_cache_overlay_weights(
+					cd->ds_cache,
+					ds_list, ds_count);
+			}
+			/* In/out stripe_count: on success it holds the
+			 * EFFECTIVE (possibly degraded) stripe count, which
+			 * must flow into mds_cat_stripe_map_put and every
+			 * downstream stripe_count use -- persisting the
+			 * requested count would store calloc-zeroed phantom
+			 * stripes that can never become FH-ready, wedging
+			 * LAYOUTGET in an NFS4ERR_DELAY loop.  The entries
+			 * buffer stays at the requested (>= effective)
+			 * size, which is harmless. */
 			if (cd->cfg_placement_policy_enabled) {
-				/* Phase A WRR: overlay operator-configured
-				 * weights from the DS cache so the WRR
-				 * dispatcher does not collapse to uniform on
-				 * 3rd-party DSes that never populate
-				 * total_bytes / used_bytes. */
-				if (cd->ds_cache != NULL) {
-					ds_cache_overlay_weights(
-						cd->ds_cache,
-						ds_list, ds_count);
-				}
-				st = placement_select_ex(
+				st = placement_select_ex2(
 					cd->cfg_placement_policy,
 					ds_list, ds_count,
-					stripe_count, mirror_count,
+					&stripe_count, mirror_count,
 					stripe_unit, entries);
 			} else {
-				st = placement_select(ds_list, ds_count,
-					      stripe_count, mirror_count,
+				st = placement_select2(ds_list, ds_count,
+					      &stripe_count, mirror_count,
 					      stripe_unit, entries);
 			}
 			free(ds_list);

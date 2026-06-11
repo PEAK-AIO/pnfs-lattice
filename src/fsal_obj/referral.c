@@ -182,9 +182,15 @@ enum mds_status referral_encode_fs_locations(
  * at each level to recover the component name.  Produces an absolute
  * path like "/shard2" that can be passed to referral_build().
  *
- * Limitation: supports paths up to 8 components deep.  Junction
- * directories are typically one level below root, so this is generous.
+ * Limitation: supports paths up to REFERRAL_PATH_MAX_DEPTH components
+ * deep.  Junction directories are typically one level below root, so
+ * this is generous.  Deeper paths are an ERROR, never a silently
+ * truncated rootpath (clients would chase a wrong fs_locations).
  * ----------------------------------------------------------------------- */
+
+/* 32 components x 256 bytes = 8 KiB of stack in
+ * referral_resolve_path; safe on default thread stacks. */
+#define REFERRAL_PATH_MAX_DEPTH 32
 
 /**
  * Readdir callback: find the name of a child by fileid.
@@ -216,13 +222,15 @@ static int find_name_cb(const struct mds_cat_dirent *entry, void *arg)
  * @param fileid   Starting inode fileid.
  * @param path_buf Receives the null-terminated absolute path.
  * @param buf_len  Capacity of path_buf.
- * @return MDS_OK on success.
+ * @return MDS_OK on success, MDS_ERR_INVAL if the ancestry is deeper
+ *         than REFERRAL_PATH_MAX_DEPTH (no truncated path is ever
+ *         returned as success).
  */
 enum mds_status referral_resolve_path(struct mds_catalogue *cat,
 				      uint64_t fileid,
 				      char *path_buf, size_t buf_len)
 {
-	char components[8][256];
+	char components[REFERRAL_PATH_MAX_DEPTH][256];
 	int depth = 0;
 	uint64_t cur = fileid;
 
@@ -230,7 +238,7 @@ enum mds_status referral_resolve_path(struct mds_catalogue *cat,
 		return MDS_ERR_INVAL;
 	}
 
-	while (cur != MDS_FILEID_ROOT && depth < 8) {
+	while (cur != MDS_FILEID_ROOT && depth < REFERRAL_PATH_MAX_DEPTH) {
 		struct mds_inode inode;
 		enum mds_status st;
 
@@ -258,6 +266,14 @@ enum mds_status referral_resolve_path(struct mds_catalogue *cat,
 			       "%s", fna.name);
 		depth++;
 		cur = inode.parent_fileid;
+	}
+
+	/* Depth limit exhausted before reaching the root: returning the
+	 * partial path as MDS_OK would send clients a wrong fs_locations
+	 * rootpath.  Fail instead; callers already handle errors from
+	 * this function (no referral is surfaced). */
+	if (cur != MDS_FILEID_ROOT && depth >= REFERRAL_PATH_MAX_DEPTH) {
+		return MDS_ERR_INVAL;
 	}
 
 	if (depth == 0) {

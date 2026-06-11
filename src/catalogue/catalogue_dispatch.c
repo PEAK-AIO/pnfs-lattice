@@ -529,9 +529,15 @@ enum mds_status mds_cat_dir_is_empty(struct mds_catalogue *cat,
 
     st = cat->auth_ops->ns_readdir(cat, parent_fileid, NULL, NULL,
                                    dir_empty_cb, &ctx);
-    /* readdir returns MDS_OK even if the dir is empty (0 entries). */
+    /* readdir returns MDS_OK even if the dir is empty (0 entries),
+     * and the RonDB backend also returns MDS_OK when the callback
+     * stops iteration early, so st != MDS_OK is a genuine backend
+     * failure.  Propagate it: treating e.g. an NDB timeout as "empty"
+     * would let RENAME overwrite a non-empty directory. */
+    if (st != MDS_OK) {
+        return st;
+    }
     *empty = !ctx.found;
-    (void)st;
     return MDS_OK;
 }
 
@@ -636,11 +642,19 @@ static int cat_iter_collect_xattr_name(const char *name, size_t name_len,
 }
 
 /**
+ * Maximum DFS recursion depth.  Each frame carries large per-frame
+ * allocations (dirent + xattr collections), so unbounded recursion on
+ * a pathologically deep directory tree would exhaust the stack.
+ */
+#define CAT_SUBTREE_MAX_DEPTH 256
+
+/**
  * Recursive DFS helper -- catalogue-native.
  */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 static enum mds_status cat_subtree_dfs(struct mds_catalogue *cat,
                                        uint64_t fileid,
+                                       uint32_t depth,
                                        mds_cat_subtree_iter_cb cb,
                                        void *arg)
 {
@@ -648,6 +662,10 @@ static enum mds_status cat_subtree_dfs(struct mds_catalogue *cat,
     struct cat_iter_dirent_ctx dc;
     struct cat_iter_xattr_ctx xc;
     enum mds_status st;
+
+    if (depth > CAT_SUBTREE_MAX_DEPTH) {
+        return MDS_ERR_INVAL;
+    }
 
     memset(&chunk, 0, sizeof(chunk));
     memset(&dc, 0, sizeof(dc));
@@ -752,7 +770,8 @@ static enum mds_status cat_subtree_dfs(struct mds_catalogue *cat,
 
     /* 6. Recurse into all children. */
     for (uint32_t i = 0; i < dc.count; i++) {
-        st = cat_subtree_dfs(cat, dc.entries[i].child_fileid, cb, arg);
+        st = cat_subtree_dfs(cat, dc.entries[i].child_fileid,
+                             depth + 1, cb, arg);
         if (st != MDS_OK) {
             goto out_free;
         }
@@ -781,7 +800,7 @@ enum mds_status mds_cat_subtree_iter(struct mds_catalogue *cat,
     if (cat == NULL || cb == NULL) {
         return MDS_ERR_INVAL;
     }
-    return cat_subtree_dfs(cat, root_fileid, cb, arg);
+    return cat_subtree_dfs(cat, root_fileid, 0, cb, arg);
 }
 
 /* -----------------------------------------------------------------------
@@ -1169,6 +1188,11 @@ enum mds_status mds_cat_shard_fileid_get(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    /* Optional slot: no current backend vtable populates it, so a
+     * NULL check is mandatory to avoid a NULL function-pointer call. */
+    if (cat->auth_ops->shard_fileid_get == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
     return cat->auth_ops->shard_fileid_get(cat, fileid, shard_id);
 }
 
@@ -1180,6 +1204,9 @@ enum mds_status mds_cat_shard_fileid_put(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    if (cat->auth_ops->shard_fileid_put == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
     return cat->auth_ops->shard_fileid_put(cat, txn, fileid, shard_id);
 }
 
@@ -1189,6 +1216,9 @@ enum mds_status mds_cat_shard_fileid_del(struct mds_catalogue *cat,
 {
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->shard_fileid_del == NULL) {
+        return MDS_ERR_NOSUPPORT;
     }
     return cat->auth_ops->shard_fileid_del(cat, txn, fileid);
 }
@@ -1208,6 +1238,10 @@ enum mds_status mds_cat_ext_dirent_get(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    /* Optional slot: see shard_fileid_get above. */
+    if (cat->auth_ops->ext_dirent_get == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
     return cat->auth_ops->ext_dirent_get(cat, parent, name,
                                          owner_mds_id, target_fileid,
                                          target_type, anchor_id);
@@ -1225,6 +1259,9 @@ enum mds_status mds_cat_ext_dirent_put(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    if (cat->auth_ops->ext_dirent_put == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
     return cat->auth_ops->ext_dirent_put(cat, txn, parent, name,
                                          owner_mds_id, target_fileid,
                                          target_type, anchor_id);
@@ -1237,6 +1274,9 @@ enum mds_status mds_cat_ext_dirent_del(struct mds_catalogue *cat,
 {
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->ext_dirent_del == NULL) {
+        return MDS_ERR_NOSUPPORT;
     }
     return cat->auth_ops->ext_dirent_del(cat, txn, parent, name);
 }
@@ -1255,6 +1295,10 @@ enum mds_status mds_cat_link_anchor_put(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    /* Optional slot: see shard_fileid_get above. */
+    if (cat->auth_ops->link_anchor_put == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
     return cat->auth_ops->link_anchor_put(cat, txn, anchor_id,
                                           remote_mds_id,
                                           parent_fileid, name);
@@ -1266,6 +1310,9 @@ enum mds_status mds_cat_link_anchor_del(struct mds_catalogue *cat,
 {
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->link_anchor_del == NULL) {
+        return MDS_ERR_NOSUPPORT;
     }
     return cat->auth_ops->link_anchor_del(cat, txn, anchor_id);
 }

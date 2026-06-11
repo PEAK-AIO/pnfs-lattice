@@ -600,23 +600,23 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
     if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
                                 &session->cb_sec)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_compound_header(&xdrs, session->minorversion, 2)) {
         /* CB_SEQUENCE + CB_LAYOUTRECALL */
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_sequence(&xdrs, session->session_id,
                             (uint32_t)slot_idx,
                             session->cb_slots[slot_idx].seq_id,
                             session->num_cb_slots - 1)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_layoutrecall(&xdrs, args)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
 
     uint32_t msg_len = xdr_getpos(&xdrs);
@@ -644,7 +644,13 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
      * client's natural LAYOUTRETURN / DELEGRETURN.
      */
     rc = 0;
+    goto out;
 
+out_xdr:
+    /* Encode failed after xdrmem_create: the stream must still be
+     * destroyed on this path (the success path destroys it before
+     * sending). */
+    xdr_destroy(&xdrs);
 out:
     cb_slot_release(session, slot_idx);
     return rc;
@@ -693,22 +699,22 @@ int nfs4_cb_notify(struct nfs4_session *session,
     if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
                                 &session->cb_sec)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_compound_header(&xdrs, session->minorversion, 2)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_sequence(&xdrs, session->session_id,
                             (uint32_t)slot_idx,
                             session->cb_slots[slot_idx].seq_id,
                             session->num_cb_slots - 1)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_notify(&xdrs, args)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
 
     uint32_t msg_len = xdr_getpos(&xdrs);
@@ -723,7 +729,12 @@ int nfs4_cb_notify(struct nfs4_session *session,
 
     /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
     rc = 0;
+    goto out;
 
+out_xdr:
+    /* Encode failed after xdrmem_create: destroy the stream here
+     * (the success path destroys it before sending). */
+    xdr_destroy(&xdrs);
 out:
     cb_slot_release(session, slot_idx);
     return rc;
@@ -832,23 +843,23 @@ int nfs4_cb_recall(struct nfs4_session *session,
     if (!encode_rpc_call_header(&xdrs, xid, session->cb_prog, 1,
                                 &session->cb_sec)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_compound_header(&xdrs, session->minorversion, 2)) {
         /* CB_SEQUENCE + CB_RECALL */
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_sequence(&xdrs, session->session_id,
                             (uint32_t)slot_idx,
                             session->cb_slots[slot_idx].seq_id,
                             session->num_cb_slots - 1)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
     if (!encode_cb_recall(&xdrs, args)) {
         rc = -EIO;
-        goto out;
+        goto out_xdr;
     }
 
     uint32_t msg_len = xdr_getpos(&xdrs);
@@ -863,7 +874,12 @@ int nfs4_cb_recall(struct nfs4_session *session,
 
     /* See nfs4_cb_layoutrecall: do not recv on the shared fd. */
     rc = 0;
+    goto out;
 
+out_xdr:
+    /* Encode failed after xdrmem_create: destroy the stream here
+     * (the success path destroys it before sending). */
+    xdr_destroy(&xdrs);
 out:
     cb_slot_release(session, slot_idx);
     return rc;

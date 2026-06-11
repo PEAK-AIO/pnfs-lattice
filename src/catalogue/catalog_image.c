@@ -596,6 +596,9 @@ int catalog_image_readdir(const struct catalog_image *img,
             struct readdir_entry *tmp = realloc(
                 arr, new_cap * sizeof(*tmp));
             if (tmp == NULL) {
+                /* The rdlock taken above must be released on every
+                 * return path, or readers/writers deadlock later. */
+                pthread_rwlock_unlock((pthread_rwlock_t *)&img->lock);
                 free(arr);
                 return -1;
             }
@@ -711,9 +714,13 @@ int catalog_image_apply(struct catalog_image *img,
         break;
     }
 
-    /* Update high-water mark + gap detection. */
+    /* Update high-water mark + gap detection.  These arrays are read
+     * concurrently by catalog_image_is_complete / applied_high_water,
+     * so they must be mutated under the image write lock (the map
+     * mutations above take/release it internally, so no nesting). */
     if (rec->stream_id < MAX_STREAMS) {
         uint32_t sid = rec->stream_id;
+        pthread_rwlock_wrlock(&img->lock);
         if ((img->expected_next[sid] == 0 && rec->seqno != 1) ||
             (img->expected_next[sid] != 0 &&
              rec->seqno != img->expected_next[sid])) {
@@ -723,6 +730,7 @@ int catalog_image_apply(struct catalog_image *img,
             img->high_water[sid] = rec->seqno;
         }
         img->expected_next[sid] = rec->seqno + 1;
+        pthread_rwlock_unlock(&img->lock);
     }
 
     return 0;
@@ -731,24 +739,34 @@ int catalog_image_apply(struct catalog_image *img,
 uint64_t catalog_image_applied_high_water(
     const struct catalog_image *img, uint32_t stream_id)
 {
+    uint64_t hw;
+
     if (img == NULL || stream_id >= MAX_STREAMS) {
         return 0;
     }
-    return img->high_water[stream_id];
+    /* Paired with the wrlock in catalog_image_apply. */
+    pthread_rwlock_rdlock((pthread_rwlock_t *)&img->lock);
+    hw = img->high_water[stream_id];
+    pthread_rwlock_unlock((pthread_rwlock_t *)&img->lock);
+    return hw;
 }
 
 bool catalog_image_is_complete(const struct catalog_image *img,
                                uint32_t stream_id,
                                uint64_t authority_seqno)
 {
+    bool complete;
+
     if (img == NULL || stream_id >= MAX_STREAMS) {
         return false;
     }
-    /* Require both: caught up AND no gaps detected. */
-    if (img->has_gap[stream_id]) {
-        return false;
-    }
-    return img->high_water[stream_id] >= authority_seqno;
+    /* Paired with the wrlock in catalog_image_apply.
+     * Require both: caught up AND no gaps detected. */
+    pthread_rwlock_rdlock((pthread_rwlock_t *)&img->lock);
+    complete = !img->has_gap[stream_id] &&
+               img->high_water[stream_id] >= authority_seqno;
+    pthread_rwlock_unlock((pthread_rwlock_t *)&img->lock);
+    return complete;
 }
 
 /* -----------------------------------------------------------------------

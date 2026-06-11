@@ -1132,20 +1132,30 @@ wrongsec:
             if (session_slot_get_cached_reply(
                     cd.st, ops[0].arg.sequence.session_id,
                     ops[0].arg.sequence.slot_id,
-                    &cached, &cached_len) == 0 &&
-                cached_len >= 4 && cached_len <= REPLY_BUF_SIZE) {
-                /* Defensive bounds: a malformed cache entry
-                 * (somehow shorter than 4 bytes or larger than
-                 * the reply buffer) MUST not be sent. */
-                memcpy(reply_buf, cached, cached_len);
-                /* Patch XID @ offset 0 (RFC 5531 S9 message header,
-                 * uint32 big-endian).  htonl() converts from host
-                 * order to network order for the wire. */
-                uint32_t xid_be = htonl(xid);
-                memcpy(reply_buf, &xid_be, 4);
-                rc = send_record(c, (uint8_t *)reply_buf,
-                                 cached_len);
-                goto cleanup;
+                    &cached, &cached_len) == 0) {
+                /* On success `cached` is a heap copy made under the
+                 * session lock (a borrowed slot pointer would race
+                 * with concurrent slot reuse).  This caller owns it
+                 * and must free() it on every path below. */
+                if (cached_len >= 4 && cached_len <= REPLY_BUF_SIZE) {
+                    /* Defensive bounds: a malformed cache entry
+                     * (somehow shorter than 4 bytes or larger than
+                     * the reply buffer) MUST not be sent. */
+                    memcpy(reply_buf, cached, cached_len);
+                    /* Patch XID @ offset 0 (RFC 5531 S9 message
+                     * header, uint32 big-endian).  htonl() converts
+                     * from host order to network order for the
+                     * wire. */
+                    uint32_t xid_be = htonl(xid);
+                    memcpy(reply_buf, &xid_be, 4);
+                    free((void *)cached);
+                    rc = send_record(c, (uint8_t *)reply_buf,
+                                     cached_len);
+                    goto cleanup;
+                }
+                /* Size sanity failed -- free the copy and fall
+                 * through to normal encoding. */
+                free((void *)cached);
             }
             /* Cache miss / GSS / size sanity -- fall through to
              * normal encoding so the SEQUENCE result that
@@ -1836,6 +1846,15 @@ static void close_conn(struct rpc_server *srv, struct rpc_conn *c)
         }
         conn_reset(c);
         srv->conn_count--;
+        /* Return the slot to the free list; otherwise it is leaked
+         * and the server stops accepting once max_conns cumulative
+         * connections have closed.  A double push is impossible:
+         * conn_reset() set c->fd = -1, so a second close_conn() on
+         * the same conn skips this whole block. */
+        if (srv->free_list != NULL && srv->free_top < srv->max_conns) {
+            srv->free_list[srv->free_top++] =
+                (uint32_t)(c - srv->conns);
+        }
     }
 }
 

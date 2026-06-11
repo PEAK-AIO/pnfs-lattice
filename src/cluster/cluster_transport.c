@@ -911,12 +911,19 @@ respond:;
 static void handle_tiering_stop(struct cluster_server *srv, int conn_fd,
                                  const uint8_t *payload, uint32_t plen)
 {
+    enum mds_status st = MDS_ERR_INVAL;
+
     (void)payload;
     (void)plen;
 
-    tiering_stop(srv->tiering);
+    /* srv->tiering is NULL until the daemon attaches a worker;
+     * mirror handle_tiering_start's guard to avoid a NULL deref. */
+    if (srv->tiering != NULL) {
+        tiering_stop(srv->tiering);
+        st = MDS_OK;
+    }
 
-    int32_t st_be = (int32_t)htobe32((uint32_t)(int32_t)MDS_OK);
+    int32_t st_be = (int32_t)htobe32((uint32_t)(int32_t)st);
     send_header(conn_fd, CT_MSG_TIERING_RESP, 4);
     send_all(conn_fd, &st_be, 4);
 }
@@ -1512,6 +1519,12 @@ static void handle_ds_capacity_probe_admin(
     const struct cluster_server *srv, int conn_fd,
     const uint8_t *payload, uint32_t plen);
 
+/* Cross-subtree nlink handlers (impl near the nlink client code). */
+static void handle_nlink_inc(const struct cluster_server *srv, int conn_fd,
+                             const uint8_t *payload, uint32_t plen);
+static void handle_nlink_dec(const struct cluster_server *srv, int conn_fd,
+                             const uint8_t *payload, uint32_t plen);
+
 static void handle_connection(struct cluster_server *srv, int conn_fd)
 {
     while (atomic_load(&srv->running)) {
@@ -1770,6 +1783,14 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
 
         case CT_MSG_DS_VALIDATE_CLR_REQ:
             handle_ds_validate_clr_admin(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_NLINK_INC_REQ:
+            handle_nlink_inc(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_NLINK_DEC_REQ:
+            handle_nlink_dec(srv, conn_fd, payload, payload_len);
             break;
 
         default:
@@ -4428,7 +4449,10 @@ static void handle_ds_patch_clear_admin(
         return;
     }
 
-    info.capabilities &= ~((uint32_t)0);
+    /* The request carries no bitmask (client sends ds_id only) and is
+     * documented as "clear all patched readiness bits": reset the
+     * whole capability word. */
+    info.capabilities = 0;
 
     st = mds_cat_ds_put(srv->cat, NULL, &info);
     if (st != MDS_OK) {
@@ -4545,7 +4569,9 @@ static void handle_ds_validate_admin(const struct cluster_server *srv,
         return;
     }
 
-    info.capabilities |= 0;
+    /* Mark GPUDirect-validated; pairs with handle_ds_validate_clr_admin
+     * which clears exactly this bit. */
+    info.capabilities |= DS_CAP_GPUDIRECT;
 
     st = mds_cat_ds_put(srv->cat, NULL, &info);
     if (st != MDS_OK) {
@@ -4580,7 +4606,9 @@ static void handle_ds_validate_clr_admin(const struct cluster_server *srv,
         return;
     }
 
-    info.capabilities &= ~((uint32_t)0);
+    /* Clear only the GPUDirect validation bit; other capability bits
+     * (e.g. patch-readiness) are managed by separate requests. */
+    info.capabilities &= ~(uint32_t)DS_CAP_GPUDIRECT;
 
     st = mds_cat_ds_put(srv->cat, NULL, &info);
     if (st != MDS_OK) {
@@ -4838,6 +4866,16 @@ static void handle_mig_progress_admin(const struct cluster_server *srv,
     enum migration_state mstate = MIG_IDLE;
     char mpath[MDS_MAX_PATH];
     uint32_t mtotal = 0, mdone = 0;
+
+    /* Defensive: tracker may not be attached yet; reply with the
+     * handler's 1-byte error pattern instead of relying on the
+     * tracker API tolerating NULL. */
+    if (srv->tracker == NULL) {
+        uint8_t err = (uint8_t)(-(int)MDS_ERR_INVAL);
+        send_header(conn_fd, CT_MSG_MIG_PROGRESS_ADMIN_RESP, 1);
+        send_all(conn_fd, &err, 1);
+        return;
+    }
 
     mpath[0] = '\0';
     migration_tracker_get_progress(srv->tracker, &mstate,
@@ -6117,6 +6155,58 @@ enum mds_status cluster_transport_request_nlink_dec(
     return nlink_request(membership, target_mds, fileid, -1);
 }
 
+/*
+ * Server side of nlink_request().
+ *
+ * Request wire format (must match the client sender above):
+ *   [fileid u64 BE][delta i32 BE]   (12 bytes)
+ * Response: matching *_RESP carrying [status i32 BE] (mds_status),
+ * which the client casts back to enum mds_status.
+ */
+static void handle_nlink_adjust(const struct cluster_server *srv,
+                                int conn_fd, uint8_t resp_type,
+                                int32_t expect_delta,
+                                const uint8_t *payload, uint32_t plen)
+{
+    enum mds_status st = MDS_ERR_INVAL;
+
+    /* Validate untrusted payload length before parsing. */
+    if (srv->cat != NULL && payload != NULL && plen >= 12) {
+        uint64_t fid_be;
+        uint32_t d_be;
+
+        memcpy(&fid_be, payload, 8);
+        memcpy(&d_be, payload + 8, 4);
+        uint64_t fileid = be64toh(fid_be);
+        int32_t delta = (int32_t)be32toh(d_be);
+
+        /* The client only ever sends +1 (INC) or -1 (DEC); reject any
+         * other delta so a malformed/hostile peer cannot skew the
+         * authoritative nlink count by arbitrary amounts. */
+        if (delta == expect_delta) {
+            st = mds_cat_ns_nlink_adjust(srv->cat, fileid, delta);
+        }
+    }
+
+    int32_t st_be = (int32_t)htobe32((uint32_t)(int32_t)st);
+    send_header(conn_fd, resp_type, 4);
+    send_all(conn_fd, &st_be, 4);
+}
+
+static void handle_nlink_inc(const struct cluster_server *srv, int conn_fd,
+                             const uint8_t *payload, uint32_t plen)
+{
+    handle_nlink_adjust(srv, conn_fd, CT_MSG_NLINK_INC_RESP, 1,
+                        payload, plen);
+}
+
+static void handle_nlink_dec(const struct cluster_server *srv, int conn_fd,
+                             const uint8_t *payload, uint32_t plen)
+{
+    handle_nlink_adjust(srv, conn_fd, CT_MSG_NLINK_DEC_RESP, -1,
+                        payload, plen);
+}
+
 /* -----------------------------------------------------------------------
  * Split evaluator admin handlers (Tier 3 Phase 1)
  * ----------------------------------------------------------------------- */
@@ -6687,6 +6777,12 @@ static void handle_ds_capacity_show_admin(
         uint32_t op_w = 0, auto_w = 0;
         if (ds_cache_get(srv->ds_cache, ids[i], &info) != MDS_OK) {
             continue;
+        }
+        /* Invariant: never write a record past the allocation sized
+         * for `n` entries; if it would overflow, stop and let the
+         * count fix-up below report only the records written. */
+        if (off + rec_size > total) {
+            break;
         }
         (void)ds_cache_get_weights(srv->ds_cache, ids[i],
                                    &op_w, &auto_w);

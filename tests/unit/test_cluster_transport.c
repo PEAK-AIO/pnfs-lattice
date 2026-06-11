@@ -1349,9 +1349,12 @@ static void test_tiering_stop_wire(void)
     cluster_transport_server_set_tiering(srv, tw);
     uint16_t port = cluster_transport_server_port(srv);
 
-    /* Stop without start -- should still return OK. */
+    /* Stop without start -- stub tiering_init returns a NULL worker,
+     * so srv->tiering is NULL and the server correctly rejects the
+     * stop request with MDS_ERR_INVAL (vs the old code that blindly
+     * passed NULL to tiering_stop). */
     st = cluster_transport_request_tiering_stop("127.0.0.1", port);
-    ASSERT_EQ(st, MDS_OK);
+    ASSERT_EQ(st, MDS_ERR_INVAL);
 
     cluster_transport_server_stop(srv);
     tiering_destroy(tw);
@@ -1666,7 +1669,8 @@ static void test_ds_admin_invalidates_cache(void)
                                                "cache-test", "ok");
     ASSERT_EQ(st, MDS_OK);
     ASSERT_EQ(ds_cache_get(cache, 77, &cached), MDS_OK);
-    ASSERT_EQ(cached.capabilities, (uint32_t)0);
+    /* validate now correctly sets DS_CAP_GPUDIRECT (was a no-op). */
+    ASSERT_EQ(cached.capabilities, (uint32_t)DS_CAP_GPUDIRECT);
 
     st = cluster_transport_request_ds_validate_clear("127.0.0.1", port, 77);
     ASSERT_EQ(st, MDS_OK);

@@ -71,18 +71,6 @@ static uint32_t ddt_default_timeout(void)
 				    memory_order_relaxed);
 }
 
-/*
- * Match delegation.c: a recall in flight within this window is
- * suppressed so concurrent mutators do not send duplicate CB_RECALLs
- * to the same client for the same grant.  The window scales with
- * the configured default so operators who extend the timeout also
- * extend the dedupe horizon.
- */
-static uint64_t ddt_recall_pending_ns(void)
-{
-	return (uint64_t)ddt_default_timeout() * 1000000ULL;
-}
-
 /* -----------------------------------------------------------------------
  * Internal structures
  * ----------------------------------------------------------------------- */
@@ -405,91 +393,9 @@ bool dir_deleg_is_writer_present(struct dir_deleg_table *ddt,
 	return writer;
 }
 
-int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
-			 uint64_t dir_fileid, uint64_t requesting_clientid,
-			 uint32_t timeout_ms)
-{
-	uint32_t bucket;
-	struct ddt_entry **pp;
-	int recalled = 0;
-
-	if (ddt == NULL) {
-		return -1;
-	}
-	if (timeout_ms == 0) {
-		timeout_ms = ddt_default_timeout();
-	}
-
-	lock_stripe(ddt, dir_fileid);
-
-	bucket = ddt_hash(dir_fileid);
-	pp = &ddt->buckets[bucket];
-
-	while (*pp != NULL) {
-		struct ddt_entry *e = *pp;
-
-		if (e->dir_fileid != dir_fileid ||
-		    e->clientid == requesting_clientid) {
-			pp = &e->hash_next;
-			continue;
-		}
-
-		/* Best-effort CB_RECALL; suppress duplicates within the
-		 * configured dedupe window (mirrors delegation.c). */
-		if (e->session != NULL) {
-			struct timespec nowts;
-			uint64_t now_ns;
-			bool suppress = false;
-
-			clock_gettime(CLOCK_MONOTONIC, &nowts);
-			now_ns = (uint64_t)nowts.tv_sec * 1000000000ULL +
-				 (uint64_t)nowts.tv_nsec;
-
-			if (e->recall_pending &&
-			    (now_ns - e->recall_sent_ns) <
-				    ddt_recall_pending_ns()) {
-				suppress = true;
-			}
-
-			if (!suppress) {
-				struct nfs4_cb_recall_args ra;
-				int cbrc;
-
-				memset(&ra, 0, sizeof(ra));
-				ra.stateid  = e->stateid;
-				ra.truncate = false;
-				ra.fileid   = e->dir_fileid;
-				e->recall_pending = true;
-				e->recall_sent_ns = now_ns;
-				cbrc = nfs4_cb_recall(e->session, &ra,
-						      timeout_ms);
-				if (cbrc != 0) {
-					MDS_LOG_INFO(LOG_COMP_MDS,
-						"dir_deleg: CB_RECALL "
-						"dir=%llu client=%llu "
-						"rc=%d \\u2014 revoking",
-						(unsigned long long)e->dir_fileid,
-						(unsigned long long)e->clientid,
-						cbrc);
-				}
-			}
-		}
-
-		/* Revoke locally regardless of CB result: caller must
-		 * be able to proceed with its mutation without the
-		 * delegation still being observable. */
-		*pp = e->hash_next;
-		free(e);
-		recalled++;
-		atomic_fetch_add_explicit(&ddt->cnt_recalled, 1,
-					  memory_order_relaxed);
-		atomic_fetch_add_explicit(&ddt->cnt_revoked, 1,
-					  memory_order_relaxed);
-	}
-
-	unlock_stripe(ddt, dir_fileid);
-	return recalled;
-}
+/* dir_deleg_recall_dir is defined after ddt_resolve_cb_target below:
+ * it needs the fd-based callback-target snapshot machinery shared
+ * with the notify dispatcher. */
 
 void dir_deleg_revoke_client(struct dir_deleg_table *ddt, uint64_t clientid)
 {
@@ -682,6 +588,138 @@ static bool ddt_resolve_cb_target(struct session_table *st,
 	}
 	*out = ctx.target;
 	return true;
+}
+
+/*
+ * Per-recall snapshot captured under the stripe lock.  CB I/O is
+ * performed outside the lock against this copy only (two-phase
+ * pattern, mirrors deleg_recall_file in delegation.c): the entry's
+ * `session` pointer is borrowed and non-refcounted, so it may be
+ * freed by DESTROY_SESSION and must never be dereferenced here, and
+ * a blocking send under the stripe lock would stall 1/16 of the
+ * fileid space for up to timeout_ms.
+ */
+struct ddt_recall_target {
+	struct nfs4_stateid stateid;
+	uint64_t            clientid;
+	uint64_t            dir_fileid;
+};
+
+#define DDT_RECALL_MAX_PER_DIR 32
+
+int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
+			 uint64_t dir_fileid, uint64_t requesting_clientid,
+			 uint32_t timeout_ms)
+{
+	struct ddt_recall_target targets[DDT_RECALL_MAX_PER_DIR];
+	uint32_t target_count = 0;
+	uint32_t bucket;
+	struct ddt_entry **pp;
+	int recalled = 0;
+
+	if (ddt == NULL) {
+		return -1;
+	}
+	if (timeout_ms == 0) {
+		timeout_ms = ddt_default_timeout();
+	}
+
+	/*
+	 * Phase 1 -- under the stripe lock: snapshot and unlink every
+	 * conflicting grant.  No CB I/O and no session-table access may
+	 * happen while the stripe lock is held (lock-order trap with
+	 * paths that take the session-table lock first).  Unlinking
+	 * here also makes duplicate CB_RECALL sends impossible: a
+	 * concurrent mutator can no longer find the entry.
+	 */
+	lock_stripe(ddt, dir_fileid);
+
+	bucket = ddt_hash(dir_fileid);
+	pp = &ddt->buckets[bucket];
+
+	while (*pp != NULL) {
+		struct ddt_entry *e = *pp;
+
+		if (e->dir_fileid != dir_fileid ||
+		    e->clientid == requesting_clientid) {
+			pp = &e->hash_next;
+			continue;
+		}
+
+		if (target_count >= DDT_RECALL_MAX_PER_DIR) {
+			/* Cap exceeded: leave the surplus entry in place
+			 * for the next caller (bounds stack usage, mirrors
+			 * deleg_recall_file). */
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"dir_deleg: recall cap %u reached on "
+				"dir=%llu; deferring surplus entries",
+				(unsigned)DDT_RECALL_MAX_PER_DIR,
+				(unsigned long long)dir_fileid);
+			break;
+		}
+		targets[target_count].stateid    = e->stateid;
+		targets[target_count].clientid   = e->clientid;
+		targets[target_count].dir_fileid = e->dir_fileid;
+		target_count++;
+
+		/* Revoke locally regardless of CB outcome: caller must
+		 * be able to proceed with its mutation without the
+		 * delegation still being observable. */
+		*pp = e->hash_next;
+		free(e);
+		recalled++;
+		atomic_fetch_add_explicit(&ddt->cnt_recalled, 1,
+					  memory_order_relaxed);
+		atomic_fetch_add_explicit(&ddt->cnt_revoked, 1,
+					  memory_order_relaxed);
+	}
+
+	unlock_stripe(ddt, dir_fileid);
+
+	/*
+	 * Phase 2 -- outside the stripe lock: resolve each holder's
+	 * backchannel via the session table (which dup()s the cb fd
+	 * under the session-table lock) and send CB_RECALL on the
+	 * dup'd fd.  Best-effort: the grant is already revoked.
+	 */
+	if (ddt->st == NULL) {
+		/* No session table wired -- silent revoke only. */
+		return recalled;
+	}
+
+	for (uint32_t i = 0; i < target_count; i++) {
+		struct ddt_cb_target cbt;
+		struct nfs4_cb_recall_args ra;
+		int cbrc;
+
+		if (!ddt_resolve_cb_target(ddt->st, targets[i].clientid,
+					   &cbt)) {
+			/* No live backchannel: silent revoke. */
+			continue;
+		}
+
+		memset(&ra, 0, sizeof(ra));
+		ra.stateid  = targets[i].stateid;
+		ra.truncate = false;
+		ra.fileid   = targets[i].dir_fileid;
+
+		cbrc = nfs4_cb_recall_fd(cbt.fd, cbt.session_id,
+					 cbt.cb_prog, cbt.slot_seq_id,
+					 cbt.num_cb_slots,
+					 cbt.minorversion, &cbt.cb_sec,
+					 &ra, timeout_ms);
+		if (cbrc != 0) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"dir_deleg: CB_RECALL dir=%llu "
+				"client=%llu rc=%d -- already revoked",
+				(unsigned long long)targets[i].dir_fileid,
+				(unsigned long long)targets[i].clientid,
+				cbrc);
+		}
+		(void)close(cbt.fd);
+	}
+
+	return recalled;
 }
 
 static bool event_is_structural(uint32_t event)

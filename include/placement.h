@@ -43,6 +43,33 @@ enum mds_status placement_select(const struct mds_ds_info *ds_list,
                                  struct mds_ds_map_entry *entries);
 
 /**
+ * Like placement_select, but @p stripe_count is in/out.
+ *
+ * On entry *stripe_count holds the requested stripe count; on MDS_OK
+ * it holds the EFFECTIVE stripe count actually placed, which may be
+ * smaller when too few DSes are ONLINE (graceful degradation).
+ * Callers that persist the stripe geometry (e.g. LAYOUTGET's
+ * mds_cat_stripe_map_put) MUST use the returned effective count;
+ * persisting the requested count records zeroed phantom stripes.
+ * On any error *stripe_count is left unchanged.
+ *
+ * @param ds_list       Array of registered data servers.
+ * @param ds_count      Number of entries in @ds_list.
+ * @param stripe_count  In: requested stripes.  Out: effective stripes.
+ * @param mirror_count  Number of mirrors per stripe (>= 1).
+ * @param stripe_unit   Stripe unit size in bytes (unused here).
+ * @param entries       Caller-allocated output array sized for the
+ *                      REQUESTED stripe_count x mirror_count.
+ * @return MDS_OK, MDS_ERR_NOSPC, MDS_ERR_NOMEM, or MDS_ERR_INVAL.
+ */
+enum mds_status placement_select2(const struct mds_ds_info *ds_list,
+                                  uint32_t ds_count,
+                                  uint32_t *stripe_count,
+                                  uint32_t mirror_count,
+                                  uint32_t stripe_unit,
+                                  struct mds_ds_map_entry *entries);
+
+/**
  * Select DS nodes for a new file's stripe layout under a specific
  * policy.  Thin superset of `placement_select`:
  *
@@ -67,6 +94,21 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
                                     uint32_t mirror_count,
                                     uint32_t stripe_unit,
                                     struct mds_ds_map_entry *entries);
+
+/**
+ * Like placement_select_ex, but @p stripe_count is in/out with the
+ * same contract as placement_select2: on MDS_OK it holds the
+ * effective (possibly degraded) stripe count; unchanged on error.
+ * Callers that persist the stripe geometry MUST use the returned
+ * effective count.
+ */
+enum mds_status placement_select_ex2(enum mds_placement_policy policy,
+                                     const struct mds_ds_info *ds_list,
+                                     uint32_t ds_count,
+                                     uint32_t *stripe_count,
+                                     uint32_t mirror_count,
+                                     uint32_t stripe_unit,
+                                     struct mds_ds_map_entry *entries);
 
 /**
  * Select a replacement DS for a degraded mirror slot.

@@ -456,7 +456,15 @@ int session_slot_cache_reply(struct session_table *st,
 			     uint32_t slot_id,
 			     const uint8_t *reply, uint32_t reply_len);
 
-/** Retrieve the cached reply for a replayed slot. */
+/**
+ * Retrieve the cached reply for a replayed slot.
+ *
+ * On success, *out_reply points to a freshly malloc'd COPY of the
+ * cached reply (made under the slot's shard lock so a concurrent
+ * sequence advance cannot free it mid-read).  THE CALLER OWNS THE
+ * BUFFER AND MUST free() IT.  Returns -1 when no cached reply exists
+ * or on allocation failure.
+ */
 int session_slot_get_cached_reply(struct session_table *st,
 				  const uint8_t session_id[SESSION_ID_SIZE],
 				  uint32_t slot_id,

@@ -41,27 +41,29 @@ static _Atomic uint32_t g_rr_counter;
  * Round-robin placement
  * ----------------------------------------------------------------------- */
 
-enum mds_status placement_select(const struct mds_ds_info *ds_list,
-                                 uint32_t ds_count,
-                                 uint32_t stripe_count,
-                                 uint32_t mirror_count,
-                                 uint32_t stripe_unit,
-                                 struct mds_ds_map_entry *entries)
+enum mds_status placement_select2(const struct mds_ds_info *ds_list,
+                                  uint32_t ds_count,
+                                  uint32_t *stripe_count,
+                                  uint32_t mirror_count,
+                                  uint32_t stripe_unit,
+                                  struct mds_ds_map_entry *entries)
 {
     uint32_t *online = NULL;
     uint32_t online_count = 0;
+    uint32_t sc;
     uint32_t need;
     uint32_t start;
     uint32_t i, s, m;
 
     (void)stripe_unit;
 
-    if (ds_list == NULL || entries == NULL ||
-        stripe_count == 0 || mirror_count == 0) {
+    if (ds_list == NULL || entries == NULL || stripe_count == NULL ||
+        *stripe_count == 0 || mirror_count == 0) {
         return MDS_ERR_INVAL;
 }
 
-    need = stripe_count * mirror_count;
+    sc = *stripe_count;
+    need = sc * mirror_count;
 
     /* Build index of ONLINE data servers. */
     online = malloc(ds_count * sizeof(*online));
@@ -89,11 +91,11 @@ enum mds_status placement_select(const struct mds_ds_info *ds_list,
         return MDS_ERR_NOSPC;
     }
     if (online_count < need) {
-        stripe_count = online_count / mirror_count;
-        if (stripe_count == 0) {
-            stripe_count = 1;
+        sc = online_count / mirror_count;
+        if (sc == 0) {
+            sc = 1;
         }
-        need = stripe_count * mirror_count;
+        need = sc * mirror_count;
     }
 
     /*
@@ -109,7 +111,7 @@ enum mds_status placement_select(const struct mds_ds_info *ds_list,
      * in the online[] array (modulo online_count), guaranteeing
      * distinct servers per mirror when online_count >= mirror_count.
      */
-    for (s = 0; s < stripe_count; s++) {
+    for (s = 0; s < sc; s++) {
         for (m = 0; m < mirror_count; m++) {
             uint32_t idx = (start + s * mirror_count + m) % online_count;
             uint32_t ds_idx = online[idx];
@@ -122,7 +124,29 @@ enum mds_status placement_select(const struct mds_ds_info *ds_list,
     }
 
     free(online);
+    /* Report the effective (possibly degraded) stripe count back to
+     * the caller.  Persisting the originally requested count would
+     * record calloc-zeroed phantom stripes in the durable stripe
+     * map (entries beyond sc * mirror_count were never filled). */
+    *stripe_count = sc;
     return MDS_OK;
+}
+
+enum mds_status placement_select(const struct mds_ds_info *ds_list,
+                                 uint32_t ds_count,
+                                 uint32_t stripe_count,
+                                 uint32_t mirror_count,
+                                 uint32_t stripe_unit,
+                                 struct mds_ds_map_entry *entries)
+{
+    /* Legacy wrapper: the effective (possibly degraded) stripe count
+     * is discarded, preserving the historical by-value behaviour for
+     * existing callers.  New callers that must persist the geometry
+     * should use placement_select2. */
+    uint32_t effective_stripe_count = stripe_count;
+
+    return placement_select2(ds_list, ds_count, &effective_stripe_count,
+                             mirror_count, stripe_unit, entries);
 }
 
 /* -----------------------------------------------------------------------
@@ -196,25 +220,29 @@ static uint32_t fill_online_with_free(
  */
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
-enum mds_status placement_select_ex(enum mds_placement_policy policy,
-                                    const struct mds_ds_info *ds_list,
-                                    uint32_t ds_count,
-                                    uint32_t stripe_count,
-                                    uint32_t mirror_count,
-                                    uint32_t stripe_unit,
-                                    struct mds_ds_map_entry *entries)
+enum mds_status placement_select_ex2(enum mds_placement_policy policy,
+                                     const struct mds_ds_info *ds_list,
+                                     uint32_t ds_count,
+                                     uint32_t *stripe_count,
+                                     uint32_t mirror_count,
+                                     uint32_t stripe_unit,
+                                     struct mds_ds_map_entry *entries)
 {
-    if (ds_list == NULL || entries == NULL ||
-        stripe_count == 0 || mirror_count == 0) {
+    uint32_t sc;
+
+    if (ds_list == NULL || entries == NULL || stripe_count == NULL ||
+        *stripe_count == 0 || mirror_count == 0) {
         return MDS_ERR_INVAL;
     }
+    sc = *stripe_count;
 
     /* PLACEMENT_RR always delegates to the legacy RR helper, which
-     * already supports stripe>1 / mirror>1 and graceful degrade. */
+     * already supports stripe>1 / mirror>1 and graceful degrade.
+     * Pass the pointer through so degradation propagates. */
     if (policy == PLACEMENT_RR) {
-        return placement_select(ds_list, ds_count,
-                                stripe_count, mirror_count,
-                                stripe_unit, entries);
+        return placement_select2(ds_list, ds_count,
+                                 stripe_count, mirror_count,
+                                 stripe_unit, entries);
     }
 
     /*
@@ -224,7 +252,7 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
      * the Phase 1 Gate C regression.  Only safe for stripe=1 +
      * mirror=1 because multi-stripe layouts need distinct DSes.
      */
-    if (stripe_count == 1 && mirror_count == 1 &&
+    if (sc == 1 && mirror_count == 1 &&
         ds_count == 1 && ds_list[0].state == DS_ONLINE) {
         memset(&entries[0], 0, sizeof(entries[0]));
         entries[0].ds_id = ds_list[0].ds_id;
@@ -277,9 +305,9 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
         policy != PLACEMENT_CAPACITY) {
         free(heap_idx);
         free(heap_w);
-        return placement_select(ds_list, ds_count,
-                                stripe_count, mirror_count,
-                                stripe_unit, entries);
+        return placement_select2(ds_list, ds_count,
+                                 stripe_count, mirror_count,
+                                 stripe_unit, entries);
     }
 
     /*
@@ -296,12 +324,12 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
         free(heap_w);
         return MDS_ERR_NOSPC;
     }
-    if (stripe_count * mirror_count > online_count) {
+    if (sc * mirror_count > online_count) {
         uint32_t new_stripe = online_count / mirror_count;
         if (new_stripe == 0) {
             new_stripe = 1;
         }
-        stripe_count = new_stripe;
+        sc = new_stripe;
         atomic_fetch_add_explicit(
             &g_branch_metrics.placement_degraded_total,
             1, memory_order_relaxed);
@@ -316,7 +344,7 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
      * per-stripe mirror slots then walk the remaining online
      * entries in order.
      */
-    uint32_t total = stripe_count * mirror_count;
+    uint32_t total = sc * mirror_count;
     bool taken_stack[MDS_PLACEMENT_STACK_MAX] = {0};
     bool *taken = taken_stack;
     bool *taken_heap = NULL;
@@ -334,7 +362,7 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
     memset(entries, 0, (size_t)total * sizeof(*entries));
     uint32_t s;
 
-    for (s = 0; s < stripe_count; s++) {
+    for (s = 0; s < sc; s++) {
         /*
          * Pick the head DS for stripe s via the configured policy,
          * ignoring slots already taken by previous stripes.
@@ -405,7 +433,29 @@ enum mds_status placement_select_ex(enum mds_placement_policy policy,
     free(taken_heap);
     free(heap_idx);
     free(heap_w);
+    /* Report the effective (possibly degraded) stripe count so the
+     * caller's persisted stripe map matches the entries filled above
+     * (see placement_select2 for the phantom-stripe rationale). */
+    *stripe_count = sc;
     return MDS_OK;
+}
+
+enum mds_status placement_select_ex(enum mds_placement_policy policy,
+                                    const struct mds_ds_info *ds_list,
+                                    uint32_t ds_count,
+                                    uint32_t stripe_count,
+                                    uint32_t mirror_count,
+                                    uint32_t stripe_unit,
+                                    struct mds_ds_map_entry *entries)
+{
+    /* Legacy wrapper: discards the effective stripe count.  New
+     * callers that must persist the geometry should use
+     * placement_select_ex2. */
+    uint32_t effective_stripe_count = stripe_count;
+
+    return placement_select_ex2(policy, ds_list, ds_count,
+                                &effective_stripe_count, mirror_count,
+                                stripe_unit, entries);
 }
 
 /* -----------------------------------------------------------------------

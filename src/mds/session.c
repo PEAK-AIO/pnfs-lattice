@@ -58,7 +58,20 @@ struct session_table {
 	uint64_t             next_session_seq;
 	uint32_t             mds_id;
 	uint32_t             lease_time_sec;
-	pthread_mutex_t      locks[16]; /* striped by clientid */
+	/*
+	 * Stripe-lock protocol:
+	 *   - Per-slot ops on a live session (session_sequence_check,
+	 *     session_slot_cache_reply, session_slot_get_cached_reply)
+	 *     hold only locks[session_id_shard(session_id)].
+	 *   - Other lookup/update paths hold locks[0].
+	 *   - Any path that unhashes or frees a session or client
+	 *     (destroy_session, destroy_client, exchange_id replace,
+	 *     create_session expiry/superseded destroy, lease reaper,
+	 *     table destroy) MUST hold ALL locks, acquired in ascending
+	 *     order 0..15 and released in reverse, so a shard-locked
+	 *     reader can never observe a freed session.
+	 */
+	pthread_mutex_t      locks[16];
 	struct commit_queue  *cq;    /* Optional: routes recovery writes through repl pipeline */
 	struct mds_catalogue *cat;   /* Optional: catalogue vtable fallback for RonDB */
 	/* Lease expiry reaper (R2.2). */
@@ -85,6 +98,27 @@ static uint32_t session_id_shard(
 		h *= 16777619u;
 	}
 	return h % 16;
+}
+
+/*
+ * Acquire every stripe lock in ascending order (release in reverse
+ * via session_table_unlock_all).  Required by any path that unhashes
+ * or frees a session or client: shard-locked slot operations hold
+ * exactly one locks[i], so holding all of them guarantees no reader
+ * still dereferences the session being freed.
+ */
+static void session_table_lock_all(struct session_table *st)
+{
+	for (uint32_t i = 0; i < 16; i++) {
+		pthread_mutex_lock(&st->locks[i]);
+	}
+}
+
+static void session_table_unlock_all(struct session_table *st)
+{
+	for (uint32_t i = 16; i > 0; i--) {
+		pthread_mutex_unlock(&st->locks[i - 1]);
+	}
 }
 
 /*
@@ -191,6 +225,18 @@ static void free_session(struct nfs4_session *s)
 	if (s == NULL) {
 		return;
 }
+	/* Each slot owns a malloc'd DRC reply buffer; free them before
+	 * the slot arrays or they leak. */
+	if (s->slots != NULL) {
+		for (uint32_t i = 0; i < s->num_slots; i++) {
+			free(s->slots[i].cached_reply);
+		}
+	}
+	if (s->cb_slots != NULL) {
+		for (uint32_t i = 0; i < s->num_cb_slots; i++) {
+			free(s->cb_slots[i].cached_reply);
+		}
+	}
 	free(s->cb_slots);
 	free(s->slots);
 	free(s);
@@ -402,6 +448,9 @@ void session_table_destroy(struct session_table *st)
 		return;
 }
 
+	/* Frees every session: exclude any in-flight shard-locked slot
+	 * readers first (see the locks[] protocol comment). */
+	session_table_lock_all(st);
 	for (i = 0; i < CLIENT_HASH_BUCKETS; i++) {
 		struct nfs4_client *c = st->client_hash[i];
 		struct nfs4_client *next;
@@ -412,6 +461,7 @@ void session_table_destroy(struct session_table *st)
 			c = next;
 		}
 	}
+	session_table_unlock_all(st);
 
 	for (uint32_t li = 0; li < 16; li++) {
 		pthread_mutex_destroy(&st->locks[li]);
@@ -609,7 +659,10 @@ int session_exchange_id(struct session_table *st,
 
 	update = (eia_flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* Cases 3/4/7 below may unhash + free a confirmed client and
+	 * its sessions, so all stripe locks are required (see the
+	 * locks[] protocol comment). */
+	session_table_lock_all(st);
 
 	c = find_client_by_owner(st, co_ownerid, co_ownerid_len);
 
@@ -764,7 +817,7 @@ int session_exchange_id(struct session_table *st,
 	}
 
 out:
-	pthread_mutex_unlock(&st->locks[0]);
+	session_table_unlock_all(st);
 	return rc;
 }
 
@@ -815,7 +868,11 @@ int session_create_session(struct session_table *st,
 		return -1;
 }
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* The unconfirmed-expiry path and the superseded-clientid
+	 * destroy below free clients (and possibly their sessions), so
+	 * all stripe locks are required (see the locks[] protocol
+	 * comment). */
+	session_table_lock_all(st);
 
 	c = find_client_by_id(st, clientid);
 	if (c == NULL) {
@@ -1050,7 +1107,7 @@ int session_create_session(struct session_table *st,
 	}
 
 out:
-	pthread_mutex_unlock(&st->locks[0]);
+	session_table_unlock_all(st);
 	return rc;
 }
 
@@ -1121,7 +1178,10 @@ int session_destroy_session(struct session_table *st,
 		return -1;
 }
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* Unhashes + frees the session: all stripe locks required so
+	 * shard-locked SEQUENCE/DRC readers are excluded (see the
+	 * locks[] protocol comment). */
+	session_table_lock_all(st);
 
 	s = find_session(st, session_id);
 	if (s == NULL) {
@@ -1148,7 +1208,7 @@ int session_destroy_session(struct session_table *st,
 	free_session(s);
 
 out:
-	pthread_mutex_unlock(&st->locks[0]);
+	session_table_unlock_all(st);
 	return rc;
 }
 
@@ -1178,7 +1238,9 @@ int session_destroy_client(struct session_table *st, uint64_t clientid)
 		return -1;
 	}
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* free_client below may free sessions: all stripe locks
+	 * required (see the locks[] protocol comment). */
+	session_table_lock_all(st);
 	c = find_client_by_id(st, clientid);
 	if (c == NULL) {
 		rc = -1;
@@ -1196,7 +1258,7 @@ int session_destroy_client(struct session_table *st, uint64_t clientid)
 	free_client(st, c);
 
 out:
-	pthread_mutex_unlock(&st->locks[0]);
+	session_table_unlock_all(st);
 	return rc;
 }
 
@@ -1277,6 +1339,16 @@ int session_slot_cache_reply(struct session_table *st,
 	return 0;
 }
 
+/*
+ * Retrieve the cached reply for a replayed slot.
+ *
+ * On success, *out_reply points to a freshly malloc'd COPY of the
+ * cached reply, taken while the shard lock is held: the slot's own
+ * buffer can be freed at any moment by a concurrent
+ * session_sequence_check advancing the slot.  THE CALLER OWNS THE
+ * COPY AND MUST free() IT.  Returns -1 when no cached reply exists
+ * or on allocation failure.
+ */
 int session_slot_get_cached_reply(struct session_table *st,
 				  const uint8_t session_id[SESSION_ID_SIZE],
 				  uint32_t slot_id,
@@ -1285,6 +1357,7 @@ int session_slot_get_cached_reply(struct session_table *st,
 {
 	struct nfs4_session *s;
 	const struct nfs4_slot *slot;
+	uint8_t *copy;
 	uint32_t shard;
 
 	if (st == NULL || out_reply == NULL || out_len == NULL) {
@@ -1299,10 +1372,20 @@ int session_slot_get_cached_reply(struct session_table *st,
 		return -1;
 	}
 	slot = &s->slots[slot_id];
-	*out_reply = slot->cached_reply;
+	if (slot->cached_reply == NULL || slot->cached_reply_len == 0) {
+		pthread_mutex_unlock(&st->locks[shard]);
+		return -1;
+	}
+	copy = malloc(slot->cached_reply_len);
+	if (copy == NULL) {
+		pthread_mutex_unlock(&st->locks[shard]);
+		return -1;
+	}
+	memcpy(copy, slot->cached_reply, slot->cached_reply_len);
+	*out_reply = copy;
 	*out_len = slot->cached_reply_len;
 	pthread_mutex_unlock(&st->locks[shard]);
-	return (*out_reply != NULL) ? 0 : -1;
+	return 0;
 }
 
 int session_sequence_check(struct session_table *st,
@@ -1670,10 +1753,11 @@ static void *lease_reaper_thread(void *arg)
 
         time_t now = time(NULL);
 
-        /* All session-table mutations use locks[0]; the reaper
-         * must use the same lock to avoid racing with
-         * session_exchange_id / session_create_session. */
-        pthread_mutex_lock(&st->locks[0]);
+        /* The reaper frees expired clients together with their
+         * sessions, so it must hold ALL stripe locks (see the
+         * locks[] protocol comment) to exclude shard-locked
+         * SEQUENCE/DRC readers. */
+        session_table_lock_all(st);
         for (uint32_t b = 0; b < CLIENT_HASH_BUCKETS; b++) {
             struct nfs4_client **pp = &st->client_hash[b];
             while (*pp != NULL) {
@@ -1726,7 +1810,7 @@ static void *lease_reaper_thread(void *arg)
                 }
             }
         }
-        pthread_mutex_unlock(&st->locks[0]);
+        session_table_unlock_all(st);
     }
     return NULL;
 }

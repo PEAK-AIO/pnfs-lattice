@@ -50,6 +50,7 @@ struct mds_rondb_state {
 	bool                    changefeed_enabled;
 	uint64_t                delta_seqno;
 	uint64_t                delta_persist_counter; /**< Persist seqno every 64 mutations. */
+	pthread_mutex_t         delta_mu; /**< Guards delta_seqno + delta_persist_counter. */
 	/* Phase 9C: background image poller. */
 	struct catalog_image   *poller_image;
 	pthread_t               poller_thread;
@@ -57,6 +58,9 @@ struct mds_rondb_state {
 	uint32_t                poller_interval_ms;
 	uint32_t                poller_self_mds_id;
 };
+
+/** Persist the changefeed seqno counter every N mutations. */
+#define DELTA_PERSIST_INTERVAL 64
 
 static void catalogue_rondb_close_backend(struct mds_catalogue *cat);
 
@@ -246,12 +250,25 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
 		cfg->catalog_image_mode != MDS_IMAGE_OFF);
 	state->delta_seqno = 1;
 	state->delta_persist_counter = 0;
+	if (pthread_mutex_init(&state->delta_mu, NULL) != 0) {
+		rondb_shim_disconnect(state->handle);
+		free(state);
+		free(cat);
+		return MDS_ERR_IO;
+	}
 	if (state->changefeed_enabled && state->handle != NULL) {
 		uint64_t loaded = 0;
 		if (rondb_shim_delta_seqno_load(state->handle,
 						state->mds_id,
 						&loaded) == 0 && loaded > 0) {
-			state->delta_seqno = loaded;
+			/* The counter is only persisted every
+			 * DELTA_PERSIST_INTERVAL mutations (and on clean
+			 * shutdown), so after a crash up to that many
+			 * seqnos beyond the persisted value may already
+			 * exist in mds_delta_broadcast.  Skip the whole
+			 * window so restarted emission does not collide
+			 * with already-used keys. */
+			state->delta_seqno = loaded + DELTA_PERSIST_INTERVAL;
 		}
 	}
 
@@ -272,12 +289,20 @@ static void catalogue_rondb_close_backend(struct mds_catalogue *cat)
 		return;
 	}
 
+	/* Stop the poller before tearing down the handle: the poller
+	 * thread dereferences state->handle on every iteration, so
+	 * disconnecting/freeing first would be a use-after-free.
+	 * poller_stop joins the thread; close_backend is never called
+	 * from the poller itself, so this cannot self-deadlock. */
+	catalogue_rondb_poller_stop(cat);
+
 	state = cat->backend_private;
 	if (state != NULL) {
 		if (state->handle != NULL) {
 			rondb_shim_disconnect(state->handle);
 			state->handle = NULL;
 		}
+		pthread_mutex_destroy(&state->delta_mu);
 		free(state);
 		cat->backend_private = NULL;
 	}
@@ -843,12 +868,21 @@ enum mds_status catalogue_rondb_inode_put(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_rename(
+/**
+ * Rename implementation.  On success, *src_fid_out / *src_type_out
+ * (when non-NULL) receive the renamed child's fileid and type as
+ * resolved from the source dirent.  The changefeed wrapper needs them
+ * to emit a DIRENT_PUT delta that maps the destination name to the
+ * real child instead of fileid 0.
+ */
+static enum mds_status rondb_ns_rename_resolved(
 	struct mds_catalogue *cat,
 	uint64_t src_parent,
 	const char *src_name,
 	uint64_t dst_parent,
-	const char *dst_name)
+	const char *dst_name,
+	uint64_t *src_fid_out,
+	uint8_t *src_type_out)
 {
 	void *h = rondb_handle(cat);
 	struct mds_inode sp, dp, sc, dc;
@@ -928,6 +962,8 @@ enum mds_status catalogue_rondb_ns_rename(
 
 		if (dst_fid == src_fid) {
 			/* Same file -- no-op. */
+			if (src_fid_out != NULL) { *src_fid_out = src_fid; }
+			if (src_type_out != NULL) { *src_type_out = src_type; }
 			return MDS_OK;
 		}
 
@@ -1018,7 +1054,20 @@ enum mds_status catalogue_rondb_ns_rename(
 		return MDS_ERR_IO;
 	}
 
+	if (src_fid_out != NULL) { *src_fid_out = src_fid; }
+	if (src_type_out != NULL) { *src_type_out = src_type; }
 	return MDS_OK;
+}
+
+enum mds_status catalogue_rondb_ns_rename(
+	struct mds_catalogue *cat,
+	uint64_t src_parent,
+	const char *src_name,
+	uint64_t dst_parent,
+	const char *dst_name)
+{
+	return rondb_ns_rename_resolved(cat, src_parent, src_name,
+					dst_parent, dst_name, NULL, NULL);
 }
 
 /* -----------------------------------------------------------------------
@@ -2725,39 +2774,65 @@ static void rondb_unlock_set(
  * to the caller -- otherwise authority and image diverge permanently.
  * ----------------------------------------------------------------------- */
 
-#define DELTA_PERSIST_INTERVAL 64
-
 static int rondb_emit_delta(
     struct mds_rondb_state *st, void *h,
     uint8_t delta_type, const void *payload, uint32_t payload_len)
 {
     struct timespec ts;
     uint64_t now_ns;
+    uint64_t persist_seqno = 0;
+    int rc = -1;
 
     if (!st->changefeed_enabled) { return 0; }
 
-    st->delta_seqno++;
     clock_gettime(CLOCK_REALTIME, &ts);
     now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 
-    int rc = rondb_shim_delta_insert(
-        h, st->mds_id, st->delta_seqno, st->boot_epoch,
-        delta_type, payload, payload_len, now_ns);
+    /* delta_seqno / delta_persist_counter are shared by every mutating
+     * thread; serialise allocation + insert so two threads can never
+     * claim the same seqno. */
+    pthread_mutex_lock(&st->delta_mu);
+    for (int attempt = 0; attempt < 128; attempt++) {
+        st->delta_seqno++;
+        rc = rondb_shim_delta_insert(
+            h, st->mds_id, st->delta_seqno, st->boot_epoch,
+            delta_type, payload, payload_len, now_ns);
+        if (rc != 1) {
+            break;
+        }
+        /* rc == 1: duplicate key.  A stale post-crash seqno collided
+         * with a row from the previous incarnation; keep bumping so
+         * the delta is emitted instead of silently dropped. */
+    }
     if (rc != 0) {
         MDS_LOG_ERROR(LOG_COMP_CAT,
-            "delta_insert failed for seqno=%llu type=%u -- "
+            "delta_insert failed for seqno=%llu type=%u rc=%d -- "
             "mutation will be reported as failed",
-            (unsigned long long)st->delta_seqno, (unsigned)delta_type);
-        st->delta_seqno--; /* Roll back so the seqno can be reused. */
+            (unsigned long long)st->delta_seqno, (unsigned)delta_type,
+            rc);
+        if (rc < 0) {
+            /* Insert failed outright; the seqno was not consumed in
+             * the table, so it is safe to reuse.  Duplicate-key
+             * seqnos (rc == 1) stay consumed. */
+            st->delta_seqno--;
+        }
+        pthread_mutex_unlock(&st->delta_mu);
         return -1;
     }
 
-    /* Persist seqno counter periodically. */
+    /* Persist seqno counter periodically.  The save itself runs
+     * outside the mutex: the startup load adds a
+     * DELTA_PERSIST_INTERVAL safety margin, so persisting a slightly
+     * stale value is harmless. */
     st->delta_persist_counter++;
     if (st->delta_persist_counter >= DELTA_PERSIST_INTERVAL) {
-        (void)rondb_shim_delta_seqno_save(h, st->mds_id,
-                                          st->delta_seqno);
+        persist_seqno = st->delta_seqno;
         st->delta_persist_counter = 0;
+    }
+    pthread_mutex_unlock(&st->delta_mu);
+
+    if (persist_seqno != 0) {
+        (void)rondb_shim_delta_seqno_save(h, st->mds_id, persist_seqno);
     }
     return 0;
 }
@@ -2787,6 +2862,8 @@ static enum mds_status rondb_locked_ns_rename(
     void *h = rondb_handle(cat);
     struct rondb_lock_entry lock;
     enum mds_status rc;
+    uint64_t child_fid = 0;
+    uint8_t child_type = 0;
 
     if (st == NULL || h == NULL ||
         src_name == NULL || dst_name == NULL) {
@@ -2804,15 +2881,19 @@ static enum mds_status rondb_locked_ns_rename(
     rc = rondb_lock_set(h, st, &lock, 1, RONDB_LOCK_MODE_EXCLUSIVE);
     if (rc != MDS_OK) { return rc; }
 
-    rc = catalogue_rondb_ns_rename(cat, src_parent, src_name,
-                                   dst_parent, dst_name);
+    rc = rondb_ns_rename_resolved(cat, src_parent, src_name,
+                                  dst_parent, dst_name,
+                                  &child_fid, &child_type);
     if (rc == MDS_OK && st->changefeed_enabled) {
-        /* Emit DIRENT_DELETE(src) + DIRENT_PUT(dst). */
+        /* Emit DIRENT_DELETE(src) + DIRENT_PUT(dst) carrying the
+         * child fileid/type resolved by the rename prologue.
+         * Emitting fileid 0 here would make peer images map the
+         * renamed name to fileid 0. */
         size_t snlen = strlen(src_name);
         uint8_t sbuf[17 + MDS_MAX_NAME];
         fdb_put_u64(sbuf, src_parent);
-        fdb_put_u64(sbuf + 8, 0);
-        sbuf[16] = 0;
+        fdb_put_u64(sbuf + 8, child_fid);
+        sbuf[16] = child_type;
         memcpy(sbuf + 17, src_name, snlen);
         if (rondb_emit_delta(st, h, CAT_DELTA_DIRENT_DELETE,
                              sbuf, (uint32_t)(17 + snlen)) != 0) {
@@ -2823,8 +2904,8 @@ static enum mds_status rondb_locked_ns_rename(
             size_t dnlen = strlen(dst_name);
             uint8_t dbuf[17 + MDS_MAX_NAME];
             fdb_put_u64(dbuf, dst_parent);
-            fdb_put_u64(dbuf + 8, 0);
-            dbuf[16] = 0;
+            fdb_put_u64(dbuf + 8, child_fid);
+            dbuf[16] = child_type;
             memcpy(dbuf + 17, dst_name, dnlen);
             if (rondb_emit_delta(st, h, CAT_DELTA_DIRENT_PUT,
                                  dbuf, (uint32_t)(17 + dnlen)) != 0) {
@@ -2984,10 +3065,16 @@ static void *rondb_poller_thread(void *arg)
         usleep(st->poller_interval_ms * 1000U);
     }
 
-    /* Persist delta seqno on shutdown. */
+    /* Persist delta seqno on shutdown.  Read the counter under its
+     * mutex; mutating threads may still be emitting deltas. */
     if (st->changefeed_enabled) {
+        uint64_t final_seqno;
+
+        pthread_mutex_lock(&st->delta_mu);
+        final_seqno = st->delta_seqno;
+        pthread_mutex_unlock(&st->delta_mu);
         (void)rondb_shim_delta_seqno_save(st->handle, st->mds_id,
-                                          st->delta_seqno);
+                                          final_seqno);
     }
 
     return NULL;

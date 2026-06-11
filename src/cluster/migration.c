@@ -301,6 +301,14 @@ int mig_chunk_deserialise(const void *data, size_t len,
         chunk->stripe_map.stripe_count = mig_de_u32(p, off); off += 4;
         chunk->stripe_map.stripe_unit  = mig_de_u32(p, off); off += 4;
         chunk->stripe_map.mirror_count = mig_de_u32(p, off); off += 4;
+        /* Peer-supplied counts: bound each factor before multiplying
+         * so the uint32 product cannot wrap (65536 * 65536 == 0 would
+         * skip allocation yet leave the counts set).  The caps match
+         * the catalogue-wide stripe-map limits. */
+        if (chunk->stripe_map.stripe_count > MDS_MAX_STRIPES ||
+            chunk->stripe_map.mirror_count > MDS_MAX_MIRRORS) {
+            goto fail;
+        }
         uint32_t n = chunk->stripe_map.stripe_count *
                      chunk->stripe_map.mirror_count;
         if (n > 0) {

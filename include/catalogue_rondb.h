@@ -638,7 +638,12 @@ typedef int (*rondb_delta_poll_cb)(uint64_t seqno, uint64_t boot_epoch,
                                    const void *payload, uint32_t payload_len,
                                    uint64_t timestamp_ns, void *ctx);
 
-/** Insert a delta broadcast record.  Returns 0/-1. */
+/** Insert a delta broadcast record.
+ *  Returns 0 on success, 1 if a row with the same
+ *  (source_mds_id, seqno) already exists (duplicate key: the new
+ *  record was NOT written -- the caller must advance its seqno and
+ *  retry, e.g. after a crash left the persisted seqno counter stale),
+ *  -1 on error. */
 int rondb_shim_delta_insert(void *handle,
                             uint32_t source_mds_id, uint64_t seqno,
                             uint64_t boot_epoch, uint8_t delta_type,

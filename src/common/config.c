@@ -487,7 +487,11 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 (void)fprintf(stderr,
                     "ERROR: invalid nfs_auth_mode '%s' "
                     "(expected sys|krb5|krb5i|krb5p)\n", val);
-                return -1;
+                /* Fatal-parse pattern: close the file and return a
+                 * real mds_status (a bare -1 aliased MDS_ERR_NOMEM
+                 * and leaked fp). */
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
             }
         } else if (strcmp(key, "krb5_keytab") == 0) {
             (void)snprintf(cfg->krb5_keytab_path,
@@ -543,10 +547,20 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 }
         } else if (strcmp(key, "stripe_unit_bytes") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
-            if (v > 0) {
+            /* Bound before the uint32_t truncation: without the
+             * upper check, 4294967296 silently became 0 and
+             * 4294967297 became 1.  1 GiB is far above any sane
+             * stripe unit (profiles use 64 KiB - 4 MiB). */
+            if (v > 0 && v <= 1073741824UL) {
                 cfg->stripe_unit_bytes = (uint32_t)v;
                 cfg->tuning_set |= MDS_CFG_SET_STRIPE_UNIT_BYTES;
-}
+} else {
+                (void)fprintf(stderr,
+                    "ERROR: stripe_unit_bytes=%s out of range "
+                    "[1, 1073741824]\n", val);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
         } else if (strcmp(key, "auto_widen_lease_on_4k") == 0) {
             cfg->auto_widen_lease_on_4k =
                 (strcmp(val, "true") == 0 ||

@@ -67,13 +67,20 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
         return false;
     }
     if (len == 8) {
-        /* v0 legacy: 8-byte fileid BE. */
-        *fileid = be64toh(*(uint64_t *)buf);
+        /* v0 legacy: 8-byte fileid BE.  memcpy avoids an unaligned
+         * uint64_t load from the byte buffer (UB / SIGBUS on
+         * strict-alignment targets). */
+        uint64_t fid_be;
+        memcpy(&fid_be, buf, sizeof(fid_be));
+        *fileid = be64toh(fid_be);
         return true;
     }
     if (len >= 17 && buf[0] == 0x01) {
-        /* v1 cluster-global: skip owner_mds_id, extract fileid. */
-        *fileid = be64toh(*(uint64_t *)(buf + 5));
+        /* v1 cluster-global: skip owner_mds_id, extract fileid.
+         * buf + 5 is never 8-byte aligned — copy before swapping. */
+        uint64_t fid_be;
+        memcpy(&fid_be, buf + 5, sizeof(fid_be));
+        *fileid = be64toh(fid_be);
         return true;
     }
     /* Malformed wire FH — sentinel fileid=0 so op_putfh returns
@@ -94,13 +101,23 @@ bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
     }
     memset(desc, 0, sizeof(*desc));
     if (len == 8) {
-        desc->fileid = be64toh(*(uint64_t *)buf);
+        /* memcpy avoids an unaligned load (see xdr_nfs4_fh_decode). */
+        uint64_t fid_be;
+        memcpy(&fid_be, buf, sizeof(fid_be));
+        desc->fileid = be64toh(fid_be);
         return true;
     }
     if (len >= 17 && buf[0] == 0x01) {
-        desc->owner_mds_id = be32toh(*(uint32_t *)(buf + 1));
-        desc->fileid = be64toh(*(uint64_t *)(buf + 5));
-        desc->generation = be32toh(*(uint32_t *)(buf + 13));
+        /* buf + 1 / buf + 5 / buf + 13 are misaligned for their
+         * types — copy into properly typed locals before swapping. */
+        uint32_t m_be, g_be;
+        uint64_t fid_be;
+        memcpy(&m_be, buf + 1, sizeof(m_be));
+        memcpy(&fid_be, buf + 5, sizeof(fid_be));
+        memcpy(&g_be, buf + 13, sizeof(g_be));
+        desc->owner_mds_id = be32toh(m_be);
+        desc->fileid = be64toh(fid_be);
+        desc->generation = be32toh(g_be);
         return true;
     }
     /* Malformed FH — sentinel fileid=0 so op_putfh returns
@@ -1163,7 +1180,12 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
                 uint32_t olen;
                 if (!xdr_uint64_t(xdrs, &lo_clientid)) { return false; }
                 if (!xdr_uint32_t(xdrs, &olen)) { return false; }
-                a->lock_owner_len = (olen <= 128) ? olen : 128;
+                /* Reject overlong owners instead of clamping: two
+                 * distinct owners truncated to the same 128 bytes
+                 * would alias lock ownership.  Failing the decode
+                 * yields NFS4ERR_BADXDR. */
+                if (olen > sizeof(a->lock_owner)) { return false; }
+                a->lock_owner_len = olen;
                 if (olen > 0) {
                     if (!xdr_opaque_decode(xdrs, (char *)a->lock_owner, olen)) { return false; }
                 }
@@ -1183,8 +1205,12 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
             uint32_t olen;
             if (!xdr_uint64_t(xdrs, &a->clientid)) { return false; }
             if (!xdr_uint32_t(xdrs, &olen)) { return false; }
-            a->owner_len = (olen <= 128) ? olen : 128;
-            if (!xdr_opaque_decode(xdrs, (char *)a->owner, olen)) { return false; }
+            /* Reject overlong owners — same aliasing concern as
+             * OP_LOCK above; clamping must not silently truncate. */
+            if (olen > sizeof(a->owner)) { return false; }
+            a->owner_len = olen;
+            if (olen > 0 &&
+                !xdr_opaque_decode(xdrs, (char *)a->owner, olen)) { return false; }
         }
         return true;
     }
@@ -1224,18 +1250,20 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
         if (!xdr_uint32_t(xdrs, &count)) {
             return false;
         }
-        op->arg.test_stateid.count = (count > 64) ? 64 : count;
-        for (j = 0; j < count && j < 64; j++) {
+        /* Reject oversized arrays: the reply must carry one status
+         * per requested stateid (RFC 8881 §18.48) and the result's
+         * status_codes[] holds only 64 — a larger count would make
+         * the encoder read past the array and leak memory to the
+         * wire. */
+        if (count > 64) {
+            return false;
+        }
+        op->arg.test_stateid.count = count;
+        for (j = 0; j < count; j++) {
             if (!xdr_nfs4_stateid_decode(xdrs, &op->arg.test_stateid.stateids[j])) {
                 return false;
             }
         }
-        /* Skip excess stateids beyond our array. */
-        for (; j < count; j++) {
-            struct nfs4_stateid skip_sid;
-            if (!xdr_nfs4_stateid_decode(xdrs, &skip_sid)) { return false; }
-        }
-        op->arg.test_stateid.count = count;
         return true;
     }
     case OP_FREE_STATEID:
