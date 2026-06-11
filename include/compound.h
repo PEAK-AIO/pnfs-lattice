@@ -1380,7 +1380,6 @@ struct nfs4_res_layoutget {
 	uint32_t              ff_mirror_count;
 	struct nfs4_ff_mirror *ff_mirrors; /* heap, sized ff_mirror_count */
 	uint32_t              ff_flags;
-	uint32_t              stripe_lease_duration_ms;
 
 	/*
 	 * Phase C / Step 6 — wire-form selector.
@@ -1615,6 +1614,7 @@ struct layout_recall     *lr;
 	bool                      saved_fh_set;
 	uint32_t                  mds_id;       /* This MDS node numeric ID */
 	uint32_t                  cfg_stripe_unit; /* Config stripe_unit_bytes (0 = default 64KiB) */
+	bool                      cfg_auto_widen_lease_on_4k;
 	/*
 	 * Phase 1 placement policy dispatch.  cfg_placement_policy_enabled
 	 * gates the new path; when false, LAYOUTGET's new-file branch uses
@@ -1794,6 +1794,7 @@ struct layout_recall     *lr;
  * @param cat  Catalogue handle used for namespace operations.
  */
 void compound_init(struct compound_data *cd);
+void compound_layout_set_grant_max_length(uint64_t bytes);
 
 /**
  * RFC 8881 §1.7 / §14.4 — UTF-8 well-formedness check.

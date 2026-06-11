@@ -1,0 +1,10 @@
+{
+  "phase": "phase_d_pynfs",
+  "mds_host": "10.0.0.11",
+  "pass": 3,
+  "fail": 0,
+  "skip": 0,
+  "total": 3,
+  "completed_at": "2026-06-07T18:19:41Z",
+  "result_dir": "/home/peak/lattice_test_handover/per_patch/0003"
+}

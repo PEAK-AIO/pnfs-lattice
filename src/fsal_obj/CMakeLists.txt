@@ -8,6 +8,7 @@ add_library(pnfs_fsal_obj STATIC
     placement.c
     referral.c
     lease_table.c
+    lease_stripe_map.c
 )
 
 target_include_directories(pnfs_fsal_obj PUBLIC

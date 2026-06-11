@@ -79,6 +79,7 @@ struct rpc_server_config {
     uint32_t    mds_id;         /**< MDS node ID for stateid/deviceid. */
     uint64_t    write_verf;     /**< Server boot epoch for writeverf4. */
     uint32_t    stripe_unit;    /**< Stripe unit (0 = 64 KiB default). */
+    bool        auto_widen_lease_on_4k; /**< Widen generic 4 KiB leases. */
     uint32_t    max_conns;      /**< Max connections (0 = RPC_MAX_CONNS). */
     /* Phase 1: placement policy for new files' layouts.  Ignored
      * unless placement_policy_enabled is true. */

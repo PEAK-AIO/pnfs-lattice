@@ -1,0 +1,139 @@
+[run_all 18:21:51] RESULT_DIR=/home/peak/lattice_test_handover/per_patch/0004
+[run_all 18:21:51] MDS_HOST=10.0.0.11
+[run_all 18:21:51] --- Phase A: Linux default ---
+[empirical 18:21:51] Phase A: Linux default writes against 10.0.0.11
+[empirical 18:21:51] mounting 10.0.0.11:/ -> /mnt/pnfs_empirical (opts=vers=4.2,rsize=1048576,wsize=1048576)
+[empirical 18:21:51] tcpdump start: iface=ens19 pcap=/home/peak/lattice_test_handover/per_patch/0004/phase_a_linux_default.pcap
+[empirical 18:21:52] dd: 4K -> /mnt/pnfs_empirical/.phase_a_206530_4K
+[empirical 18:21:52] PASS: write 4K
+[empirical 18:21:52] dd: 16K -> /mnt/pnfs_empirical/.phase_a_206530_16K
+[empirical 18:21:52] PASS: write 16K
+[empirical 18:21:52] dd: 64K -> /mnt/pnfs_empirical/.phase_a_206530_64K
+[empirical 18:21:52] PASS: write 64K
+[empirical 18:21:52] dd: 1M -> /mnt/pnfs_empirical/.phase_a_206530_1M
+[empirical 18:21:52] PASS: write 1M
+[empirical 18:21:52] dd: 16M -> /mnt/pnfs_empirical/.phase_a_206530_16M
+[empirical 18:21:52] PASS: write 16M
+[empirical 18:21:52] dd: 256M -> /mnt/pnfs_empirical/.phase_a_206530_256M
+[empirical 18:21:54] PASS: write 256M
+[empirical 18:21:56] tcpdump stop: pid=206548
+[empirical 18:21:56] LAYOUTGET replies decoded: 540
+[empirical 18:21:56] FF_FLAGS_STRIPE_LEASE on wire: 0
+[empirical 18:21:56] PASS: captured at least 1 LAYOUTGET reply (540)
+[empirical 18:21:56] PASS: FF_FLAGS_STRIPE_LEASE bit set on the wire (expected=0 actual=0)
+[empirical 18:21:56] Phase A done: pass=8 fail=0
+[empirical 18:21:56] umount /mnt/pnfs_empirical
+[run_all 18:21:56] --- Phase B: Flex Files ---
+[empirical 18:21:56] Phase B: pynfs flex-files subset against 10.0.0.11:/
+[empirical 18:21:56] running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/per_patch/0004/phase_b_flex_files_pynfs.json flex
+[empirical 18:23:29] pynfs rc=0 (non-zero is informational; pass/fail comes from json)
+[empirical 18:23:29] pynfs FF results: pass=27 fail=0 omit=235 error=0
+[empirical 18:23:29] PASS: pynfs flex-files FAIL count (expected=0 actual=0)
+[empirical 18:23:29] PASS: pynfs flex-files ERROR count (expected=0 actual=0)
+[empirical 18:23:29] Phase B done: pass=2 fail=0
+[run_all 18:23:29] --- Phase C: strict N-to-1 ---
+[empirical 18:23:29] Phase C: strict N-to-1 (two writers, same client, 268435456 bytes)
+[empirical 18:23:29] mounting 10.0.0.11:/ -> /mnt/pnfs_empirical (opts=vers=4.2,rsize=1048576,wsize=1048576)
+[empirical 18:23:29] tcpdump start: iface=ens19 pcap=/home/peak/lattice_test_handover/per_patch/0004/phase_c_strict_n_to_1.pcap
+[empirical 18:23:30] preallocate /mnt/pnfs_empirical/.phase_c_208625_n_to_1 (268435456 bytes)
+[empirical 18:23:30] launching two parallel writers
+[empirical 18:23:31] PASS: writer 1 finished
+[empirical 18:23:31] PASS: writer 2 finished
+[empirical 18:23:33] tcpdump stop: pid=208643
+[empirical 18:23:33] LAYOUTGET replies decoded: 964
+[empirical 18:23:33] CB_LAYOUTRECALL refs: 0
+[empirical 18:23:33] PASS: captured at least 1 LAYOUTGET reply (964)
+[empirical 18:23:33] PASS: CB_LAYOUTRECALL count between same-client writers (expected=0 actual=0)
+[empirical 18:23:33] Phase C done: pass=4 fail=0
+[empirical 18:23:33] umount /mnt/pnfs_empirical
+[run_all 18:23:33] --- Phase D: full pynfs ---
+[empirical 18:23:33] Phase D: full pynfs against 10.0.0.11:/
+[empirical 18:23:33] running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/per_patch/0004/phase_d_pynfs_pynfs.json all deleg xattr writedelegations backchannel_ctl
+[empirical 18:32:03] pynfs rc=0 (informational; pass/fail comes from json)
+[empirical 18:32:03] pynfs results: pass=171 fail_total=10 fail_expected=8 fail_diverg=2 fail_unexpected=0 error=0 omit=81
+[empirical 18:32:03] pre-existing lattice divergences (pmds passes, not introduced here):
+lattice_divergence (pre-existing, pmds passes):
+  - st_rename.testStaleRename
+  - st_compound.testUndefined
+
+[empirical 18:32:03] PASS: pynfs unexpected FAIL count (expected=0 actual=0)
+[empirical 18:32:03] PASS: pynfs ERROR count (expected=0 actual=0)
+[empirical 18:32:03] PASS: pynfs expected (delegation) FAIL count (limit=12 actual=8)
+[empirical 18:32:03] Phase D done: pass=3 fail=0
+{
+  "phases": [
+    {
+      "phase": "phase_a_linux_default",
+      "mds_host": "10.0.0.11",
+      "pass": 8,
+      "fail": 0,
+      "skip": 0,
+      "total": 8,
+      "completed_at": "2026-06-07T18:21:56Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0004"
+    },
+    {
+      "phase": "phase_b_flex_files",
+      "mds_host": "10.0.0.11",
+      "pass": 2,
+      "fail": 0,
+      "skip": 0,
+      "total": 2,
+      "completed_at": "2026-06-07T18:23:29Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0004"
+    },
+    {
+      "phase": "phase_c_strict_n_to_1",
+      "mds_host": "10.0.0.11",
+      "pass": 4,
+      "fail": 0,
+      "skip": 0,
+      "total": 4,
+      "completed_at": "2026-06-07T18:23:33Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0004"
+    },
+    {
+      "phase": "phase_d_pynfs",
+      "mds_host": "10.0.0.11",
+      "pass": 3,
+      "fail": 0,
+      "skip": 0,
+      "total": 3,
+      "completed_at": "2026-06-07T18:32:03Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0004"
+    }
+  ],
+  "totals": {
+    "pass": 17,
+    "fail": 0,
+    "skip": 0,
+    "total": 17
+  }
+}
+
+--- PASS_REPORT.md ---
+# Lattice empirical pass report
+
+MDS host: `10.0.0.11`
+Result dir: `/home/peak/lattice_test_handover/per_patch/0004`
+
+## Per-phase
+
+| phase | pass | fail | skip | total |
+|---|---|---|---|---|
+| phase_a_linux_default | 8 | 0 | 0 | 8 |
+| phase_b_flex_files | 2 | 0 | 0 | 2 |
+| phase_c_strict_n_to_1 | 4 | 0 | 0 | 4 |
+| phase_d_pynfs | 3 | 0 | 0 | 3 |
+
+## Totals
+
+- pass: **17**
+- fail: **0**
+- skip: **0**
+- total: **17**
+
+## Verdict
+
+**PASS**
+[run_all 18:32:03] overall: PASS

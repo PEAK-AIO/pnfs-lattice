@@ -1,0 +1,50 @@
+{
+  "phases": [
+    {
+      "phase": "phase_a_linux_default",
+      "mds_host": "10.0.0.11",
+      "pass": 8,
+      "fail": 0,
+      "skip": 0,
+      "total": 8,
+      "completed_at": "2026-06-07T18:09:34Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0003"
+    },
+    {
+      "phase": "phase_b_flex_files",
+      "mds_host": "10.0.0.11",
+      "pass": 2,
+      "fail": 0,
+      "skip": 0,
+      "total": 2,
+      "completed_at": "2026-06-07T18:11:07Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0003"
+    },
+    {
+      "phase": "phase_c_strict_n_to_1",
+      "mds_host": "10.0.0.11",
+      "pass": 4,
+      "fail": 0,
+      "skip": 0,
+      "total": 4,
+      "completed_at": "2026-06-07T18:11:12Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0003"
+    },
+    {
+      "phase": "phase_d_pynfs",
+      "mds_host": "10.0.0.11",
+      "pass": 3,
+      "fail": 0,
+      "skip": 0,
+      "total": 3,
+      "completed_at": "2026-06-07T18:19:41Z",
+      "result_dir": "/home/peak/lattice_test_handover/per_patch/0003"
+    }
+  ],
+  "totals": {
+    "pass": 17,
+    "fail": 0,
+    "skip": 0,
+    "total": 17
+  }
+}

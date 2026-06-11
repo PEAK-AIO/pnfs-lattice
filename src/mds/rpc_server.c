@@ -85,6 +85,7 @@ struct rpc_server {
     uint16_t                 port;
     uint32_t                 mds_id;
     uint32_t                 stripe_unit;
+    bool                     auto_widen_lease_on_4k;
     uint64_t                 write_verf;
     uint32_t                 max_conns;
     /* Phase 1: placement policy dispatcher for LAYOUTGET. */
@@ -1070,6 +1071,7 @@ wrongsec:
         cd.transport = srv->transport;
         cd.mds_id = srv->mds_id;
         cd.cfg_stripe_unit = srv->stripe_unit;
+        cd.cfg_auto_widen_lease_on_4k = srv->auto_widen_lease_on_4k;
         cd.cfg_placement_policy = srv->placement_policy;
         cd.cfg_placement_policy_enabled = srv->placement_policy_enabled;
         cd.cfg_default_stripe_count = srv->default_stripe_count;
@@ -1595,6 +1597,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->max_conns = max_conns;
     srv->mds_id = cfg->mds_id;
     srv->stripe_unit = cfg->stripe_unit;
+    srv->auto_widen_lease_on_4k = cfg->auto_widen_lease_on_4k;
     srv->placement_policy = cfg->placement_policy;
     srv->placement_policy_enabled = cfg->placement_policy_enabled;
     srv->default_stripe_count = cfg->default_stripe_count ?

@@ -207,6 +207,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->self_failover_partner_id = 0;  /* no failover partner */
     cfg->ds_heartbeat_ms = 5000;
     cfg->stripe_unit_bytes = 65536;
+    cfg->auto_widen_lease_on_4k = true;
+    cfg->layout_grant_max_length_bytes = (1ULL << 36); /* 64 GiB */
     cfg->default_stripe_count = 1;
     cfg->default_mirror_count = 1;
     cfg->lease_time_sec = 90;
@@ -545,6 +547,15 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 cfg->stripe_unit_bytes = (uint32_t)v;
                 cfg->tuning_set |= MDS_CFG_SET_STRIPE_UNIT_BYTES;
 }
+        } else if (strcmp(key, "auto_widen_lease_on_4k") == 0) {
+            cfg->auto_widen_lease_on_4k =
+                (strcmp(val, "true") == 0 ||
+                 strcmp(val, "yes") == 0 ||
+                 strcmp(val, "1") == 0);
+        } else if (strcmp(key, "layout_grant_max_length_bytes") == 0) {
+            uint64_t v = strtoull(val, NULL, 10);
+            cfg->layout_grant_max_length_bytes =
+                (v < 65536ULL) ? 65536ULL : v;
         } else if (strcmp(key, "default_mirror_count") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             if (v > 0 && v <= MDS_MAX_MIRRORS) {

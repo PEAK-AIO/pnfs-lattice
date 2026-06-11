@@ -1,0 +1,17 @@
+pass=179
+fail_total=2
+fail_expected=0
+fail_diverg=2
+fail_unexpected=0
+error_total=0
+omit=81
+
+unexpected_fail:
+
+expected_fail (config-gated):
+
+lattice_divergence (pre-existing, pmds passes):
+  - st_rename.testStaleRename
+  - st_compound.testUndefined
+
+errors:

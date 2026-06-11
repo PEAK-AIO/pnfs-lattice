@@ -1,0 +1,25 @@
+pass=171
+fail_total=10
+fail_expected=8
+fail_diverg=2
+fail_unexpected=0
+error_total=0
+omit=81
+
+unexpected_fail:
+
+expected_fail (config-gated):
+  - st_delegation.testWriteDeleg
+  - st_delegation.testServerSelfConflict3
+  - st_delegation.testReadDeleg
+  - st_delegation.testDelegRevocation
+  - st_delegation.testCBSecParmsNull
+  - st_delegation.testCBSecParmsChange
+  - st_delegation.testCBSecParms
+  - st_delegation.testAnyDeleg
+
+lattice_divergence (pre-existing, pmds passes):
+  - st_rename.testStaleRename
+  - st_compound.testUndefined
+
+errors:

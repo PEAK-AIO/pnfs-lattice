@@ -33,15 +33,9 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
-#include "lease_table.h"    /* stripe lease table (Phase 2) */
+#include "lease_table.h"
+#include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "mds_op_metrics.h" /* CAT_TIMED-equivalent for direct fused call */
-
-/* FF_FLAGS_STRIPE_LEASE lives in layout_types.h, but that header's
- * enum layout_iomode collides with compound.h's #define macros of the
- * same names.  Duplicate the single constant here to avoid the clash. */
-#ifndef FF_FLAGS_STRIPE_LEASE
-#define FF_FLAGS_STRIPE_LEASE 0x00000010
-#endif
 
 
 /* -----------------------------------------------------------------------
@@ -414,11 +408,24 @@ void make_layout_stateid(uint32_t mds_id,
  * functionally equivalent for finite workloads while letting the
  * server emit byte-range CB_LAYOUTRECALLs.
  */
-#define MDS_LAYOUT_GRANT_MAX_LENGTH (1ULL << 30) /* 1 GiB */
+#define MDS_LAYOUT_GRANT_MAX_LENGTH_DEFAULT (1ULL << 36) /* 64 GiB */
+
+static _Atomic(uint64_t) mds_layout_grant_max_length =
+	MDS_LAYOUT_GRANT_MAX_LENGTH_DEFAULT;
+
+void compound_layout_set_grant_max_length(uint64_t bytes)
+{
+	uint64_t cap = bytes;
+
+	if (cap < 65536ULL) {
+		cap = 65536ULL;
+	}
+	atomic_store(&mds_layout_grant_max_length, cap);
+}
 
 static uint64_t layout_clamp_grant_length(uint64_t offset, uint64_t length)
 {
-	uint64_t cap = MDS_LAYOUT_GRANT_MAX_LENGTH;
+	uint64_t cap = atomic_load(&mds_layout_grant_max_length);
 
 	if (offset >= UINT64_MAX - 1ULL) {
 		return 0;
@@ -467,7 +474,7 @@ static enum nfs4_status layout_select_grant_range(
 	 * overwhelms the MDS and causes close() to hang.
 	 *
 	 * The floor is the client's requested length (may be 4K or
-	 * UINT64_MAX); the ceiling is MDS_LAYOUT_GRANT_MAX_LENGTH
+	 * UINT64_MAX); the ceiling is layout_grant_max_length_bytes
 	 * (1 GiB) applied by layout_clamp_grant_length() below.
 	 */
 	window = configured_stripe_unit > 0 ? configured_stripe_unit : 65536ULL;
@@ -848,6 +855,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	const uint32_t grant_iomode = LAYOUTIOMODE4_RW;
 	uint64_t grant_offset = 0;
 	uint64_t grant_length = UINT64_MAX;
+	uint64_t lease_offset = 0;
+	uint64_t lease_length = UINT64_MAX;
+	uint64_t recall_offset = 0;
+	uint64_t recall_length = UINT64_MAX;
 
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
@@ -881,6 +892,59 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 	}
+	/* Decouple stripe-lease and recall scope from the grant scope.
+	 *
+	 * The grant range (returned to the client on the wire) is widened
+	 * by layout_select_grant_range() up to layout_grant_max_length_bytes
+	 * (1 GiB) to avoid per-page LAYOUTGET storms during writeback.
+	 *
+	 * The stripe-lease range, however, should track what the client
+	 * actually intends to write -- taken from loga_minlength
+	 * (RFC 5661 18.43.2, RFC 8881 18.43.3).  Without this decoupling,
+	 * two clients writing disjoint sub-GiB regions of the same
+	 * logical file would always see a lease-scope conflict even
+	 * though the underlying byte ranges do not overlap.
+	 *
+	 * Fall back to the configured stripe unit when the client did
+	 * not supply a meaningful minlength.  Never let the lease exceed
+	 * the grant. */
+	lease_offset = a->offset;
+	if (a->minlength != UINT64_MAX && a->minlength > 0) {
+		lease_length = a->minlength;
+	} else {
+		lease_length = cd->cfg_stripe_unit > 0
+			? cd->cfg_stripe_unit
+			: 65536ULL;
+	}
+	if (cd->cfg_auto_widen_lease_on_4k &&
+	    a->minlength == 4096 &&
+	    a->length == UINT64_MAX) {
+		lease_length = UINT64_MAX; /* capped to grant_length below */
+	}
+	/*
+	 * Floor: clamp lease_length up to the configured stripe
+	 * unit (or 64 KiB if unconfigured) so the smallest possible
+	 * lease still aligns with the smallest sensible on-wire
+	 * I/O unit.  Strict-N-to-1 clients already send
+	 * loga_minlength >= stripe_unit, so this floor is a no-op
+	 * for them.  Defends the non-strict path (e.g. Linux
+	 * page-cache writeback issuing loga_minlength = 4096)
+	 * from creating one-page leases that fragment the lease
+	 * table.
+	 */
+	{
+		uint64_t lease_floor = cd->cfg_stripe_unit > 0
+			? cd->cfg_stripe_unit
+			: 65536ULL;
+		if (lease_length < lease_floor) {
+			lease_length = lease_floor;
+		}
+	}
+	if (lease_length > grant_length) {
+		lease_length = grant_length;
+	}
+	recall_offset = lease_offset;
+	recall_length = lease_length;
 
 	/*
 	 * Mark's bug -- byte-range CB_LAYOUTRECALL.
@@ -949,8 +1013,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 				cd->current_fh.fileid,
 				cd->clientid,
 				req_iomode_for_recall,
-				grant_offset,
-				grant_length,
+				recall_offset,
+				recall_length,
 				a->layout_type,
 				&recalled));
 		(void)recalled; /* tracked via per-holder log; metrics tbd */
@@ -965,14 +1029,45 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * so the requesting client retries after a backoff.
 	 *
 	 * Same-client requests are allowed (renewal path). */
-	if (cd->slt != NULL && cd->cfg_stripe_lease_duration_ms > 0) {
-		if (stripe_lease_check_conflict(
-			cd->slt,
-			cd->current_fh.fileid,
-			cd->clientid,
-			grant_offset,
-			grant_length)) {
+	if (cd->slt != NULL && cd->cfg_stripe_lease_duration_ms > 0 &&
+	    (inode.flags & MDS_IFLAG_HPC_SHARED) != 0) {
+		/* Patch 0006: per-stripe lease arbitration is gated by
+		 * MDS_IFLAG_HPC_SHARED on the inode -- non-HPC files never
+		 * enter the SLT, preserving baseline (non-arbitrated)
+		 * behaviour for regular workloads.
+		 *
+		 * Patch 0005: per-DS-stripe lease keying.  Decompose the
+		 * logical lease range into per-stripe slices and conflict-
+		 * check each one against the lease table.  Slicing fails
+		 * closed -- on error we return TRYLATER. */
+		struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
+		uint32_t _slt_unit = cd->cfg_stripe_unit ? cd->cfg_stripe_unit : 65536U;
+		int _slt_n = lease_range_to_stripe_slices(
+			lease_offset, lease_length, _slt_unit,
+			_slt_slices, MDS_MAX_STRIPES);
+		if (_slt_n < 0) {
 			return NFS4ERR_LAYOUTTRYLATER;
+		}
+		/* Patch 0007: contention-aware grant narrowing.
+		 * Find the longest conflict-free file-byte prefix.  If
+		 * 0 < prefix < lease_length, narrow lease+grant to the
+		 * prefix so the client gets a smaller-but-usable layout
+		 * instead of NFS4ERR_LAYOUTTRYLATER.  prefix == 0 keeps
+		 * the legacy TRYLATER behaviour. */
+		uint64_t _slt_prefix = stripe_lease_prefix_conflict_free_length(
+			cd->slt,
+			_slt_slices, (uint32_t)_slt_n,
+			_slt_unit,
+			lease_offset, lease_length,
+			cd->current_fh.fileid, cd->clientid);
+		if (_slt_prefix == 0) {
+			return NFS4ERR_LAYOUTTRYLATER;
+		}
+		if (_slt_prefix < lease_length) {
+			lease_length = _slt_prefix;
+			if (grant_length > _slt_prefix) {
+				grant_length = _slt_prefix;
+			}
 		}
 	}
 
@@ -1918,19 +2013,40 @@ fill_layoutget_result:
 	if (r->layout_type == LAYOUT4_FLEX_FILES) {
 		r->ff_flags = 0;
 
-		/* Stripe lease: set flag + duration and acquire the lease. */
+		/* Stripe lease: acquire the in-memory lease only.
+		 * The historical FF_FLAGS_STRIPE_LEASE wire flag and the
+		 * trailing ffl_stripe_lease_duration_ms XDR field were a
+		 * PEAK-only extension of RFC 8435 Flex Files v1; removed
+		 * so the LAYOUTGET reply is bit-for-bit RFC compliant.
+		 * Cross-client coordination still happens server-side
+		 * via stripe_lease_check_conflict at LAYOUTGET entry. */
 		if (cd->slt != NULL &&
-		    cd->cfg_stripe_lease_duration_ms > 0) {
-			r->ff_flags |= FF_FLAGS_STRIPE_LEASE;
-			r->stripe_lease_duration_ms =
-				cd->cfg_stripe_lease_duration_ms;
-			(void)stripe_lease_acquire(
-				cd->slt,
-				cd->current_fh.fileid,
-				cd->clientid,
-				grant_offset,
-				grant_length,
-				cd->cfg_stripe_lease_duration_ms);
+		    cd->cfg_stripe_lease_duration_ms > 0 &&
+		    (inode.flags & MDS_IFLAG_HPC_SHARED) != 0) {
+			/* Patch 0006: HPC-gated.  Only HPC_SHARED files enter
+			 * the SLT (matches the conflict-check gate above).
+			 *
+			 * Patch 0005: per-DS-stripe lease keying.  Acquire one
+			 * lease entry per stripe slice; best-effort -- the
+			 * conflict check at LAYOUTGET entry already ruled out
+			 * cross-client collisions. */
+			struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
+			uint32_t _slt_unit = cd->cfg_stripe_unit
+				? cd->cfg_stripe_unit : 65536U;
+			int _slt_n = lease_range_to_stripe_slices(
+				lease_offset, lease_length, _slt_unit,
+				_slt_slices, MDS_MAX_STRIPES);
+			for (int _slt_i = 0; _slt_i < _slt_n; _slt_i++) {
+				(void)stripe_lease_acquire(
+					cd->slt,
+					cd->current_fh.fileid,
+					cd->clientid,
+					0U, /* ds_id: tracing only */
+					_slt_slices[_slt_i].stripe_index,
+					_slt_slices[_slt_i].ds_offset,
+					_slt_slices[_slt_i].ds_length,
+					cd->cfg_stripe_lease_duration_ms);
+			}
 		}
 
 		/*
@@ -2209,11 +2325,12 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 		/* Release any stripe lease held by this client for
 		 * the returned range (whole-file for FILE returns). */
 		if (cd->slt != NULL) {
-			stripe_lease_release(
+			/* Patch 0005: LAYOUTRETURN4_FILE -- whole-file return
+			 * semantics don't need slice reconstruction. */
+			stripe_lease_release_all_for(
 				cd->slt,
 				cd->current_fh.fileid,
-				cd->clientid,
-				a->offset);
+				cd->clientid);
 		}
 	}
 	r->stateid_present = true;

@@ -1,0 +1,130 @@
++++ dirname /home/peak/lattice-dev/tests/empirical/phase_d_pynfs.sh
+++ cd /home/peak/lattice-dev/tests/empirical
+++ pwd
++ HERE=/home/peak/lattice-dev/tests/empirical
++ . /home/peak/lattice-dev/tests/empirical/lib_common.sh
+++ set -u
+++ set -o pipefail
+++ : 10.0.0.11
+++ : /mnt/pnfs_empirical
+++ : ''
+++ : /home/peak/lattice_test_handover/baseline_lattice_main
+++ : sudo
+++ PASS=0
+++ FAIL=0
+++ SKIP=0
+++ mkdir -p /home/peak/lattice_test_handover/baseline_lattice_main
+++ TCPDUMP_PID=
+++ trap empirical_cleanup EXIT
++ PHASE=phase_d_pynfs
++ LOG=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs.log
++ JSON_RAW=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json
++ SUMMARY_JSON=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_summary.json
++ : /home/peak/pynfs
++ : 10.0.0.11:/
++ : 'all deleg xattr writedelegations backchannel_ctl'
++ : st_delegation,st_deleg,delegation
++ : 12
++ : testStaleRename,testUndefined
++ log 'Phase D: full pynfs against 10.0.0.11:/'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'Phase D: full pynfs against 10.0.0.11:/'
+[empirical 18:46:00] Phase D: full pynfs against 10.0.0.11:/
++ '[' -d /home/peak/pynfs/nfs4.1 ']'
++ command -v python3
++ cd /home/peak/pynfs/nfs4.1
++ log 'running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json all deleg xattr writedelegations backchannel_ctl'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json all deleg xattr writedelegations backchannel_ctl'
+[empirical 18:46:00] running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json all deleg xattr writedelegations backchannel_ctl
++ PYTHONPATH=/home/peak/pynfs
++ python3 ./testserver.py 10.0.0.11:/ --maketree --showomit --json=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json -- all deleg xattr writedelegations backchannel_ctl
++ pynfs_rc=0
++ log 'pynfs rc=0 (informational; pass/fail comes from json)'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'pynfs rc=0 (informational; pass/fail comes from json)'
+[empirical 18:54:30] pynfs rc=0 (informational; pass/fail comes from json)
++ '[' '!' -s /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json ']'
++ classify_out=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ python3 - /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_pynfs.json /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt st_delegation,st_deleg,delegation testStaleRename,testUndefined
++ classify_rc=0
++ '[' 0 -ne 0 ']'
++ '[' '!' -s /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt ']'
+++ get_count pass
+++ awk -F= -v k=pass '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_pass=179
++ cnt_pass=179
+++ get_count fail_total
+++ awk -F= -v k=fail_total '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_fail_total=2
++ cnt_fail_total=2
+++ get_count fail_expected
+++ awk -F= -v k=fail_expected '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_fail_exp=0
++ cnt_fail_exp=0
+++ get_count fail_diverg
+++ awk -F= -v k=fail_diverg '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_fail_diverg=2
++ cnt_fail_diverg=2
+++ get_count fail_unexpected
+++ awk -F= -v k=fail_unexpected '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_fail_unexp=0
++ cnt_fail_unexp=0
+++ get_count error_total
+++ awk -F= -v k=error_total '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_err=0
++ cnt_err=0
+++ get_count omit
+++ awk -F= -v k=omit '$1==k {print $2; exit}' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ cnt_omit=81
++ cnt_omit=81
++ log 'pynfs results: pass=179 fail_total=2 fail_expected=0 fail_diverg=2 fail_unexpected=0 error=0 omit=81'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'pynfs results: pass=179 fail_total=2 fail_expected=0 fail_diverg=2 fail_unexpected=0 error=0 omit=81'
+[empirical 18:54:30] pynfs results: pass=179 fail_total=2 fail_expected=0 fail_diverg=2 fail_unexpected=0 error=0 omit=81
++ '[' 2 -gt 0 ']'
++ log 'pre-existing lattice divergences (pmds passes, not introduced here):'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'pre-existing lattice divergences (pmds passes, not introduced here):'
+[empirical 18:54:30] pre-existing lattice divergences (pmds passes, not introduced here):
++ sed -n '/^lattice_divergence/,/^$/p' /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_classify.txt
++ tee -a /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs.log
+lattice_divergence (pre-existing, pmds passes):
+  - st_rename.testStaleRename
+  - st_compound.testUndefined
+
++ assert_eq 'pynfs unexpected FAIL count' 0 0
++ local 'label=pynfs unexpected FAIL count' expected=0 actual=0
++ '[' 0 = 0 ']'
++ pass 'pynfs unexpected FAIL count (expected=0 actual=0)'
++ PASS=1
++ log 'PASS: pynfs unexpected FAIL count (expected=0 actual=0)'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'PASS: pynfs unexpected FAIL count (expected=0 actual=0)'
+[empirical 18:54:30] PASS: pynfs unexpected FAIL count (expected=0 actual=0)
++ assert_eq 'pynfs ERROR count' 0 0
++ local 'label=pynfs ERROR count' expected=0 actual=0
++ '[' 0 = 0 ']'
++ pass 'pynfs ERROR count (expected=0 actual=0)'
++ PASS=2
++ log 'PASS: pynfs ERROR count (expected=0 actual=0)'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'PASS: pynfs ERROR count (expected=0 actual=0)'
+[empirical 18:54:30] PASS: pynfs ERROR count (expected=0 actual=0)
++ assert_le 'pynfs expected (delegation) FAIL count' 12 0
++ local 'label=pynfs expected (delegation) FAIL count' limit=12 actual=0
++ '[' 0 -le 12 ']'
++ pass 'pynfs expected (delegation) FAIL count (limit=12 actual=0)'
++ PASS=3
++ log 'PASS: pynfs expected (delegation) FAIL count (limit=12 actual=0)'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'PASS: pynfs expected (delegation) FAIL count (limit=12 actual=0)'
+[empirical 18:54:30] PASS: pynfs expected (delegation) FAIL count (limit=12 actual=0)
++ '[' 0 -gt 0 ']'
++ write_summary_json phase_d_pynfs /home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_summary.json
++ local phase=phase_d_pynfs outfile=/home/peak/lattice_test_handover/baseline_lattice_main/phase_d_pynfs_summary.json
++ local total=3
++ cat
+++ date -u +%Y-%m-%dT%H:%M:%SZ
++ log 'Phase D done: pass=3 fail=0'
++ printf '[empirical %(%H:%M:%S)T] %s\n' -1 'Phase D done: pass=3 fail=0'
+[empirical 18:54:30] Phase D done: pass=3 fail=0
++ exit 0
++ empirical_cleanup
++ stop_capture
++ '[' -n '' ']'
++ TCPDUMP_PID=
++ ensure_umount
++ mountpoint -q /mnt/pnfs_empirical

@@ -1,0 +1,13 @@
+[empirical 18:55:38] Phase D: full pynfs against 10.0.0.11:/
+[empirical 18:55:38] running: testserver.py 10.0.0.11:/ --json=/home/peak/lattice_test_handover/per_patch/0004_deleg/phase_d_pynfs_pynfs.json all deleg xattr writedelegations backchannel_ctl
+[empirical 19:04:08] pynfs rc=0 (informational; pass/fail comes from json)
+[empirical 19:04:08] pynfs results: pass=179 fail_total=2 fail_expected=0 fail_diverg=2 fail_unexpected=0 error=0 omit=81
+[empirical 19:04:08] pre-existing lattice divergences (pmds passes, not introduced here):
+lattice_divergence (pre-existing, pmds passes):
+  - st_rename.testStaleRename
+  - st_compound.testUndefined
+
+[empirical 19:04:08] PASS: pynfs unexpected FAIL count (expected=0 actual=0)
+[empirical 19:04:08] PASS: pynfs ERROR count (expected=0 actual=0)
+[empirical 19:04:08] PASS: pynfs expected (delegation) FAIL count (limit=12 actual=0)
+[empirical 19:04:08] Phase D done: pass=3 fail=0

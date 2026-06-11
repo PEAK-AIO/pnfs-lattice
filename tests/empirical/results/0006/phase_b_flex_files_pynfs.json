@@ -1,0 +1,1818 @@
+{
+    "errors": 0,
+    "failures": 0,
+    "name": "all",
+    "skipped": 235,
+    "testcase": [
+        {
+            "classname": "st_courtesy",
+            "code": "COUR6",
+            "name": "testShareReservationDB03",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR5",
+            "name": "testShareReservationDB02",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR4",
+            "name": "testShareReservationDB01",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR3",
+            "name": "testShareReservation00",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR1",
+            "name": "testLockSleepLockU",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR2",
+            "name": "testLockSleepLock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR7",
+            "name": "testExpiringManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT5",
+            "name": "testUpdateOfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT7",
+            "name": "testUpdateExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT8",
+            "name": "testRemoveNonExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT9",
+            "name": "testRemoveExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT10",
+            "name": "testListNoAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT11",
+            "name": "testListAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT1",
+            "name": "testGetXattrAttribute",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT2",
+            "name": "testGetMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT6",
+            "name": "testExclusiveCreateAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT4",
+            "name": "testCreateNewIfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT3",
+            "name": "testCreateNewAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFST1",
+            "name": "testStateid1",
+            "time": "0.01912856101989746"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLA1",
+            "name": "testFlexLayoutTestAccess",
+            "time": "0.01388692855834961"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLG2",
+            "name": "testFlexLayoutStress",
+            "time": "1.5593414306640625"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS3",
+            "name": "testFlexLayoutStatsStraight",
+            "time": "19.03642749786377"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS1",
+            "name": "testFlexLayoutStatsSmall",
+            "time": "0.1237022876739502"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS2",
+            "name": "testFlexLayoutStatsReset",
+            "time": "19.035357236862183"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS4",
+            "name": "testFlexLayoutStatsOverflow",
+            "time": "52.05757927894592"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEWRITE",
+            "name": "testFlexLayoutReturnStaleWrite",
+            "time": "0.020338058471679688"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEREAD",
+            "name": "testFlexLayoutReturnStaleRead",
+            "time": "0.013863086700439453"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTWRITE",
+            "name": "testFlexLayoutReturnServerFaultWrite",
+            "time": "0.012668371200561523"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTREAD",
+            "name": "testFlexLayoutReturnServerFaultRead",
+            "time": "0.012594223022460938"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOWRITE",
+            "name": "testFlexLayoutReturnNxioWrite",
+            "time": "0.012410163879394531"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOREAD",
+            "name": "testFlexLayoutReturnNxioRead",
+            "time": "0.0141754150390625"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPCWRITE",
+            "name": "testFlexLayoutReturnNospcWrite",
+            "time": "0.012484550476074219"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPC",
+            "name": "testFlexLayoutReturnNospcRead",
+            "time": "0.012650728225708008"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOWRITE",
+            "name": "testFlexLayoutReturnIoWrite",
+            "time": "0.01317906379699707"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOREAD",
+            "name": "testFlexLayoutReturnIoRead",
+            "time": "0.012813806533813477"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR1",
+            "name": "testFlexLayoutReturnFile",
+            "time": "0.0113372802734375"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIGWRITE",
+            "name": "testFlexLayoutReturnFbigWrite",
+            "time": "0.013048887252807617"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIG",
+            "name": "testFlexLayoutReturnFbigRead",
+            "time": "0.012449979782104492"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYWRITE",
+            "name": "testFlexLayoutReturnDelayWrite",
+            "time": "0.012691974639892578"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYREAD",
+            "name": "testFlexLayoutReturnDelayRead",
+            "time": "0.013216733932495117"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSWRITE",
+            "name": "testFlexLayoutReturnAccessWrite",
+            "time": "0.013154029846191406"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSREAD",
+            "name": "testFlexLayoutReturnAccessRead",
+            "time": "0.012731075286865234"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR100",
+            "name": "testFlexLayoutReturn100",
+            "time": "0.5233242511749268"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOOS",
+            "name": "testFlexLayoutOldSeqid",
+            "time": "0.012903690338134766"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFGDI1",
+            "name": "testFlexGetDevInfo",
+            "time": "0.009878158569335938"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC1",
+            "name": "testAllocateSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC2",
+            "name": "testAllocateStateidZero",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC3",
+            "name": "testAllocateStateidOne",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID3",
+            "name": "testOpenWriteClose",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID8",
+            "name": "testOpenSetattr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID10",
+            "name": "testOpenSaveFHLookupRestoreFHClose",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID5",
+            "name": "testOpenLookupClose",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID7",
+            "name": "testOpenLayoutGet",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID9",
+            "name": "testOpenFreestateidClose",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID1",
+            "name": "testOpenAndClose",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID4",
+            "name": "testLockWriteLocku",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID2",
+            "name": "testLockLockU",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID6",
+            "name": "testCloseNoStateid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK2",
+            "name": "testStateid2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK4",
+            "name": "testSplitCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK3",
+            "name": "testEmptyCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4c",
+            "name": "testRebootWithManyManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2c",
+            "name": "testRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4b",
+            "name": "testRebootWithManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2b",
+            "name": "testRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4a",
+            "name": "testRebootWithManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2a",
+            "name": "testRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT5",
+            "name": "testRebootWithLateReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT1",
+            "name": "testRebootValid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3c",
+            "name": "testDoubleRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3b",
+            "name": "testDoubleRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3a",
+            "name": "testDoubleRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1s",
+            "name": "testSocket",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1a",
+            "name": "testLink",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1r",
+            "name": "testFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1f",
+            "name": "testFifo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1d",
+            "name": "testDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1c",
+            "name": "testChar",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1b",
+            "name": "testBlock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH2",
+            "name": "testBadHandle",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM6",
+            "name": "testZeroLengthOldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM7",
+            "name": "testZeroLengthNewname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1s",
+            "name": "testValidSocket",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1a",
+            "name": "testValidLink",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1r",
+            "name": "testValidFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1f",
+            "name": "testValidFifo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1d",
+            "name": "testValidDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1c",
+            "name": "testValidChar",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1b",
+            "name": "testValidBlock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM21",
+            "name": "testStaleRename",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2s",
+            "name": "testSfhSocket",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2a",
+            "name": "testSfhLink",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2r",
+            "name": "testSfhFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2f",
+            "name": "testSfhFifo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2c",
+            "name": "testSfhChar",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2b",
+            "name": "testSfhBlock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM19",
+            "name": "testSelfRenameFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM18",
+            "name": "testSelfRenameDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM5",
+            "name": "testNonExistent",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM4",
+            "name": "testNoSfh",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM20",
+            "name": "testLinkRename",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM17",
+            "name": "testFileToFullDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM15",
+            "name": "testFileToFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM14",
+            "name": "testFileToDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM10",
+            "name": "testDotsOldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM11",
+            "name": "testDotsNewname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM12",
+            "name": "testDirToObj",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM16",
+            "name": "testDirToFullDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM13",
+            "name": "testDirToDir",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3s",
+            "name": "testCfhSocket",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3a",
+            "name": "testCfhLink",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3r",
+            "name": "testCfhFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3f",
+            "name": "testCfhFifo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3c",
+            "name": "testCfhChar",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3b",
+            "name": "testCfhBlock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM8",
+            "name": "testBadutf8Oldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM9",
+            "name": "testBadutf8Newname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP4",
+            "name": "testXdev",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1s",
+            "name": "testSock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP3",
+            "name": "testNoFH",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP2",
+            "name": "testLookuppRoot",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1d",
+            "name": "testLookupp",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1a",
+            "name": "testLink",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1r",
+            "name": "testFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1f",
+            "name": "testFifo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1c",
+            "name": "testChar",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1b",
+            "name": "testBlock",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET2",
+            "name": "testLayoutReturnFsid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET1",
+            "name": "testLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET3",
+            "name": "testLayoutReturnAll",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTCOMMIT1",
+            "name": "testLayoutCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT1",
+            "name": "testGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDLIST1",
+            "name": "testGetDevList",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDINFO1",
+            "name": "testGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT100",
+            "name": "testEMCGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_verify",
+            "code": "VF1r",
+            "name": "testMandFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG9",
+            "name": "testWriteOpenvsReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG2",
+            "name": "testWriteDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG23",
+            "name": "testServerSelfConflict3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG1",
+            "name": "testReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG4",
+            "name": "testNoDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG8",
+            "name": "testDelegRevocation",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG6",
+            "name": "testCBSecParmsNull",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG7",
+            "name": "testCBSecParmsChange",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG5",
+            "name": "testCBSecParms",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG3",
+            "name": "testAnyDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN2",
+            "name": "testServerStateSeqid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN30",
+            "name": "testReadWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN7",
+            "name": "testOPENClaimFH",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN6",
+            "name": "testEXCLUSIVE4AtNameAttribute",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN8",
+            "name": "testCloseWithZeroSeqid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN31",
+            "name": "testAnonReadWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK2",
+            "name": "testUseTwoSessions",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK1",
+            "name": "testTwoSessions",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ7",
+            "name": "testTooManyOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ12",
+            "name": "testSessionidSequenceidSlotid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ6",
+            "name": "testRequestTooBig",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ10b",
+            "name": "testReplayCache007",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9f",
+            "name": "testReplayCache006",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9e",
+            "name": "testReplayCache005",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9d",
+            "name": "testReplayCache004",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9c",
+            "name": "testReplayCache003",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9b",
+            "name": "testReplayCache002",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9a",
+            "name": "testReplayCache001",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ11",
+            "name": "testOpNotInSession",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ2",
+            "name": "testNotFirst",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ4",
+            "name": "testImplicitBind",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ8",
+            "name": "testBadSlot",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ5",
+            "name": "testBadSession",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ13",
+            "name": "testBadSequenceidAtSlot",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC2",
+            "name": "testSupported2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN4",
+            "name": "testSupported4",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN3",
+            "name": "testSupported3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN2",
+            "name": "testSupported2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC2",
+            "name": "testReclaimAfterRECC",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC3",
+            "name": "testOpenBeforeRECC",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC4",
+            "name": "testDoubleRECC",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID2",
+            "name": "testDestroyCIDWS",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID8",
+            "name": "testDestroyCIDTwice",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID5",
+            "name": "testDestroyCIDSessionB",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID7",
+            "name": "testDestroyCIDNotOnly",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID6",
+            "name": "testDestroyCIDCSession",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID3",
+            "name": "testDestroyBadCIDWS",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID4",
+            "name": "testDestroyBadCIDIS",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9006",
+            "name": "testDestroyLockConfRace",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS1",
+            "name": "testDestroyBasic",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9003",
+            "name": "testDestroy3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9002",
+            "name": "testDestroy2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9001",
+            "name": "testDestroy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9005",
+            "name": "testDestoryNotSoleOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9004",
+            "name": "testDestoryNotFinalOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS28",
+            "name": "testTooSmallMaxReq",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS25",
+            "name": "testTooSmallMaxRS",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2b",
+            "name": "testSupported2b",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2",
+            "name": "testSupported2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS1",
+            "name": "testSupported1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS6",
+            "name": "testReplay2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5b",
+            "name": "testReplay1b",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5a",
+            "name": "testReplay1a",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5",
+            "name": "testReplay1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS27",
+            "name": "testRepTooBigToCache",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS26",
+            "name": "testRepTooBig",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS19",
+            "name": "testRdmaArray2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS18",
+            "name": "testRdmaArray1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS17",
+            "name": "testRdmaArray0",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS10",
+            "name": "testPrincipalCollision2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS9",
+            "name": "testPrincipalCollision1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS23",
+            "name": "testNotOnlyOp",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS3",
+            "name": "testNoExchange",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS22",
+            "name": "testMaxreqs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS200",
+            "name": "testManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS29",
+            "name": "testDRCMemLeak",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS24",
+            "name": "testCsr_sequence",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS4",
+            "name": "testContrivedReplay",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16a",
+            "name": "testCbSecParmsDec",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16",
+            "name": "testCbSecParms",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS21",
+            "name": "testCallbackVersion",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS20",
+            "name": "testCallbackProgram",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS8",
+            "name": "testBadSeqnum2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS7",
+            "name": "testBadSeqnum1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS15",
+            "name": "testBadFlag",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_copy",
+            "code": "COPY5",
+            "name": "testZeroLengthCopy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP1",
+            "name": "testZeroOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP5",
+            "name": "testUndefined",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4b",
+            "name": "testInvalidMinor2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4a",
+            "name": "testInvalidMinor",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP2",
+            "name": "testGoodTag",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP3",
+            "name": "testBadTags",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6",
+            "name": "testUpdateNonexistant",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6h",
+            "name": "testUpdate111",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6g",
+            "name": "testUpdate110",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6f",
+            "name": "testUpdate101",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6e",
+            "name": "testUpdate100",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6d",
+            "name": "testUpdate011",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6c",
+            "name": "testUpdate010",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6b",
+            "name": "testUpdate001",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6a",
+            "name": "testUpdate000",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1b",
+            "name": "testSupported2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID7",
+            "name": "testSupported1a",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1",
+            "name": "testSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID50",
+            "name": "testSSV",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID8",
+            "name": "testNotOnlyOp",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5h",
+            "name": "testNoUpdate111",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5g",
+            "name": "testNoUpdate110",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5fb",
+            "name": "testNoUpdate101b",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5f",
+            "name": "testNoUpdate101",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5e",
+            "name": "testNoUpdate100",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5d",
+            "name": "testNoUpdate011",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5c",
+            "name": "testNoUpdate010",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5b",
+            "name": "testNoUpdate001",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5a",
+            "name": "testNoUpdate000",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID2",
+            "name": "testNoImplId",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID3",
+            "name": "testLongArray",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID9",
+            "name": "testLeasePeriod",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID4",
+            "name": "testBadFlags",
+            "skipped": 1,
+            "time": "0"
+        }
+    ],
+    "tests": 262,
+    "time": 92.61733675003052,
+    "timestamp": "2026-06-08 06:23:16.682745"
+}
