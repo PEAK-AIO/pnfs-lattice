@@ -99,6 +99,7 @@ add_compile_options(
     -Wno-error=uninitialized
     -fstack-protector-strong
     -D_GNU_SOURCE
+    -UNDEBUG # always define "assert()" in assert.h, even for Release builds
 )
 
 # GCC-specific flags that clang does not understand.
