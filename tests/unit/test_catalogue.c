@@ -744,6 +744,100 @@ static void test_catalogue_layout_grant_return(void)
 }
 
 /* -----------------------------------------------------------------------
+ * 6b. test_catalogue_layout_iter_file -- per-file holder enumeration
+ *
+ * Locks the behavioural contract that rondb_shim_layout_iter_file must
+ * preserve after the partition-pruned rewrite: enumerate exactly the
+ * holders of the target fileid (correct clientid / iomode / seqid
+ * tuple), never a holder of a different file, and return cleanly with
+ * zero holders for a file that has none.
+ * ----------------------------------------------------------------------- */
+
+struct layout_iter_test_ctx {
+	uint32_t hits;
+	bool     saw_c10, saw_c11, saw_c12;
+	bool     saw_foreign;
+	uint32_t iomode_c10, iomode_c11, iomode_c12;
+	uint32_t seqid_c10, seqid_c11, seqid_c12;
+};
+
+static int layout_iter_test_cb(uint64_t clientid,
+			       const struct nfs4_stateid *stateid,
+			       uint32_t iomode, void *ctx)
+{
+	struct layout_iter_test_ctx *c = ctx;
+	uint32_t seqid = (stateid != NULL) ? stateid->seqid : 0;
+
+	c->hits++;
+	switch (clientid) {
+	case 10: c->saw_c10 = true; c->iomode_c10 = iomode; c->seqid_c10 = seqid; break;
+	case 11: c->saw_c11 = true; c->iomode_c11 = iomode; c->seqid_c11 = seqid; break;
+	case 12: c->saw_c12 = true; c->iomode_c12 = iomode; c->seqid_c12 = seqid; break;
+	case 99: c->saw_foreign = true; break;
+	default: break;
+	}
+	return 0;
+}
+
+static void test_catalogue_layout_iter_file(void)
+{
+	struct mds_catalogue *cat;
+	struct nfs4_stateid sid;
+	uint32_t ds_ids[1] = {1};
+	struct layout_iter_test_ctx ctx;
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	/* Three holders on fileid 300 (distinct clientid / iomode / seqid). */
+	memset(&sid, 0, sizeof(sid));
+	sid.seqid = 1; memset(sid.other, 0x10, sizeof(sid.other));
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 10, 300, 1,
+					 0, UINT64_MAX, &sid, ds_ids, 1),
+		  MDS_OK);
+	sid.seqid = 2; memset(sid.other, 0x11, sizeof(sid.other));
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 11, 300, 2,
+					 0, UINT64_MAX, &sid, ds_ids, 1),
+		  MDS_OK);
+	sid.seqid = 3; memset(sid.other, 0x12, sizeof(sid.other));
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 12, 300, 1,
+					 0, UINT64_MAX, &sid, ds_ids, 1),
+		  MDS_OK);
+
+	/* A holder on a different file must never appear for fileid 300. */
+	sid.seqid = 9; memset(sid.other, 0x99, sizeof(sid.other));
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 99, 301, 2,
+					 0, UINT64_MAX, &sid, ds_ids, 1),
+		  MDS_OK);
+
+	/* Enumerate holders of fileid 300. */
+	memset(&ctx, 0, sizeof(ctx));
+	ASSERT_EQ(mds_coord_layout_iter_file(cat, 300,
+					     layout_iter_test_cb, &ctx),
+		  MDS_OK);
+	ASSERT_EQ(ctx.hits, (uint32_t)3);
+	ASSERT_TRUE(ctx.saw_c10);
+	ASSERT_TRUE(ctx.saw_c11);
+	ASSERT_TRUE(ctx.saw_c12);
+	ASSERT_EQ(ctx.saw_foreign, false);
+	ASSERT_EQ(ctx.iomode_c10, (uint32_t)1);
+	ASSERT_EQ(ctx.iomode_c11, (uint32_t)2);
+	ASSERT_EQ(ctx.iomode_c12, (uint32_t)1);
+	ASSERT_EQ(ctx.seqid_c10, (uint32_t)1);
+	ASSERT_EQ(ctx.seqid_c11, (uint32_t)2);
+	ASSERT_EQ(ctx.seqid_c12, (uint32_t)3);
+
+	/* A file with no layouts yields zero holders, no error. */
+	memset(&ctx, 0, sizeof(ctx));
+	ASSERT_EQ(mds_coord_layout_iter_file(cat, 999,
+					     layout_iter_test_cb, &ctx),
+		  MDS_OK);
+	ASSERT_EQ(ctx.hits, (uint32_t)0);
+
+	close_test_cat(cat, path);
+}
+
+/* -----------------------------------------------------------------------
  * 7. test_catalogue_recovery_put_get_del -- client recovery round-trip
  * ----------------------------------------------------------------------- */
 
@@ -1070,6 +1164,7 @@ int main(void)
 	RUN_TEST(test_catalogue_ns_readdir_plus_start_after);
 	RUN_TEST(test_catalogue_stripe_map_wide_round_trip);
 	RUN_TEST(test_catalogue_layout_grant_return);
+	RUN_TEST(test_catalogue_layout_iter_file);
 	RUN_TEST(test_catalogue_coordination_cq_accepts_wide_ds_count);
 	RUN_TEST(test_catalogue_coordination_dispatch_rejects_null_ds_ids);
 	RUN_TEST(test_catalogue_recovery_put_get_del);

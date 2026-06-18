@@ -8853,53 +8853,88 @@ int rondb_shim_layout_get_by_stateid(void *handle,
     return rc;
 }
 
+/*
+ * Presence check: does `fileid` have any live layout?
+ *
+ * Mirrors rondb_shim_layout_iter_file's access path: a fileid-bounded
+ * primary-key ordered-index scan of mds_layout_state (partition-pruned
+ * to the single owning fragment), falling back to a table scan +
+ * equality filter when the PRIMARY ordered index is absent.  Only the
+ * fileid key column is read and the scan stops at the first match, so
+ * this is a cheap existence probe rather than a full enumeration.
+ */
 int rondb_shim_layout_scan_for_file(void *handle, uint64_t fileid,
                                     int *has_layout)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
-    const NdbDictionary::Table *tbl;
+    const NdbDictionary::Table *ls_tbl;
     NdbTransaction *tx;
-    NdbScanOperation *scan;
+    NdbScanOperation *scan = nullptr;
+    NdbIndexScanOperation *iscan;
     NdbError err;
     int next_rc;
+    Uint64 bound_fileid = (Uint64)fileid;
 
     if (state == nullptr || has_layout == nullptr) { return -1; }
     *has_layout = 0;
 
     dict = rondb_get_dictionary(state);
     if (dict == nullptr) { return -1; }
-    tbl = dict->getTable(RONDB_TBL_LAYOUT_BY_FILE);
-    if (tbl == nullptr) { return -1; }
+    ls_tbl = dict->getTable(RONDB_TBL_LAYOUT_STATE);
+    if (ls_tbl == nullptr) { return -1; }
 
-    tx = rondb_get_ndb(state)->startTransaction();
+    /* TC locality hint: layout_state is partitioned by fileid. */
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(
+            ls_tbl, (const char *)pk_buf, 8);
+    }
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
                                  "layout_scan_file startTx");
     }
 
-    scan = tx->getNdbScanOperation(tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_scan_file getScanOp");
+    /* Fast path: primary-key ordered-index scan bounded by fileid;
+     * fall back to a table scan + filter when PRIMARY is absent. */
+    iscan = tx->getNdbIndexScanOperation("PRIMARY", RONDB_TBL_LAYOUT_STATE);
+    if (iscan != nullptr) {
+        if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_scan_file idx readTuples");
+        }
+        if (iscan->setBound(RONDB_LS_COL_FILEID,
+                            NdbIndexScanOperation::BoundEQ,
+                            &bound_fileid) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_scan_file setBound");
+        }
+        scan = iscan;
+    } else {
+        scan = tx->getNdbScanOperation(ls_tbl);
+        if (scan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_scan_file getScanOp");
+        }
+        if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = scan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_scan_file readTuples");
+        }
+        {
+            NdbScanFilter filter(scan);
+            filter.begin(NdbScanFilter::AND);
+            filter.eq(ls_tbl->getColumn(RONDB_LS_COL_FILEID)->getColumnNo(),
+                      (Uint64)fileid);
+            filter.end();
+        }
     }
 
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_scan_file readTuples");
-    }
-
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        filter.eq(tbl->getColumn(RONDB_LBF_COL_FILEID)->getColumnNo(),
-                  (Uint64)fileid);
-        filter.end();
-    }
-
-    (void)scan->getValue(RONDB_LBF_COL_FILEID, nullptr);
+    (void)scan->getValue(RONDB_LS_COL_FILEID, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -9106,7 +9141,31 @@ int rondb_shim_ds_layout_idx_scan(void *handle, uint32_t ds_id,
 }
 
 /* -----------------------------------------------------------------------
- * Phase 8A+ -- layout_by_file iteration with layout_state join
+ * Phase 8A+ -- per-file layout holder enumeration
+ *
+ * Enumerate every layout holder for `fileid` for the recall
+ * coordinator (final-unlink revoke and byte-range conflict recall).
+ *
+ * mds_layout_state has PK (fileid, stateid_other) partitioned by
+ * fileid and stores clientid/iomode/seqid inline (schema v6), so a
+ * single fileid-scoped scan of layout_state returns everything the
+ * callback needs.  This deliberately no longer reads
+ * mds_layout_by_file and no longer issues a per-stateid
+ * rondb_shim_layout_get_by_stateid round-trip: the previous revision
+ * did both, turning one unlink into 1 + N table scans
+ * (layout_get_by_stateid is itself a scan), which dominated mdtest
+ * delete latency and amplified scan contention into spurious
+ * NFS4ERR_DELAY retries.
+ *
+ * Fast path: a primary-key ordered-index scan bounded by fileid.
+ * Because fileid is the full distribution key, NDB prunes the scan to
+ * the single fragment that owns the file, so cost is O(holders for
+ * this file) rather than O(all live layouts in the cluster).  If the
+ * primary ordered index is unavailable (clusters created without
+ * ndb_index_stat system tables -- see the note on
+ * rondb_shim_layout_get_by_stateid), fall back to a table scan with a
+ * server-side equality filter on fileid.  Both paths read the same
+ * columns and yield identical results.
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
@@ -9114,50 +9173,94 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
-    const NdbDictionary::Table *lbf_tbl;
+    const NdbDictionary::Table *ls_tbl;
     NdbTransaction *tx;
-    NdbScanOperation *scan;
-    NdbRecAttr *a_sid;
+    NdbScanOperation *scan = nullptr;
+    NdbIndexScanOperation *iscan;
+    NdbRecAttr *a_cid, *a_fid, *a_io, *a_seq, *a_sid;
     NdbError err;
     int next_rc;
-    std::vector<std::string> stateids;
+    Uint64 bound_fileid = (Uint64)fileid;
+
+    /* One decoded holder row, collected during the scan and emitted to
+     * the callback after the scan transaction is closed. */
+    struct iter_row {
+        uint64_t clientid;
+        uint32_t seqid;
+        uint32_t iomode;
+        uint8_t  stateid[12];
+    };
+    std::vector<iter_row> rows;
 
     if (state == nullptr || cb == nullptr) { return -1; }
 
     dict = rondb_get_dictionary(state);
     if (dict == nullptr) { return -1; }
-    lbf_tbl = dict->getTable(RONDB_TBL_LAYOUT_BY_FILE);
-    if (lbf_tbl == nullptr) { return -1; }
+    ls_tbl = dict->getTable(RONDB_TBL_LAYOUT_STATE);
+    if (ls_tbl == nullptr) { return -1; }
 
-    /* Step 1: scan layout_by_file for all stateids on this file. */
-    tx = rondb_get_ndb(state)->startTransaction();
+    /* TC locality hint: layout_state is partitioned by fileid. */
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(
+            ls_tbl, (const char *)pk_buf, 8);
+    }
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
                                  "layout_iter_file startTx");
     }
 
-    scan = tx->getNdbScanOperation(lbf_tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
+    /* Fast path: primary-key ordered-index scan bounded by fileid.
+     * A null op means the PRIMARY ordered index is absent on this
+     * cluster; fall back to a table scan + filter (no operation has
+     * been attached to the transaction yet, so this is safe). */
+    iscan = tx->getNdbIndexScanOperation("PRIMARY", RONDB_TBL_LAYOUT_STATE);
+    if (iscan != nullptr) {
+        if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file idx readTuples");
+        }
+        if (iscan->setBound(RONDB_LS_COL_FILEID,
+                            NdbIndexScanOperation::BoundEQ,
+                            &bound_fileid) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file setBound");
+        }
+        scan = iscan;
+    } else {
+        scan = tx->getNdbScanOperation(ls_tbl);
+        if (scan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file getScanOp");
+        }
+        if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = scan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file readTuples");
+        }
+        {
+            NdbScanFilter filter(scan);
+            filter.begin(NdbScanFilter::AND);
+            filter.eq(ls_tbl->getColumn(RONDB_LS_COL_FILEID)->getColumnNo(),
+                      (Uint64)fileid);
+            filter.end();
+        }
+    }
+
+    a_cid = scan->getValue(RONDB_LS_COL_CLIENTID, nullptr);
+    a_fid = scan->getValue(RONDB_LS_COL_FILEID, nullptr);
+    a_io  = scan->getValue(RONDB_LS_COL_IOMODE, nullptr);
+    a_seq = scan->getValue(RONDB_LS_COL_SEQID, nullptr);
+    a_sid = scan->getValue(RONDB_LS_COL_STATEID, nullptr);
+    if (a_cid == nullptr || a_fid == nullptr || a_io == nullptr ||
+        a_seq == nullptr || a_sid == nullptr) {
         rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file getScanOp");
+        return -1;
     }
-
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file readTuples");
-    }
-
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        filter.eq(lbf_tbl->getColumn(RONDB_LBF_COL_FILEID)->getColumnNo(),
-                  (Uint64)fileid);
-        filter.end();
-    }
-
-    a_sid = scan->getValue(RONDB_LBF_COL_STATEID, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -9166,13 +9269,26 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     }
 
     while ((next_rc = scan->nextResult(true)) == 0) {
-        const char *ref = a_sid->aRef();
-        if (ref != nullptr) {
-            uint32_t vb_len = (uint32_t)(uint8_t)ref[0];
-            if (vb_len == 12) {
-                stateids.emplace_back(ref + 1, 12);
-            }
+        /* Defensive: the index bound / scan filter already restrict to
+         * this fileid; re-check so a filter edge case cannot leak a
+         * foreign holder to the recall coordinator. */
+        if (a_fid->u_64_value() != fileid) {
+            continue;
         }
+        const char *ref = a_sid->aRef();
+        if (ref == nullptr) {
+            continue;
+        }
+        uint32_t vb_len = (uint32_t)(uint8_t)ref[0];
+        if (vb_len != 12) {
+            continue;
+        }
+        iter_row r;
+        r.clientid = a_cid->u_64_value();
+        r.seqid    = a_seq->u_32_value();
+        r.iomode   = a_io->u_32_value();
+        std::memcpy(r.stateid, ref + 1, 12);
+        rows.push_back(r);
     }
     if (next_rc != 1) {
         err = scan->getNdbError();
@@ -9183,22 +9299,14 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     scan->close();
     rondb_get_ndb(state)->closeTransaction(tx);
 
-    /* Step 2: for each stateid, read layout_state to get details,
-     * then invoke the callback. */
-    for (const std::string &sid : stateids) {
-        uint64_t cid = 0;
-        uint32_t iomode = 0, seqid = 0;
-        int rc = rondb_shim_layout_get_by_stateid(
-            handle, (const uint8_t *)sid.data(),
-            &cid, nullptr, &iomode, nullptr, nullptr, &seqid);
-        if (rc == 0) {
-            int cb_rc = cb(cid, (const uint8_t *)sid.data(),
-                          seqid, iomode, ctx);
-            if (cb_rc != 0) {
-                break;
-            }
+    /* Emit after the scan transaction is closed: keeps the NDB scan
+     * cursor short-lived and avoids invoking the callback with an open
+     * transaction.  The callback set used here does not issue
+     * catalogue I/O, but decoupling is the safer contract. */
+    for (const iter_row &r : rows) {
+        if (cb(r.clientid, r.stateid, r.seqid, r.iomode, ctx) != 0) {
+            break;
         }
-        /* rc == 1 (NOTFOUND): stale index entry, skip. */
     }
 
     return 0;
