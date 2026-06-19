@@ -342,6 +342,7 @@
 
 #define RONDB_LBF_COL_FILEID      "fileid"
 #define RONDB_LBF_COL_STATEID     "stateid_other"
+#define RONDB_IX_LBF_FILEID       "ix_layout_by_file_fileid"
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_ds_layout_idx (index: ds_id -> client+file)
