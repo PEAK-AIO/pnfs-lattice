@@ -82,6 +82,10 @@ struct rpc_conn {
     pthread_mutex_t  send_lock;
     _Atomic uint32_t inflight;
     bool             closing;
+    /* MPSC deferred-close stack link.  -1 = not enqueued.  Workers push
+     * closing connections into the server's comp_stack; the epoll thread
+     * drains it to run conn_finalize_close.  Lock-free (Treiber stack). */
+    _Atomic int32_t  comp_next;
 };
 
 struct rpc_server {
@@ -151,8 +155,13 @@ struct rpc_server {
 
     /* Thread-pool dispatch (3.3). */
     struct threadpool       *tp;          /**< Worker pool (NULL = inline). */
-    int                      comp_pipe[2]; /**< Completion pipe: workers write conn idx. */
     uint32_t                 max_inflight_per_conn; /**< Bounded pipelining cap. */
+    /* MPSC deferred-close stack (Treiber stack).  Workers push closing
+     * connections here; the epoll thread drains it to finalize.  The
+     * stop_pipe is reused to wake epoll when a close needs draining.
+     * Replaces the former comp_pipe (per-completion write+read syscall
+     * pair) with zero syscalls on the normal (non-closing) path. */
+    _Atomic int32_t          comp_stack_head;
     uint32_t            *free_list;
     uint32_t             free_top;   /**< eventfd to wake epoll. */
 
@@ -201,6 +210,7 @@ static void conn_init(struct rpc_conn *c)
     pthread_mutex_init(&c->send_lock, NULL);
     atomic_store(&c->inflight, 0);
     c->closing = false;
+    atomic_store(&c->comp_next, -1);
 }
 
 static void conn_reset(struct rpc_conn *c)
@@ -1469,12 +1479,51 @@ static void rpc_work_fn(void *arg)
      * dereferenced after the decrement.  The index arithmetic does not
      * dereference conn, and srv outlives every worker. */
     uint32_t cidx = (uint32_t)(conn - srv->conns);
-    atomic_fetch_sub_explicit(&conn->inflight, 1, memory_order_acq_rel);
+    uint32_t old_inflight =
+        atomic_fetch_sub_explicit(&conn->inflight, 1, memory_order_acq_rel);
 
-    /* Wake the epoll thread: it re-arms EPOLLIN (which may have been
-     * disabled at the in-flight cap) and/or finalizes a deferred
-     * close once inflight has drained to zero. */
-    (void)write(srv->comp_pipe[1], &cidx, sizeof(cidx));
+    /* After decrementing, check whether the connection is closing and we
+     * were the last worker.  If so, push to the MPSC close stack and
+     * wake the epoll thread to finalize.  The conn must not be
+     * dereferenced after the push (the epoll thread may finalize and
+     * recycle the slot), so capture the closing flag and fd BEFORE the
+     * stack push.
+     *
+     * Normal (non-closing) path: re-arm EPOLLIN and optionally EPOLLOUT
+     * directly from the worker.  epoll_ctl(MOD) is thread-safe; the
+     * worst that happens on a concurrent HUP is the MOD fails with
+     * ENOENT (fd already removed by begin_close), which is harmless.
+     * This eliminates the per-completion pipe write+read syscall pair. */
+    bool is_closing = conn->closing;  /* safe: set before EPOLL_CTL_DEL */
+    int  conn_fd    = conn->fd;       /* safe: begin_close doesn't close */
+
+    if (is_closing && old_inflight == 1) {
+        /* Last worker on a closing connection: push to MPSC stack. */
+        int32_t old_head;
+        do {
+            old_head = atomic_load_explicit(&srv->comp_stack_head,
+                                            memory_order_relaxed);
+            atomic_store_explicit(&conn->comp_next, old_head,
+                                  memory_order_relaxed);
+        } while (!atomic_compare_exchange_weak_explicit(
+            &srv->comp_stack_head, &old_head, (int32_t)cidx,
+            memory_order_release, memory_order_relaxed));
+        /* Wake the epoll thread to drain the close stack. */
+        uint8_t b = 1;
+        (void)write(srv->stop_pipe[1], &b, 1);
+    } else if (!is_closing && conn_fd >= 0) {
+        /* Normal path: re-arm EPOLLIN (may have been disabled at the
+         * in-flight cap) and EPOLLOUT if reply bytes are queued. */
+        struct epoll_event rev;
+        rev.events = EPOLLIN;
+        pthread_mutex_lock(&conn->send_lock);
+        if (conn->send_len > 0) {
+            rev.events |= EPOLLOUT;
+        }
+        pthread_mutex_unlock(&conn->send_lock);
+        rev.data.fd = conn_fd;
+        (void)epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, conn_fd, &rev);
+    }
 }
 
 /**
@@ -1735,9 +1784,8 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->max_inflight_per_conn = cfg->max_inflight_per_conn
                                  ? cfg->max_inflight_per_conn
                                  : RPC_DEFAULT_MAX_INFLIGHT;
+    atomic_store(&srv->comp_stack_head, -1);
     srv->shard_map = cfg->shard_map;
-    srv->comp_pipe[0] = -1;
-    srv->comp_pipe[1] = -1;
 
     /* Allocate connection array. */
     srv->conns = calloc(max_conns, sizeof(struct rpc_conn));
@@ -1847,26 +1895,6 @@ int rpc_server_create(const struct rpc_server_config *cfg,
 }
     }
 
-    /* Create completion pipe for threadpool notifications.
-     * Workers write the 4-byte conn index; the epoll thread
-     * reads only the completed indices -- O(completed) not
-     * O(max_conns). */
-    if (srv->tp != NULL) {
-        if (pipe(srv->comp_pipe) < 0) {
-            goto fail;
-        }
-        if (set_nonblock(srv->comp_pipe[0]) != 0) {
-            goto fail;
-        }
-        struct epoll_event wev;
-        wev.events = EPOLLIN;
-        wev.data.fd = srv->comp_pipe[0];
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD,
-                      srv->comp_pipe[0], &wev) < 0) {
-            goto fail;
-        }
-    }
-
     srv->listen_fd = listen_fd;
     srv->epoll_fd = epoll_fd;
     *out = srv;
@@ -1886,12 +1914,6 @@ fail:
         if (srv->stop_pipe[1] >= 0) {
             close(srv->stop_pipe[1]);
 }
-        if (srv->comp_pipe[0] >= 0) {
-            close(srv->comp_pipe[0]);
-        }
-        if (srv->comp_pipe[1] >= 0) {
-            close(srv->comp_pipe[1]);
-        }
         free(srv->free_list);
         free((void *)srv->fd_to_conn);
         free(srv->conns);
@@ -1973,8 +1995,8 @@ static void conn_begin_close(struct rpc_server *srv, struct rpc_conn *c)
     if (atomic_load_explicit(&c->inflight, memory_order_acquire) == 0) {
         conn_finalize_close(srv, c);
     }
-    /* else: the last worker's comp_pipe completion finalizes (see
-     * handle_epoll_wakeup). */
+    /* else: the last worker's MPSC stack push + stop_pipe wakeup
+     * triggers drain_close_stack in the epoll loop. */
 }
 
 
@@ -2038,50 +2060,32 @@ static void handle_epoll_accept(struct rpc_server *srv)
 }
 
 /**
- * Handle worker-completion notifications from the completion pipe.
+ * Drain the MPSC deferred-close stack.
  *
- * Workers write their 4-byte connection index when done.  We read
- * all available indices in one batch and re-enable EPOLLIN on each
- * completed connection.  Cost: O(completed) instead of O(max_conns).
+ * Workers push closing connections whose inflight count reached zero
+ * into srv->comp_stack_head (a lock-free Treiber stack).  The epoll
+ * thread drains it here and runs conn_finalize_close for each.
+ * Cost: one atomic exchange to snap the whole stack, then a linear
+ * walk over the snapped list.  No syscalls unless there are entries.
  */
-static void handle_epoll_wakeup(struct rpc_server *srv)
+static void drain_close_stack(struct rpc_server *srv)
 {
-    uint32_t buf[64];
-    ssize_t n;
+    /* Atomically snap the entire stack (swap head to -1). */
+    int32_t head = atomic_exchange_explicit(
+        &srv->comp_stack_head, -1, memory_order_acquire);
 
-    while ((n = read(srv->comp_pipe[0], buf, sizeof(buf))) > 0) {
-        uint32_t count = (uint32_t)n / sizeof(uint32_t);
-        for (uint32_t i = 0; i < count; i++) {
-            if (buf[i] >= srv->max_conns) {
-                continue; /* Defensive: invalid index. */
-            }
-            struct rpc_conn *rc = &srv->conns[buf[i]];
-            if (rc->fd < 0) {
-                continue;  /* Already finalized; stale completion. */
-            }
-            /* Deferred close: finalize once the last in-flight worker
-             * has drained.  Must be checked before re-arming. */
-            if (rc->closing) {
-                if (atomic_load_explicit(&rc->inflight,
-                            memory_order_acquire) == 0) {
-                    conn_finalize_close(srv, rc);
-                }
-                continue;
-            }
-            /* Re-arm EPOLLIN (it may have been disabled at the
-             * in-flight cap) and EPOLLOUT if a worker queued reply
-             * bytes that still need draining. */
-            struct epoll_event rev;
-            rev.events = EPOLLIN;
-            pthread_mutex_lock(&rc->send_lock);
-            if (rc->send_len > 0) {
-                rev.events |= EPOLLOUT;
-            }
-            pthread_mutex_unlock(&rc->send_lock);
-            rev.data.fd = rc->fd;
-            epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD,
-                      rc->fd, &rev);
+    while (head >= 0 && (uint32_t)head < srv->max_conns) {
+        struct rpc_conn *rc = &srv->conns[head];
+        int32_t next = atomic_load_explicit(&rc->comp_next,
+                                            memory_order_relaxed);
+        atomic_store_explicit(&rc->comp_next, -1,
+                              memory_order_relaxed);
+        if (rc->fd >= 0 && rc->closing &&
+            atomic_load_explicit(&rc->inflight,
+                                 memory_order_acquire) == 0) {
+            conn_finalize_close(srv, rc);
         }
+        head = next;
     }
 }
 
@@ -2163,6 +2167,14 @@ int rpc_server_start(struct rpc_server *srv)
     atomic_store(&srv->running, 1);
 
     while (atomic_load(&srv->running)) {
+        /* Drain the MPSC deferred-close stack before blocking.  This
+         * catches completions that arrived between the last epoll_wait
+         * return and now, as well as entries pushed by the stop_pipe
+         * wakeup below. */
+        if (srv->tp != NULL) {
+            drain_close_stack(srv);
+        }
+
         int nfds = epoll_wait(srv->epoll_fd, events, 64, 1000);
 
         if (nfds < 0) {
@@ -2175,14 +2187,17 @@ int rpc_server_start(struct rpc_server *srv)
         for (int i = 0; i < nfds; i++) {
             int fd = events[i].data.fd;
 
-            /* Stop pipe? */
+            /* Stop pipe -- also used by workers to wake us for
+             * deferred-close finalization (draining happens at the
+             * top of the loop).  Consume the byte(s) so the pipe
+             * doesn't stay readable.  Only the 'running' flag
+             * (set by rpc_server_stop) actually terminates. */
             if (fd == srv->stop_pipe[0]) {
-                atomic_store(&srv->running, 0);
-                break;
-            }
-
-            if (fd == srv->comp_pipe[0]) {
-                handle_epoll_wakeup(srv);
+                uint8_t drain[64];
+                (void)read(srv->stop_pipe[0], drain, sizeof(drain));
+                if (!atomic_load(&srv->running)) {
+                    break;
+                }
                 continue;
             }
 
@@ -2258,13 +2273,6 @@ void rpc_server_destroy(struct rpc_server *srv)
     if (srv->stop_pipe[1] >= 0) {
         close(srv->stop_pipe[1]);
 }
-    if (srv->comp_pipe[0] >= 0) {
-        close(srv->comp_pipe[0]);
-    }
-    if (srv->comp_pipe[1] >= 0) {
-        close(srv->comp_pipe[1]);
-    }
-
     free(srv);
 }
 

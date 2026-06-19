@@ -8727,19 +8727,16 @@ layout_del_err:
 }
 
 /*
- * Schema v6: layout_state PK is (fileid, stateid_other).  The
- * stateid-only API (OP_TEST_STATEID, OP_LAYOUTCOMMIT) does not carry
- * fileid, so a PK read is not possible.  Previous revision relied on
- * an ordered index `ix_layout_state_stateid`; this did not survive
- * schema evolution on clusters without `ndb_index_stat` system
- * tables (createIndex returns 4714 and the index ends up missing).
+ * Schema v6: layout_state PK is (fileid, stateid_other).
  *
- * Implemented as a table scan + NdbScanFilter equality on
- * stateid_other.  layout_state cardinality is tiny (one row per
- * active pNFS layout; recycled on LAYOUTRETURN / CLOSE), so the
- * full scan cost is bounded.  If the table ever grows enough to
- * matter, reintroduce the ordered index after verifying that the
- * cluster has `ndb_index_stat` tables installed.
+ * The stateid-only API (OP_TEST_STATEID, OP_LAYOUTCOMMIT) does not
+ * carry fileid, so a single-row PK read is not possible.  The schema
+ * defines an ordered index `ix_layout_state_stateid` on stateid_other
+ * (rondb_schema.h); use a bounded index scan on that index to prune
+ * to only the rows matching the requested stateid.  This is O(matches)
+ * rather than O(total layout rows).  Falls back to a full table scan
+ * with an NdbScanFilter when the index is absent (clusters without
+ * ndb_index_stat system tables -- see createIndex code 4714 note).
  */
 int rondb_shim_layout_get_by_stateid(void *handle,
                                      const uint8_t stateid_other[12],
@@ -8751,7 +8748,8 @@ int rondb_shim_layout_get_by_stateid(void *handle,
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *tbl;
     NdbTransaction *tx;
-    NdbScanOperation *scan;
+    NdbScanOperation *scan = nullptr;
+    NdbIndexScanOperation *iscan;
     NdbRecAttr *a_cid, *a_fid, *a_io, *a_off, *a_len, *a_seq, *a_sid;
     NdbError err;
     uint8_t sid_enc[14];
@@ -8776,27 +8774,44 @@ int rondb_shim_layout_get_by_stateid(void *handle,
                                  "layout_get_sid startTx");
     }
 
-    scan = tx->getNdbScanOperation(tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_get_sid getScanOp");
-    }
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_get_sid readTuples");
-    }
-
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        /* Filter value must be in the column's on-disk format:
-         * 1-byte length prefix + 12 data bytes = sid_enc (13 bytes). */
-        filter.cmp(NdbScanFilter::COND_EQ,
-                   tbl->getColumn(RONDB_LS_COL_STATEID)->getColumnNo(),
-                   sid_enc, (Uint32)sid_enc_len);
-        filter.end();
+    /* Fast path: bounded scan on ix_layout_state_stateid.
+     * Falls back to a full table scan + filter when the index is absent. */
+    iscan = tx->getNdbIndexScanOperation(
+        RONDB_IX_LS_STATEID, RONDB_TBL_LAYOUT_STATE);
+    if (iscan != nullptr) {
+        if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_get_sid idx readTuples");
+        }
+        if (iscan->setBound(RONDB_LS_COL_STATEID,
+                            NdbIndexScanOperation::BoundEQ,
+                            sid_enc, sid_enc_len) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_get_sid setBound");
+        }
+        scan = iscan;
+    } else {
+        scan = tx->getNdbScanOperation(tbl);
+        if (scan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_get_sid getScanOp");
+        }
+        if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = scan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_get_sid readTuples");
+        }
+        {
+            NdbScanFilter filter(scan);
+            filter.begin(NdbScanFilter::AND);
+            filter.cmp(NdbScanFilter::COND_EQ,
+                       tbl->getColumn(RONDB_LS_COL_STATEID)->getColumnNo(),
+                       sid_enc, (Uint32)sid_enc_len);
+            filter.end();
+        }
     }
 
     a_cid = scan->getValue(RONDB_LS_COL_CLIENTID, nullptr);
@@ -8821,12 +8836,7 @@ int rondb_shim_layout_get_by_stateid(void *handle,
 
     int scan_rc;
     while ((scan_rc = scan->nextResult(true)) == 0) {
-        /*
-         * Defensive: verify the row's stateid_other matches the
-         * requested one.  Even with the server-side filter, a
-         * prefix collision in filter evaluation would be caught
-         * here.
-         */
+        /* Defensive stateid equality recheck. */
         const char *ref = a_sid->aRef();
         if (ref == nullptr) { continue; }
         uint32_t row_len = (uint32_t)(uint8_t)ref[0];
@@ -8959,9 +8969,9 @@ int rondb_shim_layout_scan_for_file(void *handle, uint64_t fileid,
 
 /*
  * Schema v6: collect every (fileid, stateid_other) pair held by
- * clientid then delete each row.  Uses a table scan + NdbScanFilter
- * equality on clientid (matches the stateid-lookup implementation
- * for the same ordered-index-system-tables-absent reason).
+ * clientid then delete each row.  Uses a bounded index scan on
+ * ix_layout_state_clientid when the index is available, falling back
+ * to a table scan + NdbScanFilter equality otherwise.
  */
 int rondb_shim_layout_del_all_for_client(void *handle, uint64_t clientid)
 {
@@ -8969,10 +8979,12 @@ int rondb_shim_layout_del_all_for_client(void *handle, uint64_t clientid)
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *ls_tbl;
     NdbTransaction *tx;
-    NdbScanOperation *scan;
+    NdbScanOperation *scan = nullptr;
+    NdbIndexScanOperation *iscan;
     NdbRecAttr *a_cid, *a_fid, *a_sid;
     NdbError err;
     int next_rc;
+    Uint64 bound_cid = (Uint64)clientid;
     struct hit {
         uint64_t fid;
         std::string sid;
@@ -8992,24 +9004,43 @@ int rondb_shim_layout_del_all_for_client(void *handle, uint64_t clientid)
                                  "layout_del_client startTx");
     }
 
-    scan = tx->getNdbScanOperation(ls_tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_del_client getScanOp");
-    }
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_del_client readTuples");
-    }
-
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        filter.eq(ls_tbl->getColumn(RONDB_LS_COL_CLIENTID)->getColumnNo(),
-                  (Uint64)clientid);
-        filter.end();
+    /* Fast path: bounded index scan on ix_layout_state_clientid. */
+    iscan = tx->getNdbIndexScanOperation(
+        RONDB_IX_LS_CLIENTID, RONDB_TBL_LAYOUT_STATE);
+    if (iscan != nullptr) {
+        if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_del_client idx readTuples");
+        }
+        if (iscan->setBound(RONDB_LS_COL_CLIENTID,
+                            NdbIndexScanOperation::BoundEQ,
+                            &bound_cid) != 0) {
+            err = iscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_del_client setBound");
+        }
+        scan = iscan;
+    } else {
+        /* Fallback: full table scan + filter. */
+        scan = tx->getNdbScanOperation(ls_tbl);
+        if (scan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_del_client getScanOp");
+        }
+        if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = scan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_del_client readTuples");
+        }
+        {
+            NdbScanFilter filter(scan);
+            filter.begin(NdbScanFilter::AND);
+            filter.eq(ls_tbl->getColumn(RONDB_LS_COL_CLIENTID)->getColumnNo(),
+                      (Uint64)clientid);
+            filter.end();
+        }
     }
 
     a_cid = scan->getValue(RONDB_LS_COL_CLIENTID, nullptr);
@@ -10250,36 +10281,79 @@ int rondb_shim_delta_poll(void *handle,
     tbl = dict->getTable(RONDB_TBL_DELTA_BROADCAST);
     if (tbl == nullptr) { return -1; }
 
-    tx = rondb_get_ndb(state)->startTransaction();
+    /* PK = (source_mds_id, seqno), partitioned by source_mds_id.
+     * Start the transaction with a partition hint so all scan work
+     * stays on the single fragment owning this MDS stream. */
+    {
+        uint8_t pk_buf[4];
+        pk_buf[0] = (uint8_t)(source_mds_id >> 24);
+        pk_buf[1] = (uint8_t)(source_mds_id >> 16);
+        pk_buf[2] = (uint8_t)(source_mds_id >> 8);
+        pk_buf[3] = (uint8_t)(source_mds_id);
+        tx = rondb_get_ndb(state)->startTransaction(
+            tbl, (const char *)pk_buf, 4);
+    }
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
                                  "delta_poll startTx");
     }
 
-    /* Full table scan with client-side filtering.
-     * PK ordered index scans require an NdbDictionary::Index object;
-     * for simplicity we use a table scan and filter in the loop. */
+    /* Fast path: PRIMARY ordered-index scan bounded by
+     * source_mds_id == @source_mds_id AND seqno > @min_seqno.
+     * Falls back to a full table scan + client-side filter when the
+     * PRIMARY ordered index is absent. */
+    NdbScanOperation *tscan = nullptr;
     {
-        NdbScanOperation *tscan = tx->getNdbScanOperation(tbl);
-        scan = nullptr;  /* not using index scan */
-        if (tscan == nullptr) {
-            err = tx->getNdbError();
-            rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "delta_poll getScanOp");
+        NdbIndexScanOperation *iscan = tx->getNdbIndexScanOperation(
+            "PRIMARY", RONDB_TBL_DELTA_BROADCAST);
+        if (iscan != nullptr) {
+            if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+                err = iscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "delta_poll idx readTuples");
+            }
+            /* BoundEQ on source_mds_id prunes to the partition;
+             * BoundLT on seqno is actually the lower bound for
+             * ascending order:  seqno > min_seqno  ==  LO > min. */
+            Uint32 bound_src = (Uint32)source_mds_id;
+            if (iscan->setBound(RONDB_DB_COL_SOURCE_MDS,
+                                NdbIndexScanOperation::BoundEQ,
+                                &bound_src) != 0) {
+                err = iscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "delta_poll setBound src");
+            }
+            Uint64 bound_seq = (Uint64)min_seqno;
+            if (iscan->setBound(RONDB_DB_COL_SEQNO,
+                                NdbIndexScanOperation::BoundLT,
+                                &bound_seq) != 0) {
+                err = iscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "delta_poll setBound seq");
+            }
+            tscan = iscan;
+        } else {
+            /* Fallback: full table scan. */
+            tscan = tx->getNdbScanOperation(tbl);
+            if (tscan == nullptr) {
+                err = tx->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "delta_poll getScanOp");
+            }
+            if (tscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+                err = tscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "delta_poll readTuples");
+            }
         }
+    }
 
-        if (tscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-            err = tscan->getNdbError();
-            rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "delta_poll readTuples");
-        }
-
-        NdbRecAttr *a_src = tscan->getValue(RONDB_DB_COL_SOURCE_MDS, nullptr);
-        a_seqno   = tscan->getValue(RONDB_DB_COL_SEQNO, nullptr);
-        a_epoch   = tscan->getValue(RONDB_DB_COL_BOOT_EPOCH, nullptr);
-        a_type    = tscan->getValue(RONDB_DB_COL_DELTA_TYPE, nullptr);
-        a_payload = tscan->getValue(RONDB_DB_COL_PAYLOAD, nullptr);
-        a_ts      = tscan->getValue(RONDB_DB_COL_TIMESTAMP_NS, nullptr);
+    NdbRecAttr *a_src = tscan->getValue(RONDB_DB_COL_SOURCE_MDS, nullptr);
+    a_seqno   = tscan->getValue(RONDB_DB_COL_SEQNO, nullptr);
+    a_epoch   = tscan->getValue(RONDB_DB_COL_BOOT_EPOCH, nullptr);
+    a_type    = tscan->getValue(RONDB_DB_COL_DELTA_TYPE, nullptr);
+    a_payload = tscan->getValue(RONDB_DB_COL_PAYLOAD, nullptr);
+    a_ts      = tscan->getValue(RONDB_DB_COL_TIMESTAMP_NS, nullptr);
 
     if (a_src == nullptr || a_seqno == nullptr || a_epoch == nullptr ||
         a_type == nullptr || a_payload == nullptr || a_ts == nullptr) {
@@ -10302,7 +10376,7 @@ int rondb_shim_delta_poll(void *handle,
             return rondb_report_error(err, "delta_poll next");
         }
 
-        /* Client-side filter: source_mds_id match + seqno > min. */
+        /* Defensive: recheck filters (for the table-scan fallback). */
         uint32_t row_src = a_src->u_32_value();
         if (row_src != source_mds_id) { continue; }
 
@@ -10337,7 +10411,6 @@ int rondb_shim_delta_poll(void *handle,
     }
 
     tscan->close();
-    }  /* end table-scan block */
     rondb_get_ndb(state)->closeTransaction(tx);
     return 0;
 }
