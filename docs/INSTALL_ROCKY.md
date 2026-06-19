@@ -1,4 +1,4 @@
-# pnfscore — Rocky Linux 9 / 10 Installation Guide
+# pnfs-lattice — Rocky Linux 9 / 10 Installation Guide
 
 Single-MDS community edition install on Rocky Linux 9 or 10 (RHEL /
 Alma / Fedora equivalents should be near-identical). Every command in
@@ -79,7 +79,7 @@ sudo dnf install -y \
 ```
 
 > **Note:** `libaio-devel` is needed at RonDB runtime, not for
-> building pnfscore. Including it here avoids a second `dnf` pass
+> building pnfs-lattice. Including it here avoids a second `dnf` pass
 > later.
 
 Verify the toolchain:
@@ -91,13 +91,13 @@ cmake --version   # Rocky 9: 3.26+, Rocky 10: 3.30+
 
 ## Step 3 — Build libntirpc from source
 
-Neither Rocky 9 nor 10 ship a `libntirpc-dev` package. The pnfscore
+Neither Rocky 9 nor 10 ship a `libntirpc-dev` package. The pnfs-lattice
 repository includes a helper script that builds and installs it:
 
 ```bash
 cd ~
-git clone https://github.com/PEAK-AIO/pnfscore.git
-cd pnfscore
+git clone https://github.com/PEAK-AIO/pnfs-lattice.git
+cd pnfs-lattice
 sudo bash deps/build-ntirpc.sh
 ```
 
@@ -110,7 +110,7 @@ ls /usr/local/lib64/libntirpc.so     # should exist
 
 ## Step 4 — Download and install RonDB
 
-pnfscore uses RonDB as its metadata catalogue backend. Download the
+pnfs-lattice uses RonDB as its metadata catalogue backend. Download the
 RonDB 24.10.19 release:
 
 ```bash
@@ -143,10 +143,10 @@ Verify:
 # Expected: RonDB Management Server RonDB-24.10.19
 ```
 
-## Step 5 — Build pnfscore with RonDB support
+## Step 5 — Build pnfs-lattice with RonDB support
 
 ```bash
-cd ~/pnfscore
+cd ~/pnfs-lattice
 cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_RONDB=ON \
@@ -394,8 +394,8 @@ sudo install -d -m 0755 /usr/local/bin /etc/pnfs-mds /var/lib/pnfs-mds
 ### 10b. Install the binaries
 
 ```bash
-sudo install -m 0755 ~/pnfscore/build/src/mds/pnfs-mds  /usr/local/bin/pnfs-mds
-sudo install -m 0755 ~/pnfscore/build/src/tools/mds-admin /usr/local/bin/mds-admin
+sudo install -m 0755 ~/pnfs-lattice/build/src/mds/pnfs-mds  /usr/local/bin/pnfs-mds
+sudo install -m 0755 ~/pnfs-lattice/build/src/tools/mds-admin /usr/local/bin/mds-admin
 ```
 
 ### 10c. Write the RonDB backend config
@@ -627,7 +627,7 @@ connected, then `pnfs-mds`, then remount the clients.
   `showmount` and NFS client tools.
 
 - **libntirpc not found during `cmake`** — Run
-  `sudo bash deps/build-ntirpc.sh` from the pnfscore directory.
+  `sudo bash deps/build-ntirpc.sh` from the pnfs-lattice directory.
   CMake will print a `FATAL_ERROR` message pointing to this script
   if the library is missing.
 

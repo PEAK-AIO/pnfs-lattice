@@ -10,7 +10,6 @@
 - RonDB 24.10+ (NDB API headers and `libndbclient.so`)
 - libntirpc (`apt install libntirpc-dev`)
 - OpenSSL (`apt install libssl-dev`)
-- LMDB (`apt install liblmdb-dev`) — only for test fixtures
 - pkg-config (`apt install pkg-config`)
 
 ## 1. Single-Node Development Build
@@ -18,20 +17,19 @@
 ```bash
 # Install build dependencies (Ubuntu/Debian)
 sudo apt install -y build-essential cmake pkg-config \
-    libssl-dev libntirpc-dev liblmdb-dev libkrb5-dev
+    libssl-dev libntirpc-dev libkrb5-dev
 
-# Clone and build (LMDB-only mode for quick local testing)
-git clone https://github.com/elemberger/pnfs-mds.git
-cd pnfs-mds
+# Clone and build (no RonDB cluster required for unit tests)
+git clone https://github.com/PEAK-AIO/pnfs-lattice.git
+cd pnfs-lattice
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Run tests
+# Run tests (in-memory catalogue stub, no RonDB needed)
 ctest --test-dir build --output-on-failure
-# Expected: 53/53 pass
 ```
 
-## 2. RonDB Production Build
+## 2. Build with RonDB Backend
 
 Requires a running RonDB cluster with NDB API headers installed
 (typically at `/opt/rondb/include/storage/ndb`).
@@ -81,7 +79,7 @@ sudo LD_LIBRARY_PATH=/opt/rondb/lib:/opt/rondb/lib64 \
     /usr/local/bin/pnfs-mds /etc/pnfs-mds/mds.conf
 ```
 
-On first start, the MDS auto-creates all 21 RonDB tables and seeds
+On first start, the MDS auto-creates all 35 RonDB tables and seeds
 the root inode.
 
 ## 4. Mount from Client
@@ -124,7 +122,7 @@ lab host.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `catalogue_backend` | `rondb` | Backend: `rondb` (production) or `lmdb` (legacy test) |
+| `catalogue_backend` | `rondb` | Backend: `rondb` (only supported backend) |
 | `catalogue_backend_conf` | — | Path to `rondb.conf` |
 | `worker_threads` | `nproc` | RPC worker thread count |
 | `inode_cache_size` | 32768 | LRU inode cache entries |
@@ -144,7 +142,9 @@ Check MDS is listening: `ss -tlnp | grep 2049`. Check logs:
 `tail /tmp/pnfs-mds.log`.
 
 **EEXIST on parallel creates:**
-Ensure you're running build `bf8cd38` or later (fileid race fix).
+This was a fileid race bug fixed in early development. Ensure you
+are building from the latest `main` branch.
 
 **Segfault under 16+ tasks:**
-Ensure you're running build `cedfe07` or later (open_state hash fix).
+This was an open_state hash bug fixed in early development. Ensure you
+are building from the latest `main` branch.

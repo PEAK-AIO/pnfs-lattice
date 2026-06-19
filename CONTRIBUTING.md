@@ -1,4 +1,4 @@
-# Contributing to pnfs-mds
+# Contributing to Lattice
 
 **Copyright (c) 2026 PeakAIO. Licensed under MIT — by submitting a contribution you agree that your contribution will be licensed under the same terms (see `LICENSE-MIT`).**
 
