@@ -874,7 +874,7 @@ enum mds_status migration_cleanup(struct mds_catalogue *cat,
             struct cleanup_dirent_ctx dc;
             memset(&dc, 0, sizeof(dc));
             /* Collect dirent names via catalogue readdir. */
-            (void)mds_cat_ns_readdir(cat, fid, NULL, NULL,
+            (void)mds_cat_ns_readdir(cat, fid, NULL, 0, NULL,
                                      cleanup_collect_dirent_cat, &dc);
             for (uint32_t i = 0; i < dc.count; i++) {
                 (void)mds_cat_dirent_del(cat, NULL, fid, dc.names[i]);

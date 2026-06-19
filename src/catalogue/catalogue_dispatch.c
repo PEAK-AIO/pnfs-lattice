@@ -282,6 +282,7 @@ enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
 enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
                                    uint64_t parent_fileid,
                                    const char *start_after,
+                                   uint32_t max_entries,
                                    struct mds_cat_txn *txn,
                                    mds_readdir_cb cb, void *ctx)
 {
@@ -290,7 +291,25 @@ enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
     }
     return CAT_TIMED(MDS_CATOP_NS_READDIR,
         cat->auth_ops->ns_readdir(cat, parent_fileid, start_after,
-                                  txn, cb, ctx));
+                                  max_entries, txn, cb, ctx));
+}
+
+enum mds_status mds_cat_ns_dirent_name_for_child(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    uint64_t child_fileid,
+    char *name_out,
+    size_t name_out_len)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        name_out == NULL || name_out_len == 0) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->dirent_name_for_child != NULL) {
+        return cat->auth_ops->dirent_name_for_child(
+            cat, parent_fileid, child_fileid, name_out, name_out_len);
+    }
+    return MDS_ERR_NOTFOUND;
 }
 
 /* -----------------------------------------------------------------------
@@ -347,6 +366,7 @@ static int ns_readdir_plus_fallback_cb(const struct mds_cat_dirent *entry,
 enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
                                         uint64_t parent_fileid,
                                         const char *start_after,
+                                        uint32_t max_entries,
                                         struct mds_cat_txn *txn,
                                         mds_readdir_plus_cb cb,
                                         void *ctx)
@@ -362,8 +382,8 @@ enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
     if (cat->auth_ops->ns_readdir_plus != NULL) {
         return CAT_TIMED(MDS_CATOP_NS_READDIR_PLUS,
             cat->auth_ops->ns_readdir_plus(cat, parent_fileid,
-                                           start_after, txn,
-                                           cb, ctx));
+                                           start_after, max_entries,
+                                           txn, cb, ctx));
     }
 
     /* Fallback: ns_readdir + ns_getattr per entry. */
@@ -373,7 +393,8 @@ enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
     fctx.last_status = MDS_OK;
 
     st = cat->auth_ops->ns_readdir(cat, parent_fileid, start_after,
-                                   txn, ns_readdir_plus_fallback_cb,
+                                   max_entries, txn,
+                                   ns_readdir_plus_fallback_cb,
                                    &fctx);
     if (st != MDS_OK) {
         return st;
@@ -527,7 +548,7 @@ enum mds_status mds_cat_dir_is_empty(struct mds_catalogue *cat,
         return MDS_ERR_INVAL;
     }
 
-    st = cat->auth_ops->ns_readdir(cat, parent_fileid, NULL, NULL,
+    st = cat->auth_ops->ns_readdir(cat, parent_fileid, NULL, 1, NULL,
                                    dir_empty_cb, &ctx);
     /* readdir returns MDS_OK even if the dir is empty (0 entries),
      * and the RonDB backend also returns MDS_OK when the callback
@@ -681,7 +702,7 @@ static enum mds_status cat_subtree_dfs(struct mds_catalogue *cat,
 
     /* 2. Collect dirents (directories only). */
     if (chunk.inode.type == MDS_FTYPE_DIR) {
-        st = mds_cat_ns_readdir(cat, fileid, NULL, NULL,
+        st = mds_cat_ns_readdir(cat, fileid, NULL, 0, NULL,
                                 cat_iter_collect_dirent, &dc);
         if (st != MDS_OK) {
             goto out_free;

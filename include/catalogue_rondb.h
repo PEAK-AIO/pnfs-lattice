@@ -283,12 +283,23 @@ typedef int (*rondb_readdir_cb)(uint64_t child_fileid,
 
 /** Scan dirents for a parent directory.  Ordered by entry_name.
  *  If start_after is non-NULL, entries with names <= start_after
- *  are skipped.  Calls cb for each entry found.
+ *  are skipped.  When max_entries > 0, at most that many entries
+ *  are delivered after start_after filtering (0 = unlimited).
+ *  Calls cb for each entry found.
  *  Returns 0 on success, -1 on error. */
 int rondb_shim_ns_readdir(void *handle,
                           uint64_t parent_fileid,
                           const char *start_after,
+                          uint32_t max_entries,
                           rondb_readdir_cb cb, void *ctx);
+
+/** Resolve a child fileid to its entry name within a parent directory.
+ *  Returns 0 on success, 1 if not found, -1 on error. */
+int rondb_shim_dirent_name_for_child(void *handle,
+                                     uint64_t parent_fileid,
+                                     uint64_t child_fileid,
+                                     char *name_out,
+                                     size_t name_out_cap);
 
 /** READDIR_PLUS shim callback -- called once per dirent with both the
  *  dirent columns and the fused child-inode read.
@@ -317,12 +328,13 @@ typedef int (*rondb_readdir_plus_cb)(uint64_t child_fileid,
  *  round-trips into 2 (one NoCommit scan + one Commit batch).
  *
  *  Entry order matches rondb_shim_ns_readdir (bytewise by name).
- *  `start_after` semantics match rondb_shim_ns_readdir.
+ *  `start_after` and `max_entries` semantics match rondb_shim_ns_readdir.
  *
  *  Returns 0 on success, -1 on error. */
 int rondb_shim_ns_readdir_plus(void *handle,
                                uint64_t parent_fileid,
                                const char *start_after,
+                               uint32_t max_entries,
                                rondb_readdir_plus_cb cb, void *ctx);
 
 /** Atomic LINK: create dirent + bump target nlink + atomic parent

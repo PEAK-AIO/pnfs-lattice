@@ -204,12 +204,25 @@ enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
 				   const struct mds_inode *attrs,
 				   uint32_t mask);
 
-/** Iterate directory entries (start_after = NULL for first page). */
+/** Iterate directory entries (start_after = NULL for first page).
+ *  When max_entries > 0, return at most that many entries (0 = unlimited). */
 enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
 				   uint64_t parent_fileid,
 				   const char *start_after,
+				   uint32_t max_entries,
 				   struct mds_cat_txn *txn,
 				   mds_readdir_cb cb, void *ctx);
+
+/**
+ * Look up a directory entry name by child fileid within a parent.
+ * Used to translate READDIR cookies (fileids) into start_after names.
+ */
+enum mds_status mds_cat_ns_dirent_name_for_child(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	uint64_t child_fileid,
+	char *name_out,
+	size_t name_out_len);
 
 /**
  * Iterate directory entries delivering dirent + child inode together
@@ -224,6 +237,7 @@ enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
  * @param parent_fileid Directory fileid.
  * @param start_after   NULL for first page; otherwise skip entries
  *                      whose names are <= start_after (bytewise).
+ * @param max_entries   Maximum entries to return (0 = unlimited).
  * @param txn           Reserved for future use; pass NULL.
  * @param cb            Called once per entry.
  * @param ctx           Passed to cb.
@@ -232,6 +246,7 @@ enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
 enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
 					uint64_t parent_fileid,
 					const char *start_after,
+					uint32_t max_entries,
 					struct mds_cat_txn *txn,
 					mds_readdir_plus_cb cb,
 					void *ctx);

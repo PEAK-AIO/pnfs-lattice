@@ -1722,7 +1722,7 @@ enum nfs4_status op_rename(struct compound_data *cd,
 				.target = cd->current_fh.fileid,
 				.found = false,
 			};
-			if (cat_readdir(cd, MDS_FILEID_ROOT, NULL,
+			if (cat_readdir(cd, MDS_FILEID_ROOT, NULL, 0,
 					find_name_cat_cb, &fnc) == MDS_OK
 			    && fnc.found) {
 				(void)snprintf(cd->current_path,
@@ -2268,8 +2268,6 @@ enum nfs4_status op_link(struct compound_data *cd,
 struct readdir_fill {
 	struct compound_data    *cd;
 	struct nfs4_res_readdir *rd;
-	uint64_t cookie_fileid; /* Resume after this fileid (0 = start) */
-	bool     past_cookie;   /* Have we passed the cookie entry? */
 };
 
 /**
@@ -2343,17 +2341,6 @@ static int readdir_plus_cat_cb(const struct mds_cat_dirent *entry,
 						     &se) == MDS_OK) {
 				return 0; /* hidden referral junction */
 			}
-		}
-	}
-
-	if (!f->past_cookie) {
-		if (f->cookie_fileid == 0) {
-			f->past_cookie = true;
-		} else if (entry->fileid == f->cookie_fileid) {
-			f->past_cookie = true;
-			return 0;
-		} else {
-			return 0;
 		}
 	}
 
@@ -2463,20 +2450,40 @@ enum nfs4_status op_readdir(struct compound_data *cd,
 
 	{
 		struct readdir_fill fill;
+		const char *start_after = NULL;
+		char cookie_name[MDS_MAX_NAME + 1];
 
 		fill.cd = cd;
 		fill.rd = &res->res.readdir;
-		fill.cookie_fileid = op->arg.readdir.cookie;
-		fill.past_cookie = false;
 
-		/* Fused path: dirent scan + all entry_attrs resolve in one
+		/* Translate the opaque fileid cookie into a start_after name
+		 * so the catalogue can skip earlier entries without scanning
+		 * the full directory on every page. */
+		if (op->arg.readdir.cookie != 0) {
+			st = mds_cat_ns_dirent_name_for_child(
+				cd->cat, cd->current_fh.fileid,
+				op->arg.readdir.cookie,
+				cookie_name, sizeof(cookie_name));
+			if (st == MDS_OK) {
+				start_after = cookie_name;
+			} else if (st == MDS_ERR_NOTFOUND) {
+				/* Stale cookie (entry removed): empty page. */
+				res->res.readdir.eof = true;
+				return NFS4_OK;
+			} else {
+				return mds_status_to_nfs4(st);
+			}
+		}
+
+		/* Fused path: dirent scan + entry_attrs resolve in one
 		 * NDB transaction on RonDB; null-safe dispatch falls back
 		 * to ns_readdir + per-entry ns_getattr for other backends.
 		 * entry_attrs / entry_attrs_valid are populated inline by
 		 * readdir_plus_cat_cb so the old populate_readdir_entry_attrs
 		 * loop is no longer needed on this path. */
 		st = cat_readdir_plus(cd, cd->current_fh.fileid,
-				      NULL, readdir_plus_cat_cb, &fill);
+				      start_after, NFS4_READDIR_MAX,
+				      readdir_plus_cat_cb, &fill);
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);
 }

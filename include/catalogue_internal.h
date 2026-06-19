@@ -81,7 +81,13 @@ struct mds_authority_ops {
         const struct mds_inode *attrs, uint32_t mask);
     enum mds_status (*ns_readdir)(struct mds_catalogue *cat,
         uint64_t parent, const char *start_after,
+        uint32_t max_entries,
         struct mds_cat_txn *txn, mds_readdir_cb cb, void *ctx);
+
+    /** Optional: resolve child fileid to dirent name within parent. */
+    enum mds_status (*dirent_name_for_child)(struct mds_catalogue *cat,
+        uint64_t parent, uint64_t child_fileid,
+        char *name_out, size_t name_out_len);
 
     /**
      * Optional fused readdir + per-entry attr read.
@@ -95,6 +101,7 @@ struct mds_authority_ops {
      */
     enum mds_status (*ns_readdir_plus)(struct mds_catalogue *cat,
         uint64_t parent, const char *start_after,
+        uint32_t max_entries,
         struct mds_cat_txn *txn, mds_readdir_plus_cb cb, void *ctx);
 
     enum mds_status (*ns_nlink_adjust)(struct mds_catalogue *cat,

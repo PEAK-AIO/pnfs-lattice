@@ -445,14 +445,14 @@ static void test_catalogue_ns_readdir(void)
 
 	/* Full readdir. */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, NULL,
+	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, NULL, 0,
 				     NULL, readdir_counter, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)3);
 
 	/* Readdir with start_after="aaa" -- should skip "aaa". */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, "aaa",
+	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, "aaa", 0,
 				     NULL, readdir_counter, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)2);
@@ -515,7 +515,7 @@ static void test_catalogue_ns_readdir_plus_empty(void)
 				    0, 0, NULL, &child), MDS_OK);
 
 	memset(&got, 0, sizeof(got));
-	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, child.fileid, NULL,
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, child.fileid, NULL, 0,
 					  NULL,
 					  readdir_plus_collect_cb, &got),
 		  MDS_OK);
@@ -547,7 +547,7 @@ static void test_catalogue_ns_readdir_plus_three_entries(void)
 
 	/* Full fused readdir_plus: three entries, each with valid inode. */
 	memset(&got, 0, sizeof(got));
-	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, NULL,
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, NULL, 0,
 					  NULL,
 					  readdir_plus_collect_cb, &got),
 		  MDS_OK);
@@ -594,11 +594,63 @@ static void test_catalogue_ns_readdir_plus_start_after(void)
 
 	/* start_after="aaa" should drop "aaa" from the result. */
 	memset(&got, 0, sizeof(got));
-	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, "aaa",
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, "aaa", 0,
 					  NULL,
 					  readdir_plus_collect_cb, &got),
 		  MDS_OK);
 	ASSERT_EQ(got.count, (uint32_t)2);
+
+	close_test_cat(cat, path);
+}
+
+static void test_catalogue_ns_readdir_max_entries(void)
+{
+	struct mds_catalogue *cat;
+	struct mds_inode child;
+	struct readdir_ctx ctx;
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "aaa", MDS_FTYPE_DIR, 0755,
+				    0, 0, NULL, &child), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "bbb", MDS_FTYPE_DIR, 0755,
+				    0, 0, NULL, &child), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "ccc", MDS_FTYPE_DIR, 0755,
+				    0, 0, NULL, &child), MDS_OK);
+
+	memset(&ctx, 0, sizeof(ctx));
+	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, NULL, 2,
+				     NULL, readdir_counter, &ctx),
+		  MDS_OK);
+	ASSERT_EQ(ctx.count, (uint32_t)2);
+	ASSERT_EQ(strcmp(ctx.first_name, "aaa"), 0);
+
+	close_test_cat(cat, path);
+}
+
+static void test_catalogue_dirent_name_for_child(void)
+{
+	struct mds_catalogue *cat;
+	struct mds_inode child;
+	char name[256];
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "bravo", MDS_FTYPE_REG, 0644,
+				    0, 0, NULL, &child), MDS_OK);
+
+	memset(name, 0, sizeof(name));
+	ASSERT_EQ(mds_cat_ns_dirent_name_for_child(
+			  cat, MDS_FILEID_ROOT, child.fileid,
+			  name, sizeof(name)),
+		  MDS_OK);
+	ASSERT_EQ(strcmp(name, "bravo"), 0);
 
 	close_test_cat(cat, path);
 }
@@ -1162,6 +1214,8 @@ int main(void)
 	RUN_TEST(test_catalogue_ns_readdir_plus_empty);
 	RUN_TEST(test_catalogue_ns_readdir_plus_three_entries);
 	RUN_TEST(test_catalogue_ns_readdir_plus_start_after);
+	RUN_TEST(test_catalogue_ns_readdir_max_entries);
+	RUN_TEST(test_catalogue_dirent_name_for_child);
 	RUN_TEST(test_catalogue_stripe_map_wide_round_trip);
 	RUN_TEST(test_catalogue_layout_grant_return);
 	RUN_TEST(test_catalogue_layout_iter_file);

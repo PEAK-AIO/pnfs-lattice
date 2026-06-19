@@ -1472,12 +1472,6 @@ static void rondb_set_inode_values(NdbOperation *op,
     op->setValue(RONDB_INO_COL_HOME_SHARD, shard);
 }
 
-struct rondb_readdir_row {
-    std::string name;
-    uint64_t child_fid;
-    uint8_t child_type;
-};
-
 static int rondb_compare_name_bytes(const char *lhs, size_t lhs_len,
                                     const char *rhs, size_t rhs_len)
 {
@@ -1493,6 +1487,146 @@ static int rondb_compare_name_bytes(const char *lhs, size_t lhs_len,
     if (lhs_len > rhs_len) {
         return 1;
     }
+    return 0;
+}
+
+struct rondb_readdir_row {
+    std::string name;
+    uint64_t child_fid;
+    uint8_t child_type;
+};
+
+static void rondb_readdir_sort_rows(std::vector<rondb_readdir_row> &rows)
+{
+    std::sort(rows.begin(), rows.end(),
+              [](const rondb_readdir_row &lhs,
+                 const rondb_readdir_row &rhs) {
+                  return rondb_compare_name_bytes(lhs.name.data(),
+                                                  lhs.name.size(),
+                                                  rhs.name.data(),
+                                                  rhs.name.size()) < 0;
+              });
+}
+
+/** Index of the first row with name > start_after (or rows.size()). */
+static size_t rondb_readdir_start_index(
+    const std::vector<rondb_readdir_row> &rows,
+    const char *start_after)
+{
+    if (start_after == nullptr || start_after[0] == '\0') {
+        return 0;
+    }
+
+    size_t sa_len = std::strlen(start_after);
+    for (size_t i = 0; i < rows.size(); i++) {
+        if (rondb_compare_name_bytes(rows[i].name.data(),
+                                   rows[i].name.size(),
+                                   start_after, sa_len) > 0) {
+            return i;
+        }
+    }
+    return rows.size();
+}
+
+/** End index (exclusive) for a bounded page. */
+static size_t rondb_readdir_end_index(size_t first, size_t total,
+                                      uint32_t max_entries)
+{
+    if (max_entries == 0) {
+        return total;
+    }
+    size_t end = first + (size_t)max_entries;
+    return (end < total) ? end : total;
+}
+
+static int rondb_readdir_scan_parent(
+    rondb_shim_handle *state,
+    uint64_t parent_fileid,
+    std::vector<rondb_readdir_row> *rows_out,
+    const char *err_tag)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbScanOperation *scan;
+    NdbRecAttr *a_name, *a_cfid, *a_ctype;
+    NdbError err;
+    int next_rc;
+
+    if (state == nullptr || rows_out == nullptr) { return -1; }
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_DIRENTS);
+    if (tbl == nullptr) { return -1; }
+
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, parent_fileid);
+        tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
+    }
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 err_tag != nullptr ? err_tag : "readdir startTx");
+    }
+
+    scan = tx->getNdbScanOperation(tbl);
+    if (scan == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "readdir getScanOp");
+    }
+
+    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+        err = scan->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "readdir readTuples");
+    }
+
+    {
+        NdbScanFilter filter(scan);
+        filter.begin(NdbScanFilter::AND);
+        filter.eq(tbl->getColumn(RONDB_DIR_COL_PARENT)->getColumnNo(),
+                  (Uint64)parent_fileid);
+        filter.end();
+    }
+
+    a_name  = scan->getValue(RONDB_DIR_COL_NAME, nullptr);
+    a_cfid  = scan->getValue(RONDB_DIR_COL_CHILD_FID, nullptr);
+    a_ctype = scan->getValue(RONDB_DIR_COL_CHILD_TYPE, nullptr);
+
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "readdir exec");
+    }
+
+    rows_out->clear();
+    while ((next_rc = scan->nextResult(true)) == 0) {
+        uint64_t child_fid = a_cfid->u_64_value();
+        uint8_t child_type = (uint8_t)a_ctype->u_8_value();
+        const char *name_ptr = a_name->aRef();
+        uint32_t name_len;
+        rondb_readdir_row row;
+
+        if (name_ptr == nullptr) { continue; }
+
+        name_len = (uint32_t)(uint8_t)name_ptr[0];
+        name_ptr += 1;
+        row.child_fid = child_fid;
+        row.child_type = child_type;
+        row.name.assign(name_ptr, name_len);
+        rows_out->push_back(row);
+    }
+    if (next_rc != 1) {
+        err = scan->getNdbError();
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "readdir nextResult");
+    }
+
+    scan->close();
+    rondb_get_ndb(state)->closeTransaction(tx);
     return 0;
 }
 
@@ -3528,127 +3662,72 @@ int rondb_shim_dirent_del(void *handle, uint64_t parent_fileid,
 int rondb_shim_ns_readdir(void *handle,
                           uint64_t parent_fileid,
                           const char *start_after,
+                          uint32_t max_entries,
                           rondb_readdir_cb cb, void *ctx)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
-    NdbDictionary::Dictionary *dict;
-    const NdbDictionary::Table *tbl;
-    NdbTransaction *tx;
-    NdbScanOperation *scan;
-    NdbRecAttr *a_name, *a_cfid, *a_ctype;
-    NdbError err;
     std::vector<rondb_readdir_row> rows;
-    int next_rc;
+    size_t first;
+    size_t end;
+    int rc;
 
     if (state == nullptr || cb == nullptr) { return -1; }
 
-    dict = rondb_get_dictionary(state);
-    if (dict == nullptr) { return -1; }
-    tbl = dict->getTable(RONDB_TBL_DIRENTS);
-    if (tbl == nullptr) { return -1; }
-
-    {
-        uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
-        tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
-    }
-    if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "readdir startTx");
+    rc = rondb_readdir_scan_parent(state, parent_fileid, &rows,
+                                   "readdir startTx");
+    if (rc != 0) {
+        return rc;
     }
 
-    scan = tx->getNdbScanOperation(tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "readdir getScanOp");
+    if (rows.size() > 1) {
+        rondb_readdir_sort_rows(rows);
     }
 
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "readdir readTuples");
-    }
+    first = rondb_readdir_start_index(rows, start_after);
+    end = rondb_readdir_end_index(first, rows.size(), max_entries);
 
-    /* Filter: parent_fileid == target. */
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        filter.eq(tbl->getColumn(RONDB_DIR_COL_PARENT)->getColumnNo(),
-                  (Uint64)parent_fileid);
-        filter.end();
-    }
-
-    a_name  = scan->getValue(RONDB_DIR_COL_NAME, nullptr);
-    a_cfid  = scan->getValue(RONDB_DIR_COL_CHILD_FID, nullptr);
-    a_ctype = scan->getValue(RONDB_DIR_COL_CHILD_TYPE, nullptr);
-
-    if (tx->execute(NdbTransaction::NoCommit) == -1) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "readdir exec");
-    }
-
-    /* Copy scan rows, then sort deterministically in memory. */
-    while ((next_rc = scan->nextResult(true)) == 0) {
-        uint64_t child_fid = a_cfid->u_64_value();
-        uint8_t child_type = (uint8_t)a_ctype->u_8_value();
-        const char *name_ptr = a_name->aRef();
-        uint32_t name_len;
-        rondb_readdir_row row;
-
-        if (name_ptr == nullptr) { continue; }
-
-        /* VARBINARY: first 1-2 bytes are length prefix. */
-        name_len = (uint32_t)(uint8_t)name_ptr[0];
-        name_ptr += 1;
-        row.child_fid = child_fid;
-        row.child_type = child_type;
-        row.name.assign(name_ptr, name_len);
-        rows.push_back(row);
-    }
-    if (next_rc != 1) {
-        err = scan->getNdbError();
-        scan->close();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "readdir nextResult");
-    }
-
-    scan->close();
-    rondb_get_ndb(state)->closeTransaction(tx);
-
-    std::sort(rows.begin(), rows.end(),
-              [](const rondb_readdir_row &lhs,
-                 const rondb_readdir_row &rhs) {
-                  return rondb_compare_name_bytes(lhs.name.data(),
-                                                  lhs.name.size(),
-                                                  rhs.name.data(),
-                                                  rhs.name.size()) < 0;
-              });
-
-    if (start_after != nullptr && start_after[0] != '\0') {
-        size_t sa_len = std::strlen(start_after);
-
-        for (const rondb_readdir_row &row : rows) {
-            if (rondb_compare_name_bytes(row.name.data(), row.name.size(),
-                                         start_after, sa_len) <= 0) {
-                continue;
-            }
-            if (cb(row.child_fid, row.child_type,
-                   row.name.data(), (uint32_t)row.name.size(), ctx) != 0) {
-                break;
-            }
-        }
-        return 0;
-    }
-
-    for (const rondb_readdir_row &row : rows) {
+    for (size_t i = first; i < end; i++) {
+        const rondb_readdir_row &row = rows[i];
         if (cb(row.child_fid, row.child_type,
                row.name.data(), (uint32_t)row.name.size(), ctx) != 0) {
             break;
         }
     }
     return 0;
+}
+
+int rondb_shim_dirent_name_for_child(void *handle,
+                                     uint64_t parent_fileid,
+                                     uint64_t child_fileid,
+                                     char *name_out,
+                                     size_t name_out_cap)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    std::vector<rondb_readdir_row> rows;
+    int rc;
+
+    if (state == nullptr || name_out == nullptr || name_out_cap == 0) {
+        return -1;
+    }
+
+    rc = rondb_readdir_scan_parent(state, parent_fileid, &rows,
+                                   "dirent_name_for_child startTx");
+    if (rc != 0) {
+        return rc;
+    }
+
+    for (const rondb_readdir_row &row : rows) {
+        if (row.child_fid != child_fileid) {
+            continue;
+        }
+        if (row.name.size() + 1 > name_out_cap) {
+            return -1;
+        }
+        std::memcpy(name_out, row.name.data(), row.name.size());
+        name_out[row.name.size()] = '\0';
+        return 0;
+    }
+    return 1;
 }
 
 /* -----------------------------------------------------------------------
@@ -3690,6 +3769,7 @@ struct rondb_readdir_plus_ino_set {
 int rondb_shim_ns_readdir_plus(void *handle,
                                uint64_t parent_fileid,
                                const char *start_after,
+                               uint32_t max_entries,
                                rondb_readdir_plus_cb cb, void *ctx)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
@@ -3784,41 +3864,27 @@ int rondb_shim_ns_readdir_plus(void *handle,
     }
     scan->close();
 
-    std::sort(rows.begin(), rows.end(),
-              [](const rondb_readdir_row &lhs,
-                 const rondb_readdir_row &rhs) {
-                  return rondb_compare_name_bytes(lhs.name.data(),
-                                                  lhs.name.size(),
-                                                  rhs.name.data(),
-                                                  rhs.name.size()) < 0;
-              });
+    if (rows.size() > 1) {
+        rondb_readdir_sort_rows(rows);
+    }
 
-    /* start_after filter: skip rows with name <= start_after. */
-    size_t first = 0;
-    if (start_after != nullptr && start_after[0] != '\0') {
-        size_t sa_len = std::strlen(start_after);
-        while (first < rows.size()) {
-            if (rondb_compare_name_bytes(rows[first].name.data(),
-                                         rows[first].name.size(),
-                                         start_after, sa_len) > 0) {
-                break;
-            }
-            first++;
+    {
+        size_t first = rondb_readdir_start_index(rows, start_after);
+        size_t end = rondb_readdir_end_index(first, rows.size(),
+                                             max_entries);
+
+        /* Empty result -- close the txn cleanly without the inode batch. */
+        if (first >= end) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return 0;
         }
-    }
 
-    /* Empty result -- close the txn cleanly without the inode batch. */
-    if (first >= rows.size()) {
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return 0;
-    }
-
-    /* Phase 2: queue one readTuple per dirent on INODES.  All ops are
-     * queued on the SAME tx so execute(Commit) below drives a single
-     * API->TC round-trip that fans out the reads across partitions. */
-    std::vector<rondb_readdir_plus_ino_set> ino_ops(rows.size() - first);
-    for (size_t i = first; i < rows.size(); i++) {
-        rondb_readdir_plus_ino_set &s = ino_ops[i - first];
+        /* Phase 2: queue one readTuple per dirent on INODES.  All ops are
+         * queued on the SAME tx so execute(Commit) below drives a single
+         * API->TC round-trip that fans out the reads across partitions. */
+        std::vector<rondb_readdir_plus_ino_set> ino_ops(end - first);
+        for (size_t i = first; i < end; i++) {
+            rondb_readdir_plus_ino_set &s = ino_ops[i - first];
 
         s.op = tx->getNdbOperation(ino_tbl);
         if (s.op == nullptr) {
@@ -3851,27 +3917,27 @@ int rondb_shim_ns_readdir_plus(void *handle,
         s.a_verf   = s.op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
         s.a_parent = s.op->getValue(RONDB_INO_COL_PARENT, nullptr);
         s.a_shard  = s.op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
-    }
-
-    /* AO_IgnoreError: a per-op 626 (row missing) no longer aborts the
-     * whole batch.  The txn-level error is only consulted as a secondary
-     * signal; per-op errors are re-checked below for the valid flag. */
-    if (tx->execute(NdbTransaction::Commit,
-                    NdbOperation::AO_IgnoreError) == -1) {
-        err = tx->getNdbError();
-        /* 626 at the txn level is expected when some ops missed --
-         * tolerate it and drive per-op inspection. */
-        if (err.code != 626) {
-            rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "readdir_plus batch exec");
         }
-    }
 
-    /* Phase 3: materialise each row into the 137-byte rondb_inode
-     * buffer and deliver it via the caller's callback.  Stopping early
-     * (cb returns non-zero) is honoured. */
-    for (size_t i = first; i < rows.size(); i++) {
-        rondb_readdir_plus_ino_set &s = ino_ops[i - first];
+        /* AO_IgnoreError: a per-op 626 (row missing) no longer aborts the
+         * whole batch.  The txn-level error is only consulted as a secondary
+         * signal; per-op errors are re-checked below for the valid flag. */
+        if (tx->execute(NdbTransaction::Commit,
+                        NdbOperation::AO_IgnoreError) == -1) {
+            err = tx->getNdbError();
+            /* 626 at the txn level is expected when some ops missed --
+             * tolerate it and drive per-op inspection. */
+            if (err.code != 626) {
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "readdir_plus batch exec");
+            }
+        }
+
+        /* Phase 3: materialise each row into the 137-byte rondb_inode
+         * buffer and deliver it via the caller's callback.  Stopping early
+         * (cb returns non-zero) is honoured. */
+        for (size_t i = first; i < end; i++) {
+            rondb_readdir_plus_ino_set &s = ino_ops[i - first];
         uint8_t inode_buf[RONDB_INODE_FIXED_SIZE];
         int inode_valid = 1;
 
@@ -3909,6 +3975,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
                inode_valid ? (uint32_t)RONDB_INODE_FIXED_SIZE : 0U,
                inode_valid, ctx) != 0) {
             break;
+        }
         }
     }
 

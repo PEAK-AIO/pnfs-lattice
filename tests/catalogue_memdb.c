@@ -543,12 +543,39 @@ static enum mds_status mem_ns_lookup(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+static enum mds_status mem_dirent_name_for_child(
+    struct mds_catalogue *cat, uint64_t parent, uint64_t child_fileid,
+    char *name_out, size_t name_out_len)
+{
+    struct memdb *m = cat->backend_private;
+
+    if (name_out == NULL || name_out_len == 0) {
+        return MDS_ERR_INVAL;
+    }
+
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_DIRENTS; i++) {
+        if (!m->dirents[i].used || m->dirents[i].parent != parent ||
+            m->dirents[i].child_fileid != child_fileid) {
+            continue;
+        }
+        (void)snprintf(name_out, name_out_len, "%s", m->dirents[i].name);
+        pthread_mutex_unlock(&m->lock);
+        return MDS_OK;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_ERR_NOTFOUND;
+}
+
 static enum mds_status mem_ns_readdir(struct mds_catalogue *cat,
     uint64_t parent, const char *start_after,
+    uint32_t max_entries,
     struct mds_cat_txn *txn, mds_readdir_cb cb, void *ctx)
 {
     (void)txn;
     struct memdb *m = cat->backend_private;
+    uint32_t emitted = 0;
+
     pthread_mutex_lock(&m->lock);
 
     for (uint32_t i = 0; i < MEMDB_MAX_DIRENTS; i++) {
@@ -562,6 +589,10 @@ static enum mds_status mem_ns_readdir(struct mds_catalogue *cat,
         snprintf(d.name, sizeof(d.name), "%s", m->dirents[i].name);
         pthread_mutex_unlock(&m->lock);
         if (cb(&d, ctx) != 0) return MDS_OK;
+        emitted++;
+        if (max_entries > 0 && emitted >= max_entries) {
+            return MDS_OK;
+        }
         pthread_mutex_lock(&m->lock);
     }
     pthread_mutex_unlock(&m->lock);
@@ -1611,6 +1642,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .ns_getattr      = mem_ns_getattr,
     .ns_setattr      = mem_ns_setattr,
     .ns_readdir      = mem_ns_readdir,
+    .dirent_name_for_child = mem_dirent_name_for_child,
     .ns_nlink_adjust = mem_ns_nlink_adjust,
     .alloc_fileid    = mem_alloc_fileid,
     .inode_put       = mem_inode_put,

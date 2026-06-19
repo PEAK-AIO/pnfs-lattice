@@ -616,13 +616,14 @@ cat_nlink_adjust(struct compound_data *cd, uint64_t fid,
  */
 static inline enum mds_status
 cat_readdir(struct compound_data *cd, uint64_t parent,
-	    const char *start_after, mds_readdir_cb cat_cb, void *ctx)
+	    const char *start_after, uint32_t max_entries,
+	    mds_readdir_cb cat_cb, void *ctx)
 {
 	if (cd->cat == NULL) {
 		return MDS_ERR_INVAL;
 	}
 	return mds_cat_ns_readdir(cd->cat, parent, start_after,
-				  NULL, cat_cb, ctx);
+				  max_entries, NULL, cat_cb, ctx);
 }
 
 /**
@@ -633,14 +634,14 @@ cat_readdir(struct compound_data *cd, uint64_t parent,
  */
 static inline enum mds_status
 cat_readdir_plus(struct compound_data *cd, uint64_t parent,
-		 const char *start_after,
+		 const char *start_after, uint32_t max_entries,
 		 mds_readdir_plus_cb cat_cb, void *ctx)
 {
 	if (cd->cat == NULL) {
 		return MDS_ERR_INVAL;
 	}
 	return mds_cat_ns_readdir_plus(cd->cat, parent, start_after,
-				       NULL, cat_cb, ctx);
+				       max_entries, NULL, cat_cb, ctx);
 }
 
 /* -- Inline data ------------------------------------------------------- */

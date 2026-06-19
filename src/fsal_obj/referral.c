@@ -256,7 +256,7 @@ enum mds_status referral_resolve_path(struct mds_catalogue *cat,
 			.found = false,
 		};
 		st = mds_cat_ns_readdir(cat, inode.parent_fileid,
-					NULL, NULL,
+					NULL, 0, NULL,
 					find_name_cb, &fna);
 		if (st != MDS_OK || !fna.found) {
 			return MDS_ERR_NOTFOUND;

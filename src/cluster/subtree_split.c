@@ -247,7 +247,7 @@ static bool subtree_meets_min_children(struct split_evaluator *eval,
 
     memset(&ctx, 0, sizeof(ctx));
     ctx.limit = required;
-    st = mds_cat_ns_readdir(eval->cat, dir_fileid, NULL, NULL,
+    st = mds_cat_ns_readdir(eval->cat, dir_fileid, NULL, 0, NULL,
                             count_child_cb, &ctx);
     if (st != MDS_OK) {
         return false;
