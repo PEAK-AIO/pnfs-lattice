@@ -750,7 +750,7 @@ struct mds_config {
     uint32_t            ds_gc_batch_size;
 
     /* Inode cache */
-    uint32_t            inode_cache_size;  /**< Max cached inodes (0 = default 16384). */
+    uint32_t            inode_cache_size;  /**< Max cached inodes (0 = disabled). */
 
     /* Dirent cache (positive + negative entries) */
     uint32_t            dirent_cache_size;     /**< Max cached dirents (0 = default 32768). */
@@ -795,7 +795,7 @@ struct mds_config {
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is
      * skipped -- in-memory tables are authoritative.  Safe for
-     * single-MDS deployments.  Default: true. */
+     * single-MDS deployments.  Default: false (RonDB write-through). */
     bool                transient_state_cache;
 
     /* Directory delegations (RFC 8881 S10.9, S18.39).

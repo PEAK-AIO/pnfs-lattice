@@ -662,7 +662,16 @@ enum nfs4_status op_open(struct compound_data *cd,
 				 * creator).  Do the deferred lookup now and
 				 * fall through to the open-existing path.
 				 * Still cheaper than the unconditional
-				 * pre-lookup for the common new-file case. */
+				 * pre-lookup for the common new-file case.
+				 *
+				 * Flush any negative dirent cache entry first:
+				 * under concurrent create another session may
+				 * have LOOKUP'd the name (NOTFOUND) before
+				 * this CREATE lost the race, and a blind
+				 * compound_lookup_local_child would return
+				 * NOENT instead of opening the winner. */
+				compound_dirent_invalidate(cd,
+					cd->current_fh.fileid, a->name);
 				st = compound_lookup_local_child(cd,
 					cd->current_fh.fileid,
 					a->name, &inode);

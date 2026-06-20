@@ -214,9 +214,9 @@ Use the async NDB batch pipeline for hot write paths.
 .B transient_state_cache
 .I bool
 (default
-.BR true ).
-Skip NDB write-through for open/layout state.  Turn off for strict
-cross-MDS state visibility at the cost of extra RTs per OPEN/LAYOUTGET.
+.BR false ).
+Skip NDB write-through for open/layout state.  Turn on for single-MDS
+lab performance at the cost of in-memory-only open/layout state.
 .SS "Replication and failover"
 .TP
 .B repl_mode
@@ -330,8 +330,11 @@ compatibility.
 range
 .I "0..1000000"
 (default
-.BR 16384 ).
-Entries in the in-memory inode cache.
+.BR 0 ,
+disabled).
+Entries in the in-memory inode cache.  Set to e.g.
+.BR 16384
+to enable the previous lab default.
 .TP
 .B dirent_cache_size
 .IR uint ,

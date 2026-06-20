@@ -1179,27 +1179,36 @@ enum nfs4_status op_create(struct compound_data *cd,
 				      NOTIFY4_ADD_ENTRY,
 				      a->name, NULL);
 
-	/* Capture parent change_before so encode_res_create() can
-	 * emit a correct change_info4 without reading from the
-	 * union-aliased r->res.change_info.{before,after} fields,
-	 * which would overlap r->res.create.inode and therefore
-	 * carry bogus values derived from the child inode we are
-	 * about to write (e.g. (parent.change_before, mode << 32 |
-	 * type) seen on the wire pre-fix).  parent_change_after is
-	 * captured after cat_create() succeeds. */
+	/* Parent must exist and be a directory before CREATE (RFC 8881
+	 * §18.16.4).  Also capture change_before for encode_res_create()
+	 * without reading from the union-aliased r->res.change_info
+	 * fields, which overlap r->res.create.inode. */
 	uint64_t parent_change_before = 0;
 	{
 		struct mds_inode create_parent;
-		if (compound_inode_get(cd, cd->current_fh.fileid,
-				       &create_parent) == MDS_OK) {
-			parent_change_before = create_parent.change;
+
+		st = compound_inode_get(cd, cd->current_fh.fileid,
+					&create_parent);
+		if (st != MDS_OK) {
+			return mds_status_to_nfs4(st);
 		}
+		if (create_parent.type != MDS_FTYPE_DIR) {
+			return NFS4ERR_NOTDIR;
+		}
+		parent_change_before = create_parent.change;
 	}
 
 	st = cat_create(cd, cd->current_fh.fileid, a->name,
 			   a->type, a->mode, eff_uid, eff_gid,
 			   cd->prealloc,
 		       &res->res.create.inode);
+	if (st == MDS_ERR_EXISTS) {
+		/* Concurrent mkdir/create: flush any negative dirent
+		 * cache entry so subsequent LOOKUPs on this client
+		 * session see the committed object. */
+		compound_dirent_invalidate(cd, cd->current_fh.fileid,
+					   a->name);
+	}
 	if (st != MDS_OK) {
 		return mds_status_to_nfs4(st);
 	}

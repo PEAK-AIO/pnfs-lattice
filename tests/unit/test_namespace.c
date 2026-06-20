@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "pnfs_mds.h"
 #include "test_helpers.h"
@@ -625,6 +626,107 @@ static void test_readdir_notdir(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_concurrent_mkdir -- parallel directory creates under one parent
+ * ----------------------------------------------------------------------- */
+
+#define CONC_MKDIR_THREADS 32
+
+struct conc_mkdir_shared_arg {
+	struct mds_catalogue *db;
+	uint64_t              parent_fid;
+	uint32_t              idx;
+	enum mds_status       result;
+};
+
+static void *conc_mkdir_shared_worker(void *vp)
+{
+	struct conc_mkdir_shared_arg *a = vp;
+	struct mds_inode out;
+
+	a->result = mds_cat_ns_create(
+		a->db, NULL, a->parent_fid, "shared",
+		MDS_FTYPE_DIR, 0755, 0, 0, NULL, &out);
+	return NULL;
+}
+
+struct conc_mkdir_unique_arg {
+	struct mds_catalogue *db;
+	uint64_t              parent_fid;
+	uint32_t              idx;
+	enum mds_status       result;
+};
+
+static void *conc_mkdir_unique_worker(void *vp)
+{
+	struct conc_mkdir_unique_arg *a = vp;
+	struct mds_inode out;
+	char name[32];
+
+	(void)snprintf(name, sizeof(name), "rank%u", a->idx);
+	a->result = mds_cat_ns_create(
+		a->db, NULL, a->parent_fid, name,
+		MDS_FTYPE_DIR, 0755, 0, 0, NULL, &out);
+	return NULL;
+}
+
+static void test_concurrent_mkdir(void)
+{
+	struct mds_catalogue *db;
+	struct mds_inode parent;
+	char *path;
+	pthread_t tid[CONC_MKDIR_THREADS];
+	struct conc_mkdir_unique_arg uargs[CONC_MKDIR_THREADS];
+	struct conc_mkdir_shared_arg sargs[CONC_MKDIR_THREADS];
+	uint32_t ok_count = 0;
+	uint32_t exist_count = 0;
+	uint32_t i;
+
+	db = open_test_db(&path);
+
+	ASSERT_EQ(mds_cat_ns_create(db, NULL, MDS_FILEID_ROOT, "parent",
+				    MDS_FTYPE_DIR, 0755, 0, 0,
+				    NULL, &parent), MDS_OK);
+
+	/* Unique names: every thread succeeds. */
+	for (i = 0; i < CONC_MKDIR_THREADS; i++) {
+		uargs[i].db = db;
+		uargs[i].parent_fid = parent.fileid;
+		uargs[i].idx = i;
+		uargs[i].result = MDS_ERR_IO;
+		ASSERT_EQ(pthread_create(&tid[i], NULL,
+					 conc_mkdir_unique_worker,
+					 &uargs[i]), 0);
+	}
+	for (i = 0; i < CONC_MKDIR_THREADS; i++) {
+		pthread_join(tid[i], NULL);
+		ASSERT_EQ(uargs[i].result, MDS_OK);
+	}
+
+	/* Shared name: exactly one winner, rest EXISTS. */
+	for (i = 0; i < CONC_MKDIR_THREADS; i++) {
+		sargs[i].db = db;
+		sargs[i].parent_fid = parent.fileid;
+		sargs[i].idx = i;
+		sargs[i].result = MDS_ERR_IO;
+		ASSERT_EQ(pthread_create(&tid[i], NULL,
+					 conc_mkdir_shared_worker,
+					 &sargs[i]), 0);
+	}
+	for (i = 0; i < CONC_MKDIR_THREADS; i++) {
+		pthread_join(tid[i], NULL);
+		if (sargs[i].result == MDS_OK) {
+			ok_count++;
+		} else if (sargs[i].result == MDS_ERR_EXISTS) {
+			exist_count++;
+		}
+	}
+	ASSERT_EQ(ok_count, (uint32_t)1);
+	ASSERT_EQ(exist_count, (uint32_t)(CONC_MKDIR_THREADS - 1));
+
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -647,6 +749,7 @@ int main(void)
 	RUN_TEST(test_readdir_pagination);
 	RUN_TEST(test_readdir_pagination_difflen);
 	RUN_TEST(test_readdir_notdir);
+	RUN_TEST(test_concurrent_mkdir);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;

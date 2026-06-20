@@ -177,8 +177,10 @@ static void test_promoted_knob_defaults(void)
     ASSERT_EQ((int)cfg.dir_deleg_recall_timeout_ms, 5000);
     ASSERT_EQ((int)cfg.metrics_http_port, 9090);
     ASSERT_EQ((int)cfg.inline_max_size, 65536);
+    ASSERT_EQ((int)cfg.inode_cache_size, 0);
     ASSERT_EQ((int)cfg.dirent_cache_size, 32768);
     ASSERT_EQ((int)cfg.negative_cache_ttl_ms, 5000);
+    ASSERT_EQ(cfg.transient_state_cache, false);
     unlink(path);
 }
 

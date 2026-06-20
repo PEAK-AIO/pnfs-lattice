@@ -248,8 +248,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Cosmetic: keep referral junctions visible in READDIR by default. */
     cfg->hide_referral_junctions = false;
 
-    /* Transient state caching (default: on for single-MDS perf) */
-    cfg->transient_state_cache = true;
+    /* Transient state caching (default: off -- open/layout state
+     * write-through to RonDB for cross-MDS correctness). */
+    cfg->transient_state_cache = false;
 
     /* Live DS capacity probe interval (ms).  60s by default. */
     cfg->ds_capacity_poll_ms = 60000;
@@ -262,6 +263,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * no INI parser, so operators could not actually tune them.
      * Apply sane defaults here; INI keys override below. */
     cfg->inline_max_size = 65536;          /* 64 KiB */
+    cfg->inode_cache_size = 0;             /* 0 = disabled; set >0 to enable */
     cfg->dirent_cache_size = 32768;
     cfg->negative_cache_ttl_ms = 5000;
 

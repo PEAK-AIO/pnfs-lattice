@@ -598,9 +598,11 @@ enum mds_status catalogue_rondb_ns_create(
 	 * via interpretedUpdateTuple -- immune to read-modify-write race.
 	 *
 	 * Retry on transient NDB errors (rc == -2): lock contention,
-	 * temporary resource exhaustion, node recovery.  Up to 3
-	 * attempts with 500us backoff between retries. */
-	for (int attempt = 0; attempt < 3; attempt++) {
+	 * temporary resource exhaustion, node recovery.  Up to 5
+	 * attempts with 500us backoff between retries.  Extra attempts
+	 * cover concurrent mkdir bursts on the same parent partition
+	 * under mdtest-style load. */
+	for (int attempt = 0; attempt < 5; attempt++) {
 		rc = rondb_shim_ns_create(h, parent_fileid, name,
 					  child_buf, RONDB_INODE_FIXED_SIZE,
 					  parent_nlink_delta,

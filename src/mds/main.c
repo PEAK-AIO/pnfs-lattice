@@ -1408,22 +1408,30 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		/* Global inode cache (cross-compound LRU). */
+		/* Global inode cache (cross-compound LRU).  Disabled when
+		 * inode_cache_size=0 (the default).  Operators who want
+		 * the previous lab default set inode_cache_size=16384. */
 		{
 			struct inode_cache *icache = NULL;
-			uint32_t icache_size = cfg.inode_cache_size > 0
-				? cfg.inode_cache_size : 16384;
-			if (inode_cache_init(icache_size, &icache) == 0) {
-				inode_cache_set_ttl_ms(icache,
-						       cache_pos_ttl_ms);
-				MDS_LOG_INFO(LOG_COMP_MDS,
-					"inode cache active "
-					"(max=%u entries, ttl=%ums)",
-					(unsigned)icache_size,
-					(unsigned)cache_pos_ttl_ms);
+
+			if (cfg.inode_cache_size > 0) {
+				if (inode_cache_init(cfg.inode_cache_size,
+						     &icache) == 0) {
+					inode_cache_set_ttl_ms(icache,
+							       cache_pos_ttl_ms);
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"inode cache active "
+						"(max=%u entries, ttl=%ums)",
+						(unsigned)cfg.inode_cache_size,
+						(unsigned)cache_pos_ttl_ms);
+				} else {
+					MDS_LOG_WARN(LOG_COMP_MDS,
+						"inode_cache_init failed");
+				}
 			} else {
-				MDS_LOG_WARN(LOG_COMP_MDS,
-					"inode_cache_init failed");
+				MDS_LOG_INFO(LOG_COMP_MDS,
+					"inode cache disabled "
+					"(inode_cache_size=0)");
 			}
 			rpc_cfg.icache = icache;
 
