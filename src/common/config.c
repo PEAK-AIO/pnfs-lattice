@@ -992,8 +992,12 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         } else if (strcmp(key, "ndb_conn_pool_size") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
-            if (v > 0 && v <= 32) {
+            if (v > 0 && v <= 64) {
                 cfg->ndb_conn_pool_size = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: ndb_conn_pool_size=%lu out of range "
+                    "(1..64); using default\n", v);
             }
         } else if (strcmp(key, "ndb_async_writes") == 0) {
             cfg->ndb_async_writes = (strcmp(val, "true") == 0 ||
@@ -1205,16 +1209,16 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Auto-size NDB connection pool to match worker_threads when not
      * explicitly set.  RonDB catalogue dispatch is now concurrent
      * (no single-writer serialization), so each worker thread may
-     * need its own NDB connection under peak load.
+     * need its own NDB connection under peak load.  Capped at
+     * NDB_CONN_POOL_MAX (64) in the shim.
      *
-     * Default: min(worker_threads, 16).  Override with
-     * ndb_conn_pool_size=N in mds.conf (max 64).
-     * For 64-MDS clusters, ensure RonDB config.ini has enough
+     * Override with ndb_conn_pool_size=N in mds.conf.
+     * For multi-MDS clusters, ensure RonDB config.ini has enough
      * [api] slots: total = num_MDS x ndb_conn_pool_size. */
     if (cfg->ndb_conn_pool_size == 0) {
         uint32_t wt = cfg->worker_threads;
         if (wt == 0) { wt = 4; }
-        cfg->ndb_conn_pool_size = (wt <= 16) ? wt : 16;
+        cfg->ndb_conn_pool_size = (wt <= 64) ? wt : 64;
     }
 
     return MDS_OK;
