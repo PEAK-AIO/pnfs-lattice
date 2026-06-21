@@ -886,6 +886,23 @@ struct mds_config {
     uint32_t            stripe_lease_duration_ms;
 
     /*
+     * RFC 8435 §2.2.1: DS synthetic-ID secret.
+     *
+     * When ds_synth_secret_file is non-empty, the daemon loads a
+     * 32-byte binary key at startup and uses HMAC-SHA256 to derive
+     * per-(fileid, stripe, mirror) synthetic uid values for
+     * ffl_user in LAYOUTGET and for chown on the DS backing file.
+     * This implements the loosely-coupled model's per-grant
+     * credential isolation.
+     *
+     * When empty (the default), the daemon falls back to the
+     * caller's real uid -- the pre-patch behaviour.
+     */
+    char                ds_synth_secret_file[256];
+    uint8_t             ds_synth_secret[32];
+    uint32_t            ds_synth_secret_len; /**< 0 = unconfigured, 32 = active */
+
+    /*
      * Logging (src/common/log.c).  log_file is the diagnostics output
      * path; an empty string sends output to stderr.  log_level_global
      * is the default verbosity (an enum log_level value) applied to

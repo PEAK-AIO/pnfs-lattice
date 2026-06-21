@@ -38,6 +38,7 @@
 #include "nfs4_cb.h"
 #include "rpc_server.h"
 #include "mds_shard.h"
+#include "proxy_io.h"
 #include "mds_log.h"
 
 /* Default revoke timeout -- used as CB send timeout per client. */
@@ -67,6 +68,7 @@ struct layout_recall {
      * reject the recall.
      */
     uint32_t                 default_layout_type;
+    struct mds_proxy_ctx    *proxy;    /* Optional: for DS-side fencing */
 };
 
 /* -----------------------------------------------------------------------
@@ -455,6 +457,63 @@ void layout_recall_set_shard(struct layout_recall *lr,
     } else {
         lr->cq = NULL;
     }
+}
+
+void layout_recall_set_proxy(struct layout_recall *lr,
+                             struct mds_proxy_ctx *proxy)
+{
+    if (lr != NULL) {
+        lr->proxy = proxy;
+    }
+}
+
+/*
+ * RFC 8435 §14: best-effort DS-side fencing for a fileid.
+ *
+ * Reads the stripe map and chowns every DS backing file to the
+ * fencing uid/gid so that a revoked client's stale credentials
+ * no longer pass the DS's AUTH_SYS check.  Failures are logged
+ * but never propagated — fencing is belt-and-braces alongside
+ * the authoritative layout-state delete.
+ */
+static void fence_ds_file_for_fileid(
+    struct mds_proxy_ctx *proxy,
+    struct mds_catalogue *cat,
+    uint64_t fileid)
+{
+    struct mds_ds_map_entry *entries = NULL;
+    uint32_t sc = 0, su = 0, mc = 0;
+    enum mds_status st;
+
+    if (proxy == NULL || cat == NULL) {
+        return;
+    }
+
+    st = mds_cat_stripe_map_get(cat, fileid, &sc, &su, &mc, &entries);
+    if (st != MDS_OK || entries == NULL || sc == 0 || mc == 0) {
+        /* No stripe map (file already deleted or never striped). */
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "fence: no stripe map for fileid=%llu (st=%d)",
+            (unsigned long long)fileid, (int)st);
+        free(entries);
+        return;
+    }
+
+    uint32_t total = sc * mc;
+    for (uint32_t idx = 0; idx < total; idx++) {
+        uint32_t stripe = idx / mc;
+        uint32_t mirror = idx % mc;
+        enum mds_status fst = mds_proxy_fence_ds_file(
+            proxy, entries[idx].ds_id, fileid, stripe, mirror);
+        if (fst != MDS_OK) {
+            MDS_LOG_WARN(LOG_COMP_MDS,
+                "fence: chown failed ds=%u fid=%llu s=%u m=%u: %d",
+                (unsigned)entries[idx].ds_id,
+                (unsigned long long)fileid,
+                stripe, mirror, (int)fst);
+        }
+    }
+    free(entries);
 }
 
 int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id)
@@ -1173,6 +1232,14 @@ static void byte_range_revoke_holders(struct layout_recall *lr,
         revoke_layout(lr, holders[i].stateid.other,
                       holders[i].clientid, holders[i].fileid, 0);
         layout_seqid_remove(holders[i].stateid.other);
+
+        /* RFC 8435 §14: fence the DS backing files so the revoked
+         * client's stale credentials fail at the DS POSIX layer. */
+        if (lr->proxy != NULL) {
+            fence_ds_file_for_fileid(lr->proxy,
+                                    (struct mds_catalogue *)lr->cat,
+                                    holders[i].fileid);
+        }
     }
 }
 

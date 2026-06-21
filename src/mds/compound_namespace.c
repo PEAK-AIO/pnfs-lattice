@@ -1551,6 +1551,30 @@ enum nfs4_status op_remove(struct compound_data *cd,
 			}
 		}
 
+		/* RFC 8435 §14: fence DS backing files so a non-
+		 * cooperating client cannot continue I/O after the
+		 * layout is revoked and the inode is about to be
+		 * deleted.  Best-effort: do not fail the remove. */
+		if (cd->proxy != NULL && cd->cat != NULL) {
+			struct mds_ds_map_entry *fe = NULL;
+			uint32_t fsc = 0, fsu = 0, fmc = 0;
+
+			if (mds_cat_stripe_map_get(cd->cat, rm_fileid,
+					&fsc, &fsu, &fmc, &fe) == MDS_OK &&
+			    fe != NULL) {
+				uint32_t ftot = fsc * fmc;
+				for (uint32_t fi = 0; fi < ftot; fi++) {
+					(void)mds_proxy_fence_ds_file(
+						cd->proxy,
+						fe[fi].ds_id,
+						rm_fileid,
+						fi / fmc,
+						fi % fmc);
+				}
+				free(fe);
+			}
+		}
+
 		/*
 		 * Free any in-memory delegation grants that were recorded
 		 * for this fileid by a prior op_open.  This is done before

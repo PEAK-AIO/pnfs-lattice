@@ -35,6 +35,7 @@
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
 #include "lease_table.h"
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
+#include "synth_uid.h"           /* RFC 8435 §2.2.1 synthetic UID derivation */
 #include "mds_op_metrics.h" /* CAT_TIMED-equivalent for direct fused call */
 
 
@@ -2062,19 +2063,27 @@ fill_layoutget_result:
 		/*
 		 * RFC 8435 S5.1: ffl_user / ffl_group identify the user
 		 * and group the DS must use to access the data on behalf
-		 * of the client.  Pynfs FFLA1 (testFlexLayoutTestAccess)
-		 * requires READ vs RW grants to advertise *different*
-		 * uids and the *same* gid -- the canonical RFC 8435
-		 * pattern is to use squash semantics for READ grants
-		 * (uid 0 / nobody) and the AUTH_SYS caller's uid for RW
-		 * grants, while group identity stays tied to the inode.
-		 * Plain inodes pre-feature shipped with both fields = 0;
-		 * keying off a->iomode preserves that for any client that
-		 * never asks for a READ-only grant. */
+		 * of the client.
+		 *
+		 * When a DS synthetic-ID secret is configured, ffl_user
+		 * is derived per-(fileid, stripe, mirror) via HMAC-SHA256
+		 * so two different clients always present the same
+		 * synthetic credential for the same stripe, and the DS
+		 * POSIX layer provides per-file isolation.  The scalar
+		 * ffl_user_value below is only used when no secret is
+		 * configured (legacy real-uid path); when a secret IS
+		 * configured, the per-entry loops below compute the
+		 * synthetic uid inline.
+		 *
+		 * ffl_group stays tied to the inode gid in both modes. */
+		const bool use_synth_uid =
+			(cd->cfg != NULL &&
+			 cd->cfg->ds_synth_secret_len > 0);
 		const uint32_t ffl_user_value =
-			(a->iomode == LAYOUTIOMODE4_READ)
+			use_synth_uid ? 0U :
+			((a->iomode == LAYOUTIOMODE4_READ)
 				? cd->cred_uid
-				: 0U;
+				: 0U);
 		const uint32_t ffl_group_value = (uint32_t)inode.gid;
 
 		/*
@@ -2096,12 +2105,22 @@ fill_layoutget_result:
 				const uint32_t mirror = idx % mirror_count;
 				enum mds_status own_st;
 
-				own_st = mds_proxy_set_ds_owner_explicit(
-					cd->proxy, entries[idx].ds_id,
-					cd->current_fh.fileid,
-					stripe, mirror,
-					(uid_t)ffl_user_value,
-					(gid_t)ffl_group_value);
+				if (use_synth_uid) {
+					own_st = mds_proxy_set_ds_owner(
+						cd->proxy,
+						entries[idx].ds_id,
+						cd->current_fh.fileid,
+						stripe, mirror,
+						cd->cfg->ds_synth_secret,
+						cd->cfg->ds_synth_secret_len);
+				} else {
+					own_st = mds_proxy_set_ds_owner_explicit(
+						cd->proxy, entries[idx].ds_id,
+						cd->current_fh.fileid,
+						stripe, mirror,
+						(uid_t)ffl_user_value,
+						(gid_t)ffl_group_value);
+				}
 				if (own_st != MDS_OK) {
 					MDS_LOG_WARN(LOG_COMP_NFS,
 						"layout chown failed "
@@ -2151,7 +2170,13 @@ fill_layoutget_result:
 				       r->ds[k].nfs_fh,
 				       r->ds[k].nfs_fh_len);
 				r->ff_mirrors[0].ds[k].ffl_user =
-					ffl_user_value;
+					use_synth_uid
+					? synth_uid_from_secret(
+						cd->cfg->ds_synth_secret,
+						cd->cfg->ds_synth_secret_len,
+						cd->current_fh.fileid,
+						k, 0)
+					: ffl_user_value;
 				r->ff_mirrors[0].ds[k].ffl_group =
 					ffl_group_value;
 			}
@@ -2182,7 +2207,14 @@ fill_layoutget_result:
 				       r->ds[m].nfs_fh,
 				       r->ds[m].nfs_fh_len);
 				r->ff_mirrors[m].ds[0].ffl_user =
-					ffl_user_value;
+					use_synth_uid
+					? synth_uid_from_secret(
+						cd->cfg->ds_synth_secret,
+						cd->cfg->ds_synth_secret_len,
+						cd->current_fh.fileid,
+						m / mirror_count,
+						m % mirror_count)
+					: ffl_user_value;
 				r->ff_mirrors[m].ds[0].ffl_group =
 					ffl_group_value;
 			}
@@ -2327,6 +2359,32 @@ enum nfs4_status op_layoutreturn(struct compound_data *cd,
 				cd->current_fh.fileid,
 				NULL, 0);
 		}
+
+		/* RFC 8435 §14: fence DS backing files so the client's
+		 * stale credentials fail at the DS POSIX layer.  Best-
+		 * effort: a chown failure does not fail LAYOUTRETURN. */
+		if (cd->proxy != NULL && cd->cat != NULL) {
+			struct mds_ds_map_entry *lr_entries = NULL;
+			uint32_t lr_sc = 0, lr_su = 0, lr_mc = 0;
+
+			if (mds_cat_stripe_map_get(cd->cat,
+					cd->current_fh.fileid,
+					&lr_sc, &lr_su, &lr_mc,
+					&lr_entries) == MDS_OK &&
+			    lr_entries != NULL) {
+				uint32_t lr_total = lr_sc * lr_mc;
+				for (uint32_t li = 0; li < lr_total; li++) {
+					(void)mds_proxy_fence_ds_file(
+						cd->proxy,
+						lr_entries[li].ds_id,
+						cd->current_fh.fileid,
+						li / lr_mc,
+						li % lr_mc);
+				}
+				free(lr_entries);
+			}
+		}
+
 		/* Drop the in-memory seqid record so a subsequent
 		 * LAYOUTGET/RETURN on the same `other` is treated as
 		 * a brand-new layout, not a renewal. */

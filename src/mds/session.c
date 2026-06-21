@@ -77,8 +77,9 @@ struct session_table {
 	/* Lease expiry reaper (R2.2). */
 	pthread_t             reaper_tid;
 	_Atomic int           reaper_running;
-	struct open_state_table *ot; /* For cleanup on expiry */
-	struct lock_table *lt; /* For cleanup on expiry */
+    struct open_state_table *ot; /* For cleanup on expiry */
+    struct lock_table *lt; /* For cleanup on expiry */
+    struct mds_proxy_ctx *proxy; /* For DS-side fencing on expiry (P0.5) */
 };
 
 /* -----------------------------------------------------------------------
@@ -1889,5 +1890,11 @@ void session_table_set_lt(struct session_table *st,
                           struct lock_table *lt)
 {
     if (st != NULL) { st->lt = lt; }
+}
+
+void session_table_set_proxy(struct session_table *st,
+                             struct mds_proxy_ctx *proxy)
+{
+    if (st != NULL) { st->proxy = proxy; }
 }
 

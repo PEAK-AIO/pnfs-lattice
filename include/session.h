@@ -745,3 +745,8 @@ void session_table_set_ot(struct session_table *st,
                           struct open_state_table *ot);
 void session_table_set_lt(struct session_table *st,
                           struct lock_table *lt);
+
+struct mds_proxy_ctx;
+/** Inject proxy context for DS-side fencing on lease expiry (P0.5). */
+void session_table_set_proxy(struct session_table *st,
+                             struct mds_proxy_ctx *proxy);

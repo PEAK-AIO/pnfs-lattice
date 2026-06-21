@@ -1135,6 +1135,10 @@ int main(int argc, char *argv[])
 		 * this binding the recall coordinator falls back to
 		 * authoritative-revoke-only mode. */
 		layout_recall_set_session_table(lr, session_tbl);
+		/* RFC 8435 §14: proxy context for DS-side fencing
+		 * on layout revocation.  Without this, revocation
+		 * is callback-only. */
+		layout_recall_set_proxy(lr, proxy);
 		if (cfg.ds_heartbeat_ms == 0) {
 			MDS_LOG_INFO(LOG_COMP_MDS,
 				"DS health monitoring disabled "

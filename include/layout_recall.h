@@ -202,6 +202,22 @@ struct mds_shard;
 void layout_recall_set_shard(struct layout_recall *lr,
                              const struct mds_shard *shard);
 
+struct mds_proxy_ctx;
+
+/**
+ * Inject proxy I/O context for DS-side fencing.
+ *
+ * When set, the revoke path (byte_range_revoke_holders) chowns the
+ * DS backing file to the fencing uid/gid after revoking the layout
+ * state, per RFC 8435 §14.  Without this binding, revocation is
+ * callback-only and a non-cooperating client can continue I/O.
+ *
+ * @param lr     Layout recall handle (NULL tolerated).
+ * @param proxy  Proxy context (NULL to disable fencing).
+ */
+void layout_recall_set_proxy(struct layout_recall *lr,
+                             struct mds_proxy_ctx *proxy);
+
 /* -----------------------------------------------------------------------
  * Layout-stateid seqid tracker (compound_layout.c).
  *

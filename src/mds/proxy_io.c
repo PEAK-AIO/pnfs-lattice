@@ -43,6 +43,7 @@
 #include "ds_nfs_rpc.h"
 #include "mds_op_metrics.h"
 #include "mds_log.h"
+#include "synth_uid.h"
 
 /* -----------------------------------------------------------------------
  * Internal types
@@ -1927,6 +1928,51 @@ enum mds_status mds_proxy_set_ds_owner_explicit(
      * compound_layout.c::op_layoutget().
      */
     if (chown(file_path, uid, gid) != 0) {
+        return MDS_ERR_IO;
+    }
+
+    return MDS_OK;
+}
+
+/*
+ * RFC 8435 §2.2.1: HMAC-derived synthetic-owner chown.
+ *
+ * Derives uid from HMAC-SHA256(secret, fileid||stripe||mirror) and
+ * chowns the DS data file.  The uid is clamped to [0x40000000,
+ * 0x7FFFFFFF] so it cannot collide with real local users.
+ * gid is set to 0 (synthetic isolation is uid-only; gid namespace
+ * is less sensitive per the RFC).
+ */
+enum mds_status mds_proxy_set_ds_owner(
+    const struct mds_proxy_ctx *ctx,
+    uint32_t ds_id, uint64_t fileid,
+    uint32_t stripe, uint32_t mirror,
+    const uint8_t *secret, uint32_t secret_len)
+{
+    const char *mount;
+    char file_path[MDS_MAX_PATH];
+    uint32_t synth_uid;
+
+    if (ctx == NULL || secret == NULL || secret_len == 0) {
+        return MDS_ERR_INVAL;
+    }
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
+    mount = find_mount(ctx, ds_id);
+    if (mount == NULL) {
+        return MDS_ERR_NOTFOUND;
+    }
+
+    if (build_ds_path(file_path, sizeof(file_path), mount,
+                      fileid, stripe, mirror) != 0) {
+        return MDS_ERR_IO;
+    }
+
+    synth_uid = synth_uid_from_secret(secret, secret_len,
+                                      fileid, stripe, mirror);
+
+    if (chown(file_path, (uid_t)synth_uid, (gid_t)0) != 0) {
         return MDS_ERR_IO;
     }
 

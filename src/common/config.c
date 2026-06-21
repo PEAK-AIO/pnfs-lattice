@@ -1106,6 +1106,11 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             (void)snprintf(cfg->catalog_delta_log_path,
                 sizeof(cfg->catalog_delta_log_path), "%s", val);
 
+        /* DS synthetic-ID secret (RFC 8435 §2.2.1) */
+        } else if (strcmp(key, "ds_synth_secret_file") == 0) {
+            (void)snprintf(cfg->ds_synth_secret_file,
+                sizeof(cfg->ds_synth_secret_file), "%s", val);
+
         /* Stripe lease */
         } else if (strcmp(key, "stripe_lease_duration_ms") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
@@ -1190,6 +1195,28 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             "ERROR: catalog_compare_reads=true requires "
             "catalog_image_mode=shadow|compare|primary\n");
         return MDS_ERR_INVAL;
+    }
+
+    /* Load DS synthetic-ID secret if configured. */
+    if (cfg->ds_synth_secret_file[0] != '\0') {
+        FILE *sf = fopen(cfg->ds_synth_secret_file, "rb");
+        if (sf == NULL) {
+            (void)fprintf(stderr,
+                "ERROR: cannot open ds_synth_secret_file '%s'\n",
+                cfg->ds_synth_secret_file);
+            return MDS_ERR_IO;
+        }
+        size_t nr = fread(cfg->ds_synth_secret,
+                          1, sizeof(cfg->ds_synth_secret), sf);
+        (void)fclose(sf);
+        if (nr != sizeof(cfg->ds_synth_secret)) {
+            (void)fprintf(stderr,
+                "ERROR: ds_synth_secret_file '%s' must be exactly "
+                "32 bytes (got %zu)\n",
+                cfg->ds_synth_secret_file, nr);
+            return MDS_ERR_INVAL;
+        }
+        cfg->ds_synth_secret_len = (uint32_t)sizeof(cfg->ds_synth_secret);
     }
 
     /* Auto-size prealloc_pool_size based on ds_count, but only if
