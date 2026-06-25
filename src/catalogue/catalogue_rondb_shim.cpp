@@ -8670,41 +8670,27 @@ int rondb_shim_journal_scan(void *handle,
  * covers scan-by-clientid via an ordered index on the base table.
  * ----------------------------------------------------------------------- */
 
-int rondb_shim_layout_state_put(void *handle,
-                                const uint8_t stateid_other[12],
-                                uint64_t clientid, uint64_t fileid,
-                                uint32_t iomode, uint64_t offset,
-                                uint64_t length, uint32_t seqid,
-                                const uint32_t *ds_ids, uint32_t ds_count)
+static int rondb_shim_layout_state_put_once(
+    void *handle,
+    const uint8_t sid_enc[14], uint32_t sid_enc_len,
+    uint64_t clientid, uint64_t fileid,
+    uint32_t iomode, uint64_t offset, uint64_t length, uint32_t seqid,
+    const uint32_t *ds_ids, uint32_t ds_count)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
-    const NdbDictionary::Table *ls_tbl, *lbf_tbl, *dli_tbl;
+    const NdbDictionary::Table *ls_tbl, *lbf_tbl;
     NdbTransaction *tx;
     NdbOperation *op;
     NdbError err;
-    uint8_t sid_enc[14];
-    uint32_t sid_enc_len = 0;
 
-    if (state == nullptr || stateid_other == nullptr) { return -1; }
-    if (rondb_encode_varbinary_value(stateid_other, 12, 1U,
-                                     sid_enc, sizeof(sid_enc),
-                                     &sid_enc_len) != 0) {
-        return -1;
-    }
-
+    if (state == nullptr) { return -1; }
     dict = rondb_get_dictionary(state);
     if (dict == nullptr) { return -1; }
     ls_tbl  = dict->getTable(RONDB_TBL_LAYOUT_STATE);
     lbf_tbl = dict->getTable(RONDB_TBL_LAYOUT_BY_FILE);
-    dli_tbl = dict->getTable(RONDB_TBL_DS_LAYOUT_IDX);
-    if (ls_tbl == nullptr || lbf_tbl == nullptr ||
-        dli_tbl == nullptr) {
-        return -1;
-    }
+    if (ls_tbl == nullptr || lbf_tbl == nullptr) { return -1; }
 
-    /* Hint on fileid partition: layout_state + layout_by_file +
-     * ds_layout_idx all live there in v6. */
     {
         uint8_t pk_buf[8];
         fdb_put_u64(pk_buf, fileid);
@@ -8712,18 +8698,16 @@ int rondb_shim_layout_state_put(void *handle,
             ls_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "layout_put startTx");
+        err = rondb_get_ndb(state)->getNdbError();
+        if (err.code == 266 || err.code == 274) { return err.code; }
+        return rondb_report_error(err, "layout_put startTx");
     }
 
-    /* 1. Insert/write layout_state.
-     * PK = (fileid, stateid_other) -- both via equal(). */
     op = tx->getNdbOperation(ls_tbl);
-    if (op == nullptr) { goto layout_put_err; }
+    if (op == nullptr) { goto layout_put_once_err; }
     op->writeTuple();
     (void)rondb_equal_u64(op, RONDB_LS_COL_FILEID, fileid);
-    op->equal(RONDB_LS_COL_STATEID,
-              (const char *)sid_enc, sid_enc_len);
+    op->equal(RONDB_LS_COL_STATEID, (const char *)sid_enc, sid_enc_len);
     (void)rondb_set_value_u64(op, RONDB_LS_COL_CLIENTID, clientid);
     op->setValue(RONDB_LS_COL_IOMODE, iomode);
     (void)rondb_set_value_u64(op, RONDB_LS_COL_OFFSET, offset);
@@ -8734,18 +8718,67 @@ int rondb_shim_layout_state_put(void *handle,
         (void)rondb_set_value_u64(op, RONDB_LS_COL_GRANT_EPOCH, (Uint64)0);
     }
 
-    /* 2. Insert/write layout_by_file index. */
     op = tx->getNdbOperation(lbf_tbl);
-    if (op == nullptr) { goto layout_put_err; }
+    if (op == nullptr) { goto layout_put_once_err; }
     op->writeTuple();
     (void)rondb_equal_u64(op, RONDB_LBF_COL_FILEID, fileid);
-    op->equal(RONDB_LBF_COL_STATEID,
-              (const char *)sid_enc, sid_enc_len);
+    op->equal(RONDB_LBF_COL_STATEID, (const char *)sid_enc, sid_enc_len);
 
-    /* 3. Insert/write ds_layout_idx for each DS. */
+    (void)ds_ids; (void)ds_count;
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 266 || err.code == 274) { return err.code; }
+        return rondb_report_error(err, "layout_put commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+
+layout_put_once_err:
+    err = tx->getNdbError();
+    rondb_get_ndb(state)->closeTransaction(tx);
+    if (err.code == 266 || err.code == 274) { return err.code; }
+    return rondb_report_error(err, "layout_put op");
+}
+
+/* Best-effort post-commit write of ds_layout_idx rows.  Decoupled from
+ * the layout_state / layout_by_file transaction to reduce NDB row-lock
+ * contention on the critical path (2 ops vs 2+N).  Failure is logged
+ * but not propagated -- missing rows are tolerated by layout_state_del
+ * (626=NoDataFound is explicitly ignored there) and by DS failover
+ * (which can rebuild the index from a scan). */
+static void rondb_shim_ds_layout_idx_put_best_effort(
+    void *handle,
+    uint64_t clientid, uint64_t fileid,
+    const uint32_t *ds_ids, uint32_t ds_count)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *dli_tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+
+    if (state == nullptr || ds_ids == nullptr || ds_count == 0) { return; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return; }
+    dli_tbl = dict->getTable(RONDB_TBL_DS_LAYOUT_IDX);
+    if (dli_tbl == nullptr) { return; }
+
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(
+            dli_tbl, (const char *)pk_buf, 8);
+    }
+    if (tx == nullptr) { return; }
+
     for (uint32_t i = 0; i < ds_count; i++) {
         op = tx->getNdbOperation(dli_tbl);
-        if (op == nullptr) { goto layout_put_err; }
+        if (op == nullptr) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return;
+        }
         op->writeTuple();
         op->equal(RONDB_DLI_COL_DS_ID, (Uint32)ds_ids[i]);
         (void)rondb_equal_u64(op, RONDB_DLI_COL_CLIENTID, clientid);
@@ -8753,19 +8786,64 @@ int rondb_shim_layout_state_put(void *handle,
     }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_put commit");
+        NdbError idx_err = tx->getNdbError();
+        if (idx_err.code != 0) {
+            (void)rondb_report_error(idx_err, "layout_put ds_idx best_effort");
+        }
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+}
+
+int rondb_shim_layout_state_put(void *handle,
+                                const uint8_t stateid_other[12],
+                                uint64_t clientid, uint64_t fileid,
+                                uint32_t iomode, uint64_t offset,
+                                uint64_t length, uint32_t seqid,
+                                const uint32_t *ds_ids, uint32_t ds_count)
+{
+    uint8_t sid_enc[14];
+    uint32_t sid_enc_len = 0;
+    int rc;
+
+    if (handle == nullptr || stateid_other == nullptr) { return -1; }
+    if (rondb_encode_varbinary_value(stateid_other, 12, 1U,
+                                     sid_enc, sizeof(sid_enc),
+                                     &sid_enc_len) != 0) {
+        return -1;
     }
 
-    rondb_get_ndb(state)->closeTransaction(tx);
-    return 0;
-
-layout_put_err:
-    err = tx->getNdbError();
-    rondb_get_ndb(state)->closeTransaction(tx);
-    return rondb_report_error(err, "layout_put op");
+    for (int attempt = 0; attempt < NDB_RETRY_MAX; attempt++) {
+        rc = rondb_shim_layout_state_put_once(
+                handle, sid_enc, sid_enc_len,
+                clientid, fileid,
+                iomode, offset, length, seqid,
+                ds_ids, ds_count);
+        if (rc == 0) {
+            rondb_shim_ds_layout_idx_put_best_effort(
+                handle, clientid, fileid, ds_ids, ds_count);
+            return 0;
+        }
+        if (rc != 266 && rc != 274) { return rc; }
+        {
+            struct timespec _ts;
+            _ts.tv_sec  = 0;
+            _ts.tv_nsec = (long)(NDB_RETRY_DELAY_US * (attempt + 1)) * 1000L;
+            nanosleep(&_ts, nullptr);
+        }
+    }
+    {
+        NdbError synth_err = {};
+        synth_err.code = rc;
+        synth_err.classification = (rc == 274)
+            ? NdbError::TimeoutExpired
+            : NdbError::TemporaryResourceError;
+        synth_err.message = (rc == 266) ? "Lock wait timeout / deadlock"
+                                        : "Time-out in NDB";
+        (void)rondb_report_error(synth_err, "layout_put retry-exhausted");
+    }
+    return -1;
 }
+
 
 int rondb_shim_layout_state_del(void *handle,
                                 const uint8_t stateid_other[12],

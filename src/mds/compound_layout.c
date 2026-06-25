@@ -1137,15 +1137,15 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * serve, and falling through to the existing path keeps the
 	 * ds_prepare hand-off coherent.
 	 *
-	 * Plain (non-HPC) inodes never touch the cache, keeping the
-	 * legacy LAYOUTGET path bit-for-bit identical for the common
-	 * workload.
+	 * The DS_PENDING window is excluded: a file in that window
+	 * has no FH-ready entries to serve; falling through keeps the
+	 * ds_prepare hand-off coherent.
 	 */
 	bool layout_cache_was_hit = false;
 	const bool inode_is_hpc_shared =
 		(inode.flags & MDS_IFLAG_HPC_SHARED) != 0;
 
-	if (inode_is_hpc_shared && cd->lcache != NULL &&
+	if (cd->lcache != NULL &&
 	    !(inode.flags & MDS_IFLAG_DS_PENDING)) {
 		struct mds_ds_map_entry *cached_entries = NULL;
 		uint32_t c_sc = 0;
@@ -1745,7 +1745,7 @@ fill_layoutget_result:
 	 * that reach this label have entries[] verified FH-ready by
 	 * their own (per-branch) layout_entries_ready_for_grant
 	 * checks, so the cached snapshot is always servable. */
-	if (inode_is_hpc_shared && cd->lcache != NULL &&
+	if (cd->lcache != NULL &&
 	    !layout_cache_was_hit && entries != NULL &&
 	    stripe_count > 0 && mirror_count > 0) {
 		(void)layout_cache_put(cd->lcache,
