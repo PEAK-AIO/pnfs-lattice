@@ -149,8 +149,45 @@ static pthread_once_t g_layout_sid_seed_once = PTHREAD_ONCE_INIT;
  * and short-circuits on hit, so this table is the fallback path.
  * ----------------------------------------------------------------------- */
 
-#define LAYOUT_SEQID_BUCKETS 1024
+/*
+ * Bucket count for the in-memory layout-seqid hash table.
+ *
+ * Linux pNFS clients hold their layouts and LAYOUTRETURN lazily, so a
+ * small-file read sweep can leave tens of millions of granted stateids
+ * outstanding (un-returned) at once.  At the old 1024 buckets the
+ * per-bucket chains then grew ~11k deep, so each make_layout_stateid()
+ * insert walked an O(chain) list (O(n^2) over a sweep) and read
+ * throughput collapsed as the run progressed.  1<<20 buckets keeps
+ * chains ~10 deep even at 10M live entries, restoring effectively
+ * O(1) insert/lookup.  The hot loop is transport-agnostic, so this
+ * affects every backend equally.
+ *
+ * Cost: LAYOUT_SEQID_BUCKETS * sizeof(pointer) = 8 MiB of zero-filled
+ * BSS, reserved once for the lifetime of the daemon.
+ */
+#define LAYOUT_SEQID_BUCKETS (1U << 20)
 #define LAYOUT_SEQID_STRIPES 32
+
+/*
+ * Soft cap on the number of live entries in the layout-seqid tracker.
+ *
+ * Entries are freed only on LAYOUTRETURN, and Linux clients return
+ * their layouts lazily, so a buggy or malicious client could in
+ * principle accumulate entries without bound.  On reaching
+ * LAYOUT_SEQID_MAX_ENTRIES the grant paths refuse to mint a NEW layout
+ * stateid (NFS4ERR_RESOURCE, a retryable status) rather than evict live
+ * state: evicting an entry whose layout the client still holds would
+ * desync the RFC 8881 S12.5.3 seqid and resurface as BAD_STATEID on the
+ * client's next LAYOUTCOMMIT/LAYOUTRETURN.  Renewals of already-tracked
+ * layouts are never refused.
+ *
+ * Sized well above the "tens of millions of outstanding layouts" a
+ * legitimate large read sweep reaches, so it only trips on runaway
+ * growth.  At ~24 bytes per entry the ceiling bounds the tracker at
+ * roughly 1.5 GiB of entry structs (separate from the fixed 8 MiB
+ * bucket array).  Tune to the deployment's memory budget.
+ */
+#define LAYOUT_SEQID_MAX_ENTRIES (64ULL * 1024 * 1024)
 
 struct layout_seqid_entry {
 	uint8_t  other[NFS4_OTHER_SIZE];
@@ -161,6 +198,12 @@ struct layout_seqid_entry {
 static struct layout_seqid_entry *g_layout_seqid_buckets[LAYOUT_SEQID_BUCKETS];
 static pthread_mutex_t g_layout_seqid_locks[LAYOUT_SEQID_STRIPES];
 static pthread_once_t  g_layout_seqid_init_once = PTHREAD_ONCE_INIT;
+
+/* Live entry count across all buckets/stripes.  Maintained with relaxed
+ * atomics independent of the stripe locks: it only backs the soft cap
+ * and the layout_seqid_entry_count() diagnostic, neither of which
+ * guards data, so no stronger ordering is required. */
+static _Atomic uint64_t g_layout_seqid_count = 0;
 
 static void layout_seqid_init(void)
 {
@@ -180,10 +223,28 @@ static uint32_t layout_seqid_hash(const uint8_t other[NFS4_OTHER_SIZE])
 }
 
 /*
- * Insert a freshly-allocated layout `other` with seqid = 1.  Idempotent
- * -- a duplicate call (same `other`) leaves the existing entry alone
- * because make_layout_stateid uses a unique counter and the `other`
- * collision space is 2^96 wide.
+ * Insert a freshly-granted layout `other` with seqid = 1.
+ *
+ * make_layout_stateid() stamps the low 8 bytes of `other` from a single
+ * process-wide monotonic atomic counter, so every stateid it mints is
+ * globally unique -- a value handed to this function can never already
+ * be present.  We therefore insert unconditionally and skip the
+ * per-bucket duplicate scan the old implementation ran under the stripe
+ * lock: that scan was O(chain length), and with millions of live
+ * entries it turned each grant into an O(n) walk (O(n^2) over a sweep).
+ *
+ * The allocation and entry initialisation happen BEFORE the stripe lock
+ * is taken, so the critical section is just the O(1) linked-list head
+ * splice.  All readers (advance/peek/remove/record_at) traverse the
+ * bucket under the same stripe lock, so the fully-populated entry is
+ * published with correct happens-before ordering.
+ *
+ * Caller note: layout_pick_stateid()'s NDB-renewal path also calls this
+ * with a client-supplied `other` that has already missed the in-memory
+ * table.  Two concurrent renewals of the same `other` could insert two
+ * entries; the most-recent insert sits at the chain head and shadows
+ * the other, so lookups stay correct (worst case is one orphaned entry,
+ * never a use-after-free or double-free).
  */
 static void layout_seqid_record_new(const uint8_t other[NFS4_OTHER_SIZE])
 {
@@ -193,24 +254,25 @@ static void layout_seqid_record_new(const uint8_t other[NFS4_OTHER_SIZE])
 
 	(void)pthread_once(&g_layout_seqid_init_once, layout_seqid_init);
 
+	/* Allocate and populate outside the stripe lock. */
+	e = calloc(1, sizeof(*e));
+	if (e == NULL) {
+		return;
+	}
+	memcpy(e->other, other, NFS4_OTHER_SIZE);
+	e->seqid = 1;
+
 	bucket = layout_seqid_hash(other);
 	stripe = bucket % LAYOUT_SEQID_STRIPES;
+
+	/* O(1) critical section: splice the new entry at the head. */
 	pthread_mutex_lock(&g_layout_seqid_locks[stripe]);
-	for (e = g_layout_seqid_buckets[bucket]; e != NULL; e = e->hash_next) {
-		if (memcmp(e->other, other, NFS4_OTHER_SIZE) == 0) {
-			pthread_mutex_unlock(
-				&g_layout_seqid_locks[stripe]);
-			return;
-		}
-	}
-	e = calloc(1, sizeof(*e));
-	if (e != NULL) {
-		memcpy(e->other, other, NFS4_OTHER_SIZE);
-		e->seqid = 1;
-		e->hash_next = g_layout_seqid_buckets[bucket];
-		g_layout_seqid_buckets[bucket] = e;
-	}
+	e->hash_next = g_layout_seqid_buckets[bucket];
+	g_layout_seqid_buckets[bucket] = e;
 	pthread_mutex_unlock(&g_layout_seqid_locks[stripe]);
+
+	atomic_fetch_add_explicit(&g_layout_seqid_count, 1,
+				  memory_order_relaxed);
 }
 
 /*
@@ -251,6 +313,8 @@ void layout_seqid_record_at(const uint8_t other[NFS4_OTHER_SIZE],
 		e->seqid = seqid;
 		e->hash_next = g_layout_seqid_buckets[bucket];
 		g_layout_seqid_buckets[bucket] = e;
+		atomic_fetch_add_explicit(&g_layout_seqid_count, 1,
+					  memory_order_relaxed);
 	}
 	pthread_mutex_unlock(&g_layout_seqid_locks[stripe]);
 }
@@ -346,10 +410,35 @@ void layout_seqid_remove(const uint8_t other[NFS4_OTHER_SIZE])
 			struct layout_seqid_entry *dead = *pp;
 			*pp = dead->hash_next;
 			free(dead);
+			atomic_fetch_sub_explicit(&g_layout_seqid_count, 1,
+						  memory_order_relaxed);
 			break;
 		}
 	}
 	pthread_mutex_unlock(&g_layout_seqid_locks[stripe]);
+}
+
+/*
+ * Diagnostics: current number of live entries in the layout-seqid
+ * tracker.  Exported (declared in layout_recall.h) for metrics / admin
+ * introspection.  Relaxed load -- an exact instantaneous snapshot is
+ * neither available nor meaningful under concurrent grant/return
+ * traffic. */
+uint64_t layout_seqid_entry_count(void)
+{
+	return atomic_load_explicit(&g_layout_seqid_count,
+				    memory_order_relaxed);
+}
+
+/*
+ * True once the tracker holds LAYOUT_SEQID_MAX_ENTRIES live entries.
+ * The LAYOUTGET and fused OPEN(CREATE) grant paths consult this to
+ * refuse a NEW grant with NFS4ERR_RESOURCE instead of evicting live
+ * state.  Declared in compound_internal.h (shared with
+ * compound_data_io.c). */
+bool layout_seqid_at_capacity(void)
+{
+	return layout_seqid_entry_count() >= LAYOUT_SEQID_MAX_ENTRIES;
 }
 
 static void seed_layout_sid_counter(void)
@@ -893,6 +982,37 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 	}
+
+	/*
+	 * Soft cap (LAYOUT_SEQID_MAX_ENTRIES): when the in-memory
+	 * layout-seqid tracker is full, refuse to mint a NEW grant with
+	 * NFS4ERR_RESOURCE rather than evict live state.  Two categories
+	 * are allowed through even at capacity because neither creates a
+	 * new tracker entry:
+	 *   - a fused OPEN(CREATE) pregrant for this fileid (already
+	 *     minted and recorded on the OPEN path), and
+	 *   - a renewal: the client re-presenting a layout stateid we
+	 *     still track in memory (layout_seqid_advance just bumps it).
+	 * Checked here -- before the conflict-recall scan and any
+	 * allocation -- so a refusal has no side effects to unwind.  RFC
+	 * 8881 S15.1.11.3: NFS4ERR_RESOURCE is retryable, so a refused
+	 * client retries once the sweep drains and LAYOUTRETURNs free
+	 * tracker slots.
+	 */
+	if (layout_seqid_at_capacity()) {
+		const bool has_pregrant =
+			cd->layout_pregranted &&
+			cd->layout_pregrant_fileid == cd->current_fh.fileid;
+		uint32_t cap_cur_seqid = 0;
+		const bool is_renewal =
+			client_sid.seqid != 0 &&
+			layout_seqid_peek(client_sid.other, &cap_cur_seqid);
+
+		if (!has_pregrant && !is_renewal) {
+			return NFS4ERR_RESOURCE;
+		}
+	}
+
 	/* Decouple stripe-lease and recall scope from the grant scope.
 	 *
 	 * The grant range (returned to the client on the wire) is widened

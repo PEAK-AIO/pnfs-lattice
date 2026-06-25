@@ -231,4 +231,9 @@ void layout_seqid_record_at(const uint8_t other[12], uint32_t seqid);
 bool layout_seqid_peek(const uint8_t other[12], uint32_t *cur_seqid);
 void layout_seqid_remove(const uint8_t other[12]);
 
+/* Diagnostics: current count of live entries in the layout-seqid
+ * tracker (compound_layout.c).  Exported for metrics / admin
+ * introspection. */
+uint64_t layout_seqid_entry_count(void);
+
 #endif /* LAYOUT_RECALL_H */

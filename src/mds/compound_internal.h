@@ -84,6 +84,15 @@ void quota_submit_adjust(struct compound_data *cd,
 void make_layout_stateid(uint32_t mds_id, struct nfs4_stateid *out);
 
 /**
+ * True once the in-memory layout-seqid tracker holds
+ * LAYOUT_SEQID_MAX_ENTRIES live entries.  The LAYOUTGET and fused
+ * OPEN(CREATE) grant paths consult this to refuse a NEW layout grant
+ * with NFS4ERR_RESOURCE instead of evicting live state.  Defined in
+ * compound_layout.c.
+ */
+bool layout_seqid_at_capacity(void);
+
+/**
  * Read an inode using the request-local snapshot if available.
  *
  * Checks current_inode/saved_inode snapshots first.  On miss,

@@ -499,6 +499,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 						enum nfs_opnum4 nop =
 							cd->ops[scan].opnum;
 						if (nop == OP_LAYOUTGET) {
+							/* Soft cap: skip the fused
+							 * pregrant when the seqid
+							 * tracker is full; the
+							 * follow-on LAYOUTGET then
+							 * returns NFS4ERR_RESOURCE. */
+							if (layout_seqid_at_capacity()) {
+								break;
+							}
 							const struct nfs4_arg_layoutget *lg =
 								&cd->ops[scan].arg.layoutget;
 							cop.args.create.layout_pregrant = true;
@@ -560,6 +568,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 						enum nfs_opnum4 nop =
 							cd->ops[scan].opnum;
 						if (nop == OP_LAYOUTGET) {
+							/* Soft cap: skip the fused
+							 * pregrant when the seqid
+							 * tracker is full; the
+							 * follow-on LAYOUTGET then
+							 * returns NFS4ERR_RESOURCE. */
+							if (layout_seqid_at_capacity()) {
+								break;
+							}
 							const struct nfs4_arg_layoutget *lg =
 								&cd->ops[scan].arg.layoutget;
 							lg_clientid = cd->clientid;
