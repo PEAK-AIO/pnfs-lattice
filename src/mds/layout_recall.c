@@ -1292,7 +1292,26 @@ int layout_recall_revoke_all_for_unlink(struct layout_recall *lr,
         return 0;
     }
 
-    byte_range_dispatch_cb_each(lr, holders, holder_count, cb_status);
+    /* Skip synchronous CB_LAYOUTRECALL for final unlink.
+     *
+     * Sending blocking callbacks here deadlocks the RPC worker pool:
+     * every REMOVE worker blocks on CB_LAYOUTRECALL (up to revoke_ms=30s),
+     * but LAYOUTRETURN compounds that clients send in reply need a free
+     * worker to be processed.  Under an 8-rank mass-delete this causes
+     * mean REMOVE latency of 6+ seconds.
+     *
+     * The revoke below is authoritative: NDB layout-state rows are
+     * deleted and DS files are fenced.  Clients discover the revocation
+     * on their next SEQUENCE or when DS I/O returns EACCES.  A later
+     * voluntary LAYOUTRETURN gets NFS4ERR_BAD_STATEID (state already
+     * gone) or NFS4ERR_STALE (inode gone) — both are safe terminal
+     * outcomes in Linux NFSv4.1+.
+     */
+    {
+        uint32_t _ri;
+        for (_ri = 0; _ri < holder_count; _ri++)
+            cb_status[_ri] = CB_NOT_SENT;
+    }
     byte_range_revoke_holders(lr, holders, holder_count, cb_status, true);
 
     if (recalled_out != NULL) {
