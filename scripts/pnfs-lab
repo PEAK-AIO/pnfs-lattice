@@ -26,6 +26,10 @@ LAB_SSH_PASSWORD_ENV="PNFS_LAB_SSH_PASSWORD"
 declare -a ACTIVE_MDS_HOSTS=()
 declare -a ACTIVE_MDS_IPS=()
 declare -a ACTIVE_MDS_IDS=()
+declare -a CLIENT_HOSTS=()
+declare -a CLIENT_IPS=()
+declare -a CLIENT_MOUNTS=()
+declare -a CLIENT_NCONNECTS=()
 declare -a ACTIVE_RONDB_DATA_HOSTS=()
 declare -a ACTIVE_RONDB_DATA_IPS=()
 declare -a ACTIVE_RONDB_DATA_NODE_IDS=()
@@ -65,7 +69,9 @@ Commands:
   deploy         Deploy pnfs-mds for the selected profile
   single-mds     Deploy the single-MDS profile
   multi-mds      Deploy the multi-MDS RonDB profile
-  client         Mount the namespace on the client
+  client         Mount the namespace on every configured client
+                 (LAB_CLIENT_MDS_ASSIGNMENT=round-robin spreads clients
+                  across MDS shards for load testing)
   smoke          Run scripts/pnfs-smoke.sh on the client
   test-suite     Run scripts/pnfs-test-suite.sh on the client
   hpc-prewarm    Run scripts/pnfs-hpc-prewarm.sh on the client
@@ -296,6 +302,103 @@ ensure_equal_lengths() {
     fi
 }
 
+# Build the normalized client model from the inventory.  Supports both
+# the multi-client arrays (LAB_CLIENT_HOSTS / LAB_CLIENT_IPS) and the
+# legacy single-client variables (LAB_CLIENT_HOST / LAB_CLIENT_IP) so
+# pre-existing custom inventories keep working.  Per-client mount and
+# nconnect fall back to the shared LAB_CLIENT_MOUNT / LAB_CLIENT_NCONNECT
+# defaults unless an override array of matching length is provided.
+normalize_clients() {
+    local hosts_len=0
+    local ips_len=0
+    local mounts_len=0
+    local nconnects_len=0
+    local idx
+
+    if declare -p LAB_CLIENT_HOSTS >/dev/null 2>&1; then
+        hosts_len="${#LAB_CLIENT_HOSTS[@]}"
+    fi
+    if declare -p LAB_CLIENT_IPS >/dev/null 2>&1; then
+        ips_len="${#LAB_CLIENT_IPS[@]}"
+    fi
+
+    CLIENT_HOSTS=()
+    CLIENT_IPS=()
+    CLIENT_MOUNTS=()
+    CLIENT_NCONNECTS=()
+
+    if [ "${hosts_len}" -gt 0 ]; then
+        ensure_equal_lengths "LAB_CLIENT_HOSTS" "${hosts_len}" \
+            "LAB_CLIENT_IPS" "${ips_len}"
+        CLIENT_HOSTS=("${LAB_CLIENT_HOSTS[@]}")
+        CLIENT_IPS=("${LAB_CLIENT_IPS[@]}")
+    elif [ -n "${LAB_CLIENT_HOST:-}" ]; then
+        # Legacy single-client inventory.
+        CLIENT_HOSTS=("${LAB_CLIENT_HOST}")
+        CLIENT_IPS=("${LAB_CLIENT_IP:-}")
+    else
+        fail "No clients configured: set LAB_CLIENT_HOSTS (or legacy LAB_CLIENT_HOST)"
+    fi
+
+    if declare -p LAB_CLIENT_MOUNTS >/dev/null 2>&1; then
+        mounts_len="${#LAB_CLIENT_MOUNTS[@]}"
+    fi
+    if declare -p LAB_CLIENT_NCONNECTS >/dev/null 2>&1; then
+        nconnects_len="${#LAB_CLIENT_NCONNECTS[@]}"
+    fi
+    if [ "${mounts_len}" -gt 0 ]; then
+        ensure_equal_lengths "LAB_CLIENT_MOUNTS" "${mounts_len}" \
+            "LAB_CLIENT_HOSTS" "${#CLIENT_HOSTS[@]}"
+    fi
+    if [ "${nconnects_len}" -gt 0 ]; then
+        ensure_equal_lengths "LAB_CLIENT_NCONNECTS" "${nconnects_len}" \
+            "LAB_CLIENT_HOSTS" "${#CLIENT_HOSTS[@]}"
+    fi
+
+    for idx in "${!CLIENT_HOSTS[@]}"; do
+        if [ "${mounts_len}" -gt 0 ]; then
+            CLIENT_MOUNTS+=("${LAB_CLIENT_MOUNTS[$idx]}")
+        else
+            CLIENT_MOUNTS+=("${LAB_CLIENT_MOUNT}")
+        fi
+        if [ "${nconnects_len}" -gt 0 ]; then
+            CLIENT_NCONNECTS+=("${LAB_CLIENT_NCONNECTS[$idx]}")
+        else
+            CLIENT_NCONNECTS+=("${LAB_CLIENT_NCONNECT}")
+        fi
+    done
+
+    case "${LAB_CLIENT_MDS_ASSIGNMENT}" in
+        first|round-robin) ;;
+        *)
+            fail "Invalid LAB_CLIENT_MDS_ASSIGNMENT '${LAB_CLIENT_MDS_ASSIGNMENT}': use first|round-robin"
+            ;;
+    esac
+}
+
+# Resolve the active-MDS index a client should mount, honouring the
+# configured assignment mode.  Returns 0 for a single MDS, the legacy
+# 'first' mode, or an unknown mode; returns idx %% mds_count for
+# 'round-robin'.  Reads the current ACTIVE_MDS_* arrays so it always
+# reflects the profile in effect at mount time.
+client_mds_index() {
+    local client_idx="$1"
+    local mds_count="${#ACTIVE_MDS_IPS[@]}"
+
+    if [ "${mds_count}" -le 1 ]; then
+        printf '0'
+        return 0
+    fi
+    case "${LAB_CLIENT_MDS_ASSIGNMENT}" in
+        round-robin)
+            printf '%d' "$(( client_idx % mds_count ))"
+            ;;
+        *)
+            printf '0'
+            ;;
+    esac
+}
+
 build_known_hosts() {
     local host
 
@@ -321,7 +424,7 @@ build_known_hosts() {
 
     KNOWN_HOSTS=()
     for host in "${KNOWN_RUNTIME_HOSTS[@]}" "${LAB_DS_HOSTS[@]}" \
-        "${LAB_CLIENT_HOST}"; do
+        "${CLIENT_HOSTS[@]}"; do
         if [ -n "${host}" ]; then
             append_unique KNOWN_HOSTS "${host}"
         fi
@@ -387,6 +490,7 @@ load_inventory() {
     LAB_MDS_DS_MOUNT_FMT="${LAB_MDS_DS_MOUNT_FMT:-/mnt/ds%u}"
     LAB_CLIENT_MOUNT="${LAB_CLIENT_MOUNT:-/mnt/pnfs}"
     LAB_CLIENT_NCONNECT="${LAB_CLIENT_NCONNECT:-1}"
+    LAB_CLIENT_MDS_ASSIGNMENT="${LAB_CLIENT_MDS_ASSIGNMENT:-first}"
 
     : "${LAB_USER:?LAB_USER is required}"
     : "${LAB_BUILD_HOST_RONDB_BASE:?LAB_BUILD_HOST_RONDB_BASE is required}"
@@ -400,13 +504,12 @@ load_inventory() {
     : "${LAB_RONDB_MGM_IP:?LAB_RONDB_MGM_IP is required}"
     : "${LAB_RONDB_MGM_NODE_ID:?LAB_RONDB_MGM_NODE_ID is required}"
     : "${LAB_RONDB_MGM_PORT:?LAB_RONDB_MGM_PORT is required}"
-    : "${LAB_CLIENT_HOST:?LAB_CLIENT_HOST is required}"
-    : "${LAB_CLIENT_IP:?LAB_CLIENT_IP is required}"
 
     if [ -z "${PROFILE}" ]; then
         PROFILE="${LAB_PROFILE_DEFAULT}"
     fi
 
+    normalize_clients
     build_known_hosts
     apply_profile
 
@@ -905,7 +1008,7 @@ EOF
 )"
     done
 
-    for host in "${ACTIVE_MDS_HOSTS[@]}" "${LAB_CLIENT_HOST}"; do
+    for host in "${ACTIVE_MDS_HOSTS[@]}" "${CLIENT_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-common, attr"
         run_remote_root_script "${host}" "$(cat <<EOF
 $(render_ensure_packages)
@@ -914,12 +1017,14 @@ EOF
 )"
     done
 
-    # tshark on the client only.  The hpc-prewarm wire-form spot-check
-    # captures NFS replies on the client interface; pulling the rest
-    # of wireshark-common onto the MDS / DS hosts would just bloat
-    # them.  Installed via the same retrying ensure_packages helper.
-    log "  [${LAB_CLIENT_HOST}] ensure tshark"
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+    # tshark on the first client only.  The hpc-prewarm wire-form
+    # spot-check runs on the first client (CLIENT_HOSTS[0]) and
+    # captures NFS replies on its interface; pulling the rest of
+    # wireshark-common onto the other clients / MDS / DS hosts would
+    # just bloat them.  Installed via the retrying ensure_packages
+    # helper.
+    log "  [${CLIENT_HOSTS[0]}] ensure tshark"
+    run_remote_root_script "${CLIENT_HOSTS[0]}" "$(cat <<EOF
 $(render_ensure_packages)
 ensure_packages tshark
 EOF
@@ -1192,21 +1297,37 @@ EOF
 }
 
 phase_client() {
-    local mount_opts="vers=4.2"
+    local idx
+    local client_host
+    local client_mount
+    local client_nconnect
+    local mds_idx
+    local mds_ip
+    local mount_opts
 
-    log "Command: client"
+    log "Command: client (${#CLIENT_HOSTS[@]} client(s), mds-assignment: ${LAB_CLIENT_MDS_ASSIGNMENT})"
 
-    if [ "${LAB_CLIENT_NCONNECT}" -gt 1 ]; then
-        mount_opts+=",nconnect=${LAB_CLIENT_NCONNECT}"
-    fi
+    for idx in "${!CLIENT_HOSTS[@]}"; do
+        client_host="${CLIENT_HOSTS[$idx]}"
+        client_mount="${CLIENT_MOUNTS[$idx]}"
+        client_nconnect="${CLIENT_NCONNECTS[$idx]}"
+        mds_idx="$(client_mds_index "${idx}")"
+        mds_ip="${ACTIVE_MDS_IPS[$mds_idx]}"
 
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+        mount_opts="vers=4.2"
+        if [ "${client_nconnect}" -gt 1 ]; then
+            mount_opts+=",nconnect=${client_nconnect}"
+        fi
+
+        log "  [${client_host}] mount ${mds_ip}:/ at ${client_mount} (shard ${mds_idx}, nconnect=${client_nconnect})"
+        run_remote_root_script "${client_host}" "$(cat <<EOF
 $(render_ensure_packages)
 ensure_packages nfs-common attr
 $(render_bounded_mount_function)
-bounded_mount "${ACTIVE_MDS_IPS[0]}:/" "${LAB_CLIENT_MOUNT}" "nfs4" "${mount_opts}"
+bounded_mount "${mds_ip}:/" "${client_mount}" "nfs4" "${mount_opts}"
 EOF
 )"
+    done
 }
 
 phase_smoke() {
@@ -1218,8 +1339,8 @@ phase_smoke() {
     [ -f "${smoke_script}" ] || fail "Smoke script not found: ${smoke_script}"
     smoke_body="$(cat "${smoke_script}")"
 
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
-export PNFS_MNT="${LAB_CLIENT_MOUNT}"
+    run_remote_root_script "${CLIENT_HOSTS[0]}" "$(cat <<EOF
+export PNFS_MNT="${CLIENT_MOUNTS[0]}"
 ${smoke_body}
 EOF
 )"
@@ -1234,10 +1355,10 @@ phase_test_suite() {
     [ -f "${suite_script}" ] || fail "Test suite not found: ${suite_script}"
     ds_ips="$(join_by ' ' "${LAB_DS_IPS[@]}")"
 
-    copy_to_host "${suite_script}" "${LAB_CLIENT_HOST}" "/tmp/pnfs-test-suite.sh"
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+    copy_to_host "${suite_script}" "${CLIENT_HOSTS[0]}" "/tmp/pnfs-test-suite.sh"
+    run_remote_root_script "${CLIENT_HOSTS[0]}" "$(cat <<EOF
 chmod 0755 /tmp/pnfs-test-suite.sh
-PNFS_MNT="${LAB_CLIENT_MOUNT}" \
+PNFS_MNT="${CLIENT_MOUNTS[0]}" \
 PNFS_MDS1_IP="${ACTIVE_MDS_IPS[0]}" \
 PNFS_DS_IPS="${ds_ips}" \
 PNFS_SSH_USER="${LAB_USER}" \
@@ -1432,11 +1553,11 @@ phase_hpc_prewarm() {
     [ -f "${hpc_script}" ] || fail "HPC pre-warm script not found: ${hpc_script}"
     ds_ids="$(join_by ' ' "${LAB_DS_IDS[@]}")"
 
-    copy_to_host "${hpc_script}" "${LAB_CLIENT_HOST}" "/tmp/pnfs-hpc-prewarm.sh"
+    copy_to_host "${hpc_script}" "${CLIENT_HOSTS[0]}" "/tmp/pnfs-hpc-prewarm.sh"
 
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
+    run_remote_root_script "${CLIENT_HOSTS[0]}" "$(cat <<EOF
 chmod 0755 /tmp/pnfs-hpc-prewarm.sh
-PNFS_MNT="${LAB_CLIENT_MOUNT}" \
+PNFS_MNT="${CLIENT_MOUNTS[0]}" \
 PNFS_MDS_SSH_HOST="${ACTIVE_MDS_HOSTS[0]}" \
 PNFS_MDS_ADMIN_HOST="${ACTIVE_MDS_IPS[0]}" \
 PNFS_MDS_ADMIN_PORT="${LAB_MDS_GRPC_PORT}" \
@@ -1452,15 +1573,22 @@ phase_stop() {
     local host
     local ds_id
     local mount_target
+    local idx
+    local client_host
+    local client_mount
 
     log "Command: stop"
 
-    run_remote_root_script "${LAB_CLIENT_HOST}" "$(cat <<EOF
-if command -v mountpoint >/dev/null 2>&1 && mountpoint -q "${LAB_CLIENT_MOUNT}"; then
-    timeout -k 5 10 umount "${LAB_CLIENT_MOUNT}" || true
+    for idx in "${!CLIENT_HOSTS[@]}"; do
+        client_host="${CLIENT_HOSTS[$idx]}"
+        client_mount="${CLIENT_MOUNTS[$idx]}"
+        run_remote_root_script "${client_host}" "$(cat <<EOF
+if command -v mountpoint >/dev/null 2>&1 && mountpoint -q "${client_mount}"; then
+    timeout -k 5 10 umount "${client_mount}" || true
 fi
 EOF
 )"
+    done
 
     local stop_body
     stop_body="systemctl stop pnfs-mds.service 2>/dev/null || true"$'\n'
