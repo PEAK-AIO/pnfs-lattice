@@ -808,6 +808,8 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 		    jse.owner_mds_id != cd->mds_id &&
 		    referral_build(cd->smap, jpath, &loc) == MDS_OK) {
 			res->res.getattr.has_referral = true;
+			res->res.getattr.referral_owner_mds_id =
+				jse.owner_mds_id;
 			(void)snprintf(res->res.getattr.referral_fs_root,
 				sizeof(res->res.getattr.referral_fs_root),
 				"%s", jpath);
@@ -819,6 +821,16 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 				"%s", loc.rootpath);
 		}
 	}
+	}
+
+	{
+		uint32_t fsid_owner = cd->mds_id;
+
+		if (res->res.getattr.has_referral) {
+			fsid_owner = res->res.getattr.referral_owner_mds_id;
+		}
+		res->res.getattr.fsid_major = referral_fsid_major(fsid_owner);
+		res->res.getattr.fsid_minor = referral_fsid_minor(fsid_owner);
 	}
 
 	/* Pass the client's requested bitmap to the encoder. */

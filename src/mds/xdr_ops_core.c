@@ -1052,6 +1052,8 @@ bool encode_res_getattr(XDR *xdrs, const struct nfs4_result *r)
         };
         return xdr_nfs4_fattr_encode_ex(xdrs, &r->res.getattr.inode,
                                         req, &fs,
+                                        r->res.getattr.fsid_major,
+                                        r->res.getattr.fsid_minor,
                                         r->res.getattr.has_referral
                                             ? r->res.getattr.referral_server
                                             : NULL,
@@ -1064,6 +1066,8 @@ bool encode_res_getattr(XDR *xdrs, const struct nfs4_result *r)
     }
     return xdr_nfs4_fattr_encode_ex(xdrs, &r->res.getattr.inode, req,
                                     NULL,
+                                    r->res.getattr.fsid_major,
+                                    r->res.getattr.fsid_minor,
                                     r->res.getattr.has_referral
                                         ? r->res.getattr.referral_server
                                         : NULL,

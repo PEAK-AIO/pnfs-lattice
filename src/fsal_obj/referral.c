@@ -124,6 +124,37 @@ enum mds_status referral_create_junction(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+enum mds_status referral_ensure_junction(struct mds_catalogue *cat,
+                                         uint64_t parent_fileid,
+                                         const char *name,
+                                         uint32_t target_mds_id)
+{
+    enum mds_status st;
+    struct mds_inode ino;
+
+    st = referral_create_junction(cat, parent_fileid, name, target_mds_id);
+    if (st == MDS_OK) {
+        return MDS_OK;
+    }
+    if (st != MDS_ERR_EXISTS) {
+        return st;
+    }
+
+    st = mds_cat_ns_lookup(cat, parent_fileid, name, &ino);
+    if (st != MDS_OK) {
+        return st;
+    }
+    if (referral_is_junction(cat, ino.fileid) == 1) {
+        return MDS_OK;
+    }
+    if (ino.type != MDS_FTYPE_DIR) {
+        return MDS_ERR_INVAL;
+    }
+
+    ino.mode = (ino.mode & ~0777) | 0777 | S_ISVTX;
+    return mds_cat_ns_setattr(cat, NULL, ino.fileid, &ino, MDS_ATTR_MODE);
+}
+
 /**
  * @brief Encode fs_locations4 into a caller-provided buffer.
  *

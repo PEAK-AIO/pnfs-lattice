@@ -488,6 +488,7 @@ static void test_fattr_space_attrs_clamped_when_fs_space_unlimited(void)
     xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
     ASSERT_TRUE(xdr_nfs4_fattr_encode_ex(&enc, &inode, requested,
                                          &fs_space,
+                                         0, 0,
                                          NULL, NULL, NULL));
     ASSERT_TRUE(xdr_getpos(&enc) > 0);
 
@@ -816,6 +817,7 @@ static void test_fattr_encode_referral_fs_locations(void)
 
     xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
     ASSERT_TRUE(xdr_nfs4_fattr_encode_ex(&enc, &inode, requested, NULL,
+                                         3, 0,
                                          "10.10.10.51", "/", "/foreign"));
 
     xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
@@ -833,7 +835,7 @@ static void test_fattr_encode_referral_fs_locations(void)
     xdrmem_ncreate(&attr_dec, attr_buf, attr_len, XDR_DECODE);
     ASSERT_TRUE(xdr_uint64_t(&attr_dec, &fsid_major));
     ASSERT_TRUE(xdr_uint64_t(&attr_dec, &fsid_minor));
-    ASSERT_EQ(fsid_major, (uint64_t)99);
+    ASSERT_EQ(fsid_major, (uint64_t)3);
     ASSERT_EQ(fsid_minor, (uint64_t)0);
     ASSERT_TRUE(xdr_uint64_t(&attr_dec, &fileid));
     ASSERT_EQ(fileid, inode.fileid);

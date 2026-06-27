@@ -226,6 +226,8 @@ struct xdr_fattr_fs_space {
 bool xdr_nfs4_fattr_encode_ex(XDR *xdrs, const struct mds_inode *inode,
                                const uint32_t requested[NFS4_BITMAP_WORDS],
                                const struct xdr_fattr_fs_space *fs_space,
+                               uint64_t fsid_major,
+                               uint64_t fsid_minor,
                                const char *ref_server,
                                const char *ref_rootpath,
                                const char *ref_fs_root);

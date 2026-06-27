@@ -295,6 +295,8 @@ static void test_lookup_junction_getattr_fs_locations(void)
     ASSERT_EQ(results[1].status, NFS4_OK);
     ASSERT_EQ(results[2].status, NFS4_OK);
     ASSERT_TRUE(results[2].res.getattr.has_referral);
+    ASSERT_EQ(results[2].res.getattr.referral_owner_mds_id, 3u);
+    ASSERT_EQ(results[2].res.getattr.fsid_major, 3u);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_server,
                        "10.10.10.51") == 0);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_rootpath,
@@ -303,6 +305,31 @@ static void test_lookup_junction_getattr_fs_locations(void)
                        "/foreign") == 0);
 
     subtree_map_destroy(smap);
+    mds_catalogue_close(db);
+    cleanup_db();
+    PASS();
+}
+
+static void test_referral_ensure_junction_upgrades_plain_dir(void)
+{
+    fprintf(stdout, "  test_referral_ensure_upgrades_plain: ");
+    fflush(stdout);
+
+    struct mds_catalogue *db = open_test_db();
+    ASSERT_TRUE(db != NULL);
+    struct mds_catalogue *cat = wrap_db_as_cat(db);
+    enum mds_status st;
+    struct mds_inode plain;
+
+    st = mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT, "poisoned",
+                           MDS_FTYPE_DIR, 0755, 0, 0, NULL, &plain);
+    ASSERT_EQ(st, MDS_OK);
+    ASSERT_EQ(referral_is_junction(cat, plain.fileid), 0);
+
+    st = referral_ensure_junction(cat, MDS_FILEID_ROOT, "poisoned", 2);
+    ASSERT_EQ(st, MDS_OK);
+    ASSERT_EQ(referral_is_junction(cat, plain.fileid), 1);
+
     mds_catalogue_close(db);
     cleanup_db();
     PASS();
@@ -584,6 +611,7 @@ int main(void)
     test_putfh_junction_succeeds();
     test_lookup_junction_returns_moved();
     test_lookup_junction_getattr_fs_locations();
+    test_referral_ensure_junction_upgrades_plain_dir();
     test_rename_cross_subtree_local_to_remote_fastpath();
     test_rename_cross_subtree_membership();
 

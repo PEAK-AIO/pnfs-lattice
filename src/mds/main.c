@@ -767,15 +767,13 @@ int main(int argc, char *argv[])
 			if (jname[0] == '\0' || jname[0] == '/') {
 				continue;
 			}
-			enum mds_status jst = referral_create_junction(
+			enum mds_status jst = referral_ensure_junction(
 				cat, MDS_FILEID_ROOT, jname,
 				je.owner_mds_id);
 			if (jst == MDS_OK) {
 				MDS_LOG_INFO(LOG_COMP_MDS,
-					"created junction /%s -> MDS %u",
+					"ensured junction /%s -> MDS %u",
 					jname, (unsigned)je.owner_mds_id);
-			} else if (jst == MDS_ERR_EXISTS) {
-				/* Junction already exists -- no action needed. */
 			} else {
 				MDS_LOG_WARN(LOG_COMP_MDS,
 					"failed to create junction /%s: %d",
