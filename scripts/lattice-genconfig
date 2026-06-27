@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# lattice-genconfig -- generate *basic* configs for a RonDB-colocated
+# Lattice (pNFS) cluster from a list of MDS IPs and a list of DS IPs.
+#
+# "RonDB colocated" means one RonDB data node runs on every MDS host.
+# The RonDB management node (ndb_mgmd) is colocated on the first MDS.
+#
+# This is a config GENERATOR only.  It writes files into an output
+# directory; it never connects to a host and never deploys or starts
+# anything.  Copy the generated files to the matching hosts as described
+# in the emitted MANIFEST.txt, then bring up RonDB and pnfs-mds.
+#
+# Generated artifacts (in --out DIR):
+#   config.ini      RonDB cluster config for the ndb_mgmd host (first MDS)
+#   rondb.conf      backend connect string + schema (copied to every MDS)
+#   mds-<n>.conf    one pnfs-mds config per MDS host
+#   MANIFEST.txt    which file goes to which host and path
+#
+# Usage:
+#   ./lattice-genconfig --mds-file MDS.txt --ds-file DS.txt [options]
+#
+# See --help for the full option list.
+
+set -euo pipefail
+
+PROG="$(basename "$0")"
+
+# --- Fixed, "basic" node-id layout (small colocated clusters) -----------
+MGM_NODE_ID=65         # ndb_mgmd node id (colocated on the first MDS)
+DATA_NODE_ID_BASE=1    # data nodes get 1..N
+API_NODE_ID_BASE=101   # [api] slots get 101..
+MAX_NODE_ID=255        # NDB hard limit on node ids
+MAX_MDS=48             # keep data-node ids (1..N) clear of MGM_NODE_ID (65)
+
+# --- Defaults (override via flags; all optional) ------------------------
+out_dir="./pnfs-config"
+schema_name="pnfs_mds"
+mgm_port="1186"
+nfs_port="2049"
+grpc_port="50051"
+worker_threads="8"
+ds_export="/export/ds"
+ds_mount_fmt="/mnt/ds%u"
+data_dir="/var/lib/rondb"
+data_memory="2G"
+conf_dir="/etc/pnfs-mds"
+replicas_opt=""
+force=0
+
+mds_file=""
+ds_file=""
+
+# Globals populated at runtime.
+MDS_IPS=()
+DS_IPS=()
+replicas=1
+GENERATED_AT=""
+
+usage() {
+    cat <<EOF
+Usage: ${PROG} --mds-file FILE --ds-file FILE [options]
+
+Generate basic configs for a RonDB-colocated Lattice (pNFS) cluster.
+A RonDB data node is colocated on every MDS; ndb_mgmd lives on the
+first MDS.  Output is written to a directory -- nothing is deployed.
+
+Required:
+  --mds-file FILE        File of MDS IPs, one per line (# comments ok).
+  --ds-file FILE         File of DS IPs, one per line (# comments ok).
+
+Options (defaults in brackets):
+  --out DIR              Output directory [${out_dir}].
+  --force                Allow writing into a non-empty --out dir
+                         (overwrites same-named files; never deletes).
+  --replicas N           NoOfReplicas override.  Default: 1 for a single
+                         MDS, 2 for an even MDS count, 1 (with a warning)
+                         for an odd count >= 3.  N must divide the MDS
+                         count.
+  --schema-name NAME     RonDB schema name [${schema_name}].
+  --mgm-port PORT        ndb_mgmd port [${mgm_port}].
+  --nfs-port PORT        MDS NFS port [${nfs_port}].
+  --grpc-port PORT       MDS gRPC port [${grpc_port}].
+  --worker-threads N     MDS worker threads; also sizes the [api] pool
+                         [${worker_threads}].
+  --ds-export PATH       NFS export path on each DS [${ds_export}].
+  --ds-mount-fmt FMT     MDS-side DS mount template (one %u) [${ds_mount_fmt}].
+  --data-dir DIR         RonDB data/mgm directory [${data_dir}].
+  --data-memory SIZE     RonDB DataMemory [${data_memory}].
+  --conf-dir DIR         Target dir for mds.conf/rondb.conf [${conf_dir}].
+  -h, --help             Show this help.
+
+Example:
+  printf '10.0.0.50\n10.0.0.51\n' > mds.txt
+  printf '10.0.0.52\n10.0.0.53\n' > ds.txt
+  ${PROG} --mds-file mds.txt --ds-file ds.txt --out ./cluster-config
+
+For RonDB memory sizing beyond the basic DataMemory default, see
+scripts/rondb-mem-config.sh.
+EOF
+}
+
+die()  { printf '%s: error: %s\n' "${PROG}" "$*" >&2; exit 1; }
+warn() { printf '%s: warning: %s\n' "${PROG}" "$*" >&2; }
+info() { printf '%s: %s\n' "${PROG}" "$*" >&2; }
+
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+# Validate a syntactic IPv4 dotted-quad (0-255 per octet).
+is_ipv4() {
+    local ip="$1" a b c d extra o
+    IFS=. read -r a b c d extra <<<"${ip}"
+    [[ -n "${a}" && -n "${b}" && -n "${c}" && -n "${d}" ]] || return 1
+    [[ -z "${extra}" ]] || return 1
+    for o in "${a}" "${b}" "${c}" "${d}"; do
+        [[ "${o}" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#${o} <= 255 )) || return 1
+    done
+    return 0
+}
+
+# read_list FILE LABEL OUT_ARRAY_NAME
+# Reads one IPv4 per line (ignoring blank lines and # comments), validates
+# each, rejects duplicates, and stores the result in the named array.
+read_list() {
+    local file="$1" label="$2"
+    local -n out_ref="$3"
+    local line ip lineno=0
+    local -A seen=()
+    out_ref=()
+    [[ -f "${file}" ]] || die "${label} file not found: ${file}"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        lineno=$(( lineno + 1 ))
+        line="${line%%#*}"                              # strip comment
+        line="${line#"${line%%[![:space:]]*}"}"         # ltrim
+        line="${line%"${line##*[![:space:]]}"}"         # rtrim
+        [[ -z "${line}" ]] && continue
+        ip="${line}"
+        is_ipv4 "${ip}" || \
+            die "${label} file ${file} line ${lineno}: not a valid IPv4 address: '${ip}'"
+        [[ -z "${seen[${ip}]:-}" ]] || \
+            die "${label} file ${file}: duplicate IP: ${ip}"
+        seen[${ip}]=1
+        out_ref+=("${ip}")
+    done < "${file}"
+    [[ "${#out_ref[@]}" -gt 0 ]] || die "${label} file ${file} contains no IPs"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mds-file)       mds_file="${2:?--mds-file requires an argument}"; shift 2;;
+            --ds-file)        ds_file="${2:?--ds-file requires an argument}"; shift 2;;
+            --out)            out_dir="${2:?--out requires an argument}"; shift 2;;
+            --force)          force=1; shift;;
+            --replicas)       replicas_opt="${2:?--replicas requires an argument}"; shift 2;;
+            --schema-name)    schema_name="${2:?--schema-name requires an argument}"; shift 2;;
+            --mgm-port)       mgm_port="${2:?--mgm-port requires an argument}"; shift 2;;
+            --nfs-port)       nfs_port="${2:?--nfs-port requires an argument}"; shift 2;;
+            --grpc-port)      grpc_port="${2:?--grpc-port requires an argument}"; shift 2;;
+            --worker-threads) worker_threads="${2:?--worker-threads requires an argument}"; shift 2;;
+            --ds-export)      ds_export="${2:?--ds-export requires an argument}"; shift 2;;
+            --ds-mount-fmt)   ds_mount_fmt="${2:?--ds-mount-fmt requires an argument}"; shift 2;;
+            --data-dir)       data_dir="${2:?--data-dir requires an argument}"; shift 2;;
+            --data-memory)    data_memory="${2:?--data-memory requires an argument}"; shift 2;;
+            --conf-dir)       conf_dir="${2:?--conf-dir requires an argument}"; shift 2;;
+            -h|--help)        usage; exit 0;;
+            --) shift; break;;
+            -*) usage >&2; die "unknown option: $1";;
+            *)  usage >&2; die "unexpected argument: $1";;
+        esac
+    done
+}
+
+validate_inputs() {
+    [[ -n "${mds_file}" ]] || { usage >&2; die "--mds-file is required"; }
+    [[ -n "${ds_file}" ]]  || { usage >&2; die "--ds-file is required"; }
+
+    local p
+    for p in "${mgm_port}" "${nfs_port}" "${grpc_port}"; do
+        { is_uint "${p}" && (( p >= 1 && p <= 65535 )); } || \
+            die "port out of range [1,65535]: ${p}"
+    done
+    { is_uint "${worker_threads}" && (( worker_threads >= 1 && worker_threads <= 64 )); } || \
+        die "--worker-threads must be in [1,64]: ${worker_threads}"
+
+    case "${ds_mount_fmt}" in
+        *%u*) : ;;
+        *) die "--ds-mount-fmt must contain a %u placeholder: ${ds_mount_fmt}";;
+    esac
+}
+
+# Pick NoOfReplicas honoring the NDB rule that the data-node count must be
+# divisible by the replica count.  Colocation gives one data node per MDS.
+compute_replicas() {
+    local n="$1"
+    if [[ -n "${replicas_opt}" ]]; then
+        { is_uint "${replicas_opt}" && (( replicas_opt >= 1 && replicas_opt <= 4 )); } || \
+            die "--replicas must be in [1,4]: ${replicas_opt}"
+        (( n % replicas_opt == 0 )) || \
+            die "--replicas ${replicas_opt} does not divide the MDS/data-node count ${n}"
+        replicas="${replicas_opt}"
+        return 0
+    fi
+    if (( n == 1 )); then
+        replicas=1
+    elif (( n % 2 == 0 )); then
+        replicas=2
+    else
+        replicas=1
+        warn "odd MDS count (${n}): 2-way replication needs an even number of colocated data nodes; using NoOfReplicas=1 (add/remove an MDS, or pass --replicas)"
+    fi
+}
+
+emit_config_ini() {
+    local file="$1"
+    local mgm_ip="${MDS_IPS[0]}"
+    local n="${#MDS_IPS[@]}"
+    local idx node_id total_api i api_id
+    {
+        cat <<EOF
+# Generated by ${PROG} at ${GENERATED_AT}
+# RonDB cluster config (config.ini).  Copy to /etc/rondb/config.ini on the
+# management host ${mgm_ip} and start ndb_mgmd there.
+[ndb_mgmd]
+NodeId=${MGM_NODE_ID}
+HostName=${mgm_ip}
+PortNumber=${mgm_port}
+DataDir=${data_dir}/mgm
+
+[ndbd default]
+NoOfReplicas=${replicas}
+DataDir=${data_dir}/data
+FileSystemPath=${data_dir}/data
+DataMemory=${data_memory}
+SharedGlobalMemory=256M
+RedoBuffer=64M
+TransactionMemory=128M
+IndexMemory=64M
+EOF
+        for idx in "${!MDS_IPS[@]}"; do
+            node_id=$(( DATA_NODE_ID_BASE + idx ))
+            cat <<EOF
+
+[ndbd]
+NodeId=${node_id}
+HostName=${MDS_IPS[idx]}
+EOF
+        done
+        # Free [api] pool (no HostName): any MDS/admin tool may claim a slot.
+        # Sized so each MDS can open its full NDB connection pool, plus spare
+        # for ndb_mgm / mysql clients.
+        total_api=$(( n * worker_threads + 4 ))
+        for (( i = 0; i < total_api; i++ )); do
+            api_id=$(( API_NODE_ID_BASE + i ))
+            cat <<EOF
+
+[api]
+NodeId=${api_id}
+EOF
+        done
+    } > "${file}"
+}
+
+emit_rondb_conf() {
+    local file="$1"
+    cat > "${file}" <<EOF
+# Generated by ${PROG} at ${GENERATED_AT}
+# Backend connect file.  Copy to ${conf_dir}/rondb.conf on every MDS host.
+connect_string = ${MDS_IPS[0]}:${mgm_port}
+schema_name = ${schema_name}
+EOF
+}
+
+emit_mds_conf() {
+    local idx="$1" file="$2"
+    local ip="${MDS_IPS[idx]}"
+    local mds_id=$(( idx + 1 ))
+    local n="${#MDS_IPS[@]}" m="${#DS_IPS[@]}"
+    local j
+    {
+        cat <<EOF
+# Generated by ${PROG} at ${GENERATED_AT}
+# pnfs-mds config for ${ip}.  Copy to ${conf_dir}/mds.conf on that host.
+mds_id = ${mds_id}
+hostname = ${ip}
+nfs_port = ${nfs_port}
+grpc_port = ${grpc_port}
+catalogue_backend = rondb
+catalogue_backend_conf = ${conf_dir}/rondb.conf
+worker_threads = ${worker_threads}
+inline_enabled = false
+lease_time_sec = 90
+grace_period_sec = 0
+cluster_size = ${n}
+cluster_bind_addr = ${ip}
+EOF
+        for j in "${!MDS_IPS[@]}"; do
+            printf 'cluster_peer[%s] = %s\n' "${j}" "${MDS_IPS[j]}"
+        done
+        printf 'ds_count = %s\n' "${m}"
+        for j in "${!DS_IPS[@]}"; do
+            printf 'ds[%s] = %s:%s\n' "${j}" "${DS_IPS[j]}" "${ds_export}"
+        done
+        printf 'ds_mount_path_fmt = %s\n' "${ds_mount_fmt}"
+    } > "${file}"
+}
+
+emit_manifest() {
+    local file="$1"
+    local n="${#MDS_IPS[@]}" m="${#DS_IPS[@]}"
+    local idx
+    {
+        printf '# Generated by %s at %s\n' "${PROG}" "${GENERATED_AT}"
+        printf '# RonDB-colocated Lattice cluster: %s MDS (each runs a RonDB data node), %s DS.\n' \
+            "${n}" "${m}"
+        printf '# Management node (ndb_mgmd) colocated on the first MDS: %s\n' "${MDS_IPS[0]}"
+        printf '# NoOfReplicas=%s\n\n' "${replicas}"
+        printf '%-14s %-18s %s\n' "FILE" "HOST" "DESTINATION"
+        printf '%-14s %-18s %s\n' "config.ini" "${MDS_IPS[0]}" "/etc/rondb/config.ini"
+        printf '%-14s %-18s %s\n' "rondb.conf" "<every MDS>" "${conf_dir}/rondb.conf"
+        for idx in "${!MDS_IPS[@]}"; do
+            printf '%-14s %-18s %s\n' \
+                "mds-$(( idx + 1 )).conf" "${MDS_IPS[idx]}" "${conf_dir}/mds.conf"
+        done
+        printf '\nNext steps:\n'
+        printf '  1. Copy config.ini to %s and start ndb_mgmd.\n' "${MDS_IPS[0]}"
+        printf '  2. Start a RonDB data node (ndbmtd) on each MDS host.\n'
+        printf '  3. Copy rondb.conf and the matching mds-<n>.conf to each MDS\n'
+        printf '     (as %s/rondb.conf and %s/mds.conf) and start pnfs-mds.\n' \
+            "${conf_dir}" "${conf_dir}"
+    } > "${file}"
+}
+
+warn_overlap() {
+    local a b
+    local -A mds_set=()
+    for a in "${MDS_IPS[@]}"; do mds_set[${a}]=1; done
+    for b in "${DS_IPS[@]}"; do
+        if [[ -n "${mds_set[${b}]:-}" ]]; then
+            warn "IP ${b} appears in both the MDS and DS lists (a DS colocated on an MDS is allowed; just confirm it is intentional)"
+        fi
+    done
+}
+
+# Create the output directory.  Never deletes anything: --force only permits
+# writing into a non-empty directory (overwriting files of the same name).
+prepare_out_dir() {
+    if [[ -e "${out_dir}" && ! -d "${out_dir}" ]]; then
+        die "--out exists and is not a directory: ${out_dir}"
+    fi
+    if [[ -d "${out_dir}" ]] && \
+       [[ -n "$(find "${out_dir}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]] && \
+       [[ "${force}" -eq 0 ]]; then
+        die "output directory ${out_dir} is not empty (use --force to overwrite same-named files)"
+    fi
+    mkdir -p "${out_dir}"
+}
+
+main() {
+    parse_args "$@"
+    validate_inputs
+
+    read_list "${mds_file}" "MDS" MDS_IPS
+    read_list "${ds_file}" "DS" DS_IPS
+
+    local n="${#MDS_IPS[@]}"
+    (( n <= MAX_MDS )) || \
+        die "this basic generator supports at most ${MAX_MDS} MDS (got ${n})"
+
+    local total_api=$(( n * worker_threads + 4 ))
+    local api_top=$(( API_NODE_ID_BASE + total_api - 1 ))
+    (( api_top <= MAX_NODE_ID )) || \
+        die "too many [api] slots (${total_api}); node ids would exceed ${MAX_NODE_ID}. Reduce --worker-threads or the MDS count."
+
+    compute_replicas "${n}"
+    warn_overlap
+
+    GENERATED_AT="$(date -u +%FT%TZ)"
+    prepare_out_dir
+
+    emit_config_ini "${out_dir}/config.ini"
+    emit_rondb_conf "${out_dir}/rondb.conf"
+    local idx
+    for idx in "${!MDS_IPS[@]}"; do
+        emit_mds_conf "${idx}" "${out_dir}/mds-$(( idx + 1 )).conf"
+    done
+    emit_manifest "${out_dir}/MANIFEST.txt"
+
+    info "wrote ${n}-MDS / ${#DS_IPS[@]}-DS config to ${out_dir} (NoOfReplicas=${replicas})"
+    info "see ${out_dir}/MANIFEST.txt for file placement"
+}
+
+main "$@"

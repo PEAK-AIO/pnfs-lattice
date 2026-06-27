@@ -238,6 +238,34 @@ export PNFS_LAB_SSH_PASSWORD='...'
 ./scripts/pnfs-lab full-multi
 ```
 
+### Generating Basic Configs Without the Lab (`scripts/lattice-genconfig`)
+
+When you only need config files for a RonDB-colocated cluster (a RonDB
+data node on every MDS, `ndb_mgmd` on the first MDS) without the full
+SSH-driven lab bring-up, use `scripts/lattice-genconfig`. It takes a list
+of MDS IPs and a list of DS IPs and writes ready-to-copy configs to an
+output directory. It never connects to a host and never deploys anything.
+
+```sh
+printf '10.0.0.50\n10.0.0.51\n' > mds.txt   # one MDS IP per line
+printf '10.0.0.52\n10.0.0.53\n' > ds.txt    # one DS IP per line
+./scripts/lattice-genconfig --mds-file mds.txt --ds-file ds.txt --out ./cluster-config
+```
+
+This writes into `./cluster-config`:
+
+- `config.ini` — RonDB cluster config for the management host (first MDS)
+- `rondb.conf` — backend connect string + schema, copied to every MDS
+- `mds-<n>.conf` — one `pnfs-mds` config per MDS host
+- `MANIFEST.txt` — which file goes to which host and path
+
+`NoOfReplicas` defaults to 1 for a single MDS and 2 for an even MDS
+count; an odd count of 3 or more falls back to 1 (two-way replication
+needs an even number of colocated data nodes) and can be forced with
+`--replicas`. Run `./scripts/lattice-genconfig --help` for all options
+(ports, schema name, export path, `DataMemory`, etc.). For RonDB memory
+sizing, pair it with `scripts/rondb-mem-config.sh`.
+
 ### Service Management
 
 ```sh
