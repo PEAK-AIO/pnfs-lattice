@@ -9731,6 +9731,13 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     if (lbf_tbl == nullptr) { return -1; }
     ix = rondb_resolve_index(dict, RONDB_IX_LBF_FILEID,
                              RONDB_TBL_LAYOUT_BY_FILE);
+    if (ix == nullptr) {
+        /* rondb_resolve_index calls dict->invalidateTable() on a 4243 miss,
+         * making the earlier lbf_tbl pointer stale.  Re-fetch before using
+         * it in startTransaction() to avoid a SIGSEGV inside libndbclient. */
+        lbf_tbl = dict->getTable(RONDB_TBL_LAYOUT_BY_FILE);
+        if (lbf_tbl == nullptr) { return -1; }
+    }
 
     /* Partition-pruned startTransaction: fileid is the table partition key,
      * so this hint routes the NDB operation to the correct fragment even
