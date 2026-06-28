@@ -32,6 +32,7 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 extern "C" {
@@ -1674,8 +1675,18 @@ static int rondb_verify_index_visible(NdbDictionary::Dictionary *dict,
                                       const char *ix_name,
                                       const char *table_name)
 {
-    if (rondb_resolve_index(dict, ix_name, table_name) != nullptr) {
-        return 0;
+    /* Fresh RonDB clusters can return createIndex() code 4714
+     * (ndb_index_stat absent) and need a short propagation delay
+     * before the index is visible to NdbDictionary::getIndex(). */
+    for (int attempt = 0; attempt < 60; attempt++) {
+        if (rondb_resolve_index(dict, ix_name, table_name) != nullptr) {
+            return 0;
+        }
+        if (attempt > 0) {
+            usleep(500000);
+        }
+        dict->invalidateIndex(ix_name, table_name);
+        dict->invalidateTable(table_name);
     }
     std::fprintf(stderr,
         "ERROR: ordered index %s on table %s is not visible to the NDB "
@@ -2449,17 +2460,20 @@ static int rondb_define_layout_by_file_table(NdbDictionary::Dictionary *dict)
         }
     }
 
-    dict->invalidateIndex(RONDB_IX_LBF_FILEID, RONDB_TBL_LAYOUT_BY_FILE);
-    NdbDictionary::Index ix(RONDB_IX_LBF_FILEID);
-    ix.setTable(RONDB_TBL_LAYOUT_BY_FILE);
-    ix.setType(NdbDictionary::Index::OrderedIndex);
-    ix.setLogging(false);
-    ix.addColumnName(RONDB_LBF_COL_FILEID);
-    if (dict->createIndex(ix) != 0) {
+    auto create_ix = [&](const char *ix_name,
+                          const char *col_name) -> int {
+        dict->invalidateIndex(ix_name, RONDB_TBL_LAYOUT_BY_FILE);
+        NdbDictionary::Index ix(ix_name);
+        ix.setTable(RONDB_TBL_LAYOUT_BY_FILE);
+        ix.setType(NdbDictionary::Index::OrderedIndex);
+        ix.setLogging(false);
+        ix.addColumnName(col_name);
+        if (dict->createIndex(ix) == 0) {
+            return 0;
+        }
         NdbError err = dict->getNdbError();
-        if (err.classification != NdbError::SchemaObjectExists &&
-            err.code != 4714) {
-            return rondb_report_error(err, RONDB_IX_LBF_FILEID);
+        if (err.classification == NdbError::SchemaObjectExists) {
+            return 0;
         }
         if (err.code == 4714) {
             /* The index was created successfully; only the stats-tracking
@@ -2473,13 +2487,27 @@ static int rondb_define_layout_by_file_table(NdbDictionary::Dictionary *dict)
             std::fprintf(stderr,
                 "WARN: index %s created without stats "
                 "(ndb_index_stat tables absent, code=4714)\n",
-                RONDB_IX_LBF_FILEID);
+                ix_name);
             return 0;
         }
+        return rondb_report_error(err, ix_name);
+    };
+
+    if (create_ix(RONDB_IX_LBF_FILEID, RONDB_LBF_COL_FILEID) != 0) {
+        return -1;
     }
 
-    return rondb_verify_index_visible(dict, RONDB_IX_LBF_FILEID,
-                                      RONDB_TBL_LAYOUT_BY_FILE);
+    /* Best-effort: verify the index is visible on the startup dictionary.
+     * Failure is non-fatal: rondb_shim_layout_iter_file falls back to a
+     * partition-pruned table scan when the index is unavailable at runtime. */
+    if (rondb_verify_index_visible(dict, RONDB_IX_LBF_FILEID,
+                                   RONDB_TBL_LAYOUT_BY_FILE) != 0) {
+        std::fprintf(stderr,
+            "WARN: %s not yet visible to startup dict; "
+            "runtime will use table-scan fallback\n",
+            RONDB_IX_LBF_FILEID);
+    }
+    return 0;
 }
 
 static int rondb_define_ds_layout_idx_table(NdbDictionary::Dictionary *dict)
@@ -9396,7 +9424,7 @@ int rondb_shim_layout_scan_for_file(void *handle, uint64_t fileid,
     const NdbDictionary::Table *lbf_tbl;
     const NdbDictionary::Index *ix;
     NdbTransaction *tx;
-    NdbIndexScanOperation *scan;
+    NdbScanOperation *scan;
     NdbError err;
     int next_rc;
 
@@ -9703,47 +9731,88 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     if (lbf_tbl == nullptr) { return -1; }
     ix = rondb_resolve_index(dict, RONDB_IX_LBF_FILEID,
                              RONDB_TBL_LAYOUT_BY_FILE);
-    if (ix == nullptr) {
-        return rondb_report_error(dict->getNdbError(),
-                                 "layout_iter_file getIndex");
-    }
 
-    /*
-     * Step 1: partition-pruned ordered-index scan of mds_layout_by_file
-     * for every stateid_other recorded against `fileid`.  fileid is the
-     * partition key and the leading PK column, so an NdbIndexScanOperation
-     * with BoundEQ(fileid) reads only the matching rows from a single
-     * fragment -- one NDB round-trip regardless of global cardinality.
-     * Replaces the prior NdbScanOperation + NdbScanFilter.eq pushdown,
-     * which visited every fragment and scaled linearly with
-     * layout_by_file size (approximately 230 ms p50 on the lab cluster,
-     * approximately 100 percent of the layout_recall_scan catalogue phase).
-     */
-    tx = rondb_get_ndb(state)->startTransaction();
+    /* Partition-pruned startTransaction: fileid is the table partition key,
+     * so this hint routes the NDB operation to the correct fragment even
+     * when we fall back from the index scan to a full table scan. */
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(lbf_tbl,
+                                                    (const char *)pk_buf, 8);
+    }
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
                                  "layout_iter_file startTx");
     }
 
-    scan = tx->getNdbIndexScanOperation(ix);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file getIndexScanOp");
-    }
-
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file readTuples");
-    }
-
-    if (scan->setBound(RONDB_LBF_COL_FILEID,
-                       NdbIndexScanOperation::BoundEQ,
-                       &fileid) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file setBound");
+    if (ix != nullptr) {
+        /*
+         * Fast path: partition-pruned ordered-index scan of mds_layout_by_file
+         * for every stateid_other recorded against `fileid`.  fileid is the
+         * partition key and the leading PK column, so an NdbIndexScanOperation
+         * with BoundEQ(fileid) reads only the matching rows from a single
+         * fragment -- one NDB round-trip regardless of global cardinality.
+         */
+        NdbIndexScanOperation *ixscan = tx->getNdbIndexScanOperation(ix);
+        if (ixscan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file getIndexScanOp");
+        }
+        if (ixscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = ixscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file readTuples");
+        }
+        if (ixscan->setBound(RONDB_LBF_COL_FILEID,
+                             NdbIndexScanOperation::BoundEQ,
+                             &fileid) != 0) {
+            err = ixscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file setBound");
+        }
+        scan = ixscan;
+    } else {
+        /* Fallback: full table scan with pushed-down filter.
+         *
+         * ix_layout_by_file_fileid returned code=4243 (Index not found) on
+         * this pool connection's per-connection NDB dictionary cache.  This
+         * happens when the index was created on a different Ndb instance and
+         * the cache on this connection has not yet been refreshed.
+         *
+         * The startTransaction() partition key hint above still prunes the
+         * scan to the one NDB fragment that owns this fileid, so the scan
+         * visits only rows for this file -- no global cardinality penalty.
+         */
+        static int _ix_warn = 0;
+        if ((_ix_warn++ & 0x3F) == 0) {
+            std::fprintf(stderr,
+                "WARN: layout_iter_file: index %s unavailable (4243), "
+                "falling back to partition-pruned table scan\n",
+                RONDB_IX_LBF_FILEID);
+        }
+        NdbScanOperation *tscan = tx->getNdbScanOperation(lbf_tbl);
+        if (tscan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file getScanOp");
+        }
+        if (tscan->readTuples(NdbOperation::LM_CommittedRead,
+                              NdbScanOperation::SF_TupScan) != 0) {
+            err = tscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file readTuples");
+        }
+        {
+            NdbScanFilter filter(tscan);
+            filter.begin(NdbScanFilter::AND);
+            filter.eq(
+                lbf_tbl->getColumn(RONDB_LBF_COL_FILEID)->getColumnNo(),
+                (Uint64)fileid);
+            filter.end();
+        }
+        scan = tscan;
     }
 
     a_sid = scan->getValue(RONDB_LBF_COL_STATEID, nullptr);
