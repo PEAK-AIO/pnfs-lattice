@@ -21,6 +21,14 @@ At any given time, there may be improvements, fixes and new features under activ
 
 The software is provided as is, without warranty. Use is at your own risk. See the licence files for the full terms.
 
+## Quickstart
+
+If you would like to quickly try Lattice, pre-compiled binaries are available for Red Hat / Rocky Linux 9.7 and Ubuntu 24.04 from https://pnfs-lattice.peakaio.com.
+
+These bundles are provided free of charge for evaluation and testing only, and are not intended for production use. They are supplied as is, without warranty or support; see the licence files for the full terms.
+
+Each bundle includes the MDS daemon, the RonDB metadata backend, and a working single-node default configuration. Follow the bundled INSTALL-GUIDE to install and start a single-node metadata server in a few minutes.
+
 
 
 
