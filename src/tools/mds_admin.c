@@ -3013,7 +3013,8 @@ int main(int argc, char *argv[])
         return EXIT_SUCCESS;
     }
     if (strcmp(argv[1], "-V") == 0 || strcmp(argv[1], "--version") == 0) {
-        printf("mds-admin %s\n", PNFS_MDS_VERSION);
+        printf("mds-admin %s (commit %s)\n",
+               PNFS_MDS_VERSION, PNFS_MDS_GIT_COMMIT);
         return EXIT_SUCCESS;
     }
 

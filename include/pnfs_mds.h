@@ -52,9 +52,21 @@ _Static_assert(0, "pnfs-mds requires GCC >= 11.1 -- see docs/architecture.md sec
 #define TO_STR(x) #x
 #define VERSION(maj, min, patch) TO_STR(maj) "." TO_STR(min) "." TO_STR(patch)
 
+/* A build-time -DPNFS_MDS_VERSION="..." (set by the deb/rpm packaging from
+ * PNFS_MDS_VERSION_OVERRIDE) takes precedence over this default; the #ifndef
+ * guard avoids a macro redefinition that -Werror would reject. */
+#ifndef PNFS_MDS_VERSION
 #define PNFS_MDS_VERSION VERSION(PNFS_MDS_VERSION_MAJOR, \
                                  PNFS_MDS_VERSION_MINOR, \
                                  PNFS_MDS_VERSION_PATCH)
+#endif
+
+/* Short git commit the build was cut from.  A build-time
+ * -DPNFS_MDS_GIT_COMMIT="..." (set by CMake from `git rev-parse`, or by the
+ * deb/rpm packaging via PNFS_MDS_GIT_COMMIT_OVERRIDE) wins over this default. */
+#ifndef PNFS_MDS_GIT_COMMIT
+#define PNFS_MDS_GIT_COMMIT "unknown"
+#endif
 
 /**
  * Wire compatibility version -- bumped only on breaking wire/replication/RPC
