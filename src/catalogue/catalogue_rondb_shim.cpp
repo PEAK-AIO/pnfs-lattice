@@ -9424,7 +9424,7 @@ int rondb_shim_layout_scan_for_file(void *handle, uint64_t fileid,
     const NdbDictionary::Table *lbf_tbl;
     const NdbDictionary::Index *ix;
     NdbTransaction *tx;
-    NdbScanOperation *scan;
+    NdbIndexScanOperation *scan;
     NdbError err;
     int next_rc;
 
@@ -9717,7 +9717,7 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     const NdbDictionary::Table *lbf_tbl;
     const NdbDictionary::Index *ix;
     NdbTransaction *tx;
-    NdbIndexScanOperation *scan;
+    NdbScanOperation *scan;
     NdbRecAttr *a_sid;
     NdbError err;
     int next_rc;
