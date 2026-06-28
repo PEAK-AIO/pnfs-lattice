@@ -359,6 +359,8 @@ static bool xdr_encode_pathname4(XDR *xdrs, const char *abspath)
 static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
                              const uint32_t actual[NFS4_BITMAP_WORDS],
                              const struct xdr_fattr_fs_space *fs_space,
+                             uint64_t fsid_major,
+                             uint64_t fsid_minor,
                              const char *ref_server,
                              const char *ref_rootpath,
                              const char *ref_fs_root)
@@ -416,13 +418,15 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
 }
     }
     /* FATTR4_FSID (bit 8).
-     * Junction directories get a distinct FSID to signal a
-     * separate filesystem, triggering the kernel's migration
-     * logic when NFS4ERR_MOVED is returned by LOOKUP. */
+     * Each shard/partition has a distinct FSID (major = owner MDS id)
+     * so clients treat referral crossings as separate filesystems. */
     if (nfs4_bitmap_test(actual, FATTR4_FSID)) {
-        uint64_t major = (ref_server != NULL && ref_server[0] != '\0')
-                         ? 99 : 1;
-        uint64_t minor = 0;
+        uint64_t major = fsid_major;
+        uint64_t minor = fsid_minor;
+
+        if (major == 0) {
+            major = 1;
+        }
 
         if (!xdr_uint64_t(xdrs, &major)) {
             return false;
@@ -761,7 +765,8 @@ bool xdr_nfs4_fattr_encode(XDR *xdrs, const struct mds_inode *inode,
 
         uint32_t start_pos = xdr_getpos(xdrs);
 
-        if (!encode_attr_vals(xdrs, inode, actual, NULL, NULL, NULL, NULL)) {
+        if (!encode_attr_vals(xdrs, inode, actual, NULL, 1, 0,
+                              NULL, NULL, NULL)) {
             return false;
         }
 
@@ -781,6 +786,8 @@ bool xdr_nfs4_fattr_encode(XDR *xdrs, const struct mds_inode *inode,
 bool xdr_nfs4_fattr_encode_ex(XDR *xdrs, const struct mds_inode *inode,
                                const uint32_t requested[NFS4_BITMAP_WORDS],
                                const struct xdr_fattr_fs_space *fs_space,
+                               uint64_t fsid_major,
+                               uint64_t fsid_minor,
                                const char *ref_server,
                                const char *ref_rootpath,
                                const char *ref_fs_root)
@@ -820,7 +827,8 @@ bool xdr_nfs4_fattr_encode_ex(XDR *xdrs, const struct mds_inode *inode,
         uint32_t start_pos = xdr_getpos(xdrs);
 
         if (!encode_attr_vals(xdrs, inode, actual,
-                             fs_space, ref_server,
+                             fs_space, fsid_major, fsid_minor,
+                             ref_server,
                              ref_rootpath, ref_fs_root)) {
             return false;
         }

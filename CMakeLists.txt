@@ -3,6 +3,28 @@
 
 cmake_minimum_required(VERSION 3.20)
 
+# Cluster build nodes often have a full /tmp.  GCC writes intermediate .s
+# files there during CMake's compiler sanity check (before project()).
+# Redirect compiler temps into the out-of-tree build directory unless the
+# caller opted out with PNFS_KEEP_TMPDIR=1 in the environment.
+if(NOT DEFINED ENV{PNFS_KEEP_TMPDIR})
+    if(CMAKE_BINARY_DIR)
+        get_filename_component(_PNFS_BUILD_TMP "${CMAKE_BINARY_DIR}/tmp" ABSOLUTE)
+    else()
+        get_filename_component(_PNFS_BUILD_TMP
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/tmp" ABSOLUTE)
+    endif()
+    file(MAKE_DIRECTORY "${_PNFS_BUILD_TMP}")
+    if(NOT DEFINED ENV{TMPDIR}
+            OR "$ENV{TMPDIR}" STREQUAL "/tmp"
+            OR "$ENV{TMPDIR}" MATCHES "^/tmp/")
+        set(ENV{TMPDIR} "${_PNFS_BUILD_TMP}")
+        set(ENV{TEMP} "${_PNFS_BUILD_TMP}")
+        set(ENV{TMP} "${_PNFS_BUILD_TMP}")
+        message(STATUS "TMPDIR=${_PNFS_BUILD_TMP} (redirected from system /tmp)")
+    endif()
+endif()
+
 project(pnfs-mds
     VERSION 0.1.0
     DESCRIPTION "pNFS Active-Active MDS with Flex File Layouts"

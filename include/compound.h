@@ -1028,9 +1028,13 @@ struct nfs4_res_getattr {
 	uint64_t space_total;
 	/* Junction referral (inline storage, no heap). */
 	bool has_referral;
+	uint32_t referral_owner_mds_id;
 	char referral_server[256];
 	char referral_rootpath[MDS_MAX_PATH];
 	char referral_fs_root[MDS_MAX_PATH];
+	/* FSID for FATTR4_FSID (one distinct filesystem per shard). */
+	uint64_t fsid_major;
+	uint64_t fsid_minor;
 };
 
 struct nfs4_res_create {

@@ -808,6 +808,8 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 		    jse.owner_mds_id != cd->mds_id &&
 		    referral_build(cd->smap, jpath, &loc) == MDS_OK) {
 			res->res.getattr.has_referral = true;
+			res->res.getattr.referral_owner_mds_id =
+				jse.owner_mds_id;
 			(void)snprintf(res->res.getattr.referral_fs_root,
 				sizeof(res->res.getattr.referral_fs_root),
 				"%s", jpath);
@@ -819,6 +821,16 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 				"%s", loc.rootpath);
 		}
 	}
+	}
+
+	{
+		uint32_t fsid_owner = cd->mds_id;
+
+		if (res->res.getattr.has_referral) {
+			fsid_owner = res->res.getattr.referral_owner_mds_id;
+		}
+		res->res.getattr.fsid_major = referral_fsid_major(fsid_owner);
+		res->res.getattr.fsid_minor = referral_fsid_minor(fsid_owner);
 	}
 
 	/* Pass the client's requested bitmap to the encoder. */
@@ -1335,8 +1347,9 @@ enum nfs4_status op_create(struct compound_data *cd,
  * stripe map (the worker brute-forces stripe/mirror coordinates,
  * bounded by MDS_MAX_STRIPES * MDS_MAX_MIRRORS — currently 4096
  * cheap unlinks per DS, most ENOENT, with an early-out in ds_gc.c
- * once the stripe count is exhausted).  Drop the stripe map after
- * enqueue so the next iteration does not re-enter.  All steps are
+ * once the stripe count is exhausted).  Catalogue stripe rows are
+ * deleted in the ns_remove transaction; ds_gc repeats stripe_map_del
+ * idempotently after DS bytes are gone.  All steps are
  * best-effort: a failure here only forfeits this round of cleanup;
  * the GC table will catch the next pass.  We never propagate the
  * failure back to the client — the unlink semantics from the user's
@@ -1393,9 +1406,7 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 
 	total = stripe_count * mirror_count;
 	if (total > (uint32_t)(MDS_MAX_STRIPES * MDS_MAX_MIRRORS)) {
-		/* Defensive: catalogue invariant violated.  Free the
-		 * buffer and bail; stripe_map_del below would still
-		 * remove the malformed row on a future pass. */
+		/* Defensive: catalogue invariant violated. */
 		free(entries);
 		return;
 	}
@@ -1440,9 +1451,9 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 					 entries[i].nfs_fh, fh_len);
 	}
 
-	/* Best-effort: drop the now-orphaned stripe map.  Idempotent
-	 * on the catalogue — a NOTFOUND on a re-run is not an error. */
-	(void)mds_cat_stripe_map_del(cd->cat, NULL, fileid);
+	/* Stripe catalogue rows are deleted inside the ns_remove NDB
+	 * transaction on final unlink.  Any orphaned stripe_map rows are
+	 * dropped asynchronously by ds_gc after DS file cleanup. */
 
 	/* Phase D of docs/hpc-nto1-plan.md — keep the per-MDS HPC
 	 * layout cache coherent with the catalogue.  NULL-safe; the

@@ -1,5 +1,7 @@
-# Build output (any cmake out-of-tree directory)
-build/
+# Build output (any cmake out-of-tree directory).
+# build/ is tracked with build/.gitignore only — see scripts/cmake-fresh.sh.
+build/*
+!build/.gitignore
 build-*/
 cmake-build-*/
 *.o

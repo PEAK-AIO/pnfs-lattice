@@ -1575,18 +1575,10 @@ enum mds_status catalogue_rondb_stripe_map_del(
 	}
 
 	/*
-	 * Retry on transient NDB errors (lock contention / scan
-	 * deadlock).  Since op_remove now drives stripe_map_del on
-	 * every final unlink, parallel rm workloads (e.g. mdtest) hit
-	 * NDB row-lock contention on the same stripe rows that other
-	 * concurrent removes are also draining, surfacing as
-	 * code=274 "Time-out in NDB, probably caused by deadlock"
-	 * inside the shim's nextResult loop.
-	 *
-	 * stripe_map_del is idempotent (the row has either been
-	 * deleted or never existed); a successful retry is
-	 * indistinguishable from a successful first call.  Same
-	 * 3-attempt pattern as catalogue_rondb_stripe_map_put.
+	 * Retry on transient NDB errors (lock contention).  The shim uses
+	 * batched PK deletes instead of an exclusive scan.  stripe_map_del
+	 * is idempotent; ds_gc may call it after ns_remove already removed
+	 * the rows in the same transaction as the namespace delete.
 	 */
 	for (int attempt = 0; attempt < 3; attempt++) {
 		rc = rondb_shim_stripe_del(h, fileid, MDS_MAX_STRIPES);

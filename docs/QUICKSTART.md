@@ -22,11 +22,27 @@ sudo apt install -y build-essential cmake pkg-config \
 # Clone and build (no RonDB cluster required for unit tests)
 git clone https://github.com/PEAK-AIO/pnfs-lattice.git
 cd pnfs-lattice
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+./scripts/cmake-fresh.sh build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
 # Run tests (in-memory catalogue stub, no RonDB needed)
 ctest --test-dir build --output-on-failure
+```
+
+If CMake reports a `CMakeCache.txt` path mismatch, the tarball probably
+included a `build/` tree from another host. Re-pack with
+`./scripts/package-source.sh` (excludes `build/`), or on the build host:
+
+```bash
+rm -rf build
+./scripts/cmake-fresh.sh build -DCMAKE_BUILD_TYPE=Release -DENABLE_RONDB=ON -DRonDB_ROOT=/opt/rondb
+```
+
+MDS build-machine install (after extracting `lattice.tar.gz`):
+
+```bash
+export CC=gcc-13 CXX=g++-13
+./scripts/build-install-mds.sh
 ```
 
 ## 2. Build with RonDB Backend
@@ -36,7 +52,7 @@ Requires a running RonDB cluster with NDB API headers installed
 
 ```bash
 # Build with RonDB support
-cmake -B build-rondb \
+./scripts/cmake-fresh.sh build-rondb \
     -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_RONDB=ON \
     -DRONDB_INCLUDE_DIR=/opt/rondb/include/storage/ndb \

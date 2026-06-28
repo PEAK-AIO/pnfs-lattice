@@ -32,6 +32,7 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 extern "C" {
@@ -1674,8 +1675,19 @@ static int rondb_verify_index_visible(NdbDictionary::Dictionary *dict,
                                       const char *ix_name,
                                       const char *table_name)
 {
-    if (rondb_resolve_index(dict, ix_name, table_name) != nullptr) {
-        return 0;
+    /* After a clean createIndex() the index may need a short propagation
+     * delay before it is visible to NdbDictionary::getIndex(). Callers
+     * that received code 4714 (ndb_index_stat absent) should skip this
+     * check and rely on the runtime table-scan fallback instead. */
+    for (int attempt = 0; attempt < 60; attempt++) {
+        if (rondb_resolve_index(dict, ix_name, table_name) != nullptr) {
+            return 0;
+        }
+        if (attempt > 0) {
+            usleep(500000);
+        }
+        dict->invalidateIndex(ix_name, table_name);
+        dict->invalidateTable(table_name);
     }
     std::fprintf(stderr,
         "ERROR: ordered index %s on table %s is not visible to the NDB "
@@ -2449,17 +2461,21 @@ static int rondb_define_layout_by_file_table(NdbDictionary::Dictionary *dict)
         }
     }
 
-    dict->invalidateIndex(RONDB_IX_LBF_FILEID, RONDB_TBL_LAYOUT_BY_FILE);
-    NdbDictionary::Index ix(RONDB_IX_LBF_FILEID);
-    ix.setTable(RONDB_TBL_LAYOUT_BY_FILE);
-    ix.setType(NdbDictionary::Index::OrderedIndex);
-    ix.setLogging(false);
-    ix.addColumnName(RONDB_LBF_COL_FILEID);
-    if (dict->createIndex(ix) != 0) {
+    bool ix_no_stats = false;
+    auto create_ix = [&](const char *ix_name,
+                          const char *col_name) -> int {
+        dict->invalidateIndex(ix_name, RONDB_TBL_LAYOUT_BY_FILE);
+        NdbDictionary::Index ix(ix_name);
+        ix.setTable(RONDB_TBL_LAYOUT_BY_FILE);
+        ix.setType(NdbDictionary::Index::OrderedIndex);
+        ix.setLogging(false);
+        ix.addColumnName(col_name);
+        if (dict->createIndex(ix) == 0) {
+            return 0;
+        }
         NdbError err = dict->getNdbError();
-        if (err.classification != NdbError::SchemaObjectExists &&
-            err.code != 4714) {
-            return rondb_report_error(err, RONDB_IX_LBF_FILEID);
+        if (err.classification == NdbError::SchemaObjectExists) {
+            return 0;
         }
         if (err.code == 4714) {
             /* The index was created successfully; only the stats-tracking
@@ -2473,13 +2489,30 @@ static int rondb_define_layout_by_file_table(NdbDictionary::Dictionary *dict)
             std::fprintf(stderr,
                 "WARN: index %s created without stats "
                 "(ndb_index_stat tables absent, code=4714)\n",
-                RONDB_IX_LBF_FILEID);
+                ix_name);
+            ix_no_stats = true;
             return 0;
         }
+        return rondb_report_error(err, ix_name);
+    };
+
+    if (create_ix(RONDB_IX_LBF_FILEID, RONDB_LBF_COL_FILEID) != 0) {
+        return -1;
     }
 
-    return rondb_verify_index_visible(dict, RONDB_IX_LBF_FILEID,
-                                      RONDB_TBL_LAYOUT_BY_FILE);
+    /* Best-effort: verify the index is visible on the startup dictionary.
+     * Skipped when createIndex returned 4714 (ndb_index_stat absent) because
+     * the propagation window is unbounded on such clusters; the runtime
+     * table-scan fallback in rondb_shim_layout_iter_file handles that case. */
+    if (!ix_no_stats &&
+        rondb_verify_index_visible(dict, RONDB_IX_LBF_FILEID,
+                                   RONDB_TBL_LAYOUT_BY_FILE) != 0) {
+        std::fprintf(stderr,
+            "WARN: %s not yet visible to startup dict; "
+            "runtime will use table-scan fallback\n",
+            RONDB_IX_LBF_FILEID);
+    }
+    return 0;
 }
 
 static int rondb_define_ds_layout_idx_table(NdbDictionary::Dictionary *dict)
@@ -4495,7 +4528,7 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
  * stripe_get: PK read on header + batched PK reads on entries by
  *             (fileid, ordinal=0..stripe_count-1), all in one NDB txn.
  * stripe_put: write header + insert N entries in one NDB transaction.
- * stripe_del: delete header + scan-delete all entries for fileid.
+ * stripe_del: delete header + PK-delete stripe_entries by ordinal.
  * ----------------------------------------------------------------------- */
 
 int rondb_shim_stripe_get(void *handle, uint64_t fileid,
@@ -4779,16 +4812,113 @@ stripe_put_err:
 }
 
 /*
- * stripe_del -- best-effort scan-delete of mds_stripe_maps + mds_stripe_entries
- * for a single fileid.
+ * Read mds_stripe_maps.stripe_count for fileid inside an open txn.
+ * Returns 0 when the header row is absent (not an error).
+ */
+static int rondb_txn_read_stripe_entry_count(NdbTransaction *tx,
+                                             const NdbDictionary::Table *hdr_tbl,
+                                             uint64_t fileid,
+                                             uint32_t *stripe_count_out,
+                                             NdbError *err_out)
+{
+    NdbOperation *hdr_op;
+    NdbRecAttr *a_sc;
+    NdbError err;
+
+    if (stripe_count_out == nullptr) {
+        return -1;
+    }
+    *stripe_count_out = 0;
+
+    hdr_op = tx->getNdbOperation(hdr_tbl);
+    if (hdr_op == nullptr) {
+        if (err_out != nullptr) {
+            *err_out = tx->getNdbError();
+        }
+        return -1;
+    }
+    hdr_op->readTuple(NdbOperation::LM_CommittedRead);
+    (void)rondb_equal_u64(hdr_op, RONDB_SM_COL_FILEID, fileid);
+    a_sc = hdr_op->getValue(RONDB_SM_COL_STRIPE_CNT, nullptr);
+    if (a_sc == nullptr) {
+        return -1;
+    }
+
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        if (err_out != nullptr) {
+            *err_out = err;
+        }
+        if (rondb_is_temporary(err)) {
+            return -2;
+        }
+        return -1;
+    }
+
+    err = hdr_op->getNdbError();
+    if (err.code == 626 ||
+        err.classification == NdbError::NoDataFound) {
+        return 0;
+    }
+    if (err.code != 0) {
+        if (err_out != nullptr) {
+            *err_out = err;
+        }
+        if (rondb_is_temporary(err)) {
+            return -2;
+        }
+        return -1;
+    }
+
+    *stripe_count_out = a_sc->u_32_value();
+    return 0;
+}
+
+/*
+ * Queue PK deletes for mds_stripe_maps + mds_stripe_entries rows.
+ * Caller commits the transaction.
+ */
+static int rondb_txn_append_stripe_pk_deletes(NdbTransaction *tx,
+                                              const NdbDictionary::Table *hdr_tbl,
+                                              const NdbDictionary::Table *ent_tbl,
+                                              uint64_t fileid,
+                                              uint32_t stripe_count)
+{
+    NdbOperation *op;
+    uint32_t capped = stripe_count;
+
+    if (stripe_count == 0) {
+        return 0;
+    }
+    if (capped > (uint32_t)MDS_MAX_STRIPES) {
+        capped = (uint32_t)MDS_MAX_STRIPES;
+    }
+
+    op = tx->getNdbOperation(hdr_tbl);
+    if (op == nullptr) {
+        return -1;
+    }
+    op->deleteTuple();
+    (void)rondb_equal_u64(op, RONDB_SM_COL_FILEID, fileid);
+
+    for (uint32_t i = 0; i < capped; i++) {
+        op = tx->getNdbOperation(ent_tbl);
+        if (op == nullptr) {
+            return -1;
+        }
+        op->deleteTuple();
+        (void)rondb_equal_u64(op, RONDB_SE_COL_FILEID, fileid);
+        op->equal(RONDB_SE_COL_ORDINAL, (Uint32)i);
+    }
+    return 0;
+}
+
+/*
+ * stripe_del -- delete stripe_maps header + stripe_entries rows for fileid.
  *
- * Under multi-MDS contention the inner scan-delete deadlocks against
- * concurrent op_remove sweeps on the same partition.  Every transient
- * NDB error here is already retried at the C-wrapper layer
- * (catalogue_rondb_stripe_map_del -- 3 attempts with backoff), so the
- * shim returns -2 silently on temporary failures and only logs via
- * rondb_report_error when the error is genuinely permanent.  This
- * mirrors the pattern in rondb_shim_stripe_put.
+ * Uses batched PK deletes on (fileid, ordinal) instead of an exclusive
+ * NdbScanOperation, which deadlocked under concurrent mdtest mass-delete.
+ * Transient NDB errors return -2 for the C-wrapper retry loop.
  */
 int rondb_shim_stripe_del(void *handle, uint64_t fileid,
                           uint32_t max_entries)
@@ -4797,12 +4927,9 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *hdr_tbl, *ent_tbl;
     NdbTransaction *tx;
-    NdbOperation *op;
-    NdbScanOperation *scan;
     NdbError err;
-    int next_rc;
-
-    (void)max_entries; /* reserved for future bounded cleanup */
+    uint32_t stripe_count = max_entries;
+    int rc;
 
     if (state == nullptr) { return -1; }
 
@@ -4812,7 +4939,6 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
     ent_tbl = dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
     if (hdr_tbl == nullptr || ent_tbl == nullptr) { return -1; }
 
-    /* TC locality: fileid partition. */
     {
         uint8_t pk_buf[8];
         fdb_put_u64(pk_buf, fileid);
@@ -4823,118 +4949,41 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
                                  "stripe_del startTx");
     }
 
-    /* 1. Delete header row (silent if missing). */
-    op = tx->getNdbOperation(hdr_tbl);
-    if (op == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "stripe_del hdr delOp");
-    }
-    op->deleteTuple();
-    (void)rondb_equal_u64(op, RONDB_SM_COL_FILEID, fileid);
-
-    /* 2. Scan-delete entry rows for this fileid.
-     * We use a separate transaction for the scan-delete because
-     * mixing PK deletes and scan operations in one NDB transaction
-     * is not supported cleanly.  The header delete commits first,
-     * then entries are cleaned up. */
-    if (tx->execute(NdbTransaction::Commit) == -1) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        /* 626 = tuple not found -- header didn't exist, still clean entries. */
-        if (err.code != 626 &&
-            err.classification != NdbError::NoDataFound) {
-            if (rondb_is_temporary(err)) {
-                return -2; /* Wrapper retries; suppress log spam. */
-            }
-            return rondb_report_error(err, "stripe_del hdr commit");
-        }
-    }
-    rondb_get_ndb(state)->closeTransaction(tx);
-
-    /* Second transaction: scan-delete entries. */
-    {
-        uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
-        tx = rondb_get_ndb(state)->startTransaction(ent_tbl, (const char *)pk_buf, 8);
-    }
-    if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "stripe_del ent startTx");
-    }
-
-    scan = tx->getNdbScanOperation(ent_tbl);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "stripe_del getScanOp");
-    }
-
-    if (scan->readTuples(NdbOperation::LM_Exclusive) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "stripe_del readTuples");
-    }
-
-    /* Filter: fileid == target. */
-    {
-        NdbScanFilter filter(scan);
-        filter.begin(NdbScanFilter::AND);
-        filter.eq(ent_tbl->getColumn(RONDB_SE_COL_FILEID)->getColumnNo(),
-                  (Uint64)fileid);
-        filter.end();
-    }
-
-    if (tx->execute(NdbTransaction::NoCommit) == -1) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        if (rondb_is_temporary(err)) {
-            return -2; /* Wrapper retries; suppress log spam. */
-        }
-        return rondb_report_error(err, "stripe_del scan exec");
-    }
-
-    /* Delete each matched row. */
-    while ((next_rc = scan->nextResult(true)) == 0) {
-        if (scan->deleteCurrentTuple() != 0) {
-            err = scan->getNdbError();
-            scan->close();
+    if (stripe_count == 0) {
+        rc = rondb_txn_read_stripe_entry_count(tx, hdr_tbl, fileid,
+                                               &stripe_count, &err);
+        if (rc == -2) {
             rondb_get_ndb(state)->closeTransaction(tx);
-            if (rondb_is_temporary(err)) {
-                return -2;
-            }
-            return rondb_report_error(err, "stripe_del deleteCurrentTuple");
-        }
-        /* Flush this batch of deletes. */
-        if (tx->execute(NdbTransaction::NoCommit) == -1) {
-            err = tx->getNdbError();
-            scan->close();
-            rondb_get_ndb(state)->closeTransaction(tx);
-            if (rondb_is_temporary(err)) {
-                return -2;
-            }
-            return rondb_report_error(err, "stripe_del batch exec");
-        }
-    }
-    if (next_rc != 1) {
-        err = scan->getNdbError();
-        scan->close();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        if (rondb_is_temporary(err)) {
             return -2;
         }
-        return rondb_report_error(err, "stripe_del nextResult");
+        if (rc != 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "stripe_del hdr read");
+        }
+        if (stripe_count == 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return 0;
+        }
     }
 
-    scan->close();
+    if (rondb_txn_append_stripe_pk_deletes(tx, hdr_tbl, ent_tbl,
+                                           fileid, stripe_count) != 0) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "stripe_del delOp");
+    }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626 ||
+            err.classification == NdbError::NoDataFound) {
+            return 0;
+        }
         if (rondb_is_temporary(err)) {
             return -2;
         }
-        return rondb_report_error(err, "stripe_del ent commit");
+        return rondb_report_error(err, "stripe_del commit");
     }
 
     rondb_get_ndb(state)->closeTransaction(tx);
@@ -6538,7 +6587,8 @@ ns_create_wl_err:
  * Atomic REMOVE (T2 -- single NDB transaction, multi-row)
  *
  * Deletes dirent + updates/deletes child inode + updates parent inode.
- * Stripe cleanup deferred to stripe_del stub.
+ * On final unlink (delete_child), stripe_maps + stripe_entries rows for
+ * the child fileid are removed in the same NDB transaction.
  * ----------------------------------------------------------------------- */
 
 static int rondb_shim_ns_remove_once(void *handle,
@@ -6552,13 +6602,16 @@ static int rondb_shim_ns_remove_once(void *handle,
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *ino_tbl, *dir_tbl;
+    const NdbDictionary::Table *sm_hdr_tbl, *sm_ent_tbl;
     NdbTransaction *tx;
     NdbOperation *op_dirent, *op_child;
     NdbError err;
     struct mds_inode child_ino;
     uint32_t child_shard;
+    uint32_t stripe_entry_count = stripe_count;
     uint8_t name_value[MDS_MAX_NAME + 2];
     uint32_t name_value_len = 0;
+    int stripe_rc;
 
     if (state == nullptr || name == nullptr ||
         child_inode_buf == nullptr) {
@@ -6580,6 +6633,8 @@ static int rondb_shim_ns_remove_once(void *handle,
     ino_tbl = dict->getTable(RONDB_TBL_INODES);
     dir_tbl = dict->getTable(RONDB_TBL_DIRENTS);
     if (ino_tbl == nullptr || dir_tbl == nullptr) { return -1; }
+    sm_hdr_tbl = dict->getTable(RONDB_TBL_STRIPE_MAPS);
+    sm_ent_tbl = dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
 
     {
         uint8_t pk_buf[8];
@@ -6590,6 +6645,18 @@ static int rondb_shim_ns_remove_once(void *handle,
         err = rondb_get_ndb(state)->getNdbError();
         if (err.code == 266 || err.code == 274) { return err.code; }
         return rondb_report_error(err, "ns_remove startTx");
+    }
+
+    if (delete_child && sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr &&
+        stripe_entry_count == 0) {
+        stripe_rc = rondb_txn_read_stripe_entry_count(
+            tx, sm_hdr_tbl, child_fileid, &stripe_entry_count, &err);
+        if (stripe_rc == -2) {
+            goto ns_remove_err;
+        }
+        if (stripe_rc != 0) {
+            goto ns_remove_err;
+        }
     }
 
     /* 1. Delete dirent. */
@@ -6650,8 +6717,14 @@ static int rondb_shim_ns_remove_once(void *handle,
         goto ns_remove_err;
     }
 
-    /* 4. Stripe cleanup (TODO: delete stripe header+entries here). */
-    (void)stripe_count;
+    if (delete_child && stripe_entry_count > 0 &&
+        sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr) {
+        if (rondb_txn_append_stripe_pk_deletes(tx, sm_hdr_tbl, sm_ent_tbl,
+                                               child_fileid,
+                                               stripe_entry_count) != 0) {
+            goto ns_remove_err;
+        }
+    }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -6793,6 +6866,23 @@ int rondb_shim_ns_remove_full(void *handle,
         *out_child_type = child_type;
         *out_old_nlink  = old_nlink;
 
+        const NdbDictionary::Table *sm_hdr_tbl =
+            dict->getTable(RONDB_TBL_STRIPE_MAPS);
+        const NdbDictionary::Table *sm_ent_tbl =
+            dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
+        uint32_t stripe_entry_count = 0;
+
+        if (delete_child && sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr) {
+            int stripe_rc = rondb_txn_read_stripe_entry_count(
+                tx, sm_hdr_tbl, child_fid, &stripe_entry_count, &err);
+            if (stripe_rc == -2) {
+                goto remove_full_err;
+            }
+            if (stripe_rc != 0) {
+                goto remove_full_err;
+            }
+        }
+
         /* Phase 3: mutations (Commit).
          * All in the same transaction as the reads. */
 
@@ -6831,6 +6921,15 @@ int rondb_shim_ns_remove_full(void *handle,
         if (rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
                                             parent_nlink_delta) != 0) {
             goto remove_full_err;
+        }
+
+        if (delete_child && stripe_entry_count > 0 &&
+            sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr) {
+            if (rondb_txn_append_stripe_pk_deletes(tx, sm_hdr_tbl, sm_ent_tbl,
+                                                   child_fid,
+                                                   stripe_entry_count) != 0) {
+                goto remove_full_err;
+            }
         }
 
         if (tx->execute(NdbTransaction::Commit) == -1) {
@@ -9623,7 +9722,7 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     const NdbDictionary::Table *lbf_tbl;
     const NdbDictionary::Index *ix;
     NdbTransaction *tx;
-    NdbIndexScanOperation *scan;
+    NdbScanOperation *scan;
     NdbRecAttr *a_sid;
     NdbError err;
     int next_rc;
@@ -9638,46 +9737,94 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
     ix = rondb_resolve_index(dict, RONDB_IX_LBF_FILEID,
                              RONDB_TBL_LAYOUT_BY_FILE);
     if (ix == nullptr) {
-        return rondb_report_error(dict->getNdbError(),
-                                 "layout_iter_file getIndex");
+        /* rondb_resolve_index calls dict->invalidateTable() on a 4243 miss,
+         * making the earlier lbf_tbl pointer stale.  Re-fetch before using
+         * it in startTransaction() to avoid a SIGSEGV inside libndbclient. */
+        lbf_tbl = dict->getTable(RONDB_TBL_LAYOUT_BY_FILE);
+        if (lbf_tbl == nullptr) { return -1; }
     }
 
-    /*
-     * Step 1: partition-pruned ordered-index scan of mds_layout_by_file
-     * for every stateid_other recorded against `fileid`.  fileid is the
-     * partition key and the leading PK column, so an NdbIndexScanOperation
-     * with BoundEQ(fileid) reads only the matching rows from a single
-     * fragment -- one NDB round-trip regardless of global cardinality.
-     * Replaces the prior NdbScanOperation + NdbScanFilter.eq pushdown,
-     * which visited every fragment and scaled linearly with
-     * layout_by_file size (approximately 230 ms p50 on the lab cluster,
-     * approximately 100 percent of the layout_recall_scan catalogue phase).
-     */
-    tx = rondb_get_ndb(state)->startTransaction();
+    /* Partition-pruned startTransaction: fileid is the table partition key,
+     * so this hint routes the NDB operation to the correct fragment even
+     * when we fall back from the index scan to a full table scan. */
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(lbf_tbl,
+                                                    (const char *)pk_buf, 8);
+    }
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
                                  "layout_iter_file startTx");
     }
 
-    scan = tx->getNdbIndexScanOperation(ix);
-    if (scan == nullptr) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file getIndexScanOp");
-    }
-
-    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file readTuples");
-    }
-
-    if (scan->setBound(RONDB_LBF_COL_FILEID,
-                       NdbIndexScanOperation::BoundEQ,
-                       &fileid) != 0) {
-        err = scan->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_iter_file setBound");
+    if (ix != nullptr) {
+        /*
+         * Fast path: partition-pruned ordered-index scan of mds_layout_by_file
+         * for every stateid_other recorded against `fileid`.  fileid is the
+         * partition key and the leading PK column, so an NdbIndexScanOperation
+         * with BoundEQ(fileid) reads only the matching rows from a single
+         * fragment -- one NDB round-trip regardless of global cardinality.
+         */
+        NdbIndexScanOperation *ixscan = tx->getNdbIndexScanOperation(ix);
+        if (ixscan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file getIndexScanOp");
+        }
+        if (ixscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            err = ixscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file readTuples");
+        }
+        if (ixscan->setBound(RONDB_LBF_COL_FILEID,
+                             NdbIndexScanOperation::BoundEQ,
+                             &fileid) != 0) {
+            err = ixscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file setBound");
+        }
+        scan = ixscan;
+    } else {
+        /* Fallback: full table scan with pushed-down filter.
+         *
+         * ix_layout_by_file_fileid returned code=4243 (Index not found) on
+         * this pool connection's per-connection NDB dictionary cache.  This
+         * happens when the index was created on a different Ndb instance and
+         * the cache on this connection has not yet been refreshed.
+         *
+         * The startTransaction() partition key hint above still prunes the
+         * scan to the one NDB fragment that owns this fileid, so the scan
+         * visits only rows for this file -- no global cardinality penalty.
+         */
+        static int _ix_warn = 0;
+        if ((_ix_warn++ & 0x3F) == 0) {
+            std::fprintf(stderr,
+                "WARN: layout_iter_file: index %s unavailable (4243), "
+                "falling back to partition-pruned table scan\n",
+                RONDB_IX_LBF_FILEID);
+        }
+        NdbScanOperation *tscan = tx->getNdbScanOperation(lbf_tbl);
+        if (tscan == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file getScanOp");
+        }
+        if (tscan->readTuples(NdbOperation::LM_CommittedRead,
+                              NdbScanOperation::SF_TupScan) != 0) {
+            err = tscan->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "layout_iter_file readTuples");
+        }
+        {
+            NdbScanFilter filter(tscan);
+            filter.begin(NdbScanFilter::AND);
+            filter.eq(
+                lbf_tbl->getColumn(RONDB_LBF_COL_FILEID)->getColumnNo(),
+                (Uint64)fileid);
+            filter.end();
+        }
+        scan = tscan;
     }
 
     a_sid = scan->getValue(RONDB_LBF_COL_STATEID, nullptr);

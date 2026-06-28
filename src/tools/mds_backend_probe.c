@@ -111,12 +111,8 @@ int main(int argc, char *argv[])
     if (do_bootstrap) {
         enum mds_status cmd_st = MDS_OK;
         (void)fprintf(stdout, "Running bootstrap...\n");
-        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-            (void)fprintf(stdout, "Backend: no bootstrap needed "
-                    "(root inode created on open).\n");
-        }
 #ifdef HAVE_RONDB
-        else if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
             cmd_st = mds_rondb_bootstrap(cat);
             (void)fprintf(stdout, "RonDB bootstrap: %s\n",
                     cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));
@@ -158,11 +154,8 @@ int main(int argc, char *argv[])
         enum mds_status cmd_st = MDS_OK;
 
         (void)fprintf(stdout, "Running cleanup...\n");
-        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-            (void)fprintf(stdout, "Backend: no cleanup needed.\n");
-        }
 #ifdef HAVE_RONDB
-        else if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
             cmd_st = mds_rondb_cleanup(cat);
             (void)fprintf(stdout, "RonDB cleanup: %s\n",
                     cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));

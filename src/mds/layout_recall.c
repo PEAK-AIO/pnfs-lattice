@@ -1370,47 +1370,34 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     }
 
     /*
-     * For each holder, dispatch one CB_LAYOUTRECALL via the per-
-     * clientid session iterator, which selects the most-recently
-     * created session for the holder (Q2(a) of Mark's bug report).
+     * Fire-and-forget CB_LAYOUTRECALL to each conflicting holder.
+     *
+     * CB delivery is asynchronous (nfs4_cb_layoutrecall_fd sends the
+     * record and returns immediately; it does not wait for a reply).
      * The iterator commits the slot-0 sequenceid advance under the
      * session-table lock when our callback returns 1.
-     *
-     * Track each holder's CB outcome in a parallel array so the
-     * revoke loop below can suppress the preemptive row-delete on
-     * transient client responses (NFS4_OK, NFS4ERR_DELAY,
-     * NFS4ERR_RECALLCONFLICT) per RFC 5661 S20.4.2.1.  When the
-     * client agrees to (or is mid-way through) returning the layout
-     * the natural LAYOUTRETURN cleans up the row; revoking here
-     * before the LAYOUTRETURN arrives would race with that op and
-     * give the client NFS4ERR_BAD_STATEID, which it cannot recover
-     * from without a full session reset.
      */
     byte_range_dispatch_cb_each(lr, holders, holder_count, cb_status);
 
     /*
-     * Conditional revoke (RFC 5661 S20.4.2.1).
+     * Authoritative revoke -- delete all conflicting holder rows now.
      *
-     * Drop the holder's layout-state row only when the recall did
-     * NOT land cleanly:
-     *   -- CB_NOT_SENT (no backchannel / dup fail / lr->st == NULL)
-     *   -- negative errno (transport-level failure: -EIO, -ETIMEDOUT,
-     *     -ENOTCONN, -EINVAL)
-     *   -- a non-transient NFS4ERR_* (BADSESSION, BAD_STATEID,
-     *     OLD_STATEID, BADHANDLE, etc.)
+     * Using revoke_transient=true (same as layout_recall_revoke_all_for_unlink)
+     * so that layout rows are cleaned up at LAYOUTGET time rather than
+     * waiting for the holder to send a voluntary LAYOUTRETURN.
      *
-     * Skip the revoke on transient successes:
-     *   -- NFS4_OK            -- client agreed to return
-     *   -- NFS4ERR_DELAY      -- client busy, will return shortly
-     *   -- NFS4ERR_RECALLCONFLICT -- client has I/O in flight, will
-     *                                send LAYOUTRETURN when it drains
+     * Without immediate revocation, rows accumulate in mds_layout_by_file
+     * during sustained workloads (e.g. 1M-file mdtest).  After hours of
+     * runtime the table grows large enough that NDB execute() scans become
+     * slow; once all worker threads are blocked in slow NDB scans, no
+     * thread is free to process incoming RPCs -- permanent deadlock.
      *
-     * In the skip path, the natural LAYOUTRETURN drops the row; the
-     * peer's LAYOUTGET that triggered this recall serialises on the
-     * holder's outstanding I/O via the kernel's normal recall-pending
-     * machinery rather than via a preemptive server-side BAD_STATEID.
+     * Clients that later send LAYOUTRETURN get NFS4ERR_BAD_STATEID (row
+     * already deleted).  Linux nfs4_layoutreturn_done() clears local
+     * layout state on BAD_STATEID and does not escalate -- safe terminal.
+     * RFC 5661 S20.4.2.1 option (b): server revokes at grant time.
      */
-    byte_range_revoke_holders(lr, holders, holder_count, cb_status, false);
+    byte_range_revoke_holders(lr, holders, holder_count, cb_status, true);
 
     if (recalled_out != NULL) {
         *recalled_out = holder_count;

@@ -6,8 +6,8 @@
  *
  * Community-edition implementation: coordinator thread batch-peeks
  * gc_queue rows and feeds a bounded work queue consumed by N worker
- * threads.  Each worker issues path-based unlinks on the DS mounts
- * and dequeues the row on success.
+ * threads.  Each worker issues path-based unlinks on the DS mounts,
+ * best-effort stripe_map catalogue cleanup, then dequeues the row.
  */
 
 #include "ds_gc.h"
@@ -113,6 +113,9 @@ dequeue_ok:
 	if (blocked) {
 		return false;
 	}
+	/* Best-effort: drop catalogue stripe rows after DS bytes are gone.
+	 * Idempotent when ns_remove already deleted them in-txn. */
+	(void)mds_cat_stripe_map_del(gc->cat, NULL, entry->fileid);
 	return mds_cat_gc_dequeue(gc->cat, NULL, entry->gc_seq) == MDS_OK;
 }
 

@@ -1,0 +1,11 @@
+# Out-of-tree CMake build directory.
+#
+# Keep this directory in git empty (only this file).  Generate artifacts
+# locally with:
+#   cmake -B build ...
+#   cmake --build build -j$(nproc)
+#
+# Do not rsync or copy build/ from another host — CMakeCache.txt embeds
+# absolute paths and will fail on a different machine or checkout path.
+*
+!.gitignore
