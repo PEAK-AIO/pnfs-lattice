@@ -58,6 +58,51 @@ if(ENABLE_RONDB)
 endif()
 
 # ---------------------------------------------------------------------------
+# Version string
+#
+# include/pnfs_mds.h defines a default PNFS_MDS_VERSION (built from the
+# PNFS_MDS_VERSION_* integer macros) behind an #ifndef guard.  Package builds
+# (deb/rpm) compile from a tree with no .git and pin the human-facing version
+# string by passing -DPNFS_MDS_VERSION_OVERRIDE=<str> (e.g. v0.1.0-community).
+# When set, define PNFS_MDS_VERSION globally so the daemon and the tools --
+# notably `mds-admin --version` -- report the packaged version.  The header's
+# #ifndef guard lets this build-time definition win without a redefinition.
+# ---------------------------------------------------------------------------
+if(DEFINED PNFS_MDS_VERSION_OVERRIDE AND NOT PNFS_MDS_VERSION_OVERRIDE STREQUAL "")
+    add_compile_definitions(PNFS_MDS_VERSION="${PNFS_MDS_VERSION_OVERRIDE}")
+    message(STATUS "pnfs-mds version override: ${PNFS_MDS_VERSION_OVERRIDE}")
+endif()
+
+# ---------------------------------------------------------------------------
+# Git commit
+#
+# Record the short commit the build is cut from so `mds-admin --version` can
+# report it.  Package builds (deb/rpm) stage a tree with no .git and pass
+# -DPNFS_MDS_GIT_COMMIT_OVERRIDE=<sha>; in-tree dev builds fall back to
+# `git rev-parse`.  Either way PNFS_MDS_GIT_COMMIT is defined globally.
+# ---------------------------------------------------------------------------
+if(DEFINED PNFS_MDS_GIT_COMMIT_OVERRIDE AND NOT PNFS_MDS_GIT_COMMIT_OVERRIDE STREQUAL "")
+    set(PNFS_MDS_GIT_COMMIT_STR "${PNFS_MDS_GIT_COMMIT_OVERRIDE}")
+else()
+    set(PNFS_MDS_GIT_COMMIT_STR "unknown")
+    find_package(Git QUIET)
+    if(GIT_EXECUTABLE)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            OUTPUT_VARIABLE PNFS_MDS_GIT_SHA
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE PNFS_MDS_GIT_RC)
+        if(PNFS_MDS_GIT_RC EQUAL 0 AND NOT PNFS_MDS_GIT_SHA STREQUAL "")
+            set(PNFS_MDS_GIT_COMMIT_STR "${PNFS_MDS_GIT_SHA}")
+        endif()
+    endif()
+endif()
+add_compile_definitions(PNFS_MDS_GIT_COMMIT="${PNFS_MDS_GIT_COMMIT_STR}")
+message(STATUS "pnfs-mds git commit: ${PNFS_MDS_GIT_COMMIT_STR}")
+
+# ---------------------------------------------------------------------------
 # Toolchain gate -- GCC >= 11.1 is mandatory.
 #
 # GCC 11.x ships with Rocky/RHEL 9, GCC 14.x with Rocky/RHEL 10.
