@@ -237,6 +237,19 @@ static void *ds_gc_coordinator_main(void *arg)
 			}
 		}
 
+		/*
+		 * Back-to-back batches while there is a backlog: a full batch
+		 * means there is almost certainly more, so re-peek immediately
+		 * instead of sleeping poll_ms.  Without this the drain is capped
+		 * at batch_size/poll_ms (~50/s with the defaults), which can't
+		 * clear a million-row backlog.  Only fall through to the
+		 * poll-sleep when the queue has drained below a full batch.
+		 */
+		if (st == MDS_OK && n >= gc->batch_size &&
+		    !atomic_load_explicit(&gc->stop, memory_order_relaxed)) {
+			continue;
+		}
+
 		{
 			struct pollfd pfd = {
 				.fd = gc->wake_pipe[0],
