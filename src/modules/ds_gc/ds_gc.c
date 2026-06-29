@@ -22,6 +22,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -89,6 +90,8 @@ static bool process_one_entry(struct ds_gc *gc,
 	 * round-trips per single-stripe file, which made the drain unable to
 	 * keep up with a heavy-delete backlog.
 	 */
+	enum mds_status block_st = MDS_OK;
+
 	for (uint32_t stripe = 0; stripe < MDS_MAX_STRIPES && !blocked;
 	     stripe++) {
 		bool stripe_had_existing = false;
@@ -105,6 +108,7 @@ static bool process_one_entry(struct ds_gc *gc,
 			if (st == MDS_ERR_NOTFOUND || st != MDS_OK) {
 				/* DS mount missing / I/O error -- retry later. */
 				blocked = true;
+				block_st = st;
 				break;
 			}
 			if (existed) {
@@ -123,6 +127,20 @@ static bool process_one_entry(struct ds_gc *gc,
 	}
 
 	if (blocked) {
+		/* One un-drainable entry stalls the whole FIFO drain, so make
+		 * it visible (rate-limited): NOTFOUND means entry->ds_id is not
+		 * mounted on this MDS; MDS_ERR_IO is a real unlink failure. */
+		static _Atomic unsigned long blk_n = 0;
+		if ((atomic_fetch_add_explicit(&blk_n, 1UL,
+					       memory_order_relaxed) & 0x3FFUL) == 0UL) {
+			fprintf(stderr,
+				"WARN: ds_gc blocked entry: fileid=%llu ds_id=%u "
+				"status=%d (%s)\n",
+				(unsigned long long)entry->fileid,
+				entry->ds_id, (int)block_st,
+				block_st == MDS_ERR_NOTFOUND ?
+					"ds_id not mounted here" : "unlink I/O");
+		}
 		return false;
 	}
 	(void)had_any_existed;
