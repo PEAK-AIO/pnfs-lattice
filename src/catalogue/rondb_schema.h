@@ -315,6 +315,14 @@
 #define RONDB_GC_COL_DS_ID        "ds_id"
 #define RONDB_GC_COL_NFS_FH_LEN   "nfs_fh_len"
 #define RONDB_GC_COL_NFS_FH       "nfs_fh"
+/*
+ * owner_mds_id: the MDS that enqueued this GC entry.  In multi-MDS
+ * deployments each MDS drains only the rows it owns, so GC workers on
+ * different MDSes never scan/contend the same entries.  Legacy rows
+ * written before this column existed read back as 0; the drainer treats
+ * owner_mds_id == 0 as "unassigned" and any MDS may reclaim them.
+ */
+#define RONDB_GC_COL_OWNER_MDS    "owner_mds_id"
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_layout_state

@@ -460,7 +460,8 @@ int rondb_shim_quota_usage_put(void *handle, uint8_t usage_type,
 int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out);
 int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
                           uint64_t fileid, uint32_t ds_id,
-                          const uint8_t *nfs_fh, uint32_t fh_len);
+                          const uint8_t *nfs_fh, uint32_t fh_len,
+                          uint32_t owner_mds_id);
 int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry);
 
 /** Batched peek: scan mds_gc_queue once, return the lowest-`cap`
@@ -468,11 +469,15 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry);
  *  must allocate space for `cap` entries.  *n_out gets the number
  *  written (0..cap).  Returns 0 on success (including empty queue,
  *  *n_out == 0) or -1 on error.  Does not commit / does not modify
- *  the queue. */
+ *  the queue.  Only rows whose owner_mds_id matches `self_mds_id`
+ *  (or 0 = legacy/unassigned) are returned, so each MDS drains a
+ *  disjoint slice of the queue. */
 int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
-                             uint32_t cap, uint32_t *n_out);
+                             uint32_t cap, uint32_t *n_out,
+                             uint32_t self_mds_id);
 int rondb_shim_gc_dequeue(void *handle, uint64_t gc_seq);
-int rondb_shim_gc_count(void *handle, uint32_t *count);
+/** Count queued entries owned by `self_mds_id` (or 0 = legacy). */
+int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id);
 /* Shared 2PC journal (mds_rename_journal: PK=(txn_id, role)). */
 typedef int (*rondb_journal_scan_cb)(
     const struct mds_coord_journal_record *record, void *ctx);

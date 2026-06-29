@@ -311,6 +311,7 @@ struct mds_gc_entry {
 	uint32_t ds_id;
 	uint32_t nfs_fh_len;
 	uint8_t  nfs_fh[MDS_NFS_FH_MAX];
+	uint32_t owner_mds_id;   /* MDS that enqueued this entry (0 = legacy). */
 };
 
 /* -----------------------------------------------------------------------

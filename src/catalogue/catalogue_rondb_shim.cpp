@@ -2324,6 +2324,8 @@ static int rondb_define_gc_queue_table(NdbDictionary::Dictionary *dict)
     rondb_add_unsigned(tbl, RONDB_GC_COL_NFS_FH_LEN);
     rondb_add_varbinary(tbl, RONDB_GC_COL_NFS_FH, MDS_NFS_FH_MAX,
                         false, false);
+    /* owner_mds_id: which MDS drains this row (0 = legacy/unassigned). */
+    rondb_add_unsigned(tbl, RONDB_GC_COL_OWNER_MDS);
     return rondb_create_table_if_not_exists(dict, tbl);
 }
 
@@ -8273,7 +8275,8 @@ int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out)
 
 int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
                           uint64_t fileid, uint32_t ds_id,
-                          const uint8_t *nfs_fh, uint32_t fh_len)
+                          const uint8_t *nfs_fh, uint32_t fh_len,
+                          uint32_t owner_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
@@ -8323,6 +8326,7 @@ int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
     op->setValue(RONDB_GC_COL_NFS_FH_LEN, (Uint32)fh_len);
     op->setValue(RONDB_GC_COL_NFS_FH,
                  (const char *)fh_enc, fh_enc_len);
+    op->setValue(RONDB_GC_COL_OWNER_MDS, (Uint32)owner_mds_id);
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -8443,14 +8447,15 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
  * just realloc-grows to it.
  */
 int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
-                             uint32_t cap, uint32_t *n_out)
+                             uint32_t cap, uint32_t *n_out,
+                             uint32_t self_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *tbl;
     NdbTransaction *tx;
     NdbScanOperation *scan;
-    NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh;
+    NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh, *a_owner;
     NdbError err;
     int next_rc;
     std::vector<struct mds_gc_entry> heap;
@@ -8496,6 +8501,7 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
     a_dsid  = scan->getValue(RONDB_GC_COL_DS_ID, nullptr);
     a_fhlen = scan->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
     a_fh    = scan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
+    a_owner = scan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -8505,6 +8511,17 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
 
     while ((next_rc = scan->nextResult(true)) == 0) {
         uint64_t seq = a_seq->u_64_value();
+
+        /*
+         * Per-MDS isolation: only drain rows this MDS owns.  owner==0
+         * is a legacy/unassigned row (pre-migration) that any MDS may
+         * reclaim.  self_mds_id==0 means "drain everything" (single-MDS
+         * deployments / callers that opt out of partitioning).
+         */
+        uint32_t owner = (a_owner != nullptr) ? a_owner->u_32_value() : 0U;
+        if (self_mds_id != 0U && owner != 0U && owner != self_mds_id) {
+            continue;
+        }
 
         /*
          * Skip cheaply when this row cannot improve the heap.
@@ -8519,10 +8536,11 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
          * pointer becomes invalid on the next nextResult() call. */
         struct mds_gc_entry e;
         std::memset(&e, 0, sizeof(e));
-        e.gc_seq     = seq;
-        e.fileid     = a_fid->u_64_value();
-        e.ds_id      = a_dsid->u_32_value();
-        e.nfs_fh_len = a_fhlen->u_32_value();
+        e.gc_seq       = seq;
+        e.fileid       = a_fid->u_64_value();
+        e.ds_id        = a_dsid->u_32_value();
+        e.owner_mds_id = owner;
+        e.nfs_fh_len   = a_fhlen->u_32_value();
         if (e.nfs_fh_len > MDS_NFS_FH_MAX) {
             e.nfs_fh_len = MDS_NFS_FH_MAX;
         }
@@ -8608,13 +8626,14 @@ int rondb_shim_gc_dequeue(void *handle, uint64_t gc_seq)
     return 0;
 }
 
-int rondb_shim_gc_count(void *handle, uint32_t *count)
+int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *tbl;
     NdbTransaction *tx;
     NdbScanOperation *scan;
+    NdbRecAttr *a_owner = nullptr;
     NdbError err;
     int next_rc;
     uint32_t n = 0;
@@ -8645,8 +8664,9 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
         return rondb_report_error(err, "gc_count readTuples");
     }
 
-    /* Only need PK column to count rows. */
+    /* PK column drives the row count; owner column drives per-MDS filter. */
     (void)scan->getValue(RONDB_GC_COL_SEQ, nullptr);
+    a_owner = scan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -8655,6 +8675,10 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
     }
 
     while ((next_rc = scan->nextResult(true)) == 0) {
+        uint32_t owner = (a_owner != nullptr) ? a_owner->u_32_value() : 0U;
+        if (self_mds_id != 0U && owner != 0U && owner != self_mds_id) {
+            continue;
+        }
         n++;
     }
     if (next_rc != 1) {

@@ -82,6 +82,17 @@ void *mds_catalogue_backend_handle(const struct mds_catalogue *cat)
     }
     return ((struct mds_rondb_state *)cat->backend_private)->handle;
 }
+
+/* This MDS's id, used to tag/partition per-MDS catalogue rows (e.g. the
+ * GC queue).  Returns 0 when unavailable, which the backends treat as
+ * "unpartitioned" (drain everything). */
+static uint32_t rondb_self_mds_id(struct mds_catalogue *cat)
+{
+    if (cat == NULL || cat->backend_private == NULL) {
+        return 0U;
+    }
+    return ((struct mds_rondb_state *)cat->backend_private)->mds_id;
+}
 static enum mds_status catalogue_rondb_probe_backend(struct mds_catalogue *cat);
 
 /* Forward declarations for vtables defined at end of file. */
@@ -1940,7 +1951,8 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 		return MDS_ERR_IO;
 	}
 
-	rc = rondb_shim_gc_enqueue(h, seq, fileid, ds_id, nfs_fh, fh_len);
+	rc = rondb_shim_gc_enqueue(h, seq, fileid, ds_id, nfs_fh, fh_len,
+				   rondb_self_mds_id(cat));
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -1987,7 +1999,7 @@ static enum mds_status catalogue_rondb_gc_count(
 		return MDS_ERR_INVAL;
 	}
 
-	rc = rondb_shim_gc_count(h, count);
+	rc = rondb_shim_gc_count(h, count, rondb_self_mds_id(cat));
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -2005,7 +2017,8 @@ static enum mds_status catalogue_rondb_gc_peek_batch(
 		return MDS_ERR_INVAL;
 	}
 
-	rc = rondb_shim_gc_peek_batch(h, entries, cap, n_out);
+	rc = rondb_shim_gc_peek_batch(h, entries, cap, n_out,
+				      rondb_self_mds_id(cat));
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 

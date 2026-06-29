@@ -13,6 +13,7 @@
 #include "ds_gc.h"
 
 #include "mds_catalogue.h"
+#include "mds_metrics.h"
 #include "pnfs_mds.h"
 #include "proxy_io.h"
 
@@ -206,6 +207,18 @@ static void *ds_gc_coordinator_main(void *arg)
 				}
 			}
 			coordinator_drain_queue(gc);
+		}
+
+		/* Refresh the GC backlog gauge (this MDS's owned rows) so
+		 * pnfs-mds-top / Prometheus can track drain progress. */
+		{
+			uint32_t pending = 0;
+			if (mds_cat_gc_count(gc->cat, &pending) == MDS_OK) {
+				atomic_store_explicit(
+					&g_branch_metrics.gc_pending,
+					(uint64_t)pending,
+					memory_order_relaxed);
+			}
 		}
 
 		{
