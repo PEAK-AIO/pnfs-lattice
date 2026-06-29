@@ -45,7 +45,10 @@
  *   clients on reconnect (it's in the same class as open_state,
  *   which is also drop-on-restart in transient_state_cache mode).
  */
-#define RONDB_SCHEMA_VERSION  6
+/* v7: mds_gc_queue gains owner_mds_id (per-MDS lazy-delete drain) and the
+ *     mds_prealloc_pool table is added (persisted DS pre-creation ring).
+ *     The 6->7 upgrade drops + recreates the transient gc_queue. */
+#define RONDB_SCHEMA_VERSION  7
 
 /* -----------------------------------------------------------------------
  * Table names

@@ -2748,6 +2748,16 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
                 return -1;
             }
         }
+        if (schema_version < 7) {
+            /* v6 -> v7: mds_gc_queue gains owner_mds_id.  The queue holds
+             * only transient DS-cleanup work (drained every few seconds),
+             * so drop + recreate with the new column instead of an online
+             * ALTER.  mds_prealloc_pool is created by the DDL pass above. */
+            (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_QUEUE);
+            if (rondb_define_gc_queue_table(dict) != 0) {
+                return -1;
+            }
+        }
         /* Force-update the schema version row. */
         {
             NdbDictionary::Dictionary *upd_dict = rondb_get_dictionary(state);
