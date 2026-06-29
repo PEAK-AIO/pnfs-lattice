@@ -1268,6 +1268,58 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
 }
 
 /* -----------------------------------------------------------------------
+ * Authority ops dispatch -- DS prealloc pool (optional)
+ * ----------------------------------------------------------------------- */
+
+enum mds_status mds_cat_prealloc_pool_insert(struct mds_catalogue *cat,
+        uint64_t fileid, uint32_t ds_id, const uint8_t *nfs_fh,
+        uint32_t fh_len, uint32_t owner_mds_id, uint32_t stripe_unit)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->prealloc_pool_insert == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->prealloc_pool_insert(cat, fileid, ds_id, nfs_fh,
+                                               fh_len, owner_mds_id,
+                                               stripe_unit);
+}
+
+enum mds_status mds_cat_prealloc_pool_delete(struct mds_catalogue *cat,
+        uint64_t fileid)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->prealloc_pool_delete == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->prealloc_pool_delete(cat, fileid);
+}
+
+enum mds_status mds_cat_prealloc_pool_scan(struct mds_catalogue *cat,
+        uint32_t owner_mds_id, struct mds_prealloc_pool_row **rows_out,
+        uint32_t *n_out)
+{
+    if (n_out != NULL) {
+        *n_out = 0;
+    }
+    if (rows_out != NULL) {
+        *rows_out = NULL;
+    }
+    if (cat == NULL || cat->auth_ops == NULL ||
+        rows_out == NULL || n_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->prealloc_pool_scan == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->prealloc_pool_scan(cat, owner_mds_id, rows_out,
+                                             n_out);
+}
+
+/* -----------------------------------------------------------------------
  * Authority ops dispatch -- Shard routing
  * ----------------------------------------------------------------------- */
 

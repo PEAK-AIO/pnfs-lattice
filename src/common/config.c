@@ -215,6 +215,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->lease_time_sec = 90;
     cfg->grace_period_sec = 90;
     cfg->prealloc_pool_size = 128;
+    cfg->prealloc_ring_count = 0;   /* 0 = ds_prealloc engine default. */
     cfg->repl_health_interval_ms = 5000;
     cfg->repl_refuse_writes_on_resync = false;
     cfg->repl_listen_port = 9401;        /* S11.4 default */
@@ -619,6 +620,15 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 cfg->prealloc_pool_size = (uint32_t)v;
                 cfg->tuning_set |= MDS_CFG_SET_PREALLOC_POOL_SIZE;
 }
+        } else if (strcmp(key, "prealloc_ring_count") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v <= 64UL) {
+                cfg->prealloc_ring_count = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: prealloc_ring_count=%lu out of range "
+                    "(0..64); ignoring\n", v);
+            }
 
         /* Commit pipeline */
         } else if (strcmp(key, "CommitBatchSize") == 0) {

@@ -73,6 +73,28 @@ int ds_prealloc_init_ex(const struct mds_catalogue *cat,
                         struct ds_prealloc_ctx **out);
 
 /**
+ * @brief Initialise the pool with explicit cluster topology.
+ *
+ * Like ds_prealloc_init_ex() but the caller supplies this MDS's id, the
+ * cluster size, and the ring count so the refill rings pre-create on a
+ * DS group disjoint from the other MDSes (DS p -> MDS p % cluster_size).
+ * The daemon (main.c) uses this entry point; ds_prealloc_init_ex() keeps
+ * the single-MDS defaults (self=0, cluster=1) for the unit tests.
+ *
+ * @param self_mds_id  This MDS's id (0 = single-MDS / no partitioning).
+ * @param cluster_size Number of MDSes (clamped to >= 1).
+ * @param ring_count   Number of rings + refill workers (0 = default).
+ */
+int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
+                         struct mds_proxy_ctx *proxy,
+                         enum mds_placement_policy policy,
+                         uint32_t pool_size,
+                         uint32_t self_mds_id,
+                         uint32_t cluster_size,
+                         uint32_t ring_count,
+                         struct ds_prealloc_ctx **out);
+
+/**
  * @brief Pop a pre-computed placement from the pool.
  *
  * Fast path: returns a cached placement (no catalogue I/O).

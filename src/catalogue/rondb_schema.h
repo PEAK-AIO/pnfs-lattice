@@ -325,6 +325,22 @@
 #define RONDB_GC_COL_OWNER_MDS    "owner_mds_id"
 
 /* -----------------------------------------------------------------------
+ * Column names -- mds_prealloc_pool
+ *
+ * Persisted ring of precreated DS stub files for ENABLE_DS_PREALLOC.
+ * PK = fileid.  owner_mds_id scopes the rows to the MDS that created
+ * them so each MDS only recovers/reclaims its own slots on restart.
+ * ----------------------------------------------------------------------- */
+
+#define RONDB_TBL_PREALLOC_POOL   "mds_prealloc_pool"
+#define RONDB_PP_COL_FILEID       "fileid"
+#define RONDB_PP_COL_DS_ID        "ds_id"
+#define RONDB_PP_COL_OWNER_MDS    "owner_mds_id"
+#define RONDB_PP_COL_STRIPE_UNIT  "stripe_unit"
+#define RONDB_PP_COL_NFS_FH_LEN   "nfs_fh_len"
+#define RONDB_PP_COL_NFS_FH       "nfs_fh"
+
+/* -----------------------------------------------------------------------
  * Column names -- mds_layout_state
  * PK      = (fileid, stateid_other)
  * partition key = fileid

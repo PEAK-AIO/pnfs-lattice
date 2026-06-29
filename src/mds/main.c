@@ -874,9 +874,11 @@ int main(int argc, char *argv[])
 			cfg.placement_policy_enabled
 				? cfg.placement_policy
 				: PLACEMENT_RR;
-		if (ds_prealloc_init_ex(cat, proxy, effective_policy,
-					cfg.prealloc_pool_size,
-					&ds_pa) != 0) {
+		if (ds_prealloc_init_ex2(cat, proxy, effective_policy,
+					 cfg.prealloc_pool_size,
+					 cfg.self.id, cfg.cluster_size,
+					 cfg.prealloc_ring_count,
+					 &ds_pa) != 0) {
 			MDS_LOG_WARN(LOG_COMP_MDS,
 				"ds_prealloc_init failed, "
 				"falling back to inline");
@@ -884,9 +886,13 @@ int main(int argc, char *argv[])
 		} else {
 			MDS_LOG_INFO(LOG_COMP_MDS,
 				"DS pre-alloc pool active "
-				"(pool_size=%u, policy=%d)",
+				"(pool_size=%u, rings=%u, policy=%d, "
+				"mds=%u/%u)",
 				(unsigned)cfg.prealloc_pool_size,
-				(int)effective_policy);
+				(unsigned)cfg.prealloc_ring_count,
+				(int)effective_policy,
+				(unsigned)cfg.self.id,
+				(unsigned)cfg.cluster_size);
 		}
 	}
 

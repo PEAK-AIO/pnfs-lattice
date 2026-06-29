@@ -252,6 +252,16 @@ struct mds_authority_ops {
         struct mds_gc_entry *entries, uint32_t cap,
         uint32_t *n_out);
 
+    /* DS prealloc pool (optional; NULL -> engine runs in-memory only). */
+    enum mds_status (*prealloc_pool_insert)(struct mds_catalogue *cat,
+        uint64_t fileid, uint32_t ds_id, const uint8_t *nfs_fh,
+        uint32_t fh_len, uint32_t owner_mds_id, uint32_t stripe_unit);
+    enum mds_status (*prealloc_pool_delete)(struct mds_catalogue *cat,
+        uint64_t fileid);
+    enum mds_status (*prealloc_pool_scan)(struct mds_catalogue *cat,
+        uint32_t owner_mds_id, struct mds_prealloc_pool_row **rows_out,
+        uint32_t *n_out);
+
     /* Shard routing */
     enum mds_status (*shard_fileid_get)(struct mds_catalogue *cat,
         uint64_t fileid, uint32_t *shard_id);

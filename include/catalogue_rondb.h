@@ -478,6 +478,17 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
 int rondb_shim_gc_dequeue(void *handle, uint64_t gc_seq);
 /** Count queued entries owned by `self_mds_id` (or 0 = legacy). */
 int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id);
+
+/* DS prealloc pool (mds_prealloc_pool: PK=fileid). */
+int rondb_shim_prealloc_pool_insert(void *handle, uint64_t fileid,
+                                    uint32_t ds_id, const uint8_t *nfs_fh,
+                                    uint32_t fh_len, uint32_t owner_mds_id,
+                                    uint32_t stripe_unit);
+int rondb_shim_prealloc_pool_delete(void *handle, uint64_t fileid);
+int rondb_shim_prealloc_pool_scan(void *handle, uint32_t owner_mds_id,
+                                  struct mds_prealloc_pool_row **rows_out,
+                                  uint32_t *n_out);
+
 /* Shared 2PC journal (mds_rename_journal: PK=(txn_id, role)). */
 typedef int (*rondb_journal_scan_cb)(
     const struct mds_coord_journal_record *record, void *ctx);

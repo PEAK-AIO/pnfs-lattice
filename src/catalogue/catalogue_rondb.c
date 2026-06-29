@@ -2023,6 +2023,59 @@ static enum mds_status catalogue_rondb_gc_peek_batch(
 }
 
 /* -----------------------------------------------------------------------
+ * DS prealloc pool wrappers
+ * ----------------------------------------------------------------------- */
+
+static enum mds_status catalogue_rondb_prealloc_pool_insert(
+	struct mds_catalogue *cat, uint64_t fileid, uint32_t ds_id,
+	const uint8_t *nfs_fh, uint32_t fh_len, uint32_t owner_mds_id,
+	uint32_t stripe_unit)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_prealloc_pool_insert(h, fileid, ds_id, nfs_fh,
+					     fh_len, owner_mds_id, stripe_unit);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_prealloc_pool_delete(
+	struct mds_catalogue *cat, uint64_t fileid)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_prealloc_pool_delete(h, fileid);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_prealloc_pool_scan(
+	struct mds_catalogue *cat, uint32_t owner_mds_id,
+	struct mds_prealloc_pool_row **rows_out, uint32_t *n_out)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (n_out != NULL) {
+		*n_out = 0;
+	}
+	if (rows_out != NULL) {
+		*rows_out = NULL;
+	}
+	if (h == NULL || rows_out == NULL || n_out == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_prealloc_pool_scan(h, owner_mds_id, rows_out, n_out);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+/* -----------------------------------------------------------------------
  * Phase 8A C wrappers -- Inline data via xattr table
  *
  * Symlink targets and other small metadata blobs are stored in the
@@ -3304,6 +3357,9 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.gc_dequeue        = catalogue_rondb_gc_dequeue,
 	.gc_count          = catalogue_rondb_gc_count,
 	.gc_peek_batch     = catalogue_rondb_gc_peek_batch,
+	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
+	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
+	.prealloc_pool_scan   = catalogue_rondb_prealloc_pool_scan,
 };
 
 /* -----------------------------------------------------------------------
@@ -3392,6 +3448,9 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.gc_dequeue        = catalogue_rondb_gc_dequeue,
 	.gc_count          = catalogue_rondb_gc_count,
 	.gc_peek_batch     = catalogue_rondb_gc_peek_batch,
+	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
+	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
+	.prealloc_pool_scan   = catalogue_rondb_prealloc_pool_scan,
 };
 
 static enum mds_status catalogue_rondb_recovery_list(
