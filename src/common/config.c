@@ -297,7 +297,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * clientaddr=0.0.0.0) flip the INI key to false; main.c then
      * leaves rpc_cfg.dt = NULL and op_open() short-circuits the
      * deleg-grant arm via cd->dt == NULL. */
-    cfg->file_delegations_enabled = true;
+    cfg->file_delegations_enabled = false;
 
     /* AutoSplit defaults (Tier 3 Phase 1) */
     cfg->auto_split_enabled = false;
