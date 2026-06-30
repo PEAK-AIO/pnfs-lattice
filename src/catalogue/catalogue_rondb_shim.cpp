@@ -8932,7 +8932,7 @@ int rondb_shim_prealloc_pool_delete(void *handle, uint64_t fileid)
         return rondb_report_error(err, "prealloc_pool_delete delOp");
     }
     op->deleteTuple();
-    (void)rondb_set_value_u64(op, RONDB_PP_COL_FILEID, fileid);
+    (void)rondb_equal_u64(op, RONDB_PP_COL_FILEID, fileid);
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
