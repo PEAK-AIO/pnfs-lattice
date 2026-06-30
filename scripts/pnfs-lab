@@ -785,6 +785,12 @@ ensure_build_host_tarball() {
         return 0
     fi
 
+    if [ -n "${LAB_REMOTE_RONDB_DEB:-}" ] && [ -f "${LAB_REMOTE_RONDB_DEB}" ]; then
+        log "  [local] using packaged RonDB (${LAB_REMOTE_RONDB_DEB}); no build-host tarball needed"
+        BUILD_HOST_TARBALL=""
+        return 0
+    fi
+
     if [ "${DRY_RUN}" -eq 1 ]; then
         run_local mkdir -p "${LAB_BUILD_HOST_RONDB_BASE}"
         run_local wget -O "${BUILD_HOST_TARBALL}" "${LAB_REMOTE_RONDB_TARBALL_URL}"
@@ -868,6 +874,18 @@ download_and_extract_local() {
         return 0
     fi
 
+    if [ -n "${LAB_REMOTE_RONDB_DEB:-}" ] && [ -f "${LAB_REMOTE_RONDB_DEB}" ]; then
+        log "Installing RonDB from package on build host: ${LAB_REMOTE_RONDB_DEB}"
+        if command -v apt-get >/dev/null 2>&1; then
+            run_local sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y "${LAB_REMOTE_RONDB_DEB}"
+        elif command -v dnf >/dev/null 2>&1; then
+            run_local sudo -n dnf install -y "${LAB_REMOTE_RONDB_DEB}"
+        else
+            run_local sudo -n rpm -Uvh "${LAB_REMOTE_RONDB_DEB}"
+        fi
+        return 0
+    fi
+
     if [ "${DRY_RUN}" -eq 1 ]; then
         run_local mkdir -p "${base_dir}"
         run_local wget -O "${tarball}" "${tarball_url}"
@@ -911,6 +929,22 @@ if [ -x "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm" ] && \
     [ "\$(readlink -f "${LAB_REMOTE_RONDB_LINK}")" = "\${version_dir}" ] && \
     [ -f /etc/ld.so.conf.d/pnfs-mds-rondb.conf ]; then
     printf 'rondb runtime already installed (%s)\n' "\${version_dir}"
+    exit 0
+fi
+if [ -n "${LAB_REMOTE_RONDB_DEB}" ] && [ -f "${LAB_REMOTE_RONDB_DEB}" ] && [ ! -d "\${version_dir}" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${LAB_REMOTE_RONDB_DEB}"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "${LAB_REMOTE_RONDB_DEB}"
+    else
+        rpm -Uvh "${LAB_REMOTE_RONDB_DEB}"
+    fi
+    cat > /etc/ld.so.conf.d/pnfs-mds-rondb.conf <<'EOC'
+${LAB_REMOTE_RONDB_LINK}/lib
+${LAB_REMOTE_RONDB_LINK}/lib/mysql
+EOC
+    ldconfig
+    printf 'rondb runtime installed from package %s\n' "${LAB_REMOTE_RONDB_DEB}"
     exit 0
 fi
 ensure_packages wget tar libncurses6
