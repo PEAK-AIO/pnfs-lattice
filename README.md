@@ -137,7 +137,7 @@ testing and fixed (Phase 10A):
 3. **Bootstrap DDL collision** — CAS probe-and-retry prevents multiple
    daemons from running schema DDL simultaneously.
 
-Validated on a live RonDB 24.10.19 cluster with 2 MDS daemons:
+Validated on a live RonDB 26.02.4 cluster with 2 MDS daemons:
 20 concurrent mkdirs → exact nlink; 20 concurrent rmdirs → exact nlink
 reset; zero stale-handle NFS errors; zero crashes.
 
@@ -298,7 +298,7 @@ journalctl -u pnfs-mds -f        # Live logs
 - Linux (tested on Ubuntu 22.04+)
 - CMake 3.20+
 - GCC ≥ 13.1 (mandatory — older versions miss critical diagnostics)
-- RonDB 24.10+ / NDB API headers and libraries
+- RonDB 26.02+ / NDB API headers and libraries
 - OpenSSL (HMAC credential derivation)
 - libntirpc (NFS RPC transport)
 - pthreads

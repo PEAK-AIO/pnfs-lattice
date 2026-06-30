@@ -23,7 +23,11 @@ shift || true
 # shellcheck source=build-env.sh
 source "${ROOT}/scripts/build-env.sh"
 
-BUILD_PATH="${ROOT}/${BUILD_DIR}"
+# Honour an absolute build dir; only relative dirs are rooted at the repo.
+case "${BUILD_DIR}" in
+  /*) BUILD_PATH="${BUILD_DIR}" ;;
+  *)  BUILD_PATH="${ROOT}/${BUILD_DIR}" ;;
+esac
 CACHE_FILE="${BUILD_PATH}/CMakeCache.txt"
 
 cache_value() {

@@ -1455,11 +1455,10 @@ int main(int argc, char *argv[])
 		/* Global dirent cache (cross-compound LRU + negative entries). */
 		{
 			struct dirent_cache *dcache = NULL;
-			uint32_t dcache_size = cfg.dirent_cache_size > 0
-				? cfg.dirent_cache_size : 32768;
+			uint32_t dcache_size = cfg.dirent_cache_size;
 			uint32_t neg_ttl = cache_neg_ttl_ms > 0
 				? cache_neg_ttl_ms : 5000;
-			if (dirent_cache_init(dcache_size, neg_ttl,
+			if (dcache_size > 0 && dirent_cache_init(dcache_size, neg_ttl,
 					      &dcache) == 0) {
 				dirent_cache_set_pos_ttl_ms(dcache,
 							    cache_pos_ttl_ms);
@@ -1470,8 +1469,7 @@ int main(int argc, char *argv[])
 					(unsigned)neg_ttl,
 					(unsigned)cache_pos_ttl_ms);
 			} else {
-				MDS_LOG_WARN(LOG_COMP_MDS,
-					"dirent_cache_init failed");
+				MDS_LOG_INFO(LOG_COMP_MDS, cfg.dirent_cache_size ? "dirent_cache_init failed" : "dirent cache disabled (dirent_cache_size=0)");
 			}
 		rpc_cfg.dcache = dcache;
 		}
@@ -1490,17 +1488,14 @@ int main(int argc, char *argv[])
 		 * matches the pre-Phase-D behaviour. */
 		{
 			struct layout_cache *lcache = NULL;
-			uint32_t lcache_size = cfg.layout_cache_size > 0
-				? cfg.layout_cache_size : 1024;
-			if (layout_cache_init(lcache_size, &lcache) == 0) {
+			uint32_t lcache_size = cfg.layout_cache_size;
+			if (lcache_size > 0 && layout_cache_init(lcache_size, &lcache) == 0) {
 				MDS_LOG_INFO(LOG_COMP_MDS,
 					"HPC layout cache active "
 					"(max=%u entries)",
 					(unsigned)lcache_size);
 			} else {
-				MDS_LOG_WARN(LOG_COMP_MDS,
-					"layout_cache_init failed; "
-					"falling back to catalogue reads");
+				MDS_LOG_INFO(LOG_COMP_MDS, cfg.layout_cache_size ? "layout_cache_init failed; falling back to catalogue reads" : "HPC layout cache disabled (layout_cache_size=0)");
 			}
 			rpc_cfg.lcache = lcache;
 		}

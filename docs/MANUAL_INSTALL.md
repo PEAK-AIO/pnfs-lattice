@@ -60,28 +60,28 @@ Copy the `pnfs-mds` source tree to the build host at
 rsync -a /home/warp/code/pnfs-mds/ peak@192.168.100.50:/home/peak/pnfs-mds/
 ```
 
-## Step 3 — Download and unpack the RonDB 24.10.19 SDK on the build host
+## Step 3 — Download and unpack the RonDB 26.02.4 SDK on the build host
 
 On **mds1** (the build host):
 
 ```bash
 sudo mkdir -p /opt/pnfs-mds-lab
 cd /opt/pnfs-mds-lab
-sudo wget -O rondb-24.10.19.tar.gz \
-    https://repo.hops.works/master/rondb-24.10.19-linux-glibc2.28-x86_64.tar.gz
-sudo tar xzf rondb-24.10.19.tar.gz
-sudo ln -sfn /opt/pnfs-mds-lab/rondb-24.10.19-linux-glibc2.28-x86_64 /opt/rondb
+sudo wget -O rondb-26.02.4.tar.gz \
+    https://repo.hops.works/master/rondb-26.02.4-linux-glibc2.28-x86_64.tar.gz
+sudo tar xzf rondb-26.02.4.tar.gz
+sudo ln -sfn /opt/pnfs-mds-lab/rondb-26.02.4-linux-glibc2.28-x86_64 /opt/rondb
 ```
 
 > **Note:** Do **not** use a glob like
-> `/opt/pnfs-mds-lab/rondb-24.10.19*` in the `ln` command. It will
+> `/opt/pnfs-mds-lab/rondb-26.02.4*` in the `ln` command. It will
 > match both the extracted directory and the `.tar.gz` archive, which
 > causes `ln` to treat `/opt/rondb` as a non-existent target directory
 > and fail with `No such file or directory`. If you prefer to avoid
 > the explicit suffix, use a glob that excludes the tarball:
 >
 > ```bash
-> rondb_dir=$(ls -d /opt/pnfs-mds-lab/rondb-24.10.19-*/ | head -n1)
+> rondb_dir=$(ls -d /opt/pnfs-mds-lab/rondb-26.02.4-*/ | head -n1)
 > sudo ln -sfn "${rondb_dir%/}" /opt/rondb
 > ```
 
@@ -131,10 +131,10 @@ sudo apt install -y libaio1t64 || sudo apt install -y libaio1
 
 sudo mkdir -p /opt/pnfs-mds-lab
 cd /opt/pnfs-mds-lab
-sudo wget -O rondb-24.10.19.tar.gz \
-    https://repo.hops.works/master/rondb-24.10.19-linux-glibc2.28-x86_64.tar.gz
-sudo tar xzf rondb-24.10.19.tar.gz
-sudo ln -sfn /opt/pnfs-mds-lab/rondb-24.10.19-linux-glibc2.28-x86_64 /opt/rondb
+sudo wget -O rondb-26.02.4.tar.gz \
+    https://repo.hops.works/master/rondb-26.02.4-linux-glibc2.28-x86_64.tar.gz
+sudo tar xzf rondb-26.02.4.tar.gz
+sudo ln -sfn /opt/pnfs-mds-lab/rondb-26.02.4-linux-glibc2.28-x86_64 /opt/rondb
 
 # Make the RonDB libs discoverable by ldconfig
 sudo tee /etc/ld.so.conf.d/pnfs-mds-rondb.conf >/dev/null <<'EOF'
@@ -147,8 +147,8 @@ sudo ldconfig
 ```
 
 > **Note:** Same caveat as Step 3 — always pass the explicit
-> `rondb-24.10.19-linux-glibc2.28-x86_64` directory to `ln`, or use
-> the `rondb-24.10.19-*/` trailing-slash glob so the tarball is
+> `rondb-26.02.4-linux-glibc2.28-x86_64` directory to `ln`, or use
+> the `rondb-26.02.4-*/` trailing-slash glob so the tarball is
 > excluded.
 
 Result after step 5: each of mds1/mds2/mds3 has `/opt/rondb` and its
@@ -662,10 +662,10 @@ the client.
 ## Step 14 — Troubleshooting cheatsheet
 
 - **`ln: target '/opt/rondb': No such file or directory`** — you used
-  a glob like `rondb-24.10.19*` that matched both the `.tar.gz` and
+  a glob like `rondb-26.02.4*` that matched both the `.tar.gz` and
   the extracted directory. Pass the extracted directory to `ln`
   explicitly, e.g.
-  `/opt/pnfs-mds-lab/rondb-24.10.19-linux-glibc2.28-x86_64`. See the
+  `/opt/pnfs-mds-lab/rondb-26.02.4-linux-glibc2.28-x86_64`. See the
   notes in Steps 3 and 5.
 - **`pnfs-mds` won't start, log says `failed to connect to RonDB`** —
   run `ndb_mgm -e show` from any MDS

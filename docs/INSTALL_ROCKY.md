@@ -111,18 +111,18 @@ ls /usr/local/lib64/libntirpc.so     # should exist
 ## Step 4 — Download and install RonDB
 
 pnfs-lattice uses RonDB as its metadata catalogue backend. Download the
-RonDB 24.10.19 release:
+RonDB 26.02.4 release:
 
 ```bash
 sudo mkdir -p /opt/pnfs-mds-lab
 cd /opt/pnfs-mds-lab
-sudo wget -O rondb-24.10.19.tar.gz \
-    https://repo.hops.works/master/rondb-24.10.19-linux-glibc2.28-x86_64.tar.gz
-sudo tar xzf rondb-24.10.19.tar.gz
-sudo ln -sfn /opt/pnfs-mds-lab/rondb-24.10.19-linux-glibc2.28-x86_64 /opt/rondb
+sudo wget -O rondb-26.02.4.tar.gz \
+    https://repo.hops.works/master/rondb-26.02.4-linux-glibc2.28-x86_64.tar.gz
+sudo tar xzf rondb-26.02.4.tar.gz
+sudo ln -sfn /opt/pnfs-mds-lab/rondb-26.02.4-linux-glibc2.28-x86_64 /opt/rondb
 ```
 
-> **Caution:** if the glob `rondb-24.10.19*` matches both the `.tar.gz`
+> **Caution:** if the glob `rondb-26.02.4*` matches both the `.tar.gz`
 > and the extracted directory, use the explicit directory name in the
 > `ln` command above.
 
@@ -140,7 +140,7 @@ Verify:
 
 ```bash
 /opt/rondb/bin/ndb_mgm --version
-# Expected: RonDB Management Server RonDB-24.10.19
+# Expected: RonDB Management Server RonDB-26.02.4
 ```
 
 ## Step 5 — Build pnfs-lattice with RonDB support
@@ -325,10 +325,10 @@ Expected output:
 
 ```
 [ndbd(NDB)]     1 node(s)
-id=1    @192.168.100.171  (RonDB-24.10.19, Nodegroup: 0, *)
+id=1    @192.168.100.171  (RonDB-26.02.4, Nodegroup: 0, *)
 
 [ndb_mgmd(MGM)] 1 node(s)
-id=65   @192.168.100.171  (RonDB-24.10.19)
+id=65   @192.168.100.171  (RonDB-26.02.4)
 
 [mysqld(API)]   10 node(s)
 id=101 (not connected, accepting connect from 192.168.100.171)

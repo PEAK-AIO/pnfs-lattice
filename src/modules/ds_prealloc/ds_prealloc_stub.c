@@ -173,6 +173,24 @@ int ds_prealloc_init_ex(const struct mds_catalogue *cat,
     return 0;
 }
 
+int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
+                         struct mds_proxy_ctx *proxy,
+                         enum mds_placement_policy policy,
+                         uint32_t pool_size,
+                         uint32_t self_mds_id,
+                         uint32_t cluster_size,
+                         uint32_t ring_count,
+                         struct ds_prealloc_ctx **out)
+{
+    /* CE has no refill rings, so the multi-MDS topology hints
+     * (self_mds_id / cluster_size / ring_count) are informational
+     * only; delegate to the policy-aware single-MDS stub path. */
+    (void)self_mds_id;
+    (void)cluster_size;
+    (void)ring_count;
+    return ds_prealloc_init_ex(cat, proxy, policy, pool_size, out);
+}
+
 int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
                     struct mds_ds_map_entry *entry,
                     uint32_t *stripe_unit,
