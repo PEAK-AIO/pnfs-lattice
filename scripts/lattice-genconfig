@@ -2,11 +2,15 @@
 # Copyright (c) 2026 PeakAIO
 # SPDX-License-Identifier: MIT
 #
-# lattice-genconfig -- generate *basic* configs for a RonDB-colocated
+# lattice-genconfig -- generate *basic* configs for a RonDB-backed
 # Lattice (pNFS) cluster from a list of MDS IPs and a list of DS IPs.
 #
-# "RonDB colocated" means one RonDB data node runs on every MDS host.
-# The RonDB management node (ndb_mgmd) is colocated on the first MDS.
+# Every MDS runs pnfs-mds.  One MDS (the first by default, or --mgmt-host)
+# also runs the RonDB management node (ndb_mgmd).  By default a RonDB data
+# node is colocated on every MDS, including the mgmt host.  Pass
+# --dedicate-mgmd to keep the mgmt host free of a data node, so the NDB
+# arbitrator does not share a host with a data node (the topology used by
+# docs/MANUAL_INSTALL.md and the multi-mds lab profile).
 #
 # This is a config GENERATOR only.  It writes files into an output
 # directory; it never connects to a host and never deploys or starts
@@ -14,7 +18,7 @@
 # in the emitted MANIFEST.txt, then bring up RonDB and pnfs-mds.
 #
 # Generated artifacts (in --out DIR):
-#   config.ini      RonDB cluster config for the ndb_mgmd host (first MDS)
+#   config.ini      RonDB cluster config for the ndb_mgmd host (mgmt MDS)
 #   rondb.conf      backend connect string + schema (copied to every MDS)
 #   mds-<n>.conf    one pnfs-mds config per MDS host
 #   MANIFEST.txt    which file goes to which host and path
@@ -29,7 +33,7 @@ set -euo pipefail
 PROG="$(basename "$0")"
 
 # --- Fixed, "basic" node-id layout (small colocated clusters) -----------
-MGM_NODE_ID=65         # ndb_mgmd node id (colocated on the first MDS)
+MGM_NODE_ID=65         # ndb_mgmd node id (runs on the mgmt MDS host)
 DATA_NODE_ID_BASE=1    # data nodes get 1..N
 API_NODE_ID_BASE=101   # [api] slots get 101..
 MAX_NODE_ID=255        # NDB hard limit on node ids
@@ -48,6 +52,8 @@ data_dir="/var/lib/rondb"
 data_memory="2G"
 conf_dir="/etc/pnfs-mds"
 replicas_opt=""
+mgmt_host=""
+dedicate_mgmd=0        # 1 (via --dedicate-mgmd) keeps the mgmt host data-node-free
 force=0
 
 mds_file=""
@@ -56,6 +62,8 @@ ds_file=""
 # Globals populated at runtime.
 MDS_IPS=()
 DS_IPS=()
+DATA_IPS=()            # MDS hosts that run a RonDB data node (subset of MDS_IPS)
+MGMT_IP=""             # MDS host that runs ndb_mgmd
 replicas=1
 GENERATED_AT=""
 
@@ -63,9 +71,12 @@ usage() {
     cat <<EOF
 Usage: ${PROG} --mds-file FILE --ds-file FILE [options]
 
-Generate basic configs for a RonDB-colocated Lattice (pNFS) cluster.
-A RonDB data node is colocated on every MDS; ndb_mgmd lives on the
-first MDS.  Output is written to a directory -- nothing is deployed.
+Generate basic configs for a RonDB-backed Lattice (pNFS) cluster.
+Every MDS runs pnfs-mds; one MDS also runs ndb_mgmd.  By default a RonDB
+data node is colocated on every MDS (including the mgmt host); pass
+--dedicate-mgmd to keep the mgmt host free of a data node so the NDB
+arbitrator does not share a host with a data node.  Output is written to
+a directory -- nothing is deployed.
 
 Required:
   --mds-file FILE        File of MDS IPs, one per line (# comments ok).
@@ -75,10 +86,17 @@ Options (defaults in brackets):
   --out DIR              Output directory [${out_dir}].
   --force                Allow writing into a non-empty --out dir
                          (overwrites same-named files; never deletes).
+  --mgmt-host IP         MDS host that runs ndb_mgmd [first MDS].  Must
+                         be one of the --mds-file IPs.
+  --dedicate-mgmd        Do NOT run a RonDB data node on the mgmt host, so
+                         the NDB arbitrator has its own host (matches
+                         docs/MANUAL_INSTALL.md).  Needs >= 2 MDS; for
+                         NoOfReplicas=2 use an odd MDS count (e.g. 3 MDS
+                         -> 2 data nodes).  Default: off (colocate).
   --replicas N           NoOfReplicas override.  Default: 1 for a single
-                         MDS, 2 for an even MDS count, 1 (with a warning)
-                         for an odd count >= 3.  N must divide the MDS
-                         count.
+                         data node, 2 for an even data-node count, 1
+                         (with a warning) for an odd count >= 3.  N must
+                         divide the RonDB data-node count.
   --schema-name NAME     RonDB schema name [${schema_name}].
   --mgm-port PORT        ndb_mgmd port [${mgm_port}].
   --nfs-port PORT        MDS NFS port [${nfs_port}].
@@ -155,6 +173,8 @@ parse_args() {
             --ds-file)        ds_file="${2:?--ds-file requires an argument}"; shift 2;;
             --out)            out_dir="${2:?--out requires an argument}"; shift 2;;
             --force)          force=1; shift;;
+            --mgmt-host)      mgmt_host="${2:?--mgmt-host requires an argument}"; shift 2;;
+            --dedicate-mgmd)  dedicate_mgmd=1; shift;;
             --replicas)       replicas_opt="${2:?--replicas requires an argument}"; shift 2;;
             --schema-name)    schema_name="${2:?--schema-name requires an argument}"; shift 2;;
             --mgm-port)       mgm_port="${2:?--mgm-port requires an argument}"; shift 2;;
@@ -178,6 +198,11 @@ validate_inputs() {
     [[ -n "${mds_file}" ]] || { usage >&2; die "--mds-file is required"; }
     [[ -n "${ds_file}" ]]  || { usage >&2; die "--ds-file is required"; }
 
+    if [[ -n "${mgmt_host}" ]]; then
+        is_ipv4 "${mgmt_host}" || \
+            die "--mgmt-host must be an IPv4 address: ${mgmt_host}"
+    fi
+
     local p
     for p in "${mgm_port}" "${nfs_port}" "${grpc_port}"; do
         { is_uint "${p}" && (( p >= 1 && p <= 65535 )); } || \
@@ -193,14 +218,14 @@ validate_inputs() {
 }
 
 # Pick NoOfReplicas honoring the NDB rule that the data-node count must be
-# divisible by the replica count.  Colocation gives one data node per MDS.
+# divisible by the replica count.  There is one data node per data-node host.
 compute_replicas() {
     local n="$1"
     if [[ -n "${replicas_opt}" ]]; then
         { is_uint "${replicas_opt}" && (( replicas_opt >= 1 && replicas_opt <= 4 )); } || \
             die "--replicas must be in [1,4]: ${replicas_opt}"
         (( n % replicas_opt == 0 )) || \
-            die "--replicas ${replicas_opt} does not divide the MDS/data-node count ${n}"
+            die "--replicas ${replicas_opt} does not divide the RonDB data-node count ${n}"
         replicas="${replicas_opt}"
         return 0
     fi
@@ -210,13 +235,46 @@ compute_replicas() {
         replicas=2
     else
         replicas=1
-        warn "odd MDS count (${n}): 2-way replication needs an even number of colocated data nodes; using NoOfReplicas=1 (add/remove an MDS, or pass --replicas)"
+        warn "odd data-node count (${n}): 2-way replication needs an even number of data nodes; using NoOfReplicas=1 (adjust the MDS count or --dedicate-mgmd, or pass --replicas)"
     fi
+}
+
+# Decide which MDS runs ndb_mgmd and whether that host also runs a data
+# node, then populate DATA_IPS (the MDS hosts that run RonDB data nodes,
+# in stable order -> contiguous data-node ids 1..#DATA_IPS).
+resolve_topology() {
+    local n="${#MDS_IPS[@]}"
+    local ip found=0
+
+    if [[ -n "${mgmt_host}" ]]; then
+        for ip in "${MDS_IPS[@]}"; do
+            [[ "${ip}" == "${mgmt_host}" ]] && { found=1; break; }
+        done
+        (( found )) || die "--mgmt-host ${mgmt_host} is not one of the MDS IPs"
+        MGMT_IP="${mgmt_host}"
+    else
+        MGMT_IP="${MDS_IPS[0]}"
+    fi
+
+    if (( dedicate_mgmd )); then
+        (( n >= 2 )) || \
+            die "--dedicate-mgmd needs at least 2 MDS (one for ndb_mgmd, one or more for data nodes)"
+    fi
+
+    DATA_IPS=()
+    for ip in "${MDS_IPS[@]}"; do
+        if (( dedicate_mgmd )) && [[ "${ip}" == "${MGMT_IP}" ]]; then
+            continue
+        fi
+        DATA_IPS+=("${ip}")
+    done
+
+    (( ${#DATA_IPS[@]} >= 1 )) || die "no RonDB data-node hosts were selected"
 }
 
 emit_config_ini() {
     local file="$1"
-    local mgm_ip="${MDS_IPS[0]}"
+    local mgm_ip="${MGMT_IP}"
     local n="${#MDS_IPS[@]}"
     local idx node_id total_api i api_id
     {
@@ -240,13 +298,13 @@ RedoBuffer=64M
 TransactionMemory=128M
 IndexMemory=64M
 EOF
-        for idx in "${!MDS_IPS[@]}"; do
+        for idx in "${!DATA_IPS[@]}"; do
             node_id=$(( DATA_NODE_ID_BASE + idx ))
             cat <<EOF
 
 [ndbd]
 NodeId=${node_id}
-HostName=${MDS_IPS[idx]}
+HostName=${DATA_IPS[idx]}
 EOF
         done
         # Free [api] pool (no HostName): any MDS/admin tool may claim a slot.
@@ -269,7 +327,7 @@ emit_rondb_conf() {
     cat > "${file}" <<EOF
 # Generated by ${PROG} at ${GENERATED_AT}
 # Backend connect file.  Copy to ${conf_dir}/rondb.conf on every MDS host.
-connect_string = ${MDS_IPS[0]}:${mgm_port}
+connect_string = ${MGMT_IP}:${mgm_port}
 schema_name = ${schema_name}
 EOF
 }
@@ -310,24 +368,36 @@ EOF
 
 emit_manifest() {
     local file="$1"
-    local n="${#MDS_IPS[@]}" m="${#DS_IPS[@]}"
+    local n="${#MDS_IPS[@]}" m="${#DS_IPS[@]}" d="${#DATA_IPS[@]}"
     local idx
+    local -A data_id=()
+    for idx in "${!DATA_IPS[@]}"; do data_id["${DATA_IPS[idx]}"]=$(( DATA_NODE_ID_BASE + idx )); done
     {
         printf '# Generated by %s at %s\n' "${PROG}" "${GENERATED_AT}"
-        printf '# RonDB-colocated Lattice cluster: %s MDS (each runs a RonDB data node), %s DS.\n' \
-            "${n}" "${m}"
-        printf '# Management node (ndb_mgmd) colocated on the first MDS: %s\n' "${MDS_IPS[0]}"
+        printf '# RonDB-backed Lattice cluster: %s MDS, %s RonDB data node(s), %s DS.\n' \
+            "${n}" "${d}" "${m}"
+        if [[ -n "${data_id[${MGMT_IP}]:-}" ]]; then
+            printf '# Management node (ndb_mgmd) on MDS %s (also runs RonDB data node %s).\n' \
+                "${MGMT_IP}" "${data_id[${MGMT_IP}]}"
+        else
+            printf '# Management node (ndb_mgmd) on MDS %s (no data node -- dedicated arbitrator).\n' \
+                "${MGMT_IP}"
+        fi
         printf '# NoOfReplicas=%s\n\n' "${replicas}"
         printf '%-14s %-18s %s\n' "FILE" "HOST" "DESTINATION"
-        printf '%-14s %-18s %s\n' "config.ini" "${MDS_IPS[0]}" "/etc/rondb/config.ini"
+        printf '%-14s %-18s %s\n' "config.ini" "${MGMT_IP}" "/etc/rondb/config.ini"
         printf '%-14s %-18s %s\n' "rondb.conf" "<every MDS>" "${conf_dir}/rondb.conf"
         for idx in "${!MDS_IPS[@]}"; do
             printf '%-14s %-18s %s\n' \
                 "mds-$(( idx + 1 )).conf" "${MDS_IPS[idx]}" "${conf_dir}/mds.conf"
         done
+        printf '\n# RonDB data-node hosts (start ndbmtd here):\n'
+        for idx in "${!DATA_IPS[@]}"; do
+            printf '#   NodeId %-3s %s\n' "$(( DATA_NODE_ID_BASE + idx ))" "${DATA_IPS[idx]}"
+        done
         printf '\nNext steps:\n'
-        printf '  1. Copy config.ini to %s and start ndb_mgmd.\n' "${MDS_IPS[0]}"
-        printf '  2. Start a RonDB data node (ndbmtd) on each MDS host.\n'
+        printf '  1. Copy config.ini to %s and start ndb_mgmd.\n' "${MGMT_IP}"
+        printf '  2. Start a RonDB data node (ndbmtd) on each data-node host listed above.\n'
         printf '  3. Copy rondb.conf and the matching mds-<n>.conf to each MDS\n'
         printf '     (as %s/rondb.conf and %s/mds.conf) and start pnfs-mds.\n' \
             "${conf_dir}" "${conf_dir}"
@@ -370,12 +440,14 @@ main() {
     (( n <= MAX_MDS )) || \
         die "this basic generator supports at most ${MAX_MDS} MDS (got ${n})"
 
+    resolve_topology
+
     local total_api=$(( n * worker_threads + 4 ))
     local api_top=$(( API_NODE_ID_BASE + total_api - 1 ))
     (( api_top <= MAX_NODE_ID )) || \
         die "too many [api] slots (${total_api}); node ids would exceed ${MAX_NODE_ID}. Reduce --worker-threads or the MDS count."
 
-    compute_replicas "${n}"
+    compute_replicas "${#DATA_IPS[@]}"
     warn_overlap
 
     GENERATED_AT="$(date -u +%FT%TZ)"
@@ -389,7 +461,7 @@ main() {
     done
     emit_manifest "${out_dir}/MANIFEST.txt"
 
-    info "wrote ${n}-MDS / ${#DS_IPS[@]}-DS config to ${out_dir} (NoOfReplicas=${replicas})"
+    info "wrote ${n}-MDS / ${#DATA_IPS[@]}-datanode / ${#DS_IPS[@]}-DS config to ${out_dir} (NoOfReplicas=${replicas})"
     info "see ${out_dir}/MANIFEST.txt for file placement"
 }
 
