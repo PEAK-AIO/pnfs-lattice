@@ -265,7 +265,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * Apply sane defaults here; INI keys override below. */
     cfg->inline_max_size = 65536;          /* 64 KiB */
     cfg->inode_cache_size = 0;             /* 0 = disabled; set >0 to enable */
-    cfg->dirent_cache_size = 32768;
+    cfg->dirent_cache_size = 0;     /* disabled by default: per-MDS namespace caches cannot stay coherent across the referral cluster */
+    cfg->layout_cache_size = 0;     /* disabled by default */
     cfg->negative_cache_ttl_ms = 5000;
 
     /* Promoted-from-hardcode defaults. */
