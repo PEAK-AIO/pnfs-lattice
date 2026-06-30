@@ -7,7 +7,7 @@
 - Linux (Ubuntu 22.04+ or equivalent)
 - GCC ≥ 13.1 (mandatory — build will fail on older compilers)
 - CMake 3.20+
-- RonDB 24.10+ (NDB API headers and `libndbclient.so`)
+- RonDB 26.02+ (NDB API headers and `libndbclient.so`)
 - libntirpc (`apt install libntirpc-dev`)
 - OpenSSL (`apt install libssl-dev`)
 - pkg-config (`apt install pkg-config`)

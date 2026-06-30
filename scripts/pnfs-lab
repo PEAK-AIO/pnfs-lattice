@@ -611,6 +611,9 @@ DataDir=${LAB_RONDB_DATA_DIR}/mgm
 
 [ndbd default]
 NoOfReplicas=${ACTIVE_RONDB_NUM_REPLICAS}
+# Honour our explicit DataMemory; do NOT let ndbd auto-size to (almost)
+# all of host RAM, which starves the colocated MDS + NFS (RonDB 24/26.x).
+AutomaticMemoryConfig=0
 DataDir=${LAB_RONDB_DATA_DIR}/data
 FileSystemPath=${LAB_RONDB_DATA_DIR}/data
 DataMemory=${LAB_RONDB_DATA_MEMORY}
@@ -773,6 +776,15 @@ ensure_build_host_tarball() {
     # Populates BUILD_HOST_TARBALL.
     BUILD_HOST_TARBALL="${LAB_BUILD_HOST_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
 
+    # RonDB installed from the .deb leaves the runtime unpacked at
+    # ${LAB_BUILD_HOST_RONDB_BASE}/rondb-<version> with no source tarball.
+    # Reuse it and skip the tarball fetch entirely.
+    if [ -d "${LAB_BUILD_HOST_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}" ]; then
+        log "  [local] RonDB ${LAB_REMOTE_RONDB_VERSION} already installed; skipping tarball fetch"
+        BUILD_HOST_TARBALL=""
+        return 0
+    fi
+
     if [ "${DRY_RUN}" -eq 1 ]; then
         run_local mkdir -p "${LAB_BUILD_HOST_RONDB_BASE}"
         run_local wget -O "${BUILD_HOST_TARBALL}" "${LAB_REMOTE_RONDB_TARBALL_URL}"
@@ -798,6 +810,15 @@ stage_rondb_tarball_on_host() {
     local tmp_remote="/tmp/rondb-${LAB_REMOTE_RONDB_VERSION}.tar.gz"
     local expected_size
     local remote_size
+
+    # If the RonDB runtime is already present on the host (e.g. installed from
+    # the .deb at ${LAB_REMOTE_RONDB_BASE}/rondb-<version>), there is no tarball
+    # to stage; skip.
+    if [ -z "${BUILD_HOST_TARBALL:-}" ] || \
+        run_remote_cmd "${host}" "test -d ${LAB_REMOTE_RONDB_BASE}/rondb-${LAB_REMOTE_RONDB_VERSION}"; then
+        log "  [${host}] RonDB ${LAB_REMOTE_RONDB_VERSION} runtime present; skipping tarball staging"
+        return 0
+    fi
 
     if [ "${DRY_RUN}" -eq 1 ]; then
         log "  [${host}] stage RonDB tarball -> ${remote_tarball}"
@@ -838,6 +859,14 @@ download_and_extract_local() {
     local tarball="${base_dir}/rondb-${version}.tar.gz"
     local tmp_dir
     local extracted_dir
+
+    # If a RonDB runtime is already installed at the link path (e.g. from the
+    # .deb at /opt/rondb), build against it directly: skip the SDK download and
+    # do not try to rewrite the (root-owned) symlink as an unprivileged user.
+    if [ -x "${link_path}/bin/ndb_mgmd" ]; then
+        log "RonDB already available at ${link_path}; skipping local SDK fetch"
+        return 0
+    fi
 
     if [ "${DRY_RUN}" -eq 1 ]; then
         run_local mkdir -p "${base_dir}"
