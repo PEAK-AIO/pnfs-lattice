@@ -45,7 +45,10 @@
  *   clients on reconnect (it's in the same class as open_state,
  *   which is also drop-on-restart in transient_state_cache mode).
  */
-#define RONDB_SCHEMA_VERSION  6
+/* v7: mds_gc_queue gains owner_mds_id (per-MDS lazy-delete drain) and the
+ *     mds_prealloc_pool table is added (persisted DS pre-creation ring).
+ *     The 6->7 upgrade drops + recreates the transient gc_queue. */
+#define RONDB_SCHEMA_VERSION  7
 
 /* -----------------------------------------------------------------------
  * Table names
@@ -315,6 +318,37 @@
 #define RONDB_GC_COL_DS_ID        "ds_id"
 #define RONDB_GC_COL_NFS_FH_LEN   "nfs_fh_len"
 #define RONDB_GC_COL_NFS_FH       "nfs_fh"
+/*
+ * owner_mds_id: the MDS that enqueued this GC entry.  In multi-MDS
+ * deployments each MDS drains only the rows it owns, so GC workers on
+ * different MDSes never scan/contend the same entries.  Legacy rows
+ * written before this column existed read back as 0; the drainer treats
+ * owner_mds_id == 0 as "unassigned" and any MDS may reclaim them.
+ */
+#define RONDB_GC_COL_OWNER_MDS    "owner_mds_id"
+/*
+ * Ordered index on gc_seq: lets the drainer read the oldest queued
+ * entries in gc_seq order without a full-table scan, so the GC keeps
+ * up with heavy-delete bursts even when the backlog is millions of
+ * rows.  Created with logging off (rebuilt in memory on node restart).
+ */
+#define RONDB_IX_GC_SEQ           "ix_gc_queue_seq"
+
+/* -----------------------------------------------------------------------
+ * Column names -- mds_prealloc_pool
+ *
+ * Persisted ring of precreated DS stub files for ENABLE_DS_PREALLOC.
+ * PK = fileid.  owner_mds_id scopes the rows to the MDS that created
+ * them so each MDS only recovers/reclaims its own slots on restart.
+ * ----------------------------------------------------------------------- */
+
+#define RONDB_TBL_PREALLOC_POOL   "mds_prealloc_pool"
+#define RONDB_PP_COL_FILEID       "fileid"
+#define RONDB_PP_COL_DS_ID        "ds_id"
+#define RONDB_PP_COL_OWNER_MDS    "owner_mds_id"
+#define RONDB_PP_COL_STRIPE_UNIT  "stripe_unit"
+#define RONDB_PP_COL_NFS_FH_LEN   "nfs_fh_len"
+#define RONDB_PP_COL_NFS_FH       "nfs_fh"
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_layout_state

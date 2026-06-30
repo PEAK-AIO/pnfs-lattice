@@ -233,6 +233,37 @@ def _scalar(samples, name):
     return samples.get((name, frozenset()), 0)
 
 
+def render_storage(s, prev, dt):
+    """DS prealloc pool + lazy-delete GC backlog."""
+    out = ['STORAGE (prealloc pool / lazy-delete GC)']
+
+    pops_ok    = int(_scalar(s, 'pnfs_mds_prealloc_pops_ok'))
+    pops_empty = int(_scalar(s, 'pnfs_mds_prealloc_pops_empty'))
+    fh_missing = int(_scalar(s, 'pnfs_mds_prealloc_pops_fh_missing'))
+    refill_ent = int(_scalar(s, 'pnfs_mds_prealloc_refill_entries'))
+    gc_pending = int(_scalar(s, 'pnfs_mds_gc_pending'))
+
+    total = pops_ok + pops_empty
+    hit = (100.0 * pops_ok / total) if total else 0.0
+    out.append(f'{PAD}prealloc hit  {hit:5.1f}%   '
+               f'(ok={fmt_int(pops_ok)} empty={fmt_int(pops_empty)} '
+               f'fh_miss={fmt_int(fh_missing)})')
+
+    if prev is not None and dt:
+        ok_rate = (pops_ok - int(prev.get(
+            ('pnfs_mds_prealloc_pops_ok', frozenset()), 0))) / dt
+        rf_rate = (refill_ent - int(prev.get(
+            ('pnfs_mds_prealloc_refill_entries', frozenset()), 0))) / dt
+        out.append(f'{PAD}consume       {fmt_rate(ok_rate)}/s'
+                   f'    refill {fmt_rate(rf_rate)}/s')
+    else:
+        out.append(f'{PAD}refill_total  {fmt_int(refill_ent)}')
+
+    out.append(f'{PAD}gc_pending    {fmt_int(gc_pending)}  '
+               f'(this MDS, awaiting DS unlink)')
+    return out
+
+
 def render_dispatcher(s, prev, dt):
     out = ['DISPATCHER']
 
@@ -315,6 +346,8 @@ def render(samples, prev, dt, sections):
     blocks = []
     if 'dispatcher' in sections:
         blocks.append('\n'.join(render_dispatcher(samples, prev, dt)))
+    if 'storage' in sections:
+        blocks.append('\n'.join(render_storage(samples, prev, dt)))
     if 'ops' in sections:
         hist = histogram_groups(samples, 'pnfs_mds_op_latency_seconds', 'op')
         ph   = (histogram_groups(prev, 'pnfs_mds_op_latency_seconds', 'op')
@@ -366,11 +399,12 @@ def main():
     p.add_argument('-t', '--timeout', type=float, default=3.0,
                    help='HTTP timeout seconds (default 3)')
     p.add_argument('--only', default='all',
-                   choices=['all', 'dispatcher', 'ops', 'cats', 'phases'],
+                   choices=['all', 'dispatcher', 'storage', 'ops', 'cats',
+                            'phases'],
                    help='render only one section')
     args = p.parse_args()
 
-    sections = (['dispatcher', 'ops', 'cats', 'phases']
+    sections = (['dispatcher', 'storage', 'ops', 'cats', 'phases']
                 if args.only == 'all' else [args.only])
 
     prev_snap = {h: None for h in args.hosts}

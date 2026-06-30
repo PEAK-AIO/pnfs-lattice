@@ -311,6 +311,18 @@ struct mds_gc_entry {
 	uint32_t ds_id;
 	uint32_t nfs_fh_len;
 	uint8_t  nfs_fh[MDS_NFS_FH_MAX];
+	uint32_t owner_mds_id;   /* MDS that enqueued this entry (0 = legacy). */
+};
+
+/* One persisted DS-prealloc slot (ENABLE_DS_PREALLOC).  See
+ * mds_cat_prealloc_pool_* in mds_catalogue.h. */
+struct mds_prealloc_pool_row {
+	uint64_t fileid;
+	uint32_t ds_id;
+	uint32_t owner_mds_id;
+	uint32_t stripe_unit;
+	uint32_t nfs_fh_len;
+	uint8_t  nfs_fh[MDS_NFS_FH_MAX];
 };
 
 /* -----------------------------------------------------------------------
@@ -715,6 +727,8 @@ struct mds_config {
     uint32_t            lease_time_sec;
     uint32_t            grace_period_sec;
     uint32_t            prealloc_pool_size;
+    uint32_t            prealloc_ring_count;  /* prealloc refill rings/workers
+                                               * (0 = engine default). */
 
     /* Inline data (small file acceleration) */
     bool                inline_enabled;       /* Master switch (default true) */

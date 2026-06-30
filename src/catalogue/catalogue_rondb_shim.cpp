@@ -2324,6 +2324,52 @@ static int rondb_define_gc_queue_table(NdbDictionary::Dictionary *dict)
     rondb_add_unsigned(tbl, RONDB_GC_COL_NFS_FH_LEN);
     rondb_add_varbinary(tbl, RONDB_GC_COL_NFS_FH, MDS_NFS_FH_MAX,
                         false, false);
+    /* owner_mds_id: which MDS drains this row (0 = legacy/unassigned). */
+    rondb_add_unsigned(tbl, RONDB_GC_COL_OWNER_MDS);
+    int rc = rondb_create_table_if_not_exists(dict, tbl);
+    if (rc != 0) {
+        return rc;
+    }
+    /*
+     * Ordered index on gc_seq so the drainer reads the oldest entries
+     * in order (SF_OrderBy) and stops after a batch, instead of scanning
+     * the whole queue every tick.  Idempotent: SchemaObjectExists / 4714
+     * (index_stat tables absent) are both treated as success, and the
+     * peek/count paths fall back to a full scan if the index is missing.
+     */
+    dict->invalidateIndex(RONDB_IX_GC_SEQ, RONDB_TBL_GC_QUEUE);
+    {
+        NdbDictionary::Index ix(RONDB_IX_GC_SEQ);
+        ix.setTable(RONDB_TBL_GC_QUEUE);
+        ix.setType(NdbDictionary::Index::OrderedIndex);
+        ix.setLogging(false);
+        ix.addColumnName(RONDB_GC_COL_SEQ);
+        if (dict->createIndex(ix) != 0) {
+            NdbError err = dict->getNdbError();
+            if (err.classification != NdbError::SchemaObjectExists &&
+                err.code != 4714) {
+                return rondb_report_error(err, RONDB_IX_GC_SEQ);
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+ * mds_prealloc_pool: persisted ring of precreated DS stub files.
+ *   PK = fileid.  ds_id/owner_mds_id/stripe_unit + captured NFS FH.
+ */
+static int rondb_define_prealloc_pool_table(NdbDictionary::Dictionary *dict)
+{
+    NdbDictionary::Table tbl;
+    tbl.setName(RONDB_TBL_PREALLOC_POOL);
+    rondb_add_bigunsigned(tbl, RONDB_PP_COL_FILEID, true, true);
+    rondb_add_unsigned(tbl, RONDB_PP_COL_DS_ID);
+    rondb_add_unsigned(tbl, RONDB_PP_COL_OWNER_MDS);
+    rondb_add_unsigned(tbl, RONDB_PP_COL_STRIPE_UNIT);
+    rondb_add_unsigned(tbl, RONDB_PP_COL_NFS_FH_LEN);
+    rondb_add_varbinary(tbl, RONDB_PP_COL_NFS_FH, MDS_NFS_FH_MAX,
+                        false, false);
     return rondb_create_table_if_not_exists(dict, tbl);
 }
 
@@ -2669,6 +2715,7 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
     if (rondb_define_quota_rules_table(dict) != 0) { return -1; }
     if (rondb_define_quota_usage_table(dict) != 0) { return -1; }
     if (rondb_define_gc_queue_table(dict) != 0) { return -1; }
+    if (rondb_define_prealloc_pool_table(dict) != 0) { return -1; }
     /*
      * On fresh install the v6 layout_state DDL creates the correct
      * schema directly.  On upgrade from v5 the old (stateid_other)
@@ -2724,6 +2771,16 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
             (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_BY_CLIENT);
             /* Re-create layout_state with the new schema. */
             if (rondb_define_layout_state_table(dict) != 0) {
+                return -1;
+            }
+        }
+        if (schema_version < 7) {
+            /* v6 -> v7: mds_gc_queue gains owner_mds_id.  The queue holds
+             * only transient DS-cleanup work (drained every few seconds),
+             * so drop + recreate with the new column instead of an online
+             * ALTER.  mds_prealloc_pool is created by the DDL pass above. */
+            (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_QUEUE);
+            if (rondb_define_gc_queue_table(dict) != 0) {
                 return -1;
             }
         }
@@ -2813,6 +2870,7 @@ int rondb_shim_cleanup_metadata(void *handle, const char *schema)
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_BY_CLIENT);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_STATE);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_QUEUE);
+    (void)rondb_drop_table_if_exists(dict, RONDB_TBL_PREALLOC_POOL);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_QUOTA_USAGE);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_QUOTA_RULES);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_DS_PROVISION);
@@ -8273,7 +8331,8 @@ int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out)
 
 int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
                           uint64_t fileid, uint32_t ds_id,
-                          const uint8_t *nfs_fh, uint32_t fh_len)
+                          const uint8_t *nfs_fh, uint32_t fh_len,
+                          uint32_t owner_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
@@ -8323,6 +8382,7 @@ int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
     op->setValue(RONDB_GC_COL_NFS_FH_LEN, (Uint32)fh_len);
     op->setValue(RONDB_GC_COL_NFS_FH,
                  (const char *)fh_enc, fh_enc_len);
+    op->setValue(RONDB_GC_COL_OWNER_MDS, (Uint32)owner_mds_id);
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -8443,14 +8503,15 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
  * just realloc-grows to it.
  */
 int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
-                             uint32_t cap, uint32_t *n_out)
+                             uint32_t cap, uint32_t *n_out,
+                             uint32_t self_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *tbl;
     NdbTransaction *tx;
     NdbScanOperation *scan;
-    NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh;
+    NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh, *a_owner;
     NdbError err;
     int next_rc;
     std::vector<struct mds_gc_entry> heap;
@@ -8471,6 +8532,85 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
     if (dict == nullptr) { return -1; }
     tbl = dict->getTable(RONDB_TBL_GC_QUEUE);
     if (tbl == nullptr) { return -1; }
+
+    /*
+     * Fast path: ordered-index scan on gc_seq.  SF_OrderBy returns rows
+     * ascending by gc_seq across fragments, so we read the oldest owned
+     * entries directly and stop after `cap` -- O(cap) instead of a full
+     * scan of a queue that can be millions of rows during a delete burst.
+     * `examine_cap` bounds the rows visited so an MDS that owns only a
+     * sparse slice of the oldest entries still returns promptly; any
+     * setup/scan failure falls through to the full-scan path below.
+     */
+    {
+        const NdbDictionary::Index *ix =
+            rondb_resolve_index(dict, RONDB_IX_GC_SEQ, RONDB_TBL_GC_QUEUE);
+        if (ix != nullptr) {
+            NdbTransaction *itx = rondb_get_ndb(state)->startTransaction();
+            if (itx != nullptr) {
+                NdbIndexScanOperation *iscan =
+                    itx->getNdbIndexScanOperation(ix);
+                if (iscan != nullptr &&
+                    iscan->readTuples(NdbOperation::LM_CommittedRead,
+                                      NdbScanOperation::SF_OrderBy) == 0) {
+                    NdbRecAttr *i_seq =
+                        iscan->getValue(RONDB_GC_COL_SEQ, nullptr);
+                    NdbRecAttr *i_fid =
+                        iscan->getValue(RONDB_GC_COL_FILEID, nullptr);
+                    NdbRecAttr *i_dsid =
+                        iscan->getValue(RONDB_GC_COL_DS_ID, nullptr);
+                    NdbRecAttr *i_fhlen =
+                        iscan->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
+                    NdbRecAttr *i_fh =
+                        iscan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
+                    NdbRecAttr *i_owner =
+                        iscan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
+                    if (itx->execute(NdbTransaction::NoCommit) != -1) {
+                        uint32_t got = 0;
+                        uint64_t examined = 0;
+                        uint64_t examine_cap = (uint64_t)cap * 256ULL + 4096ULL;
+                        int irc;
+                        while (got < cap && examined < examine_cap &&
+                               (irc = iscan->nextResult(true)) == 0) {
+                            examined++;
+                            uint32_t owner = (i_owner != nullptr) ?
+                                i_owner->u_32_value() : 0U;
+                            if (self_mds_id != 0U && owner != 0U &&
+                                owner != self_mds_id) {
+                                continue;
+                            }
+                            struct mds_gc_entry e;
+                            std::memset(&e, 0, sizeof(e));
+                            e.gc_seq       = i_seq->u_64_value();
+                            e.fileid       = i_fid->u_64_value();
+                            e.ds_id        = i_dsid->u_32_value();
+                            e.owner_mds_id = owner;
+                            e.nfs_fh_len   = i_fhlen->u_32_value();
+                            if (e.nfs_fh_len > MDS_NFS_FH_MAX) {
+                                e.nfs_fh_len = MDS_NFS_FH_MAX;
+                            }
+                            const char *fh_ptr = i_fh->aRef();
+                            if (fh_ptr != nullptr && e.nfs_fh_len > 0) {
+                                uint32_t vb_len =
+                                    (uint32_t)(uint8_t)fh_ptr[0];
+                                if (vb_len > MDS_NFS_FH_MAX) {
+                                    vb_len = MDS_NFS_FH_MAX;
+                                }
+                                std::memcpy(e.nfs_fh, fh_ptr + 1, vb_len);
+                            }
+                            entries[got++] = e;   /* already gc_seq order */
+                        }
+                        iscan->close();
+                        rondb_get_ndb(state)->closeTransaction(itx);
+                        *n_out = got;
+                        return 0;
+                    }
+                }
+                rondb_get_ndb(state)->closeTransaction(itx);
+            }
+        }
+        /* Index unavailable -- fall through to the full-scan heap path. */
+    }
 
     tx = rondb_get_ndb(state)->startTransaction();
     if (tx == nullptr) {
@@ -8496,6 +8636,7 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
     a_dsid  = scan->getValue(RONDB_GC_COL_DS_ID, nullptr);
     a_fhlen = scan->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
     a_fh    = scan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
+    a_owner = scan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -8505,6 +8646,17 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
 
     while ((next_rc = scan->nextResult(true)) == 0) {
         uint64_t seq = a_seq->u_64_value();
+
+        /*
+         * Per-MDS isolation: only drain rows this MDS owns.  owner==0
+         * is a legacy/unassigned row (pre-migration) that any MDS may
+         * reclaim.  self_mds_id==0 means "drain everything" (single-MDS
+         * deployments / callers that opt out of partitioning).
+         */
+        uint32_t owner = (a_owner != nullptr) ? a_owner->u_32_value() : 0U;
+        if (self_mds_id != 0U && owner != 0U && owner != self_mds_id) {
+            continue;
+        }
 
         /*
          * Skip cheaply when this row cannot improve the heap.
@@ -8519,10 +8671,11 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
          * pointer becomes invalid on the next nextResult() call. */
         struct mds_gc_entry e;
         std::memset(&e, 0, sizeof(e));
-        e.gc_seq     = seq;
-        e.fileid     = a_fid->u_64_value();
-        e.ds_id      = a_dsid->u_32_value();
-        e.nfs_fh_len = a_fhlen->u_32_value();
+        e.gc_seq       = seq;
+        e.fileid       = a_fid->u_64_value();
+        e.ds_id        = a_dsid->u_32_value();
+        e.owner_mds_id = owner;
+        e.nfs_fh_len   = a_fhlen->u_32_value();
         if (e.nfs_fh_len > MDS_NFS_FH_MAX) {
             e.nfs_fh_len = MDS_NFS_FH_MAX;
         }
@@ -8608,13 +8761,14 @@ int rondb_shim_gc_dequeue(void *handle, uint64_t gc_seq)
     return 0;
 }
 
-int rondb_shim_gc_count(void *handle, uint32_t *count)
+int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *tbl;
     NdbTransaction *tx;
     NdbScanOperation *scan;
+    NdbRecAttr *a_owner = nullptr;
     NdbError err;
     int next_rc;
     uint32_t n = 0;
@@ -8645,8 +8799,9 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
         return rondb_report_error(err, "gc_count readTuples");
     }
 
-    /* Only need PK column to count rows. */
+    /* PK column drives the row count; owner column drives per-MDS filter. */
     (void)scan->getValue(RONDB_GC_COL_SEQ, nullptr);
+    a_owner = scan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -8654,8 +8809,20 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
         return rondb_report_error(err, "gc_count exec");
     }
 
+    /*
+     * Exact count of this MDS's queued rows.  This is a full scan, but
+     * the ds_gc coordinator only refreshes the gauge every Nth tick
+     * (DS_GC_GAUGE_EVERY), so the cost is amortised and shrinks as the
+     * backlog drains; the drain hot path itself uses the cheap
+     * ordered-index peek, not this count.  An earlier "examine cap" made
+     * this scan stop early, which turned the gauge into a noisy
+     * under-estimate on a large queue -- removed.
+     */
     while ((next_rc = scan->nextResult(true)) == 0) {
-        n++;
+        uint32_t owner = (a_owner != nullptr) ? a_owner->u_32_value() : 0U;
+        if (!(self_mds_id != 0U && owner != 0U && owner != self_mds_id)) {
+            n++;
+        }
     }
     if (next_rc != 1) {
         err = scan->getNdbError();
@@ -8667,6 +8834,209 @@ int rondb_shim_gc_count(void *handle, uint32_t *count)
     scan->close();
     rondb_get_ndb(state)->closeTransaction(tx);
     *count = n;
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * DS prealloc pool (mds_prealloc_pool: PK=fileid)
+ * ----------------------------------------------------------------------- */
+
+int rondb_shim_prealloc_pool_insert(void *handle, uint64_t fileid,
+                                    uint32_t ds_id, const uint8_t *nfs_fh,
+                                    uint32_t fh_len, uint32_t owner_mds_id,
+                                    uint32_t stripe_unit)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbError err;
+    uint8_t fh_enc[MDS_NFS_FH_MAX + 2];
+    uint32_t fh_enc_len = 0;
+
+    if (state == nullptr || (fh_len > 0 && nfs_fh == nullptr) ||
+        fh_len > MDS_NFS_FH_MAX) {
+        return -1;
+    }
+    if (fh_len > 0) {
+        if (rondb_encode_varbinary_value(nfs_fh, fh_len, 1U, fh_enc,
+                                         sizeof(fh_enc), &fh_enc_len) != 0) {
+            return -1;
+        }
+    } else {
+        fh_enc[0] = 0;
+        fh_enc_len = 1;
+    }
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_PREALLOC_POOL);
+    if (tbl == nullptr) { return -1; }
+
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 "prealloc_pool_insert startTx");
+    }
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_insert insertOp");
+    }
+    op->insertTuple();
+    (void)rondb_set_value_u64(op, RONDB_PP_COL_FILEID, fileid);
+    op->setValue(RONDB_PP_COL_DS_ID, (Uint32)ds_id);
+    op->setValue(RONDB_PP_COL_OWNER_MDS, (Uint32)owner_mds_id);
+    op->setValue(RONDB_PP_COL_STRIPE_UNIT, (Uint32)stripe_unit);
+    op->setValue(RONDB_PP_COL_NFS_FH_LEN, (Uint32)fh_len);
+    op->setValue(RONDB_PP_COL_NFS_FH, (const char *)fh_enc, fh_enc_len);
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        /* 630 = tuple already exists: a prior incarnation's row for this
+         * fileid; harmless (the recovery path will reconcile). */
+        if (err.code == 630) { return 0; }
+        return rondb_report_error(err, "prealloc_pool_insert commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
+int rondb_shim_prealloc_pool_delete(void *handle, uint64_t fileid)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbError err;
+
+    if (state == nullptr) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_PREALLOC_POOL);
+    if (tbl == nullptr) { return -1; }
+
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 "prealloc_pool_delete startTx");
+    }
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_delete delOp");
+    }
+    op->deleteTuple();
+    (void)rondb_equal_u64(op, RONDB_PP_COL_FILEID, fileid);
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626) { return 0; }   /* already gone */
+        return rondb_report_error(err, "prealloc_pool_delete commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
+int rondb_shim_prealloc_pool_scan(void *handle, uint32_t owner_mds_id,
+                                  struct mds_prealloc_pool_row **rows_out,
+                                  uint32_t *n_out)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbScanOperation *scan;
+    NdbRecAttr *a_fid, *a_dsid, *a_owner, *a_su, *a_fhlen, *a_fh;
+    NdbError err;
+    int next_rc;
+    std::vector<struct mds_prealloc_pool_row> rows;
+
+    if (n_out != nullptr) { *n_out = 0; }
+    if (rows_out != nullptr) { *rows_out = nullptr; }
+    if (state == nullptr || rows_out == nullptr || n_out == nullptr) {
+        return -1;
+    }
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_PREALLOC_POOL);
+    if (tbl == nullptr) { return -1; }
+
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 "prealloc_pool_scan startTx");
+    }
+    scan = tx->getNdbScanOperation(tbl);
+    if (scan == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_scan getScanOp");
+    }
+    if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+        err = scan->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_scan readTuples");
+    }
+    a_fid   = scan->getValue(RONDB_PP_COL_FILEID, nullptr);
+    a_dsid  = scan->getValue(RONDB_PP_COL_DS_ID, nullptr);
+    a_owner = scan->getValue(RONDB_PP_COL_OWNER_MDS, nullptr);
+    a_su    = scan->getValue(RONDB_PP_COL_STRIPE_UNIT, nullptr);
+    a_fhlen = scan->getValue(RONDB_PP_COL_NFS_FH_LEN, nullptr);
+    a_fh    = scan->getValue(RONDB_PP_COL_NFS_FH, nullptr);
+
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_scan exec");
+    }
+
+    while ((next_rc = scan->nextResult(true)) == 0) {
+        uint32_t owner = (a_owner != nullptr) ? a_owner->u_32_value() : 0U;
+        if (owner_mds_id != 0U && owner != 0U && owner != owner_mds_id) {
+            continue;
+        }
+        struct mds_prealloc_pool_row r;
+        std::memset(&r, 0, sizeof(r));
+        r.fileid       = a_fid->u_64_value();
+        r.ds_id        = a_dsid->u_32_value();
+        r.owner_mds_id = owner;
+        r.stripe_unit  = a_su->u_32_value();
+        r.nfs_fh_len   = a_fhlen->u_32_value();
+        if (r.nfs_fh_len > MDS_NFS_FH_MAX) { r.nfs_fh_len = MDS_NFS_FH_MAX; }
+        const char *fh_ptr = a_fh->aRef();
+        if (fh_ptr != nullptr && r.nfs_fh_len > 0) {
+            uint32_t vb_len = (uint32_t)(uint8_t)fh_ptr[0];
+            if (vb_len > MDS_NFS_FH_MAX) { vb_len = MDS_NFS_FH_MAX; }
+            std::memcpy(r.nfs_fh, fh_ptr + 1, vb_len);
+        }
+        rows.push_back(r);
+    }
+    if (next_rc != 1) {
+        err = scan->getNdbError();
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "prealloc_pool_scan nextResult");
+    }
+    scan->close();
+    rondb_get_ndb(state)->closeTransaction(tx);
+
+    if (!rows.empty()) {
+        struct mds_prealloc_pool_row *out =
+            (struct mds_prealloc_pool_row *)malloc(
+                rows.size() * sizeof(*out));
+        if (out == nullptr) { return -1; }
+        std::memcpy(out, rows.data(), rows.size() * sizeof(*out));
+        *rows_out = out;
+        *n_out = (uint32_t)rows.size();
+    }
     return 0;
 }
 

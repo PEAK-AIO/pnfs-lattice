@@ -62,3 +62,4 @@ core.*
 
 # QA artifacts
 valgrind-logs/
+__pycache__/

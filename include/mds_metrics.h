@@ -91,6 +91,10 @@ struct mds_branch_metrics {
     _Atomic uint64_t prealloc_pops_fh_missing;/**< Ring hit but FH not captured. */
     _Atomic uint64_t prealloc_refill_entries; /**< Entries added by refill thread. */
     _Atomic uint64_t prealloc_refill_batches; /**< Refill batch invocations. */
+    _Atomic uint64_t gc_pending;              /**< GC-queue rows owned by this
+                                                  *  MDS still awaiting DS
+                                                  *  unlink (gauge; refreshed by
+                                                  *  the ds_gc coordinator). */
     _Atomic uint64_t layoutget_sync_fallback; /**< LAYOUTGET took sync FH path. */
     _Atomic uint64_t layoutget_delay_count;   /**< LAYOUTGET returned NFS4ERR_DELAY
                                                   *  (reserved; used once

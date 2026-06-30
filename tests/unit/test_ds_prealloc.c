@@ -268,6 +268,43 @@ static void test_pop_no_ds(void)
 }
 
 /* -------------------------------------------------------------------
+ * Test 7: multi-MDS DS-group partition.  MDS 1 of a 2-MDS cluster owns
+ * ONLINE-DS list positions where p % cluster_size == 0 -> ds_id 0 and 2;
+ * fast-path pops must never return a DS owned by the other MDS.
+ * ------------------------------------------------------------------- */
+
+static void test_ds_group_partition(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct ds_prealloc_ctx *ctx = NULL;
+    struct mds_ds_map_entry entry;
+    uint32_t stripe_unit = 0;
+    uint64_t fileid = 0;
+
+    db = open_test_catalogue(); assert(db != NULL);
+    seed_ds(db, 0);
+    seed_ds(db, 1);
+    seed_ds(db, 2);
+    seed_ds(db, 3);
+
+    /* self_mds_id=1, cluster_size=2, ring_count=2. */
+    if (ds_prealloc_init_ex2(db, NULL, PLACEMENT_RR, 16,
+                             1, 2, 2, &ctx) != 0) {
+        mds_catalogue_close(db); return;
+    }
+    usleep(300000);  /* let the refill rings fill (fast path). */
+
+    for (int i = 0; i < 4; i++) {
+        if (ds_prealloc_pop(ctx, &entry, &stripe_unit, &fileid) == 0) {
+            ASSERT_EQ(entry.ds_id == 0 || entry.ds_id == 2, 1);
+        }
+    }
+
+    ds_prealloc_destroy(ctx);
+    mds_catalogue_close(db);
+}
+
+/* -------------------------------------------------------------------
  * main
  * ------------------------------------------------------------------- */
 
@@ -292,6 +329,9 @@ int main(void)
 
     test_pop_no_ds();
     printf("  test_pop_no_ds                      PASS\n");
+
+    test_ds_group_partition();
+    printf("  test_ds_group_partition             PASS\n");
 
     printf("\n  %d assertions passed, %d failed\n", pass_count, fail_count);
     return fail_count > 0 ? 1 : 0;

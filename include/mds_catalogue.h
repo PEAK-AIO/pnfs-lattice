@@ -554,6 +554,34 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
 
 
 /* -----------------------------------------------------------------------
+ * Catalogue data -- DS prealloc pool (ENABLE_DS_PREALLOC)
+ *
+ * Persisted ring of precreated DS stub files (fileid PK, ds_id, FH,
+ * owner_mds_id) so the pool survives a daemon restart.  Optional:
+ * backends that leave the vtable slots NULL return MDS_ERR_NOSUPPORT and
+ * the prealloc engine runs in-memory only.  struct
+ * mds_prealloc_pool_row is defined in pnfs_mds.h.
+ * ----------------------------------------------------------------------- */
+
+/** Persist one precreated slot.  fileid is the PK. */
+enum mds_status mds_cat_prealloc_pool_insert(struct mds_catalogue *cat,
+		uint64_t fileid, uint32_t ds_id, const uint8_t *nfs_fh,
+		uint32_t fh_len, uint32_t owner_mds_id, uint32_t stripe_unit);
+
+/** Remove a slot row once it has been consumed (or reclaimed). */
+enum mds_status mds_cat_prealloc_pool_delete(struct mds_catalogue *cat,
+		uint64_t fileid);
+
+/**
+ * Scan the pool rows owned by @a owner_mds_id (0 = all).  Allocates
+ * *rows_out (caller frees with free()); *n_out gets the count.
+ */
+enum mds_status mds_cat_prealloc_pool_scan(struct mds_catalogue *cat,
+		uint32_t owner_mds_id,
+		struct mds_prealloc_pool_row **rows_out, uint32_t *n_out);
+
+
+/* -----------------------------------------------------------------------
  * Catalogue data -- Shard routing
  *
  * Maps fileid -> shard_id for cross-shard FH resolution (PUTFH).

@@ -356,7 +356,12 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         "# HELP pnfs_mds_layoutget_delay_count "
             "LAYOUTGETs that returned NFS4ERR_DELAY.\n"
         "# TYPE pnfs_mds_layoutget_delay_count counter\n"
-        "pnfs_mds_layoutget_delay_count %lu\n",
+        "pnfs_mds_layoutget_delay_count %lu\n"
+        "# HELP pnfs_mds_gc_pending "
+            "Lazy-delete GC-queue entries owned by this MDS awaiting "
+            "DS unlink.\n"
+        "# TYPE pnfs_mds_gc_pending gauge\n"
+        "pnfs_mds_gc_pending %lu\n",
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->prealloc_pops_ok),
         (unsigned long)atomic_load(
@@ -370,7 +375,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->layoutget_sync_fallback),
         (unsigned long)atomic_load(
-            (_Atomic uint64_t *)&branch->layoutget_delay_count));
+            (_Atomic uint64_t *)&branch->layoutget_delay_count),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_pending));
 
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
         return -1;

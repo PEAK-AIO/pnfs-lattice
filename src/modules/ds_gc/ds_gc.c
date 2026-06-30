@@ -13,6 +13,7 @@
 #include "ds_gc.h"
 
 #include "mds_catalogue.h"
+#include "mds_metrics.h"
 #include "pnfs_mds.h"
 #include "proxy_io.h"
 
@@ -21,6 +22,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -30,6 +32,7 @@
 #define DS_GC_MAX_WORKERS     32U
 #define DS_GC_MAX_BATCH_SIZE  4096U
 #define DS_GC_QUEUE_CAP       4096U
+#define DS_GC_GAUGE_EVERY     6U   /* refresh gc_pending every 6th tick */
 
 struct ds_gc_work_item {
 	struct mds_gc_entry entry;
@@ -79,8 +82,20 @@ static bool process_one_entry(struct ds_gc *gc,
 	bool had_any_existed = false;
 	bool blocked = false;
 
+	/*
+	 * A file's stripes (0..stripe_count-1) and mirrors (0..mirror_count-1)
+	 * are dense from 0, so the first absent slot means there are no higher
+	 * ones.  Stop probing there instead of brute-forcing all
+	 * MDS_MAX_STRIPES * MDS_MAX_MIRRORS combinations -- that was ~4096 DS
+	 * round-trips per single-stripe file, which made the drain unable to
+	 * keep up with a heavy-delete backlog.
+	 */
+	enum mds_status block_st = MDS_OK;
+
 	for (uint32_t stripe = 0; stripe < MDS_MAX_STRIPES && !blocked;
 	     stripe++) {
+		bool stripe_had_existing = false;
+
 		for (uint32_t mirror = 0; mirror < MDS_MAX_MIRRORS; mirror++) {
 			bool existed = false;
 			enum mds_status st;
@@ -90,29 +105,45 @@ static bool process_one_entry(struct ds_gc *gc,
 						      entry->fileid,
 						      stripe, mirror,
 						      &existed);
-			if (st == MDS_ERR_NOTFOUND) {
-				/* DS mount missing -- retry later. */
+			if (st == MDS_ERR_NOTFOUND || st != MDS_OK) {
+				/* DS mount missing / I/O error -- retry later. */
 				blocked = true;
+				block_st = st;
 				break;
 			}
-			if (st != MDS_OK) {
-				blocked = true;
-				break;
-			}
-			if (!existed) {
-				if (!had_any_existed) {
-					goto dequeue_ok;
-				}
-			} else {
+			if (existed) {
 				had_any_existed = true;
+				stripe_had_existing = true;
+				continue;
 			}
+			/* First absent mirror in this stripe: no higher
+			 * mirrors exist for it. */
+			break;
+		}
+		/* First stripe with no mirror at all: stripes exhausted. */
+		if (!blocked && !stripe_had_existing) {
+			break;
 		}
 	}
 
-dequeue_ok:
 	if (blocked) {
+		/* One un-drainable entry stalls the whole FIFO drain, so make
+		 * it visible (rate-limited): NOTFOUND means entry->ds_id is not
+		 * mounted on this MDS; MDS_ERR_IO is a real unlink failure. */
+		static _Atomic unsigned long blk_n = 0;
+		if ((atomic_fetch_add_explicit(&blk_n, 1UL,
+					       memory_order_relaxed) & 0x3FFUL) == 0UL) {
+			fprintf(stderr,
+				"WARN: ds_gc blocked entry: fileid=%llu ds_id=%u "
+				"status=%d (%s)\n",
+				(unsigned long long)entry->fileid,
+				entry->ds_id, (int)block_st,
+				block_st == MDS_ERR_NOTFOUND ?
+					"ds_id not mounted here" : "unlink I/O");
+		}
 		return false;
 	}
+	(void)had_any_existed;
 	/* Best-effort: drop catalogue stripe rows after DS bytes are gone.
 	 * Idempotent when ns_remove already deleted them in-txn. */
 	(void)mds_cat_stripe_map_del(gc->cat, NULL, entry->fileid);
@@ -192,6 +223,7 @@ static void coordinator_drain_queue(struct ds_gc *gc)
 static void *ds_gc_coordinator_main(void *arg)
 {
 	struct ds_gc *gc = arg;
+	uint32_t gauge_tick = 0;
 
 	while (!atomic_load_explicit(&gc->stop, memory_order_relaxed)) {
 		uint32_t n = 0;
@@ -206,6 +238,34 @@ static void *ds_gc_coordinator_main(void *arg)
 				}
 			}
 			coordinator_drain_queue(gc);
+		}
+
+		/* Refresh the GC backlog gauge (this MDS's owned rows) so
+		 * pnfs-mds-top / Prometheus can track drain progress.  The
+		 * count is a bounded scan; refresh it only every Nth tick so
+		 * it does not steal RonDB capacity from the drain on a large
+		 * backlog (the drain itself uses the ordered-index peek). */
+		if ((gauge_tick++ % DS_GC_GAUGE_EVERY) == 0) {
+			uint32_t pending = 0;
+			if (mds_cat_gc_count(gc->cat, &pending) == MDS_OK) {
+				atomic_store_explicit(
+					&g_branch_metrics.gc_pending,
+					(uint64_t)pending,
+					memory_order_relaxed);
+			}
+		}
+
+		/*
+		 * Back-to-back batches while there is a backlog: a full batch
+		 * means there is almost certainly more, so re-peek immediately
+		 * instead of sleeping poll_ms.  Without this the drain is capped
+		 * at batch_size/poll_ms (~50/s with the defaults), which can't
+		 * clear a million-row backlog.  Only fall through to the
+		 * poll-sleep when the queue has drained below a full batch.
+		 */
+		if (st == MDS_OK && n >= gc->batch_size &&
+		    !atomic_load_explicit(&gc->stop, memory_order_relaxed)) {
+			continue;
 		}
 
 		{
