@@ -6788,6 +6788,16 @@ static int rondb_shim_ns_remove_once(void *handle,
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
         if (err.code == 266 || err.code == 274) { return err.code; }
+        /* 626 "Tuple did not exist": the dirent (and, atomically with
+         * it, the child inode / stripe / parent rows) was already
+         * removed by a prior committed ns_remove -- a duplicate or
+         * retransmitted REMOVE, seen on the referral path under a
+         * concurrent -N cross-client delete storm. The unlink post-
+         * condition (name absent) already holds, so this is an
+         * idempotent success, not an I/O error. Mirrors the idempotency
+         * ds_gc already relies on and stops the client-visible
+         * "unlink() failed" reports without leaving orphaned state. */
+        if (err.code == 626) { return 0; }
         return rondb_report_error(err, "ns_remove commit");
     }
 
@@ -6798,6 +6808,7 @@ ns_remove_err:
     err = tx->getNdbError();
     rondb_get_ndb(state)->closeTransaction(tx);
     if (err.code == 266 || err.code == 274) { return err.code; }
+    if (err.code == 626) { return 0; }  /* already gone: idempotent */
     return rondb_report_error(err, "ns_remove op");
 }
 
