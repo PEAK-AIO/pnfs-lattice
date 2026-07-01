@@ -1581,7 +1581,17 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		 * enumeration fails, fail closed with DELAY rather than
 		 * removing the namespace entry while stale layouts remain.
 		 */
-		if (cd->lr != NULL) {
+		/*
+		 * Under transient_state_cache=on the layout_state table is empty
+		 * (every grant site is gated on !cd->skip_transient_ndb), so this
+		 * unlink recall enumeration is a guaranteed-miss layout_state scan
+		 * on the REMOVE hot path. Under mass-delete concurrency those scans
+		 * exhaust RonDB scan resources and stall removes (10s+). Skip it,
+		 * mirroring the truncate path above. DS files are still fenced below
+		 * and the inode is removed, so any transient layout holder sees
+		 * STALE/EACCES on its next op.
+		 */
+		if (cd->lr != NULL && !cd->skip_transient_ndb) {
 			int lrc = layout_recall_revoke_all_for_unlink(
 				cd->lr, rm_fileid, NULL);
 			if (lrc != 0) {

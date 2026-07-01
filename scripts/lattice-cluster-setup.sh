@@ -277,7 +277,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Auto --initial only on first boot (when the node fs is empty).
-ExecStart=/bin/bash -c 'FS="/var/lib/rondb/data/ndb_$2_fs"; if [ -d "\$FS" ] && [ -n "\$(ls -A "\$FS" 2>/dev/null)" ]; then exec ${rondb_bin}/ndbmtd --ndb-connectstring=$3 --ndb-nodeid=$2; else echo "ndbmtd[NodeId=$2]: \$FS empty, starting with --initial" >&2; exec ${rondb_bin}/ndbmtd --ndb-connectstring=$3 --ndb-nodeid=$2 --initial; fi'
+ExecStart=/bin/bash -c 'FS="/var/lib/rondb/data/ndb_$2_fs"; if [ -d "\$FS" ] && [ -n "\$(ls -A "\$FS" 2>/dev/null)" ]; then exec ${rondb_bin}/ndbmtd --nodaemon --ndb-connectstring=$3 --ndb-nodeid=$2; else echo "ndbmtd[NodeId=$2]: \$FS empty, starting with --initial" >&2; exec ${rondb_bin}/ndbmtd --nodaemon --ndb-connectstring=$3 --ndb-nodeid=$2 --initial; fi'
 Restart=on-failure
 RestartSec=5
 
@@ -492,6 +492,8 @@ phase_rondb_up() {
         if run_ssh "${mgmd_ip}" \
             "${rondb_bin}/ndb_mgm -c ${connectstring} -e show 2>/dev/null | grep -q '@.*(RonDB.*)'"; then
             info "RonDB cluster reports data nodes connected"
+            info "creating ndb_index_stat system tables"
+            run_ssh "${mgmd_ip}" "${rondb_bin}/ndb_index_stat --sys-create-if-not-exist -c ${connectstring} >/dev/null 2>&1 || true"
             run_ssh "${mgmd_ip}" "${rondb_bin}/ndb_mgm -c ${connectstring} -e show" || true
             return 0
         fi
