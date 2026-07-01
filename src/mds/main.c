@@ -1306,6 +1306,8 @@ int main(int argc, char *argv[])
 		rpc_cfg.port       = cfg.self.nfs_port;
 		rpc_cfg.mds_id     = cfg.self.id;
 		rpc_cfg.stripe_unit = cfg.stripe_unit_bytes;
+		rpc_cfg.ds_getdev_transport = cfg.ds_getdev_transport;
+		rpc_cfg.ds_rdma_port = cfg.ds_rdma_port;
 		rpc_cfg.auto_widen_lease_on_4k = cfg.auto_widen_lease_on_4k;
 		compound_layout_set_grant_max_length(
 			cfg.layout_grant_max_length_bytes);

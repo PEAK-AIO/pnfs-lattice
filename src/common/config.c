@@ -215,6 +215,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->lease_time_sec = 90;
     cfg->grace_period_sec = 90;
     cfg->prealloc_pool_size = 128;
+    cfg->ds_getdev_transport = 0;  /* FF_TRANSPORT_TCP: advertise tcp in GETDEVICEINFO */
+    cfg->ds_rdma_port = 20049;     /* RDMA port advertised when ds_transport=rdma|both */
     cfg->prealloc_ring_count = 0;   /* 0 = ds_prealloc engine default. */
     cfg->repl_health_interval_ms = 5000;
     cfg->repl_refuse_writes_on_resync = false;
@@ -560,6 +562,19 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             if (v <= UINT32_MAX) { /* 0 = disabled */
                 cfg->ds_heartbeat_ms = (uint32_t)v;
 }
+        } else if (strcmp(key, "ds_transport") == 0) {
+            if (strcmp(val, "rdma") == 0) {
+                cfg->ds_getdev_transport = 1;       /* FF_TRANSPORT_RDMA */
+            } else if (strcmp(val, "both") == 0) {
+                cfg->ds_getdev_transport = 2;       /* FF_TRANSPORT_BOTH */
+            } else {
+                cfg->ds_getdev_transport = 0;       /* FF_TRANSPORT_TCP */
+            }
+        } else if (strcmp(key, "ds_rdma_port") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v > 0 && v <= 65535) {
+                cfg->ds_rdma_port = (uint16_t)v;
+            }
         } else if (strcmp(key, "stripe_unit_bytes") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             /* Bound before the uint32_t truncation: without the

@@ -752,6 +752,13 @@ struct mds_config {
     /* DS mount path format (proxy I/O) */
     char                ds_mount_path_fmt[128]; /* printf fmt, e.g. "/mnt/ds%u" */
 
+    /* GETDEVICEINFO transport advertisement for the flex-files device addr.
+     * ds_getdev_transport: 0=tcp (default), 1=rdma, 2=both. ds_rdma_port is
+     * the RDMA port advertised to clients (default 20049). Values match
+     * enum ff_transport_policy. */
+    uint8_t             ds_getdev_transport;
+    uint16_t            ds_rdma_port;
+
     /* Sharding (Tier 3 Phase 3) */
     bool                shard_enabled;         /* Master switch. Default false. */
 

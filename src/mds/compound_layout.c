@@ -2381,6 +2381,24 @@ enum nfs4_status op_getdeviceinfo(const struct compound_data *cd,
 	r->ds[0].port = info.port;
 	(void)snprintf(r->ds[0].addr, sizeof(r->ds[0].addr), "%s", info.addr);
 
+	/* Apply configured GETDEVICEINFO transport advertisement (ds_transport):
+	 * 0=tcp (default, info unchanged), 1=rdma (populate rdma_port, suppress
+	 * tcp), 2=both (populate rdma_port, keep tcp). */
+	{
+		uint8_t adv = cd->cfg_ds_getdev_transport;
+		if (adv == FF_TRANSPORT_RDMA || adv == FF_TRANSPORT_BOTH) {
+			if (info.rdma_port == 0) {
+				info.rdma_port =
+					(cd->cfg_ds_rdma_port != 0)
+					? cd->cfg_ds_rdma_port : 20049;
+			}
+		}
+		if (adv == FF_TRANSPORT_RDMA) {
+			info.tcp_port = 0;
+			info.port = 0;
+		}
+	}
+
 	/* Populate endpoint list from per-transport ports. */
 	r->ds[0].endpoint_count = 0;
 	{

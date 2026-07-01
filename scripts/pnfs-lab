@@ -491,6 +491,8 @@ load_inventory() {
     LAB_CLIENT_MOUNT="${LAB_CLIENT_MOUNT:-/mnt/pnfs}"
     LAB_CLIENT_NCONNECT="${LAB_CLIENT_NCONNECT:-1}"
     LAB_CLIENT_MDS_ASSIGNMENT="${LAB_CLIENT_MDS_ASSIGNMENT:-first}"
+    LAB_DS_TRANSPORT="${LAB_DS_TRANSPORT:-tcp}"
+    LAB_DS_RDMA_PORT="${LAB_DS_RDMA_PORT:-20049}"
 
     : "${LAB_USER:?LAB_USER is required}"
     : "${LAB_BUILD_HOST_RONDB_BASE:?LAB_BUILD_HOST_RONDB_BASE is required}"
@@ -724,6 +726,8 @@ $(render_cluster_peers)
 ds_count = ${#LAB_DS_IPS[@]}
 $(render_ds_specs)
 ds_mount_path_fmt = ${LAB_MDS_DS_MOUNT_FMT}
+ds_transport = ${LAB_DS_TRANSPORT}
+ds_rdma_port = ${LAB_DS_RDMA_PORT}
 EOF
 }
 

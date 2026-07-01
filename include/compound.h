@@ -1625,6 +1625,8 @@ struct layout_recall     *lr;
 	bool                      saved_fh_set;
 	uint32_t                  mds_id;       /* This MDS node numeric ID */
 	uint32_t                  cfg_stripe_unit; /* Config stripe_unit_bytes (0 = default 64KiB) */
+	uint8_t                   cfg_ds_getdev_transport; /* ds_transport 0=tcp,1=rdma,2=both */
+	uint16_t                  cfg_ds_rdma_port;        /* RDMA port advertised (0->20049) */
 	bool                      cfg_auto_widen_lease_on_4k;
 	/*
 	 * Phase 1 placement policy dispatch.  cfg_placement_policy_enabled

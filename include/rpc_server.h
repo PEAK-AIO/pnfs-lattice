@@ -83,6 +83,8 @@ struct rpc_server_config {
     uint32_t    mds_id;         /**< MDS node ID for stateid/deviceid. */
     uint64_t    write_verf;     /**< Server boot epoch for writeverf4. */
     uint32_t    stripe_unit;    /**< Stripe unit (0 = 64 KiB default). */
+    uint8_t     ds_getdev_transport; /**< GETDEVICEINFO ds_transport: 0=tcp,1=rdma,2=both. */
+    uint16_t    ds_rdma_port;       /**< RDMA port advertised (0 -> 20049). */
     bool        auto_widen_lease_on_4k; /**< Widen generic 4 KiB leases. */
     uint32_t    max_conns;      /**< Max connections (0 = RPC_MAX_CONNS). */
     /* Bounded request pipelining: max COMPOUNDs processed concurrently
