@@ -1414,6 +1414,17 @@ static int rondb_add_lock_holder_delete(NdbTransaction *tx,
  * @param nlink_delta    +1 (dir create), -1 (dir remove), 0 (file ops).
  * @return 0 on success, -1 on error.
  */
+/* Experimental scale knob (env PNFS_RELAX_DIR_CHANGE=1): skip the
+ * synchronous change-counter + mtime bump on the PARENT directory inode
+ * for FILE create/remove (parent_nlink_delta == 0).  That bump is an
+ * exclusive lock on one shared row that serialises every same-directory
+ * metadata op -- the dominant scale bottleneck for both shared-dir create
+ * and mass remove.  The directory's NFS changeid/mtime then lags, which
+ * is acceptable for scale/benchmark workloads.  Directory ops (nlink
+ * delta != 0) always update, preserving nlink correctness. */
+static const bool g_relax_dir_change =
+    (std::getenv("PNFS_RELAX_DIR_CHANGE") != nullptr);
+
 static int rondb_interpreted_parent_update(
     NdbTransaction *tx,
     const NdbDictionary::Table *ino_tbl,
@@ -6227,7 +6238,8 @@ int rondb_shim_ns_create(void *handle,
     rondb_set_inode_values(op_child, &child_ino, child_shard);
 
     /* 3. Interpreted parent inode update (atomic nlink + change). */
-    if (rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
+    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
+        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
                                         parent_nlink_delta) != 0) {
         goto ns_create_err;
     }
@@ -6456,7 +6468,8 @@ int rondb_shim_ns_create_with_layout(
     track(op_child, "child_inode");
 
     /* 3. Atomic parent update. */
-    if (rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
+    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
+        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
                                         parent_nlink_delta) != 0) {
         goto ns_create_wl_err;
     }
@@ -6778,7 +6791,8 @@ static int rondb_shim_ns_remove_once(void *handle,
     }
 
     /* 3. Interpreted parent inode update (atomic nlink + change). */
-    if (rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
+    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
+        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
                                         parent_nlink_delta) != 0) {
         goto ns_remove_err;
     }
