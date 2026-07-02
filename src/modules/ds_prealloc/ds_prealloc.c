@@ -43,6 +43,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
+#include <stdio.h>
 
 #include "mds_catalogue.h"
 #include "ds_cache.h"
@@ -429,6 +430,7 @@ static void recover_pool(struct ds_prealloc_ctx *ctx)
 {
     struct mds_prealloc_pool_row *rows = NULL;
     uint32_t n = 0;
+    uint32_t restored = 0, dropped = 0, ring_i = 0;
     enum mds_status st;
 
     st = mds_cat_prealloc_pool_scan((struct mds_catalogue *)ctx->cat,
@@ -437,13 +439,51 @@ static void recover_pool(struct ds_prealloc_ctx *ctx)
         free(rows);
         return;
     }
-    for (uint32_t i = 0; i < n; i++) {
-        (void)mds_cat_gc_enqueue((struct mds_catalogue *)ctx->cat, NULL,
-                                 rows[i].fileid, rows[i].ds_id,
-                                 rows[i].nfs_fh, rows[i].nfs_fh_len);
-        (void)mds_cat_prealloc_pool_delete(
-            (struct mds_catalogue *)ctx->cat, rows[i].fileid);
+    if (ctx->rings == NULL || ctx->ring_count == 0) {
+        free(rows);
+        return;
     }
+    /*
+     * Restore persisted slots back into the rings so the precreated DS
+     * files are REUSED across a restart.  The old code GC-enqueued every
+     * pool row (up to prealloc_pool_size, e.g. 1M) and deleted it, which
+     * dumped the entire pool into the GC on every restart -- a self-
+     * inflicted multi-million-entry flood that stalled removes and slowed
+     * startup.  Slots stay in the pool table until consumed (delete-on-
+     * consume); an unconsumed slot is simply re-recovered next restart,
+     * and a full ring silently drops the overflow.
+     */
+    for (uint32_t i = 0; i < n; i++) {
+        struct prealloc_slot slot;
+
+        /* Guard a corrupt/out-of-range ds_id: republishing it would re-
+         * inject a bad stripe map and re-wedge the GC.  A bad ds_id means
+         * the DS precreate never succeeded, so there is nothing to
+         * reclaim -- just drop the pool row. */
+        if (rows[i].ds_id >= 65536U) {
+            (void)mds_cat_prealloc_pool_delete(
+                (struct mds_catalogue *)ctx->cat, rows[i].fileid);
+            dropped++;
+            continue;
+        }
+
+        memset(&slot, 0, sizeof(slot));
+        slot.fileid      = rows[i].fileid;
+        slot.stripe_unit = (rows[i].stripe_unit != 0U)
+                               ? rows[i].stripe_unit : ctx->stripe_unit;
+        slot.entry.ds_id      = rows[i].ds_id;
+        slot.entry.nfs_fh_len = rows[i].nfs_fh_len;
+        if (rows[i].nfs_fh_len > 0 &&
+            rows[i].nfs_fh_len <= sizeof(slot.entry.nfs_fh)) {
+            memcpy(slot.entry.nfs_fh, rows[i].nfs_fh, rows[i].nfs_fh_len);
+        }
+        ring_push(&ctx->rings[ring_i % ctx->ring_count], &slot);
+        ring_i++;
+        restored++;
+    }
+    fprintf(stderr,
+            "INFO: ds_prealloc recover_pool: restored %u slots, dropped "
+            "%u bad-ds_id rows (of %u scanned)\n", restored, dropped, n);
     free(rows);
 }
 
