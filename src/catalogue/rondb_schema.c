@@ -9,6 +9,9 @@
  */
 
 #include <string.h>
+#include <stdio.h>
+#include <stdatomic.h>
+#include <execinfo.h>
 
 #include "rondb_schema.h"
 
@@ -104,6 +107,21 @@ int rondb_stripe_entry_serialize(const struct mds_ds_map_entry *entry,
         return -1;
     }
 
+    if (entry->ds_id >= 65536U) {
+        /* Real ds_ids are small (0..N-DS); a huge value here is the
+         * garbage that later wedges ds_gc. Catch it AT THE WRITE with a
+         * backtrace to pinpoint the create/layout path. Rate-limited. */
+        static _Atomic unsigned g_bad_dsid = 0;
+        if (atomic_fetch_add_explicit(&g_bad_dsid, 1U,
+                                      memory_order_relaxed) < 16U) {
+            void *bt[32];
+            int nb = backtrace(bt, 32);
+            fprintf(stderr, "WARN: stripe write out-of-range ds_id=%u "
+                    "fh_len=%u -- origin backtrace:\n",
+                    entry->ds_id, entry->nfs_fh_len);
+            backtrace_symbols_fd(bt, nb, 2);
+        }
+    }
     fdb_put_u32(buf, entry->ds_id);
     fdb_put_u32(buf + 4, entry->nfs_fh_len);
     memset(buf + 8, 0, MDS_NFS_FH_MAX);
