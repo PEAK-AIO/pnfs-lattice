@@ -359,8 +359,12 @@ DataMemory=${data_memory}
 TotalMemoryConfig=${total_memory_config}
 SharedGlobalMemory=256M
 RedoBuffer=64M
-TransactionMemory=128M
+TransactionMemory=2G
 IndexMemory=64M
+# Scan-record capacity: in RonDB 26.x scan records come from
+# TransactionMemory; the 128M default exhausted them under mass-delete
+# (every unlink does a layout_state lookup) -> 250ms remove-latency tail.
+MaxNoOfConcurrentScans=500
 EOF
         for idx in "${!DATA_IPS[@]}"; do
             node_id=$(( DATA_NODE_ID_BASE + idx ))
