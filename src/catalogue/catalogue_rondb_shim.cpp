@@ -1516,6 +1516,145 @@ static void rondb_set_inode_synth(NdbOperation *op,
     op->setValue(RONDB_INO_COL_SYNTH_SGID, ino->synth_sgid);
 }
 
+/* v9 inline single-stripe DS map writer.  Same one-way, insert-only,
+ * getColumn-guarded contract as rondb_set_inode_synth: written only at
+ * create-insert (never in the shared updateTuple RMW path, so a later
+ * setattr can't clobber it), and skipped when the columns are absent
+ * (pre-v9 table) so creates still succeed and fall back to the side
+ * tables.  Only emits values when the inode actually carries an inline
+ * entry (MDS_IFLAG_INLINE_STRIPE set); otherwise leaves the columns NULL. */
+static void rondb_set_inode_inline_stripe(NdbOperation *op,
+                                          const NdbDictionary::Table *tbl,
+                                          const struct mds_inode *ino)
+{
+    if (tbl == nullptr ||
+        tbl->getColumn(RONDB_INO_COL_DS_ID) == nullptr) {
+        return;
+    }
+    if (!(ino->flags & MDS_IFLAG_INLINE_STRIPE)) {
+        return;
+    }
+    uint32_t fhl = ino->inline_fh_len;
+    if (fhl > MDS_NFS_FH_MAX) { fhl = MDS_NFS_FH_MAX; }
+    op->setValue(RONDB_INO_COL_DS_ID, ino->inline_ds_id);
+    op->setValue(RONDB_INO_COL_STRIPE_UNIT, ino->stripe_unit);
+    op->setValue(RONDB_INO_COL_NFS_FH_LEN, fhl);
+    /* Encode nfs_fh as VARBINARY(128): 1-byte length prefix + data. */
+    {
+        uint8_t fh_vb[1 + MDS_NFS_FH_MAX];
+        uint32_t fh_vb_len = 0;
+        if (rondb_encode_varbinary_value(ino->inline_fh, fhl, 1U,
+                                         fh_vb, sizeof(fh_vb),
+                                         &fh_vb_len) == 0) {
+            op->setValue(RONDB_INO_COL_NFS_FH,
+                         (const char *)fh_vb, fh_vb_len);
+        } else {
+            uint8_t empty_vb[1] = {0};
+            op->setValue(RONDB_INO_COL_NFS_FH,
+                         (const char *)empty_vb, 1);
+        }
+    }
+}
+
+/* v9 create-side helper: if this create is a single-stripe file
+ * (stripe_count == 1 -- the prealloc V1 / mirror==1 case), stamp its one
+ * DS entry (ds_id, nfs_fh) from stripe_buf into the inode's inline fields
+ * and set MDS_IFLAG_INLINE_STRIPE, so the entry is stored on the inode
+ * instead of the mds_stripe_maps/entries side tables.  Returns true when
+ * inlined (caller then SKIPS the stripe-table writes).  MUST run before
+ * rondb_set_inode_values() so the flag is persisted in the FLAGS column.
+ * Falls back (returns false) on multi-stripe or a malformed/oversized
+ * entry, keeping the legacy side-table path. */
+static bool rondb_inode_try_inline_stripe(struct mds_inode *ino,
+                                          const uint8_t *stripe_buf,
+                                          uint32_t stripe_count,
+                                          uint32_t stripe_len)
+{
+    if (stripe_buf == nullptr || stripe_count != 1 || stripe_len < 8) {
+        return false;
+    }
+    uint32_t ds_id  = fdb_get_u32(stripe_buf);
+    uint32_t fh_len = fdb_get_u32(stripe_buf + 4);
+    /* Require a real FH: a DS_PENDING create (fh_len==0, DS file not yet
+     * online) keeps the side tables so the existing late FH-capture update
+     * path still lands the handle.  Prealloc-backed creates already carry
+     * the FH here and take the inline path. */
+    if (ds_id >= 65536U || fh_len == 0 || fh_len > MDS_NFS_FH_MAX ||
+        fh_len > stripe_len - 8) {
+        return false;
+    }
+    ino->flags        |= MDS_IFLAG_INLINE_STRIPE;
+    ino->stripe_count  = 1;
+    ino->mirror_count  = 1;
+    ino->stripe_unit   = 65536U;   /* matches the side-table header default */
+    ino->inline_ds_id  = ds_id;
+    ino->inline_fh_len = fh_len;
+    std::memset(ino->inline_fh, 0, MDS_NFS_FH_MAX);
+    if (fh_len > 0) {
+        std::memcpy(ino->inline_fh, stripe_buf + 8, fh_len);
+    }
+    return true;
+}
+
+/* v9 inline single-stripe READ helpers -- the read/pack counterpart to
+ * rondb_set_inode_inline_stripe, shared by every inode-read site that packs
+ * the wire image.  getColumn-guarded like the synth read so a pre-v9 table
+ * (columns absent) doesn't abort the read txn (NDB 4350); absent/NULL packs
+ * as an empty inline entry (flag stays clear -> reader falls back to the
+ * side tables). */
+struct rondb_inline_stripe_attrs {
+    NdbRecAttr *a_dsid;
+    NdbRecAttr *a_unit;
+    NdbRecAttr *a_fhlen;
+    NdbRecAttr *a_fh;
+};
+
+static void rondb_get_inode_inline_stripe(NdbOperation *op,
+                                          const NdbDictionary::Table *tbl,
+                                          struct rondb_inline_stripe_attrs *o)
+{
+    o->a_dsid = o->a_unit = o->a_fhlen = o->a_fh = nullptr;
+    if (tbl == nullptr ||
+        tbl->getColumn(RONDB_INO_COL_DS_ID) == nullptr) {
+        return;
+    }
+    o->a_dsid  = op->getValue(RONDB_INO_COL_DS_ID, nullptr);
+    o->a_unit  = op->getValue(RONDB_INO_COL_STRIPE_UNIT, nullptr);
+    o->a_fhlen = op->getValue(RONDB_INO_COL_NFS_FH_LEN, nullptr);
+    o->a_fh    = op->getValue(RONDB_INO_COL_NFS_FH, nullptr);
+}
+
+/* Pack the v9 inline trailer (ds_id, stripe_unit, nfs_fh_len, nfs_fh[128
+ * padded]) at *pp, advancing *pp.  Byte layout MUST match the v9 trailer in
+ * rondb_inode_serialize()/deserialize(). */
+static void rondb_pack_inode_inline_stripe(uint8_t **pp,
+                                    const struct rondb_inline_stripe_attrs *a)
+{
+    uint8_t *p = *pp;
+    uint32_t dsid = (a->a_dsid != nullptr && !a->a_dsid->isNULL())
+                        ? a->a_dsid->u_32_value() : 0U;
+    uint32_t unit = (a->a_unit != nullptr && !a->a_unit->isNULL())
+                        ? a->a_unit->u_32_value() : 0U;
+    uint32_t fhl  = (a->a_fhlen != nullptr && !a->a_fhlen->isNULL())
+                        ? a->a_fhlen->u_32_value() : 0U;
+    if (fhl > MDS_NFS_FH_MAX) { fhl = MDS_NFS_FH_MAX; }
+    fdb_put_u32(p, dsid); p += 4;
+    fdb_put_u32(p, unit); p += 4;
+    fdb_put_u32(p, fhl);  p += 4;
+    std::memset(p, 0, MDS_NFS_FH_MAX);
+    if (a->a_fh != nullptr && !a->a_fh->isNULL() && fhl > 0) {
+        /* VARBINARY(128): 1-byte length prefix + data. */
+        const char *fh_ptr = a->a_fh->aRef();
+        if (fh_ptr != nullptr) {
+            uint32_t vb_len = (uint32_t)(uint8_t)fh_ptr[0];
+            if (vb_len > MDS_NFS_FH_MAX) { vb_len = MDS_NFS_FH_MAX; }
+            std::memcpy(p, fh_ptr + 1, vb_len);
+        }
+    }
+    p += MDS_NFS_FH_MAX;
+    *pp = p;
+}
+
 static int rondb_compare_name_bytes(const char *lhs, size_t lhs_len,
                                     const char *rhs, size_t rhs_len)
 {
@@ -1815,6 +1954,26 @@ static void rondb_add_varbinary(NdbDictionary::Table &tbl, const char *name,
     tbl.addColumn(col);
 }
 
+/* Nullable + dynamic Varbinary -- the varbinary analogue of
+ * rondb_add_unsigned_dyn.  Used for v9 inline single-stripe nfs_fh so the
+ * column can also be added to a pre-v9 table via online ALTER, and reads
+ * back NULL (-> empty FH) on rows written before it existed. */
+static void rondb_add_varbinary_dyn(NdbDictionary::Table &tbl,
+                                    const char *name, int length)
+{
+    NdbDictionary::Column col;
+    col.setName(name);
+    if (length > 255) {
+        col.setType(NdbDictionary::Column::Longvarbinary);
+    } else {
+        col.setType(NdbDictionary::Column::Varbinary);
+    }
+    col.setLength(length);
+    col.setNullable(true);
+    col.setDynamic(true);
+    tbl.addColumn(col);
+}
+
 static int rondb_define_meta_table(NdbDictionary::Dictionary *dict)
 {
     NdbDictionary::Table tbl;
@@ -1852,6 +2011,14 @@ static int rondb_define_inodes_table(NdbDictionary::Dictionary *dict)
      * the same columns can be added to pre-v8 tables via online ALTER. */
     rondb_add_unsigned_dyn(tbl, RONDB_INO_COL_SYNTH_SUID);
     rondb_add_unsigned_dyn(tbl, RONDB_INO_COL_SYNTH_SGID);
+    /* v9: inline single-stripe DS map (MDS_IFLAG_INLINE_STRIPE).  Nullable/
+     * dynamic so they can also land on a pre-v9 table via online ALTER; a
+     * file with stripe_count==1 && mirror_count==1 stores its one DS entry
+     * here instead of the mds_stripe_maps/entries side tables. */
+    rondb_add_unsigned_dyn(tbl, RONDB_INO_COL_DS_ID);
+    rondb_add_unsigned_dyn(tbl, RONDB_INO_COL_STRIPE_UNIT);
+    rondb_add_unsigned_dyn(tbl, RONDB_INO_COL_NFS_FH_LEN);
+    rondb_add_varbinary_dyn(tbl, RONDB_INO_COL_NFS_FH, MDS_NFS_FH_MAX);
     return rondb_create_table_if_not_exists(dict, tbl);
 }
 
@@ -3177,6 +3344,8 @@ int rondb_shim_inode_get(void *handle, uint64_t fileid,
         ? op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr) : nullptr;
     NdbRecAttr *a_ssgid    = have_synth
         ? op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr) : nullptr;
+    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
+    rondb_get_inode_inline_stripe(op, tbl, &a_inl);
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -3220,6 +3389,8 @@ int rondb_shim_inode_get(void *handle, uint64_t fileid,
                         ? a_ssuid->u_32_value() : 0U);       p += 4;
         fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
                         ? a_ssgid->u_32_value() : 0U);       p += 4;
+        /* v9 inline single-stripe trailer. */
+        rondb_pack_inode_inline_stripe(&p, &a_inl);
     }
 
     rondb_get_ndb(state)->closeTransaction(tx);
@@ -3688,6 +3859,8 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
         ? ino_op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr) : nullptr;
     NdbRecAttr *a_ssgid  = have_synth
         ? ino_op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr) : nullptr;
+    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
+    rondb_get_inode_inline_stripe(ino_op, ino_tbl, &a_inl);
 
     /* Commit -- both reads complete in this single round-trip. */
     if (tx->execute(NdbTransaction::Commit) == -1) {
@@ -3733,6 +3906,8 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
                         ? a_ssuid->u_32_value() : 0U);       p += 4;
         fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
                         ? a_ssgid->u_32_value() : 0U);       p += 4;
+        /* v9 inline single-stripe trailer. */
+        rondb_pack_inode_inline_stripe(&p, &a_inl);
     }
 
     rondb_get_ndb(state)->closeTransaction(tx);
@@ -4131,6 +4306,14 @@ static int rondb_readdir_plus_deliver(
         rondb_readdir_plus_ino_set &s = ino_ops[i - first];
         uint8_t inode_buf[RONDB_INODE_FIXED_SIZE];
         int inode_valid = 1;
+
+        /* This READDIRPLUS packer only fills through home_shard_id (the
+         * base attrs a directory listing needs); it does not read the
+         * synth or v9 inline-stripe trailers.  Zero the whole buffer so
+         * the unread trailer bytes deserialize as "no synth / no inline"
+         * rather than uninitialised stack (which, with the v9 fixed size,
+         * would otherwise decode into a bogus inline DS map). */
+        std::memset(inode_buf, 0, sizeof(inode_buf));
 
         if (s.op->getNdbError().code == 626) {
             inode_valid = 0;
@@ -4637,6 +4820,8 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
         a_ssuid = nullptr;
         a_ssgid = nullptr;
     }
+    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
+    rondb_get_inode_inline_stripe(op, tbl, &a_inl);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -4673,6 +4858,8 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
                         ? a_ssuid->u_32_value() : 0U);       p += 4;
         fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
                         ? a_ssgid->u_32_value() : 0U);       p += 4;
+        /* v9 inline single-stripe trailer. */
+        rondb_pack_inode_inline_stripe(&p, &a_inl);
     }
 
     if (rondb_inode_deserialize(buf, sizeof(buf), &ino, &shard) != 0) {
@@ -6332,6 +6519,7 @@ int rondb_shim_ns_create(void *handle,
     uint32_t child_shard;
     uint8_t name_value[MDS_MAX_NAME + 2];
     uint32_t name_value_len = 0;
+    bool inline_single = false;   /* v9: set once child_ino is built */
 
     if (state == nullptr || name == nullptr ||
         child_inode_buf == nullptr) {
@@ -6382,8 +6570,15 @@ int rondb_shim_ns_create(void *handle,
     if (op_child == nullptr) { goto ns_create_err; }
     op_child->insertTuple();
     (void)rondb_equal_u64(op_child, RONDB_INO_COL_FILEID, child_ino.fileid);
+    /* v9: inline a single-stripe DS map into the inode.  Runs BEFORE
+     * set_inode_values so MDS_IFLAG_INLINE_STRIPE is persisted in FLAGS;
+     * when true the stripe-table writes below are skipped. */
+    inline_single =
+        rondb_inode_try_inline_stripe(&child_ino, stripe_buf,
+                                      stripe_count, stripe_len);
     rondb_set_inode_values(op_child, &child_ino, child_shard);
     rondb_set_inode_synth(op_child, ino_tbl, &child_ino);  /* v8: stamp synth */
+    rondb_set_inode_inline_stripe(op_child, ino_tbl, &child_ino); /* v9 */
 
     /* 3. Interpreted parent inode update (atomic nlink + change). */
     if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
@@ -6395,7 +6590,8 @@ int rondb_shim_ns_create(void *handle,
     /* 4. Stripe data -- create stripe_map header + entries in the
      *    same transaction as the inode+dirent so the file is
      *    immediately ready for LAYOUTGET without a second RT. */
-    if (stripe_buf != nullptr && stripe_count > 0 && stripe_len >= 8) {
+    if (!inline_single &&
+        stripe_buf != nullptr && stripe_count > 0 && stripe_len >= 8) {
         const NdbDictionary::Table *sm_tbl =
             dict->getTable(RONDB_TBL_STRIPE_MAPS);
         const NdbDictionary::Table *se_tbl =
@@ -6527,6 +6723,7 @@ int rondb_shim_ns_create_with_layout(
     uint32_t child_shard;
     uint8_t name_value[MDS_MAX_NAME + 2];
     uint32_t name_value_len = 0;
+    bool inline_single = false;   /* v9: set once child_ino is built */
 
     /*
      * Per-op tracking for commit-failure diagnostics.  Only emits
@@ -6612,8 +6809,15 @@ int rondb_shim_ns_create_with_layout(
     op_child->insertTuple();
     (void)rondb_equal_u64(op_child, RONDB_INO_COL_FILEID,
                           child_ino.fileid);
+    /* v9: inline a single-stripe DS map into the inode (before
+     * set_inode_values so the flag lands in FLAGS); skips the stripe
+     * side tables below when true. */
+    inline_single =
+        rondb_inode_try_inline_stripe(&child_ino, stripe_buf,
+                                      stripe_count, stripe_len);
     rondb_set_inode_values(op_child, &child_ino, child_shard);
     rondb_set_inode_synth(op_child, ino_tbl, &child_ino);  /* v8: stamp synth */
+    rondb_set_inode_inline_stripe(op_child, ino_tbl, &child_ino); /* v9 */
     track(op_child, "child_inode");
 
     /* 3. Atomic parent update. */
@@ -6624,7 +6828,8 @@ int rondb_shim_ns_create_with_layout(
     }
 
     /* 4. Stripe data (same as ns_create). */
-    if (stripe_buf != nullptr && stripe_count > 0 && stripe_len >= 8) {
+    if (!inline_single &&
+        stripe_buf != nullptr && stripe_count > 0 && stripe_len >= 8) {
         const NdbDictionary::Table *sm_tbl =
             dict->getTable(RONDB_TBL_STRIPE_MAPS);
         const NdbDictionary::Table *se_tbl =
@@ -6864,6 +7069,12 @@ static int rondb_shim_ns_remove_once(void *handle,
     sm_hdr_tbl = dict->getTable(RONDB_TBL_STRIPE_MAPS);
     sm_ent_tbl = dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
 
+    /* v9: a single-stripe inode carries its DS entry inline -- there are no
+     * mds_stripe_maps/entries rows to read the count from or to delete, so
+     * skip both the stripe-count read and the stripe PK deletes below. */
+    const bool child_inline =
+        (child_ino.flags & MDS_IFLAG_INLINE_STRIPE) != 0;
+
     {
         uint8_t pk_buf[8];
         fdb_put_u64(pk_buf, parent_fileid);
@@ -6875,7 +7086,8 @@ static int rondb_shim_ns_remove_once(void *handle,
         return rondb_report_error(err, "ns_remove startTx");
     }
 
-    if (delete_child && sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr &&
+    if (!child_inline &&
+        delete_child && sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr &&
         stripe_entry_count == 0) {
         stripe_rc = rondb_txn_read_stripe_entry_count(
             tx, sm_hdr_tbl, child_fileid, &stripe_entry_count, &err);
@@ -6946,7 +7158,8 @@ static int rondb_shim_ns_remove_once(void *handle,
         goto ns_remove_err;
     }
 
-    if (delete_child && stripe_entry_count > 0 &&
+    if (!child_inline &&
+        delete_child && stripe_entry_count > 0 &&
         sm_hdr_tbl != nullptr && sm_ent_tbl != nullptr) {
         if (rondb_txn_append_stripe_pk_deletes(tx, sm_hdr_tbl, sm_ent_tbl,
                                                child_fileid,
@@ -8438,7 +8651,119 @@ int rondb_shim_quota_usage_put(void *handle, uint8_t usage_type,
  * Phase 8A -- GC queue (mds_gc_queue: PK=gc_seq, FIFO via mds_meta counter)
  * ----------------------------------------------------------------------- */
 
+/*
+ * Block-cached gc_seq allocation.
+ *
+ * The mds_gc_queue PK gc_seq comes from a single global mds_meta counter
+ * row.  Bumping it once per remove made that row hot: under mass-delete
+ * every MDS thread took an exclusive lock on the same tuple, serialising
+ * the remove phase and driving NDB 266/274 lock-timeouts + retry backoff
+ * (the remove-latency tail).  Instead each process grabs a contiguous
+ * block of RONDB_GC_SEQ_BLOCK seqs per counter bump and hands them out
+ * from a local cache, cutting counter round-trips (and its contention) by
+ * the block factor.  gc_seq only has to be unique + increasing -- gaps are
+ * fine -- so a crash simply leaks the unused tail of the current block.
+ */
+#define RONDB_GC_SEQ_BLOCK  4096
+static std::mutex   g_gc_seq_lock;
+static uint64_t     g_gc_seq_next = 0;   /* next seq to hand out          */
+static uint64_t     g_gc_seq_hi   = 0;   /* one past the cached block end */
+
+/* Reserve `count` contiguous seqs from the global counter in one txn,
+ * returning the first via *base_out.  Same exclusive read-modify-write as
+ * the original per-seq path, just incrementing by `count`. */
+static int rondb_gc_seq_alloc_block(rondb_shim_handle *state,
+                                    uint64_t count, uint64_t *base_out)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbRecAttr *val_attr;
+    NdbError err;
+    uint64_t old_val;
+    char key_buf[64];
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_META);
+    if (tbl == nullptr) { return -1; }
+
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 "gc_seq_alloc startTx");
+    }
+
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_seq_alloc readOp");
+    }
+    op->readTuple(NdbOperation::LM_Exclusive);
+    std::memset(key_buf, ' ', sizeof(key_buf));
+    std::strncpy(key_buf, RONDB_META_KEY_GC_SEQ, sizeof(key_buf) - 1);
+    op->equal(RONDB_META_COL_KEY, key_buf);
+    val_attr = op->getValue(RONDB_META_COL_VAL, nullptr);
+    if (val_attr == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_seq_alloc getValue");
+    }
+
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_seq_alloc read exec");
+    }
+
+    old_val = val_attr->u_64_value();
+
+    {
+        NdbOperation *upd = tx->getNdbOperation(tbl);
+        if (upd == nullptr) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "gc_seq_alloc updOp");
+        }
+        upd->updateTuple();
+        upd->equal(RONDB_META_COL_KEY, key_buf);
+        (void)rondb_set_value_u64(upd, RONDB_META_COL_VAL, old_val + count);
+    }
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_seq_alloc commit");
+    }
+
+    rondb_get_ndb(state)->closeTransaction(tx);
+    *base_out = old_val;
+    return 0;
+}
+
 int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+
+    if (state == nullptr || seq_out == nullptr) { return -1; }
+
+    std::lock_guard<std::mutex> lk(g_gc_seq_lock);
+    if (g_gc_seq_next >= g_gc_seq_hi) {
+        uint64_t base = 0;
+        int rc = rondb_gc_seq_alloc_block(state, RONDB_GC_SEQ_BLOCK, &base);
+        if (rc != 0) { return rc; }
+        g_gc_seq_next = base;
+        g_gc_seq_hi   = base + RONDB_GC_SEQ_BLOCK;
+    }
+    *seq_out = g_gc_seq_next++;
+    return 0;
+}
+
+/* Legacy single-seq path retained (unused) for reference / rollback. */
+__attribute__((unused))
+static int rondb_shim_gc_seq_alloc_unbatched(void *handle, uint64_t *seq_out)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;

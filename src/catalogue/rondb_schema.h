@@ -50,8 +50,16 @@
  *     The 6->7 upgrade drops + recreates the transient gc_queue.
  * v8: mds_inodes + mds_prealloc_pool gain synth_suid/synth_sgid (RFC 8435
  *     S2.2 stored synthetic DS owner).  Added via ONLINE ALTER (nullable,
- *     dynamic) so persistent namespace rows are preserved. */
-#define RONDB_SCHEMA_VERSION  8
+ *     dynamic) so persistent namespace rows are preserved.
+ * v9: mds_inodes gains ds_id / stripe_unit / nfs_fh_len / nfs_fh -- the
+ *     inline single-stripe DS map (MDS_IFLAG_INLINE_STRIPE).  A file with
+ *     stripe_count==1 && mirror_count==1 stores its one DS entry on the
+ *     inode instead of the mds_stripe_maps / mds_stripe_entries tables, so
+ *     LAYOUTGET / unlink-fence / GC serve it from the single inode read
+ *     (no cat_stripe_map_get) and create/remove write/delete no stripe
+ *     rows.  Nullable/dynamic (online ALTER); pre-v9 rows read back with
+ *     the flag clear and fall back to the side tables. */
+#define RONDB_SCHEMA_VERSION  9
 
 /* -----------------------------------------------------------------------
  * Table names
@@ -139,6 +147,13 @@
  * schema v8 via online ALTER; nullable so pre-v8 rows read back as 0. */
 #define RONDB_INO_COL_SYNTH_SUID   "synth_suid"
 #define RONDB_INO_COL_SYNTH_SGID   "synth_sgid"
+/* v9 inline single-stripe DS map (MDS_IFLAG_INLINE_STRIPE).  ds_id/
+ * stripe_unit/nfs_fh_len are nullable u32; nfs_fh is a nullable
+ * Varbinary(MDS_NFS_FH_MAX).  All read back as 0/empty on pre-v9 rows. */
+#define RONDB_INO_COL_DS_ID        "inline_ds_id"
+#define RONDB_INO_COL_STRIPE_UNIT  "inline_stripe_unit"
+#define RONDB_INO_COL_NFS_FH_LEN   "inline_nfs_fh_len"
+#define RONDB_INO_COL_NFS_FH       "inline_nfs_fh"
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_dirents
@@ -469,15 +484,26 @@
  *   flags(4) create_verf(8) parent_fileid(8)
  *   home_shard_id(4)
  *   [v8 trailer] synth_suid(4) synth_sgid(4)
- * Total: 137 bytes (v1 base) / 145 bytes (v8, with synth trailer)
+ *   [v9 trailer] inline_ds_id(4) inline_stripe_unit(4)
+ *                inline_nfs_fh_len(4) inline_nfs_fh(MDS_NFS_FH_MAX=128, padded)
+ * Total: 137 bytes (v1 base) / 145 bytes (v8, +synth) /
+ *        285 bytes (v9, +inline single-stripe map)
+ *
+ * Each trailer is optional and length-tolerant: deserialize reads a
+ * trailer only when the buffer is long enough, so a shorter (pre-feature)
+ * marshal still decodes with the newer fields defaulted to 0/empty.  The
+ * v9 nfs_fh is fixed-padded to MDS_NFS_FH_MAX so the marshalled image
+ * stays a fixed size (nfs_fh_len gives the real length); only the packed
+ * inline_nfs_fh_len bytes are meaningful.
  * ----------------------------------------------------------------------- */
 
-/* Base (pre-v8) size -- the minimum a buffer must contain to deserialize.
- * The v8 synth trailer is optional: deserialize reads it only when present,
- * so pre-v8 snapshots/marshals (137 bytes) still decode (synth -> 0). */
+/* Trailer boundaries -- the minimum length a buffer must reach to carry
+ * each successive trailer.  Deserialize keys off these so older/shorter
+ * marshals decode with newer fields zeroed. */
 #define RONDB_INODE_V1_SIZE     137
-#define RONDB_INODE_FIXED_SIZE  145
-#define RONDB_INODE_MAX_SIZE    256
+#define RONDB_INODE_V8_SIZE     145
+#define RONDB_INODE_FIXED_SIZE  285
+#define RONDB_INODE_MAX_SIZE    320
 
 /** Serialize an inode to buf. Returns bytes written, or -1 on error. */
 int rondb_inode_serialize(const struct mds_inode *inode,

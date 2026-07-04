@@ -1319,6 +1319,60 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		}
 	}
 
+	/*
+	 * v9 inline single-stripe fast path.  A file with
+	 * MDS_IFLAG_INLINE_STRIPE stores its one DS entry on the inode we
+	 * already read above, so serve the layout straight from it -- no
+	 * cat_stripe_map_get / fused read / placement round-trips.  Runs
+	 * before the root-global / single-shard split so both flows share
+	 * it, and reaches the same fill_layoutget_result grant-fill as the
+	 * HPC cache hit.  DS_PENDING and FH-less inodes are excluded so the
+	 * legacy ds_prepare / FH-capture flow still handles them.
+	 */
+	if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) &&
+	    !(inode.flags & MDS_IFLAG_DS_PENDING) &&
+	    inode.inline_fh_len > 0) {
+		struct nfs4_stateid layout_sid;
+		uint32_t fhl = inode.inline_fh_len;
+
+		if (fhl > MDS_NFS_FH_MAX) { fhl = MDS_NFS_FH_MAX; }
+		entries = calloc(1, sizeof(*entries));
+		if (entries == NULL) {
+			return NFS4ERR_SERVERFAULT;
+		}
+		entries[0].ds_id = inode.inline_ds_id;
+		entries[0].nfs_fh_len = fhl;
+		memcpy(entries[0].nfs_fh, inode.inline_fh, fhl);
+		stripe_count = 1;
+		mirror_count = 1;
+		stripe_unit = inode.stripe_unit > 0 ? inode.stripe_unit : 65536;
+
+		if (pregrant_consumed) {
+			layout_sid = pregrant_sid;
+		} else {
+			layout_pick_stateid(cd, &client_sid, &layout_sid);
+			if (!cd->skip_transient_ndb && cd->cat != NULL) {
+				uint32_t ds_total = stripe_count * mirror_count;
+				struct layout_ds_id_list ds_ids = { 0 };
+				enum nfs4_status ds_nst;
+
+				ds_nst = layout_make_ds_list(entries, ds_total,
+							     &ds_ids);
+				if (ds_nst != NFS4_OK) {
+					free(entries);
+					return ds_nst;
+				}
+				(void)mds_coord_layout_grant(cd->cat, NULL,
+					cd->clientid, cd->current_fh.fileid,
+					grant_iomode, grant_offset, grant_length,
+					&layout_sid, ds_ids.ids, ds_ids.count);
+				layout_ds_id_list_destroy(&ds_ids);
+			}
+		}
+		r->stateid = layout_sid;
+		goto fill_layoutget_result;
+	}
+
 	if (layout_state_is_root_global(cd)) {
 		/*
 		 * Keep the root-global layout-state path separate

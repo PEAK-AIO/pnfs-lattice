@@ -54,6 +54,22 @@ int rondb_inode_serialize(const struct mds_inode *inode,
     /* v8 trailer: stored synthetic DS owner (0 when ds_synth_owner off). */
     fdb_put_u32(p, inode->synth_suid);        p += 4;
     fdb_put_u32(p, inode->synth_sgid);        p += 4;
+    /* v9 trailer: inline single-stripe DS map.  Meaningful only when
+     * MDS_IFLAG_INLINE_STRIPE is set; otherwise these are all zero.  The
+     * FH is fixed-padded to MDS_NFS_FH_MAX so the image stays fixed-size;
+     * inline_nfs_fh_len records the real length. */
+    fdb_put_u32(p, inode->inline_ds_id);      p += 4;
+    fdb_put_u32(p, inode->stripe_unit);       p += 4;
+    {
+        uint32_t fhl = inode->inline_fh_len;
+        if (fhl > MDS_NFS_FH_MAX) { fhl = MDS_NFS_FH_MAX; }
+        fdb_put_u32(p, fhl);                  p += 4;
+        if (fhl > 0) { memcpy(p, inode->inline_fh, fhl); }
+        if (fhl < MDS_NFS_FH_MAX) {
+            memset(p + fhl, 0, (size_t)(MDS_NFS_FH_MAX - fhl));
+        }
+        p += MDS_NFS_FH_MAX;
+    }
 
     return RONDB_INODE_FIXED_SIZE;
 }
@@ -100,9 +116,24 @@ int rondb_inode_deserialize(const uint8_t *buf, size_t len,
     /* v8 trailer: stored synthetic DS owner.  Present only in buffers
      * serialized by v8+; pre-v8 (137-byte) buffers leave these at the
      * memset-0 default (= ds_synth_owner off / legacy). */
-    if (len >= RONDB_INODE_FIXED_SIZE) {
+    if (len >= RONDB_INODE_V8_SIZE) {
         inode->synth_suid = fdb_get_u32(p);                p += 4;
         inode->synth_sgid = fdb_get_u32(p);                p += 4;
+    }
+    /* v9 trailer: inline single-stripe DS map.  Present only in v9+
+     * marshals (>= RONDB_INODE_FIXED_SIZE); shorter buffers leave the
+     * inline fields at the memset-0 default (flag clear -> side tables). */
+    if (len >= RONDB_INODE_FIXED_SIZE) {
+        inode->inline_ds_id   = fdb_get_u32(p);            p += 4;
+        inode->stripe_unit    = fdb_get_u32(p);            p += 4;
+        inode->inline_fh_len  = fdb_get_u32(p);            p += 4;
+        if (inode->inline_fh_len > MDS_NFS_FH_MAX) {
+            inode->inline_fh_len = MDS_NFS_FH_MAX;
+        }
+        if (inode->inline_fh_len > 0) {
+            memcpy(inode->inline_fh, p, inode->inline_fh_len);
+        }
+        p += MDS_NFS_FH_MAX;
     }
 
     return 0;

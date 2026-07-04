@@ -234,6 +234,18 @@ enum cluster_mode {
  * already gives crash atomicity. */
 #define MDS_IFLAG_HPC_CREATE_PENDING (1U << 4)
 
+/*
+ * Inline single-stripe layout (schema v9).  Set when the file has
+ * stripe_count == 1 && mirror_count == 1 and its one DS map entry is
+ * stored directly in the inode (inline_ds_id / inline_fh + stripe_unit)
+ * instead of the mds_stripe_maps / mds_stripe_entries side tables.  Lets
+ * LAYOUTGET, the unlink fence, and GC enqueue serve the layout straight
+ * from the inode read -- no separate cat_stripe_map_get round-trip, and
+ * no stripe-table writes on create / deletes on remove.  Multi-stripe
+ * (>1) and mirrored files keep the side tables and leave this clear.
+ */
+#define MDS_IFLAG_INLINE_STRIPE (1U << 5)
+
 /* -----------------------------------------------------------------------
  * MDS Node Identity
  * ----------------------------------------------------------------------- */
@@ -388,6 +400,17 @@ struct mds_inode {
     uint32_t            stripe_unit;
     uint32_t            mirror_count;
     struct mds_ds_map_entry *ds_map;   /* [stripe_count * mirror_count] */
+
+    /*
+     * Inline single-stripe DS map (schema v9, MDS_IFLAG_INLINE_STRIPE).
+     * When the flag is set the file's one (ds_id, nfs_fh) lives here in
+     * the inode instead of the stripe side tables, and is packed into the
+     * inode wire image so a single inode read serves LAYOUTGET / fence /
+     * GC with no cat_stripe_map_get.  All zero when the flag is clear.
+     */
+    uint32_t            inline_ds_id;
+    uint32_t            inline_fh_len;
+    uint8_t             inline_fh[MDS_NFS_FH_MAX];
 
     /* TODO: add refcnt + per-inode lock when inode cache
      * is integrated with write-through coherence (Phase 2). */

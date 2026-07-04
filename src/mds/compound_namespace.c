@@ -1557,6 +1557,37 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	uint32_t rm_sm_su = 0;
 	uint32_t rm_sm_mc = 0;
 
+	/*
+	 * v9: a single-stripe file (MDS_IFLAG_INLINE_STRIPE) carries its one
+	 * DS entry on the inode we already read in cat_lookup.  Build the
+	 * stripe-map snapshot from it ONCE here -- independent of the
+	 * proxy/fence path below -- so both the DS fence AND the GC enqueue
+	 * (which cleans up the DS backing file) use it with no
+	 * cat_stripe_map_get.  Without this the GC path would fall back to
+	 * cat_stripe_map_get, get NOTFOUND (inline files have no stripe
+	 * rows), and skip enqueue -> the DS file would leak.
+	 */
+	if (rm_final_data_unlink && rm_fileid != 0 &&
+	    (rm_inode.flags & MDS_IFLAG_INLINE_STRIPE)) {
+		rm_sm_entries = calloc(1, sizeof(*rm_sm_entries));
+		if (rm_sm_entries != NULL) {
+			uint32_t fhl = rm_inode.inline_fh_len;
+
+			if (fhl > MDS_NFS_FH_MAX) {
+				fhl = MDS_NFS_FH_MAX;
+			}
+			rm_sm_entries[0].ds_id = rm_inode.inline_ds_id;
+			rm_sm_entries[0].nfs_fh_len = fhl;
+			if (fhl > 0) {
+				memcpy(rm_sm_entries[0].nfs_fh,
+				       rm_inode.inline_fh, fhl);
+			}
+			rm_sm_sc = 1;
+			rm_sm_mc = 1;
+			rm_sm_su = rm_inode.stripe_unit;
+		}
+	}
+
 	/* Phase 8d: NOTIFY4_REMOVE_ENTRY or recall. */
 	compound_notify_or_recall_dir(cd, cd->current_fh.fileid,
 				      NOTIFY4_REMOVE_ENTRY,
@@ -1604,10 +1635,23 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		 * layout is revoked and the inode is about to be
 		 * deleted.  Best-effort: do not fail the remove. */
 		if (cd->proxy != NULL && cd->cat != NULL) {
-			if (mds_cat_stripe_map_get(cd->cat, rm_fileid,
+			bool have_sm = false;
+
+			/*
+			 * Inline single-stripe (v9): rm_sm_entries was already
+			 * built from the inode above.  Otherwise read the
+			 * stripe map (multi-stripe / legacy side-table files).
+			 */
+			if (rm_sm_entries != NULL) {
+				have_sm = true;
+			} else if (mds_cat_stripe_map_get(cd->cat, rm_fileid,
 					&rm_sm_sc, &rm_sm_su, &rm_sm_mc,
 					&rm_sm_entries) == MDS_OK &&
 			    rm_sm_entries != NULL) {
+				have_sm = true;
+			}
+
+			if (have_sm && rm_sm_entries != NULL) {
 				uint32_t ftot = rm_sm_sc * rm_sm_mc;
 
 				for (uint32_t fi = 0; fi < ftot; fi++) {
