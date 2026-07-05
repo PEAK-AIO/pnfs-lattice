@@ -1913,11 +1913,16 @@ enum nfs4_status op_read(struct compound_data *cd,
 		    cd->proxy != NULL) {
 			{
 				struct mds_ds_map_entry *sm = NULL;
-				uint32_t sm_sc = 0, sm_mc = 0;
+				uint32_t sm_sc = 0, sm_su = 0, sm_mc = 0;
 				enum mds_status dsst;
 
+				/* NB: every out-param must be non-NULL --
+				 * catalogue_rondb_stripe_map_get() rejects a
+				 * NULL stripe_unit with MDS_ERR_INVAL, which
+				 * this arm would then misread as a missing
+				 * stripe map. */
 				dsst = cat_stripe_map_get(cd,
-					cd->current_fh.fileid, &sm_sc, NULL,
+					cd->current_fh.fileid, &sm_sc, &sm_su,
 					&sm_mc, &sm);
 				if (dsst == MDS_OK && sm_sc > 0) {
 					(void)mds_proxy_ensure_ds_file(
@@ -2067,11 +2072,16 @@ enum nfs4_status op_write(struct compound_data *cd,
 			/* Lazy DS file creation. */
 			{
 				struct mds_ds_map_entry *sm = NULL;
-				uint32_t sm_sc = 0, sm_mc = 0;
+				uint32_t sm_sc = 0, sm_su = 0, sm_mc = 0;
 				enum mds_status dsst;
 
+				/* NB: every out-param must be non-NULL --
+				 * catalogue_rondb_stripe_map_get() rejects a
+				 * NULL stripe_unit with MDS_ERR_INVAL, which
+				 * this arm would then misread as a missing
+				 * stripe map and fail the WRITE with NOSPC. */
 				dsst = cat_stripe_map_get(cd,
-					cd->current_fh.fileid, &sm_sc, NULL,
+					cd->current_fh.fileid, &sm_sc, &sm_su,
 					&sm_mc, &sm);
 				if (dsst == MDS_OK && sm_sc > 0) {
 					(void)mds_proxy_ensure_ds_file(
@@ -2084,6 +2094,13 @@ enum nfs4_status op_write(struct compound_data *cd,
 					 * DS_PENDING but never got placed.
 					 * pNFS requires DS backing -- fail.
 					 */
+					MDS_LOG_ERROR(LOG_COMP_NFS,
+						"WRITE fileid=%llu: DS_PENDING "
+						"with no stripe map (get st=%d "
+						"sc=%u) -> NOSPC",
+						(unsigned long long)
+							cd->current_fh.fileid,
+						(int)dsst, (unsigned)sm_sc);
 					free(sm);
 					return NFS4ERR_NOSPC;
 				}

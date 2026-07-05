@@ -249,6 +249,14 @@ static void *worker_thread(void *arg)
 			fh_buf, &fh_len);
 
 		if (fh_st != MDS_OK) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"ds_prepare: FH capture failed "
+				"fileid=%llu ds=%u stripe=%u mirror=%u "
+				"st=%d",
+				(unsigned long long)job->fileid,
+				(unsigned)job->ds_id,
+				(unsigned)job->stripe,
+				(unsigned)job->mirror, (int)fh_st);
 			job_complete(job, DS_PREP_FAILED);
 			atomic_fetch_add(&ctx->failed, 1);
 			hash_remove(ctx, job);
@@ -292,6 +300,11 @@ static void *worker_thread(void *arg)
 				&stripe_count, &stripe_unit,
 				&mirror_count, &entries);
 			if (st != MDS_OK) {
+				MDS_LOG_WARN(LOG_COMP_MDS,
+					"ds_prepare: stripe map read failed "
+					"fileid=%llu st=%d",
+					(unsigned long long)job->fileid,
+					(int)st);
 				free(entries);
 				job_complete(job, DS_PREP_FAILED);
 				atomic_fetch_add(&ctx->failed, 1);
@@ -307,6 +320,19 @@ static void *worker_thread(void *arg)
 			    job->mirror >= mirror_count ||
 			    target_idx >= entry_count ||
 			    entries[target_idx].ds_id != job->ds_id) {
+				MDS_LOG_WARN(LOG_COMP_MDS,
+					"ds_prepare: stripe map mismatch "
+					"fileid=%llu sc=%u mc=%u job "
+					"stripe=%u mirror=%u ds=%u map_ds=%u",
+					(unsigned long long)job->fileid,
+					(unsigned)stripe_count,
+					(unsigned)mirror_count,
+					(unsigned)job->stripe,
+					(unsigned)job->mirror,
+					(unsigned)job->ds_id,
+					(target_idx < entry_count)
+					? (unsigned)entries[target_idx].ds_id
+					: 0U);
 				free(entries);
 				job_complete(job, DS_PREP_FAILED);
 				atomic_fetch_add(&ctx->failed, 1);

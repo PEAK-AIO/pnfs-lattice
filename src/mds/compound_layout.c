@@ -1524,6 +1524,14 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		if (!layout_entries_ready_for_grant(
 			    cd, entries,
 			    stripe_count * mirror_count)) {
+			MDS_LOG_ERROR(LOG_COMP_MDS,
+				"LAYOUTGET fileid=%llu: fused map has no "
+				"FH-ready entries (sc=%u mc=%u fh0=%u) -> "
+				"LAYOUTUNAVAILABLE",
+				(unsigned long long)cd->current_fh.fileid,
+				(unsigned)stripe_count, (unsigned)mirror_count,
+				(entries != NULL && stripe_count > 0)
+					? (unsigned)entries[0].nfs_fh_len : 0U);
 			nst = layout_revoke_grant_entries(
 				cd, &fused_sid, entries,
 				stripe_count * mirror_count);
@@ -1560,6 +1568,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 						     &mirror_count, &entries);
 		}
 		if (st == MDS_ERR_NOTFOUND) {
+			MDS_LOG_DEBUG(LOG_COMP_MDS,
+				"LAYOUTGET fileid=%llu: no stripe map, "
+				"entering placement fallback",
+				(unsigned long long)cd->current_fh.fileid);
 			st = cat_ds_list(cd,
 						       &ds_list, &ds_count);
 			if (st != MDS_OK || ds_count == 0) {

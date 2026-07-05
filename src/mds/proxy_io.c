@@ -882,8 +882,19 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
  *   f_handle[14..]   : raw knfsd server FH (byte 0 = 0x01 version)
  * ----------------------------------------------------------------------- */
 
-/** NFS VFS handle type for opaque server FH. */
-#define NFS_FH_HANDLE_TYPE 13
+/** NFS VFS handle types for an opaque server FH.
+ *
+ * The NFS client's exportfs encoding has produced two type values
+ * across kernel releases for the same wrapper layout: 0x0d (13,
+ * observed on 6.8-era kernels) and 0x0c (12, observed on newer
+ * kernels; also the historical parent-less encoding).  Both carry
+ * the identical f_handle payload this extractor parses -- wrapper
+ * bytes 0..11, uint16 LE server-FH size at offset 12, raw knfsd
+ * server FH (0x01 version byte first) from offset 14 -- so accept
+ * either and let the structural checks below (size bounds + knfsd
+ * version byte) do the real validation. */
+#define NFS_FH_HANDLE_TYPE          13
+#define NFS_FH_HANDLE_TYPE_NOPARENT 12
 
 /** Byte offset of the nfs_fh.size field within f_handle. */
 #define NFS_VFS_FH_SIZE_OFFSET 12
@@ -916,8 +927,10 @@ static int proxy_name_to_handle(const char *path,
         return -1;
     }
 
-    /* Validate handle type -- must be NFS opaque FH. */
-    if (fh->handle_type != NFS_FH_HANDLE_TYPE) {
+    /* Validate handle type -- must be an NFS opaque FH (either
+     * encoding; see the NFS_FH_HANDLE_TYPE* comment above). */
+    if (fh->handle_type != NFS_FH_HANDLE_TYPE &&
+        fh->handle_type != NFS_FH_HANDLE_TYPE_NOPARENT) {
         return -1;
     }
 
@@ -1013,6 +1026,7 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
         clock_gettime(CLOCK_MONOTONIC, &t1);
 
         /* Extract server FH via syscall. */
+        errno = 0;
         if (proxy_name_to_handle(file_path, fh_out, *fh_len, fh_len) == 0) {
             clock_gettime(CLOCK_MONOTONIC, &t2);
             {
@@ -1028,6 +1042,10 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
             return MDS_OK;
         }
         /* name_to_handle_at failed -- fall through to RPC. */
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "ensure_ds_file_fh: name_to_handle_at path failed "
+            "(path=%s errno=%d) -- falling back to NFS3 RPC",
+            file_path, errno);
     }
 
 fallback_rpc:
@@ -1040,6 +1058,11 @@ fallback_rpc:
         struct timespec tr0, tr1;
 
         if (host[0] == '\0' || export_path[0] == '\0' || nfs_port == 0) {
+            MDS_LOG_WARN(LOG_COMP_MDS,
+                "ensure_ds_file_fh: NFS3 RPC fallback unavailable "
+                "(ds=%u host='%s' export='%s' port=%u)",
+                (unsigned)ds_id, host, export_path,
+                (unsigned)nfs_port);
             return MDS_ERR_INVAL;
         }
 
@@ -1049,6 +1072,10 @@ fallback_rpc:
         clock_gettime(CLOCK_MONOTONIC, &tr0);
         if (ds_nfs3_lookup_fh(host, nfs_port, export_path,
                               rel_path, 1, fh_out, fh_len, 3000) != 0) {
+            MDS_LOG_WARN(LOG_COMP_MDS,
+                "ensure_ds_file_fh: NFS3 RPC FH lookup failed "
+                "(ds=%u host=%s export=%s rel=%s)",
+                (unsigned)ds_id, host, export_path, rel_path);
             return MDS_ERR_IO;
         }
         clock_gettime(CLOCK_MONOTONIC, &tr1);
