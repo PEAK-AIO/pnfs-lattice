@@ -53,17 +53,6 @@
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 
-/** Check if caller's primary or supplementary GID matches. */
-static bool compound_gid_match(const struct compound_data *cd,
-                               uint32_t gid)
-{
-    if (cd->cred_gid == gid) { return true; }
-    for (uint32_t i = 0; i < cd->aux_gid_count && i < 16; i++) {
-        if (cd->aux_gids[i] == gid) { return true; }
-    }
-    return false;
-}
-
 static bool compound_next_op_requests_fs_locations(const struct compound_data *cd)
 {
     const struct nfs4_op *next;
@@ -131,7 +120,7 @@ enum nfs4_status op_access(struct compound_data *cd,
 				if (perm & 4) { allowed |= ACCESS4_READ | ACCESS4_LOOKUP; }
 				if (perm & 2) { allowed |= ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE; }
 				if (perm & 1) { allowed |= ACCESS4_EXECUTE | ACCESS4_LOOKUP; }
-			} else if (compound_gid_match(cd, (uint32_t)acc_inode.gid)) {
+			} else if (compound_cred_in_group(cd, (uint32_t)acc_inode.gid)) {
 				perm = (mode >> 3) & 7;
 				if (perm & 4) { allowed |= ACCESS4_READ | ACCESS4_LOOKUP; }
 				if (perm & 2) { allowed |= ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE; }
@@ -387,7 +376,13 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 	 * Invalid UTF-8 / embedded NUL / '/' → NFS4ERR_INVAL
 	 * (pynfs RNM8/9 testBadutf8*).  Decoder NUL-terminates
 	 * op->arg.lookup.name so strlen() inside the helper is safe.
+	 * Names longer than MDS_MAX_NAME were consumed-and-flagged by
+	 * the decoder -> NFS4ERR_NAMETOOLONG (checked first: the
+	 * flagged buffer is empty and would misreport INVAL).
 	 */
+	if (op->arg.lookup.name_too_long) {
+		return NFS4ERR_NAMETOOLONG;
+	}
 	nst = compound_validate_name(op->arg.lookup.name);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -409,6 +404,25 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 		cd->xattr_obj_set = true;
 		/* current_fh stays as the xattr-namespace handle. */
 		return NFS4_OK;
+	}
+
+	/*
+	 * POSIX DAC: the caller needs search (execute) permission on
+	 * the directory to resolve a component in it.  The parent
+	 * inode is almost always a request-local snapshot hit (PUTFH /
+	 * a previous LOOKUP seeded it), so this adds no catalogue
+	 * round-trip on the hot path.
+	 */
+	if (compound_dac_active(cd)) {
+		struct mds_inode lk_dir;
+
+		if (compound_inode_get(cd, cd->current_fh.fileid,
+				       &lk_dir) == MDS_OK) {
+			nst = compound_dir_search_check(cd, &lk_dir);
+			if (nst != NFS4_OK) {
+				return nst;
+			}
+		}
 	}
 
 	st = compound_lookup_local_child(cd, cd->current_fh.fileid,
@@ -478,43 +492,48 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 	 * that referral-discovery compound to resolve the junction FH so
 	 * GETATTR can return fs_locations, but keep ordinary LOOKUPs on
 	 * the junction returning MOVED so Linux creates a referral inode
-	 * instead of a same-server submount. */
-	{
+	 * instead of a same-server submount.
+	 *
+	 * The sticky bit is only the in-band junction MARKER; the
+	 * subtree map is the authority.  A sticky directory with no
+	 * subtree-map entry is an ordinary POSIX restricted-deletion
+	 * directory (a 01777 tmp dir, pjdfstest's sticky fixtures) and
+	 * MUST NOT return MOVED — the previous marker-only check made
+	 * every S_ISVTX directory unreachable.  Real junctions are
+	 * pre-registered in the subtree map by the split machinery, so
+	 * requiring (a) a subtree map, (b) a map entry for the path,
+	 * and (c) a DIFFERENT owning MDS preserves genuine referrals
+	 * (self-owned junctions must resolve normally or clients
+	 * referral-loop). */
+	if (cd->smap != NULL &&
+	    !compound_next_op_requests_fs_locations(cd)) {
 		int is_junction = referral_is_junction(
 			cd->cat, child.fileid);
 
 		if (is_junction < 0) {
 			return NFS4ERR_IO;
 		}
-		if (is_junction == 1 &&
-		    !(cd->smap != NULL &&
-		      compound_next_op_requests_fs_locations(cd))) {
-			/* Don't return MOVED for junctions owned by
-			 * this MDS — that would cause a referral loop. */
-			if (cd->smap != NULL) {
-				char jpath[MDS_MAX_PATH];
-				size_t pl = strlen(cd->current_path);
+		if (is_junction == 1) {
+			char jpath[MDS_MAX_PATH];
+			struct subtree_entry se;
+			size_t pl = strlen(cd->current_path);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
-				if (pl == 1 && cd->current_path[0] == '/') {
-					(void)snprintf(jpath, sizeof(jpath),
-						"/%s", op->arg.lookup.name);
-				} else {
-					(void)snprintf(jpath, sizeof(jpath),
-						"%s/%s", cd->current_path,
-						op->arg.lookup.name);
-				}
-#pragma GCC diagnostic pop
-				struct subtree_entry se;
-				if (subtree_map_lookup(cd->smap, jpath,
-						       &se) == MDS_OK &&
-				    se.owner_mds_id == cd->mds_id) {
-					goto not_junction;
-				}
+			if (pl == 1 && cd->current_path[0] == '/') {
+				(void)snprintf(jpath, sizeof(jpath),
+					"/%s", op->arg.lookup.name);
+			} else {
+				(void)snprintf(jpath, sizeof(jpath),
+					"%s/%s", cd->current_path,
+					op->arg.lookup.name);
 			}
-			return NFS4ERR_MOVED;
+#pragma GCC diagnostic pop
+			if (subtree_map_lookup(cd->smap, jpath,
+					       &se) == MDS_OK &&
+			    se.owner_mds_id != cd->mds_id) {
+				return NFS4ERR_MOVED;
+			}
 		}
-not_junction: ;
 	}
 
 	cd->current_fh.fileid = child.fileid;
@@ -946,6 +965,8 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	enum mds_status st;
 	struct mds_inode sa_pre_inode;
 	bool sa_pre_valid;
+	struct mds_inode sa_attrs;
+	uint32_t sa_mask;
 
 	(void)res;
 	nst = require_current_fh(cd);
@@ -980,7 +1001,47 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 				   &sa_pre_inode) == 0) {
 		sa_pre_valid = true;
 	}
-	if (sa_pre_valid &&
+
+	/*
+	 * POSIX DAC: chmod/chown/truncate/utimes permission matrix.
+	 * Needs the pre-mutation inode, so force the read when both
+	 * the request snapshot and the icache missed.  Runs BEFORE the
+	 * no-op shortcut below: a non-owner chmod to the file's
+	 * current mode must still fail with EPERM, not succeed as a
+	 * no-op.  The helper may rewrite sa_attrs.mode and add
+	 * MDS_ATTR_MODE to sa_mask (SGID drop on non-member chmod,
+	 * SUID/SGID kill on chown and truncate); the catalogue write
+	 * below therefore uses sa_attrs/sa_mask instead of the raw
+	 * wire arguments.
+	 */
+	sa_attrs = op->arg.setattr.attrs;
+	sa_mask = op->arg.setattr.mask;
+	if (compound_dac_active(cd)) {
+		if (!sa_pre_valid) {
+			enum mds_status dac_st = compound_inode_get(
+				cd, cd->current_fh.fileid, &sa_pre_inode);
+			if (dac_st != MDS_OK) {
+				return mds_status_to_nfs4(dac_st);
+			}
+			sa_pre_valid = true;
+		}
+		nst = compound_setattr_dac_check(cd, &sa_pre_inode,
+						 &op->arg.setattr,
+						 &sa_attrs, &sa_mask);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+	}
+
+	/*
+	 * No-op shortcut -- but only when the DAC pass did not adjust
+	 * the write.  A wire-level no-op chown (same uid/gid) still
+	 * kills SUID/SGID, so short-circuiting on the ORIGINAL args
+	 * would silently drop the folded MODE update.
+	 */
+	if (sa_mask == op->arg.setattr.mask &&
+	    sa_attrs.mode == op->arg.setattr.attrs.mode &&
+	    sa_pre_valid &&
 	    setattr_is_noop(&sa_pre_inode, &op->arg.setattr)) {
 		return NFS4_OK;
 	}
@@ -1018,8 +1079,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	}
 
 	st = cat_setattr(cd, cd->current_fh.fileid,
-			 &op->arg.setattr.attrs,
-			 op->arg.setattr.mask);
+			 &sa_attrs, sa_mask);
 	/* Invalidate snapshot BEFORE post-mutation re-read. */
 	if (st == MDS_OK) {
 		compound_inode_invalidate(cd, cd->current_fh.fileid);
@@ -1129,9 +1189,20 @@ enum nfs4_status op_create(struct compound_data *cd,
 	 * with a transient DELAY.  Same precedence as op_lookup /
 	 * op_rename above.
 	 */
+	if (a->name_too_long || a->link_target_too_long) {
+		return NFS4ERR_NAMETOOLONG;
+	}
 	nst = compound_validate_name(a->name);
 	if (nst != NFS4_OK) {
 		return nst;
+	}
+	/*
+	 * POSIX: creating block/character device nodes requires
+	 * appropriate privileges (mknod(2) -> EPERM for non-root).
+	 */
+	if ((a->type == MDS_FTYPE_BLKDEV || a->type == MDS_FTYPE_CHRDEV) &&
+	    compound_dac_active(cd) && cd->cred_uid != 0) {
+		return NFS4ERR_PERM;
 	}
 	nst = check_subtree_frozen(cd);
 	if (nst != NFS4_OK) {
@@ -1206,6 +1277,11 @@ enum nfs4_status op_create(struct compound_data *cd,
 		}
 		if (create_parent.type != MDS_FTYPE_DIR) {
 			return NFS4ERR_NOTDIR;
+		}
+		/* POSIX DAC: write+search on the parent directory. */
+		nst = compound_dir_mutate_check(cd, &create_parent);
+		if (nst != NFS4_OK) {
+			return nst;
 		}
 		parent_change_before = create_parent.change;
 	}
@@ -1491,6 +1567,9 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	 * NFS4ERR_INVAL.  Same shape and precedence as op_lookup,
 	 * op_create, op_rename above.
 	 */
+	if (op->arg.remove.name_too_long) {
+		return NFS4ERR_NAMETOOLONG;
+	}
 	nst = compound_validate_name(op->arg.remove.name);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1524,13 +1603,22 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		return NFS4_OK;
 	}
 
-	/* R1.3: capture parent change before mutation for change_info. */
+	/* R1.3: capture parent change before mutation for change_info.
+	 * The same read feeds the POSIX DAC checks (write+search on the
+	 * directory here; the sticky rule after the child lookup). */
 	uint64_t rm_change_before = 0;
-	{
-		struct mds_inode rm_parent;
-		if (compound_inode_get(cd, cd->current_fh.fileid,
-				       &rm_parent) == MDS_OK) {
-			rm_change_before = rm_parent.change;
+	struct mds_inode rm_parent;
+	bool rm_parent_valid = false;
+	if (compound_inode_get(cd, cd->current_fh.fileid,
+			       &rm_parent) == MDS_OK) {
+		rm_change_before = rm_parent.change;
+		rm_parent_valid = true;
+	}
+	/* POSIX DAC: removing an entry mutates the directory. */
+	if (rm_parent_valid) {
+		nst = compound_dir_mutate_check(cd, &rm_parent);
+		if (nst != NFS4_OK) {
+			return nst;
 		}
 	}
 
@@ -1546,6 +1634,13 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	struct mds_inode rm_inode;
 	st = cat_lookup(cd, cd->current_fh.fileid,
 			   op->arg.remove.name, &rm_inode);
+	/* POSIX DAC: S_ISVTX restricted deletion (sticky directories). */
+	if (st == MDS_OK && rm_parent_valid) {
+		nst = compound_sticky_delete_check(cd, &rm_parent, &rm_inode);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+	}
 	bool rm_quota = (st == MDS_OK && cd->quota != NULL);
 	bool rm_final_data_unlink =
 		(st == MDS_OK &&
@@ -1786,6 +1881,10 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	 * immediate error regardless of subtree state, matching the
 	 * precedence implied by RFC 8881 §2.6.3.1.
 	 */
+	if (op->arg.rename.src_name_too_long ||
+	    op->arg.rename.dst_name_too_long) {
+		return NFS4ERR_NAMETOOLONG;
+	}
 	nst = compound_validate_name(op->arg.rename.src_name);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1808,6 +1907,59 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+
+	/*
+	 * POSIX DAC: RENAME mutates both directories, so the caller
+	 * needs write+search on each.  Sticky directories additionally
+	 * restrict who may move an entry out of the source dir and who
+	 * may overwrite an existing entry in the destination dir.
+	 * Checked BEFORE the self-rename no-op shortcut below: Linux
+	 * evaluates permissions before the same-inode short circuit,
+	 * so an unauthorised self-rename fails rather than no-ops.
+	 */
+	if (compound_dac_active(cd)) {
+		struct mds_inode rn_src_dir;
+		struct mds_inode rn_dst_dir;
+		struct mds_inode rn_victim;
+		enum mds_status rn_st;
+
+		rn_st = compound_inode_get(cd, cd->saved_fh.fileid,
+					   &rn_src_dir);
+		if (rn_st != MDS_OK) {
+			return mds_status_to_nfs4(rn_st);
+		}
+		nst = compound_dir_mutate_check(cd, &rn_src_dir);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+		rn_st = compound_inode_get(cd, cd->current_fh.fileid,
+					   &rn_dst_dir);
+		if (rn_st != MDS_OK) {
+			return mds_status_to_nfs4(rn_st);
+		}
+		nst = compound_dir_mutate_check(cd, &rn_dst_dir);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+		if (compound_lookup_local_child(cd, cd->saved_fh.fileid,
+				op->arg.rename.src_name,
+				&rn_victim) == MDS_OK) {
+			nst = compound_sticky_delete_check(cd, &rn_src_dir,
+							   &rn_victim);
+			if (nst != NFS4_OK) {
+				return nst;
+			}
+		}
+		if (compound_lookup_local_child(cd, cd->current_fh.fileid,
+				op->arg.rename.dst_name,
+				&rn_victim) == MDS_OK) {
+			nst = compound_sticky_delete_check(cd, &rn_dst_dir,
+							   &rn_victim);
+			if (nst != NFS4_OK) {
+				return nst;
+			}
+		}
+	}
 
 	/* Resolve paths if empty (PUTFH clears them).
 	 * Walk parent_fileid to build path for cross-subtree detection. */
@@ -2162,6 +2314,9 @@ enum nfs4_status op_link(struct compound_data *cd,
 	 * NFS4ERR_BADNAME; bad UTF-8 → NFS4ERR_INVAL.  Same shape
 	 * and precedence as the other namespace ops above.
 	 */
+	if (op->arg.link.name_too_long) {
+		return NFS4ERR_NAMETOOLONG;
+	}
 	nst = compound_validate_name(op->arg.link.name);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -2174,6 +2329,22 @@ enum nfs4_status op_link(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+
+	/* POSIX DAC: LINK adds an entry to the link directory. */
+	if (compound_dac_active(cd)) {
+		struct mds_inode ln_dir;
+		enum mds_status ln_st;
+
+		ln_st = compound_inode_get(cd, cd->current_fh.fileid,
+					   &ln_dir);
+		if (ln_st != MDS_OK) {
+			return mds_status_to_nfs4(ln_st);
+		}
+		nst = compound_dir_mutate_check(cd, &ln_dir);
+		if (nst != NFS4_OK) {
+			return nst;
+		}
+	}
 
 	/* Cross-shard hard link (Phase 4, Tier 3).
 	 * Target inode (saved_fh) is in shard A, link directory (current_fh)

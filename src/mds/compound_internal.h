@@ -175,6 +175,60 @@ void compound_recall_dir_delegations(struct compound_data *cd,
  */
 enum nfs4_status compound_validate_name(const char *name);
 
+/* -----------------------------------------------------------------------
+ * POSIX DAC helpers (compound_access.c)
+ *
+ * Permission-bit masks for compound_access_mode_check(), matching the
+ * classic POSIX r/w/x triplet layout within each mode-bit group.
+ * ----------------------------------------------------------------------- */
+
+#define COMPOUND_MAY_EXEC  0x1u
+#define COMPOUND_MAY_WRITE 0x2u
+#define COMPOUND_MAY_READ  0x4u
+
+/** True when POSIX DAC enforcement applies to this request
+ *  (cfg_posix_dac set AND the RPC credential is AUTH_SYS). */
+bool compound_dac_active(const struct compound_data *cd);
+
+/** True when the caller's primary or supplementary GID matches @p gid. */
+bool compound_cred_in_group(const struct compound_data *cd, uint32_t gid);
+
+/** POSIX mode-bit check; @p may is a COMPOUND_MAY_* mask.
+ *  Returns NFS4_OK or NFS4ERR_ACCESS.  Root and inactive DAC pass. */
+enum nfs4_status compound_access_mode_check(const struct compound_data *cd,
+					    const struct mds_inode *inode,
+					    uint32_t may);
+
+/** Write+search on a directory (namespace mutations).  ACCESS on deny. */
+enum nfs4_status compound_dir_mutate_check(const struct compound_data *cd,
+					   const struct mds_inode *dir);
+
+/** Search (execute) on a directory (LOOKUP).  ACCESS on deny. */
+enum nfs4_status compound_dir_search_check(const struct compound_data *cd,
+					   const struct mds_inode *dir);
+
+/** S_ISVTX restricted-deletion rule.  Returns NFS4_OK or NFS4ERR_PERM. */
+enum nfs4_status compound_sticky_delete_check(const struct compound_data *cd,
+					      const struct mds_inode *dir,
+					      const struct mds_inode *victim);
+
+/** True when a content write by this caller must clear SUID/SGID;
+ *  @p mode_out then carries the cleared mode to persist with
+ *  MDS_ATTR_MODE. */
+bool compound_write_clears_setid(const struct compound_data *cd,
+				 const struct mds_inode *inode,
+				 uint32_t *mode_out);
+
+/** SETATTR DAC matrix; may rewrite attrs_inout->mode and OR
+ *  MDS_ATTR_MODE into *mask_inout (SGID drop, chown/truncate
+ *  SUID/SGID clearing).  Returns NFS4_OK, NFS4ERR_PERM, or
+ *  NFS4ERR_ACCESS. */
+enum nfs4_status compound_setattr_dac_check(const struct compound_data *cd,
+					    const struct mds_inode *pre,
+					    const struct nfs4_arg_setattr *arg,
+					    struct mds_inode *attrs_inout,
+					    uint32_t *mask_inout);
+
 /**
  * Notify-or-recall dispatcher for namespace mutations.
  *

@@ -4,6 +4,7 @@
 # Core MDS modules -- shared between the daemon and unit tests.
 add_library(pnfs_mds_core STATIC
     compound.c
+    compound_access.c
     compound_session.c
     compound_namespace.c
     compound_data_io.c

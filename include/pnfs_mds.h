@@ -822,6 +822,19 @@ struct mds_config {
      */
     bool                hide_referral_junctions;
 
+    /*
+     * POSIX DAC enforcement (default true).  When set, AUTH_SYS
+     * requests are subject to classic POSIX permission semantics on
+     * mutations: owner-only chmod/chown/utimes, directory
+     * write+search bits for CREATE/REMOVE/RENAME/LINK/OPEN(CREATE),
+     * the S_ISVTX sticky-deletion rule, and SUID/SGID clearing on
+     * chown/truncate/write.  Disabling restores the historical
+     * permissive behaviour where any principal could mutate any
+     * object (useful only for fully-trusted single-user clusters).
+     * INI key: posix_dac = true|false.
+     */
+    bool                posix_dac;
+
     /* DS async prepare (Phase 6) */
     uint32_t            ds_prepare_queue_depth; /* Per-DS queue (0 = default 4096). */
     uint32_t            ds_prepare_workers;     /* Worker threads (0 = 1 per DS). */

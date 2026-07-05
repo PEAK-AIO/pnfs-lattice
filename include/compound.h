@@ -405,6 +405,9 @@ struct nfs4_arg_putfh {
 
 struct nfs4_arg_lookup {
 	char name[MDS_MAX_NAME + 1];
+	/** Wire name exceeded MDS_MAX_NAME: handler must return
+	 *  NFS4ERR_NAMETOOLONG (name[] is empty in that case). */
+	bool name_too_long;
 };
 struct nfs4_layout_hint {
 	bool present;
@@ -418,21 +421,35 @@ struct nfs4_arg_create {
 	uint32_t           mode;
 	uint64_t           uid;
 	uint64_t           gid;
-	char               link_target[1024]; /**< Symlink target (NF4LNK only). */
+	/** Symlink target (NF4LNK only).  Sized for PATH_MAX-1 target
+	 *  bytes + NUL so symlink(2) targets up to 4095 chars decode. */
+	char               link_target[MDS_MAX_PATH];
 	uint32_t           link_target_len;   /**< Length of link_target. */
+	/** Wire objname exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool               name_too_long;
+	/** Wire linkdata exceeded the buffer -> NFS4ERR_NAMETOOLONG. */
+	bool               link_target_too_long;
 };
 
 struct nfs4_arg_remove {
 	char name[MDS_MAX_NAME + 1];
+	/** Wire name exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool name_too_long;
 };
 
 struct nfs4_arg_rename {
 	char src_name[MDS_MAX_NAME + 1];
 	char dst_name[MDS_MAX_NAME + 1];
+	/** Wire oldname exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool src_name_too_long;
+	/** Wire newname exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool dst_name_too_long;
 };
 
 struct nfs4_arg_link {
 	char name[MDS_MAX_NAME + 1];
+	/** Wire newname exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool name_too_long;
 };
 
 struct nfs4_arg_open_downgrade {
@@ -459,6 +476,8 @@ struct nfs4_arg_readdir {
 struct nfs4_arg_open {
 	enum nfs4_claim_type  claim;
 	char                  name[MDS_MAX_NAME + 1]; /* CLAIM_NULL only */
+	/** Wire name exceeded MDS_MAX_NAME -> NFS4ERR_NAMETOOLONG. */
+	bool                  name_too_long;
 	uint32_t              share_access;
 	uint32_t              share_deny;
 	uint8_t               open_owner[NFS4_OPEN_OWNER_MAX];
@@ -1752,6 +1771,14 @@ struct layout_recall     *lr;
 	 * listings at the namespace ROOT.  LOOKUP is unaffected.  Set
 	 * from cfg.hide_referral_junctions at compound init. */
 	bool                      cfg_hide_referral_junctions;
+
+	/* POSIX DAC enforcement (`posix_dac` in mds.conf, default true).
+	 * When set and the RPC credential is AUTH_SYS, mutation ops
+	 * enforce owner/mode permission semantics (see
+	 * compound_access.c).  When clear, the historical permissive
+	 * behaviour is preserved.  Unit tests get false from
+	 * compound_init()'s zeroing and opt in explicitly. */
+	bool                      cfg_posix_dac;
 
 	/* RFC 8881 §16.2.4 — current stateid tracking.
 	 *

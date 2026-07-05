@@ -2866,6 +2866,27 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				merged_mask |= MDS_ATTR_MTIME;
 			}
 
+			/*
+			 * POSIX: content writes by an unprivileged caller
+			 * clear SUID (and SGID when group-exec is set).
+			 * pNFS clients write directly to the DSes, so
+			 * LAYOUTCOMMIT is the only MDS-visible event for
+			 * those writes -- mirror the op_write proxy-path
+			 * clearing here, folded into the same masked
+			 * catalogue write.  Only when the commit actually
+			 * reports new data (offset or mtime).
+			 */
+			if (a->new_offset || a->time_modify_set) {
+				uint32_t lc_clear_mode = 0;
+
+				if (compound_write_clears_setid(
+					    cd, &lc_inode,
+					    &lc_clear_mode)) {
+					lc_inode.mode = lc_clear_mode;
+					merged_mask |= MDS_ATTR_MODE;
+				}
+			}
+
 			if (merged_mask != 0) {
 				st = cat_setattr(cd,
 					cd->current_fh.fileid,

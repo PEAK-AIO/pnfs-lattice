@@ -253,6 +253,7 @@ bool xdr_nfs4_time_decode(XDR *xdrs, struct timespec *ts)
  *   TIME_MODIFY_SET(54) MOUNTED_ON_FILEID(55)
  *   FS_LAYOUT_TYPES(62) LAYOUT_HINT(63)
  * Word 2 (bits 64-95): LAYOUT_BLKSIZE(66)
+ *   SUPPATTR_EXCLCREAT(75) — RFC 8881 EXCLUSIVE4_1 createattrs set
  *   CHANGE_ATTR_TYPE(79) — RFC 7862 monotonic change-counter hint
  *   XATTR_SUPPORT(82) — RFC 8276
  */
@@ -267,7 +268,9 @@ static const uint32_t k_supported_bitmap[NFS4_BITMAP_WORDS] = {
                 (1u << (48-32)) | (1u << (52-32)) | (1u << (53-32)) |
                 (1u << (54-32)) | (1u << (55-32)) | (1u << (62-32)) |
                 (1u << (FATTR4_LAYOUT_HINT - 32)),
-    /* word 2 */ (1u << (66-64)) | (1u << (79-64)) | (1u << (82-64)) |
+    /* word 2 */ (1u << (66-64)) |
+                (1u << (FATTR4_SUPPATTR_EXCLCREAT - 64)) |
+                (1u << (79-64)) | (1u << (82-64)) |
                 (1u << (FATTR4_OPEN_ARGUMENTS - 64)),
 };
 
@@ -660,6 +663,30 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
     if (nfs4_bitmap_test(actual, FATTR4_LAYOUT_BLKSIZE)) {
         uint32_t blksz = 65536;
         if (!xdr_uint32_t(xdrs, &blksz)) {
+            return false;
+        }
+    }
+
+    /* FATTR4_SUPPATTR_EXCLCREAT (bit 75) — RFC 8881 §18.16.
+     *
+     * Bitmap of the attrs a client may supply inside an
+     * EXCLUSIVE4_1 createattrs: the decoder (decode_op_open) and
+     * op_open consume MODE / OWNER / OWNER_GROUP, so advertise
+     * exactly those.  The Linux client intersects the app's
+     * requested creation attrs with this bitmap — without it,
+     * O_CREAT|O_EXCL files were created with an empty attr set
+     * (mode fell back to 0600) and no follow-up SETATTR was sent
+     * because EXCLUSIVE4_1 semantics promise atomic attr
+     * application (pjdfstest chmod/12, symlink/00). */
+    if (nfs4_bitmap_test(actual, FATTR4_SUPPATTR_EXCLCREAT)) {
+        uint32_t excl[NFS4_BITMAP_WORDS] = {
+            0,
+            (1u << (FATTR4_MODE - 32)) |
+            (1u << (FATTR4_OWNER - 32)) |
+            (1u << (FATTR4_OWNER_GROUP - 32)),
+            0,
+        };
+        if (!xdr_nfs4_bitmap_encode(xdrs, excl, 2)) {
             return false;
         }
     }
@@ -1238,10 +1265,14 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_DESTROY_CLIENTID:
         return xdr_uint64_t(xdrs, &op->arg.destroy_clientid);
     case OP_SECINFO: {
-        /* RFC 8881 §18.29.1 SECINFO4args: component4 name. */
+        /* RFC 8881 §18.29.1 SECINFO4args: component4 name.
+         * len == MDS_MAX_NAME (255) is a legal name; only longer
+         * fails.  The shared lookup-arg slot is reused across
+         * compounds, so clear the stale NAMETOOLONG flag. */
         uint32_t name_len = 0;
+        op->arg.lookup.name_too_long = false;
         if (!xdr_uint32_t(xdrs, &name_len)) { return false; }
-        if (name_len >= MDS_MAX_NAME) { return false; }
+        if (name_len > MDS_MAX_NAME) { return false; }
         if (name_len > 0 &&
             !xdr_opaque_decode(xdrs, op->arg.lookup.name, name_len)) {
             return false;

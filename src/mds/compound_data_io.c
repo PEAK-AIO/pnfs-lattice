@@ -290,6 +290,12 @@ enum nfs4_status op_open(struct compound_data *cd,
 
 	switch (a->claim) {
 	case CLAIM_NULL:
+		/* RFC 8881 S18.16 / POSIX: a CLAIM_NULL name longer than
+		 * our advertised MAXNAME was consumed-and-flagged by the
+		 * decoder -> NFS4ERR_NAMETOOLONG. */
+		if (a->name_too_long) {
+			return NFS4ERR_NAMETOOLONG;
+		}
 		clock_gettime(CLOCK_MONOTONIC, &t_open_start);
 		t_mark = t_open_start;
 
@@ -370,6 +376,26 @@ enum nfs4_status op_open(struct compound_data *cd,
 			if (nst != NFS4_OK) {
 				return nst;
 }
+			/*
+			 * POSIX DAC: creating an entry requires write +
+			 * search on the parent directory.  Re-read the
+			 * parent via the request snapshot (cheap hit --
+			 * PUTFH seeded it) because `inode` may have been
+			 * scribbled by the failed lookup above.
+			 */
+			if (compound_dac_active(cd)) {
+				struct mds_inode op_parent;
+
+				if (compound_inode_get(cd,
+						cd->current_fh.fileid,
+						&op_parent) == MDS_OK) {
+					nst = compound_dir_mutate_check(
+						cd, &op_parent);
+					if (nst != NFS4_OK) {
+						return nst;
+					}
+				}
+			}
 			/* Effective UID/GID: fall back to AUTH_SYS creds. */
 			uint64_t eff_uid = a->uid;
 			uint64_t eff_gid = a->gid;
@@ -874,29 +900,59 @@ open_existing:
 	/*
 	 * POSIX permission check: verify the caller has the requested
 	 * access (read / write) to the target file based on AUTH_SYS
-	 * credentials and the inode mode bits.
+	 * credentials and the inode mode bits.  Routed through the
+	 * shared DAC helper so supplementary GIDs and the posix_dac
+	 * config gate apply consistently with the namespace ops.
 	 *
 	 * Skip for just-created files: the creator always has access
 	 * (RFC 8881 S18.16.3).  EXCLUSIVE4 creates defer mode to a
 	 * subsequent SETATTR, so the file has mode 0 at this point.
 	 */
-	if (!just_created && cd->cred_uid != 0) {
-		uint32_t omode = inode.mode;
-		uint32_t operm;
+	if (!just_created) {
+		uint32_t open_may = 0;
 
-		if (cd->cred_uid == (uint32_t)inode.uid) {
-			operm = (omode >> 6) & 7;
-		} else if (cd->cred_gid == (uint32_t)inode.gid) {
-			operm = (omode >> 3) & 7;
-		} else {
-			operm = omode & 7;
+		if (a->share_access & OPEN4_SHARE_ACCESS_READ) {
+			open_may |= COMPOUND_MAY_READ;
 		}
+		if (a->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+			open_may |= COMPOUND_MAY_WRITE;
+		}
+		if (open_may != 0) {
+			nst = compound_access_mode_check(cd, &inode,
+							 open_may);
+			if (nst != NFS4_OK) {
+				return nst;
+			}
+		}
+	}
 
-		if ((a->share_access & OPEN4_SHARE_ACCESS_READ) && !(operm & 4)) {
-			return NFS4ERR_ACCES;
-		}
-		if ((a->share_access & OPEN4_SHARE_ACCESS_WRITE) && !(operm & 2)) {
-			return NFS4ERR_ACCES;
+	/*
+	 * POSIX: content writes by unprivileged principals clear SUID
+	 * (and SGID when group-exec is set).  pNFS clients write
+	 * directly to the DSes and Linux sends the follow-up
+	 * LAYOUTCOMMIT with machine credentials (uid 0), so this
+	 * WRITE-intent OPEN is the last MDS touchpoint carrying the
+	 * writer's identity -- clear the bits here, after the
+	 * permission check evaluated the ORIGINAL mode.  Slightly
+	 * eager (an open-for-write with no subsequent write also
+	 * clears) but deterministic and on the safe side; the MDS
+	 * proxy WRITE and LAYOUTCOMMIT paths keep their own clearing
+	 * for clients that present real credentials there.
+	 */
+	if (!just_created &&
+	    (a->share_access & OPEN4_SHARE_ACCESS_WRITE) != 0) {
+		uint32_t op_clear_mode = 0;
+
+		if (compound_write_clears_setid(cd, &inode,
+						&op_clear_mode)) {
+			struct mds_inode op_clear = inode;
+
+			op_clear.mode = op_clear_mode;
+			if (cat_setattr(cd, target_fid, &op_clear,
+					MDS_ATTR_MODE) == MDS_OK) {
+				compound_inode_invalidate(cd, target_fid);
+				inode.mode = op_clear_mode;
+			}
 		}
 	}
 
@@ -2220,6 +2276,14 @@ proxy_write:
 			st = cat_getattr(cd, cd->current_fh.fileid, &inode);
 			if (st == MDS_OK && written > 0) {
 				struct timespec now;
+				/* POSIX: a content write by an unprivileged
+				 * caller clears SUID (and SGID when group-
+				 * exec is set).  Fold the mode update into
+				 * the same catalogue write. */
+				uint32_t wr_clear_mode = 0;
+				bool wr_clear = compound_write_clears_setid(
+					cd, &inode, &wr_clear_mode);
+
 				clock_gettime(CLOCK_REALTIME, &now);
 				inode.mtime = now;
 				inode.ctime = now;
@@ -2228,12 +2292,18 @@ proxy_write:
 					inode.size = new_end;
 					inode.space_used = new_end;
 				}
+				if (wr_clear) {
+					inode.mode = wr_clear_mode;
+				}
 				{
 					/* setattr always bumps ctime+change;
 					 * we add MTIME_NOW + SIZE if extending. */
 					uint32_t mask = MDS_ATTR_MTIME_NOW;
 					if (new_end > pre_write_size) {
 						mask |= MDS_ATTR_SIZE;
+					}
+					if (wr_clear) {
+						mask |= MDS_ATTR_MODE;
 					}
 					(void)cat_setattr(cd, inode.fileid,
 							     &inode, mask);

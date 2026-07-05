@@ -93,6 +93,13 @@
 /* Word 2 (bits 64-95) */
 #define FATTR4_LAYOUT_BLKSIZE  66
 #define FATTR4_MDSTHRESHOLD    68
+/* RFC 8881 S18.16 -- attrs the server accepts inside an
+ * EXCLUSIVE4_1 createattrs.  REQUIRED whenever the server
+ * advertises the EXCLUSIVE4_1 create mode: the Linux client
+ * intersects the app's requested create attrs with this bitmap,
+ * so leaving it unadvertised makes every O_CREAT|O_EXCL file
+ * silently lose its mode (created 0600, no follow-up SETATTR). */
+#define FATTR4_SUPPATTR_EXCLCREAT 75
 /* RFC 7862 S10.2.3 -- change_attr_type (bit 79).
  *
  * When a client requests this attribute, we advertise that every

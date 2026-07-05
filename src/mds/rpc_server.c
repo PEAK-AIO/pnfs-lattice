@@ -131,6 +131,7 @@ struct rpc_server {
     bool gpudirect_required;
     bool skip_transient_ndb;
     bool hide_referral_junctions;
+    bool posix_dac;
     enum nfs_auth_mode min_auth;
     struct mds_proxy_ctx            *proxy;
     struct health_monitor           *hm;
@@ -1169,6 +1170,7 @@ wrongsec:
 	cd.gpudirect_required = srv->gpudirect_required;
 	cd.skip_transient_ndb = srv->skip_transient_ndb;
 	cd.cfg_hide_referral_junctions = srv->hide_referral_junctions;
+	cd.cfg_posix_dac = srv->posix_dac;
         cd.auth_flavor = cred_flavor;
         cd.cred_uid = cred_uid;
         cd.cred_gid = cred_gid;
@@ -1786,6 +1788,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->gpudirect_required = cfg->gpudirect_required;
     srv->skip_transient_ndb = cfg->skip_transient_ndb;
     srv->hide_referral_junctions = cfg->hide_referral_junctions;
+    srv->posix_dac = cfg->posix_dac;
     srv->min_auth = cfg->min_auth;
     srv->gss_tbl = cfg->gss_tbl;
     srv->tp = cfg->tp;

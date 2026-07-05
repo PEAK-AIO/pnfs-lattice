@@ -661,6 +661,29 @@ filesystem path on the MDS or any DS.  Example:
 mountd_compat_exports = /pnfs, /scratch
 .fi
 .RE
+.SS "Access control"
+.TP
+.B posix_dac
+.I bool
+(default
+.BR true ).
+Enforce POSIX permission semantics for
+.B AUTH_SYS
+requests: owner-only
+.BR chmod / chown / utimes ,
+directory write+search bits for namespace mutations
+(CREATE/REMOVE/RENAME/LINK/OPEN-create), search bits on LOOKUP, the
+.B S_ISVTX
+sticky-deletion rule, root-only device-node creation, and SUID/SGID
+clearing on chown, truncate, and write.
+.B uid 0
+bypasses the permission gates (there is no root squash).  Setting
+.B false
+restores the historical permissive behaviour where any principal
+could mutate any object \(em only sensible on fully-trusted
+single-user clusters.  Requests authenticated with flavors other
+than AUTH_SYS (AUTH_NONE, RPCSEC_GSS) are not subject to these
+checks.
 .SS "Auto-split"
 .TP
 .B auto_split_enabled

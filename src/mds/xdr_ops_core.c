@@ -353,22 +353,71 @@ bool decode_op_putfh(XDR *xdrs, struct nfs4_op *op)
 }
 
 
+/**
+ * Consume an opaque of @p len bytes (plus XDR padding) without
+ * storing it.  Used for component4 names longer than MDS_MAX_NAME:
+ * the wire cursor must advance past the oversized name so the rest
+ * of the COMPOUND still decodes, while the handler reports
+ * NFS4ERR_NAMETOOLONG.  Chunks are multiples of 4 so per-chunk
+ * xdr_opaque_decode padding consumption only fires on the final
+ * partial chunk (same pattern as decode_layout_hint_attr).
+ */
+static bool xdr_skip_opaque_bytes(XDR *xdrs, uint32_t len)
+{
+    char skip[512];
+    uint32_t consumed = 0;
+
+    while (consumed < len) {
+        uint32_t chunk = len - consumed;
+
+        if (chunk > sizeof(skip)) {
+            chunk = (uint32_t)sizeof(skip);
+        }
+        if (!xdr_opaque_decode(xdrs, skip, chunk)) {
+            return false;
+        }
+        consumed += chunk;
+    }
+    return true;
+}
+
+/**
+ * Decode a component4 into @p buf (capacity MDS_MAX_NAME + 1).
+ *
+ * Names of up to MDS_MAX_NAME (255) bytes are stored NUL-terminated.
+ * Longer names are consumed from the wire and flagged via
+ * @p too_long so the op handler can return NFS4ERR_NAMETOOLONG --
+ * a decode failure here would surface as a connection-level XDR
+ * error (EIO on the client) instead of the POSIX errno.
+ */
+static bool xdr_decode_component4(XDR *xdrs, char *buf, bool *too_long)
+{
+    uint32_t len = 0;
+
+    *too_long = false;
+    if (!xdr_uint32_t(xdrs, &len)) {
+        return false;
+    }
+    if (len > MDS_MAX_NAME) {
+        if (!xdr_skip_opaque_bytes(xdrs, len)) {
+            return false;
+        }
+        buf[0] = '\0';
+        *too_long = true;
+        return true;
+    }
+    if (len > 0 && !xdr_opaque_decode(xdrs, buf, len)) {
+        return false;
+    }
+    buf[len] = '\0';
+    return true;
+}
+
 bool decode_op_lookup(XDR *xdrs, struct nfs4_op *op)
 {
     /* component4 = utf8str_cs = opaque<> */
-    uint32_t len = 0;
-
-    if (!xdr_uint32_t(xdrs, &len)) {
-        return false;
-}
-    if (len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, op->arg.lookup.name, len)) {
-        return false;
-}
-    op->arg.lookup.name[len] = '\0';
-    return true;
+    return xdr_decode_component4(xdrs, op->arg.lookup.name,
+                                 &op->arg.lookup.name_too_long);
 }
 
 
@@ -415,7 +464,9 @@ bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_create *a = &op->arg.create;
     uint32_t nfs_type;
-    uint32_t name_len;
+
+    a->name_too_long = false;
+    a->link_target_too_long = false;
 
     /* createtype4: type (enum) + type-specific data. */
     if (!xdr_uint32_t(xdrs, &nfs_type)) {
@@ -452,26 +503,27 @@ bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
             return false;
         }
         if (lt_len >= sizeof(a->link_target)) {
-            return false;
+            /* Target longer than PATH_MAX-1: consume the bytes and
+             * let op_create return NFS4ERR_NAMETOOLONG. */
+            if (!xdr_skip_opaque_bytes(xdrs, lt_len)) {
+                return false;
+            }
+            a->link_target[0] = '\0';
+            a->link_target_too_long = true;
+        } else {
+            if (lt_len > 0 &&
+                !xdr_opaque_decode(xdrs, a->link_target, lt_len)) {
+                return false;
+            }
+            a->link_target[lt_len] = '\0';
+            a->link_target_len = lt_len;
         }
-        if (lt_len > 0 && !xdr_opaque_decode(xdrs, a->link_target, lt_len)) {
-            return false;
-        }
-        a->link_target[lt_len] = '\0';
-        a->link_target_len = lt_len;
     }
 
     /* component4 objname */
-    if (!xdr_uint32_t(xdrs, &name_len)) {
+    if (!xdr_decode_component4(xdrs, a->name, &a->name_too_long)) {
         return false;
 }
-    if (name_len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, a->name, name_len)) {
-        return false;
-}
-    a->name[name_len] = '\0';
 
     /* createattrs4 (fattr4) — we parse mode from it. */
     {
@@ -492,69 +544,31 @@ bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
 
 bool decode_op_remove(XDR *xdrs, struct nfs4_op *op)
 {
-    uint32_t len = 0;
-
-    if (!xdr_uint32_t(xdrs, &len)) {
-        return false;
-}
-    if (len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, op->arg.remove.name, len)) {
-        return false;
-}
-    op->arg.remove.name[len] = '\0';
-    return true;
+    return xdr_decode_component4(xdrs, op->arg.remove.name,
+                                 &op->arg.remove.name_too_long);
 }
 
 
 bool decode_op_rename(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_rename *a = &op->arg.rename;
-    uint32_t len;
 
     /* oldname */
-    if (!xdr_uint32_t(xdrs, &len)) {
+    if (!xdr_decode_component4(xdrs, a->src_name,
+                               &a->src_name_too_long)) {
         return false;
 }
-    if (len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, a->src_name, len)) {
-        return false;
-}
-    a->src_name[len] = '\0';
 
     /* newname */
-    if (!xdr_uint32_t(xdrs, &len)) {
-        return false;
-}
-    if (len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, a->dst_name, len)) {
-        return false;
-}
-    a->dst_name[len] = '\0';
-    return true;
+    return xdr_decode_component4(xdrs, a->dst_name,
+                                 &a->dst_name_too_long);
 }
 
 
 bool decode_op_link(XDR *xdrs, struct nfs4_op *op)
 {
-    uint32_t len = 0;
-
-    if (!xdr_uint32_t(xdrs, &len)) {
-        return false;
-}
-    if (len >= MDS_MAX_NAME) {
-        return false;
-}
-    if (!xdr_opaque_decode(xdrs, op->arg.link.name, len)) {
-        return false;
-}
-    op->arg.link.name[len] = '\0';
-    return true;
+    return xdr_decode_component4(xdrs, op->arg.link.name,
+                                 &op->arg.link.name_too_long);
 }
 
 
@@ -600,6 +614,11 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
     uint32_t open_claim;
     uint32_t createmode;
     memset(&a->layout_hint, 0, sizeof(a->layout_hint));
+    /* The per-thread ops[] scratch is reused without zeroing, so
+     * every field consumed by op_open must be (re)initialised on
+     * each decode -- including the CLAIM_FH path that never reads
+     * a name. */
+    a->name_too_long = false;
 
     /* seqid (deprecated in v4.1 but still on wire) */
     if (!xdr_uint32_t(xdrs, &seqid_unused)) {
@@ -712,21 +731,12 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
     a->claim = (enum nfs4_claim_type)open_claim;
 
     switch (a->claim) {
-    case CLAIM_NULL: {
-        uint32_t name_len;
-
-        if (!xdr_uint32_t(xdrs, &name_len)) {
+    case CLAIM_NULL:
+        if (!xdr_decode_component4(xdrs, a->name,
+                                   &a->name_too_long)) {
             return false;
 }
-        if (name_len >= MDS_MAX_NAME) {
-            return false;
-}
-        if (!xdr_opaque_decode(xdrs, a->name, name_len)) {
-            return false;
-}
-        a->name[name_len] = '\0';
         break;
-    }
     case CLAIM_FH:
         /* No additional args for CLAIM_FH. */
         break;

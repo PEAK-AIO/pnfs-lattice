@@ -67,6 +67,7 @@ are logged as `WARN:` and the default is kept.
 ## Authentication
 - `nfs_auth_mode` — `sys|krb5|krb5i|krb5p`.
 - `krb5_keytab` / `krb5_principal` — GSS credentials.
+- `posix_dac` — bool.  Default: **true**.  Enforce POSIX permission semantics for AUTH_SYS requests: owner-only chmod/chown/utimes, directory write+search bits for CREATE/REMOVE/RENAME/LINK/OPEN(CREATE), search bits on LOOKUP, the S_ISVTX sticky-deletion rule, root-only device-node creation, and SUID/SGID clearing on chown/truncate/write.  `uid 0` bypasses the permission gates (no root squash).  Set to `false` to restore the historical permissive behaviour where any principal could mutate any object — only sensible on fully-trusted single-user clusters.  Non-AUTH_SYS flavors (AUTH_NONE, RPCSEC_GSS) are not subject to these checks because no usable uid/gid mapping exists at this layer.
 ## Directory delegations
 - `dir_delegations_enabled` — master switch.  Default: false.
 - `dir_deleg_recall_timeout_ms` — default CB_RECALL / CB_NOTIFY timeout (50..300000).  Default: 5000.  Scales the in-flight dedupe window.

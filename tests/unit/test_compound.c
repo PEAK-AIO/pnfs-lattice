@@ -4173,6 +4173,430 @@ static void test_rfc8276_xattr_no_fh(void)
 	close_test_cat(cat, root_path);
 }
 
+/* -----------------------------------------------------------------------
+ * POSIX DAC enforcement (posix_dac) -- chmod/chown/truncate gates,
+ * SGID drop, SUID/SGID clearing on chown, directory write bits,
+ * sticky-deletion, and the decoder NAMETOOLONG flags.
+ * ----------------------------------------------------------------------- */
+
+/** SETATTR builder with explicit mask + attr values. */
+static struct nfs4_op mk_setattr_attrs(uint32_t mask, uint32_t mode,
+				       uint64_t uid, uint64_t gid,
+				       uint64_t size)
+{
+	struct nfs4_op op;
+
+	memset(&op, 0, sizeof(op));
+	op.opnum = OP_SETATTR;
+	op.arg.setattr.mask = mask;
+	op.arg.setattr.attrs.mode = mode;
+	op.arg.setattr.attrs.uid = uid;
+	op.arg.setattr.attrs.gid = gid;
+	op.arg.setattr.attrs.size = size;
+	return op;
+}
+
+/** Seed a compound context with AUTH_SYS creds + DAC enforcement on. */
+static void dac_cd_init(struct compound_data *cd, uint32_t uid, uint32_t gid)
+{
+	compound_init(cd);
+	cd->cat = g_test_cat;
+	cd->prealloc = g_prealloc;
+	cd->cfg_posix_dac = true;
+	cd->auth_flavor = 1;  /* AUTH_SYS */
+	cd->cred_uid = uid;
+	cd->cred_gid = gid;
+}
+
+/** Root helper: create @name (mode) under root and chown it. */
+static void dac_seed_file(const char *name, uint32_t mode,
+			  uint64_t uid, uint64_t gid)
+{
+	struct compound_data cd;
+	struct nfs4_op ops[5];
+	struct nfs4_result res[5];
+	uint32_t n;
+
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create(name, MDS_FTYPE_REG, mode);
+	ops[3] = mk_setattr_attrs(MDS_ATTR_UID | MDS_ATTR_GID,
+				  0, uid, gid, 0);
+	n = compound_process(&cd, ops, res, 4);
+	VERIFY(n == 4);
+	VERIFY(res[2].status == NFS4_OK);
+	VERIFY(res[3].status == NFS4_OK);
+}
+
+static void test_dac_chmod_chown_gates(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[5];
+	struct nfs4_result res[5];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+	dac_seed_file("dac_f1", 0644, 1000, 1000);
+
+	/* Non-owner chmod -> EPERM (even though DAC would allow a
+	 * no-op: gate precedes the noop shortcut). */
+	dac_cd_init(&cd, 2000, 2000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f1");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 0644, 0, 0, 0);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[3].status, NFS4ERR_PERM);
+
+	/* Non-root chown to a different uid -> EPERM. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f1");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_UID, 0, 2000, 0, 0);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4ERR_PERM);
+
+	/* Owner chgrp to a non-member group -> EPERM. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f1");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_GID, 0, 0, 4242, 0);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4ERR_PERM);
+
+	/* Owner chmod -> OK, mode persisted. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f1");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 0600, 0, 0, 0);
+	ops[4] = mk_getattr();
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+	ASSERT_EQ(res[4].status, NFS4_OK);
+	ASSERT_EQ(res[4].res.getattr.inode.mode & 07777u, (uint32_t)0600);
+
+	close_test_db(db, path);
+}
+
+static void test_dac_sgid_dropped_for_non_member(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[5];
+	struct nfs4_result res[5];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+	/* Owned by uid 1000 but group 4242 (caller is NOT a member). */
+	dac_seed_file("dac_f2", 0644, 1000, 4242);
+
+	/* Owner chmod 02777: allowed, but S_ISGID silently dropped. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f2");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 02777, 0, 0, 0);
+	ops[4] = mk_getattr();
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+	ASSERT_EQ(res[4].status, NFS4_OK);
+	ASSERT_EQ(res[4].res.getattr.inode.mode & 07777u, (uint32_t)0777);
+
+	close_test_db(db, path);
+}
+
+static void test_dac_chown_clears_setid(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[5];
+	struct nfs4_result res[5];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+
+	/* SUID+SGID file; root chown must clear both (group-exec set). */
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("dac_f3", MDS_FTYPE_REG, 06775);
+	ops[3] = mk_setattr_attrs(MDS_ATTR_UID | MDS_ATTR_GID,
+				  0, 1000, 1000, 0);
+	ops[4] = mk_getattr();
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+	ASSERT_EQ(res[4].status, NFS4_OK);
+	ASSERT_EQ(res[4].res.getattr.inode.mode & 07777u, (uint32_t)0775);
+
+	/* Restore the setid bits, then a NO-OP chown (same uid/gid) by
+	 * the owner must STILL clear them (Linux chown_common sets
+	 * ATTR_KILL_S*ID on every chown syscall) -- and must not be
+	 * swallowed by the setattr no-op shortcut. */
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f3");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 06775, 0, 0, 0);
+	n = compound_process(&cd, ops, res, 4);
+	VERIFY(n == 4 && res[3].status == NFS4_OK);
+
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f3");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_UID | MDS_ATTR_GID,
+				  0, 1000, 1000, 0);
+	ops[4] = mk_getattr();
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+	ASSERT_EQ(res[4].status, NFS4_OK);
+	ASSERT_EQ(res[4].res.getattr.inode.mode & 07777u, (uint32_t)0775);
+
+	close_test_db(db, path);
+}
+
+static void test_dac_dir_write_and_sticky(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[6];
+	struct nfs4_result res[6];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+
+	/* Root: read-only dir + sticky dir with a uid-1000 file inside. */
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("dac_ro", MDS_FTYPE_DIR, 0555);
+	n = compound_process(&cd, ops, res, 3);
+	VERIFY(n == 3 && res[2].status == NFS4_OK);
+
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("dac_sticky", MDS_FTYPE_DIR, 01777);
+	ops[3] = mk_create("victim", MDS_FTYPE_REG, 0644);
+	ops[4] = mk_setattr_attrs(MDS_ATTR_UID | MDS_ATTR_GID,
+				  0, 1000, 1000, 0);
+	n = compound_process(&cd, ops, res, 5);
+	VERIFY(n == 5 && res[3].status == NFS4_OK && res[4].status == NFS4_OK);
+
+	/* uid 1000: CREATE in the 0555 dir -> EACCES. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_ro");
+	ops[3] = mk_create("nope", MDS_FTYPE_REG, 0644);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[3].status, NFS4ERR_ACCESS);
+
+	/* uid 2000 (neither file nor dir owner): sticky REMOVE -> EPERM. */
+	dac_cd_init(&cd, 2000, 2000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_sticky");
+	ops[3] = mk_remove("victim");
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4ERR_PERM);
+
+	/* uid 1000 (file owner): sticky REMOVE -> OK. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_sticky");
+	ops[3] = mk_remove("victim");
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+
+	close_test_db(db, path);
+}
+
+static void test_dac_truncate_requires_write(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[4];
+	struct nfs4_result res[4];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+	dac_seed_file("dac_f4", 0444, 1000, 1000);
+
+	/* Owner without write permission: truncate -> EACCES. */
+	dac_cd_init(&cd, 1000, 1000);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f4");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_SIZE, 0, 0, 0, 1);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4ERR_ACCESS);
+
+	/* Root bypasses. */
+	dac_cd_init(&cd, 0, 0);
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f4");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_SIZE, 0, 0, 0, 1);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+
+	close_test_db(db, path);
+}
+
+static void test_dac_disabled_or_non_authsys_permissive(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[4];
+	struct nfs4_result res[4];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+	dac_seed_file("dac_f5", 0644, 0, 0);  /* root-owned */
+
+	/* posix_dac off: non-owner chmod allowed (legacy behaviour). */
+	dac_cd_init(&cd, 1000, 1000);
+	cd.cfg_posix_dac = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f5");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 0777, 0, 0, 0);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+
+	/* Non-AUTH_SYS flavor (GSS=6): checks do not apply. */
+	dac_cd_init(&cd, 1000, 1000);
+	cd.auth_flavor = 6;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("dac_f5");
+	ops[3] = mk_setattr_attrs(MDS_ATTR_MODE, 0666, 0, 0, 0);
+	n = compound_process(&cd, ops, res, 4);
+	ASSERT_EQ(n, (uint32_t)4);
+	ASSERT_EQ(res[3].status, NFS4_OK);
+
+	close_test_db(db, path);
+}
+
+/** Decoder-flagged oversize names surface NFS4ERR_NAMETOOLONG. */
+static void test_nametoolong_flag_paths(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[6];
+	struct nfs4_result res[6];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+
+	/* LOOKUP */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_lookup("x");
+	ops[2].arg.lookup.name_too_long = true;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_NAMETOOLONG);
+
+	/* CREATE objname */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("x", MDS_FTYPE_REG, 0644);
+	ops[2].arg.create.name_too_long = true;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_NAMETOOLONG);
+
+	/* CREATE symlink target (PATH_MAX overflow) */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("y", MDS_FTYPE_SYMLINK, 0777);
+	ops[2].arg.create.link_target_too_long = true;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_NAMETOOLONG);
+
+	/* REMOVE */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_remove("x");
+	ops[2].arg.remove.name_too_long = true;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_NAMETOOLONG);
+
+	/* RENAME (either name) */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_savefh();
+	ops[3] = mk_putrootfh();
+	ops[4] = mk_rename("a", "b");
+	ops[4].arg.rename.dst_name_too_long = true;
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[4].status, NFS4ERR_NAMETOOLONG);
+
+	/* LINK */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_savefh();
+	ops[3] = mk_putrootfh();
+	ops[4] = mk_link("x");
+	ops[4].arg.link.name_too_long = true;
+	n = compound_process(&cd, ops, res, 5);
+	ASSERT_EQ(n, (uint32_t)5);
+	ASSERT_EQ(res[4].status, NFS4ERR_NAMETOOLONG);
+
+	close_test_db(db, path);
+}
+
 int main(void)
 {
 	fprintf(stdout, "Running compound dispatch tests:\n");
@@ -4258,6 +4682,15 @@ int main(void)
 	RUN_TEST(test_validate_name_dots_badname);
 	RUN_TEST(test_validate_name_slash_inval);
 	RUN_TEST(test_validate_name_bad_utf8_inval);
+
+	/* POSIX DAC enforcement (posix_dac) + NAMETOOLONG decode flags */
+	RUN_TEST(test_dac_chmod_chown_gates);
+	RUN_TEST(test_dac_sgid_dropped_for_non_member);
+	RUN_TEST(test_dac_chown_clears_setid);
+	RUN_TEST(test_dac_dir_write_and_sticky);
+	RUN_TEST(test_dac_truncate_requires_write);
+	RUN_TEST(test_dac_disabled_or_non_authsys_permissive);
+	RUN_TEST(test_nametoolong_flag_paths);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
 	return (tests_passed == tests_run) ? 0 : 1;
