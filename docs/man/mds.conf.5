@@ -666,8 +666,8 @@ mountd_compat_exports = /pnfs, /scratch
 .B posix_dac
 .I bool
 (default
-.BR true ).
-Enforce POSIX permission semantics for
+.BR false ).
+When enabled, enforce POSIX permission semantics for
 .B AUTH_SYS
 requests: owner-only
 .BR chmod / chown / utimes ,

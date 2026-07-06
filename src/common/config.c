@@ -251,9 +251,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Cosmetic: keep referral junctions visible in READDIR by default. */
     cfg->hide_referral_junctions = false;
 
-    /* POSIX DAC enforcement for AUTH_SYS requests (default ON --
-     * matches every mainstream NFS server; see pnfs_mds.h). */
-    cfg->posix_dac = true;
+    /* POSIX DAC enforcement for AUTH_SYS requests (default OFF --
+     * opt in with posix_dac=true; see pnfs_mds.h). */
+    cfg->posix_dac = false;
 
     /* Transient state caching (default: off -- open/layout state
      * write-through to RonDB for cross-MDS correctness). */
