@@ -746,6 +746,13 @@ enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 		/* TOCTOU: concurrent remove beat us; row already gone. */
 		return MDS_ERR_NOTFOUND;
 	}
+	if (rc == -2) {
+		/* Transient NDB contention (lock-wait timeouts) survived
+		 * every retry.  Surface as DELAY so the client backs off
+		 * and resends the REMOVE instead of failing the unlink
+		 * with EIO.  Same mapping as catalogue_rondb_ns_remove. */
+		return MDS_ERR_DELAY;
+	}
 	if (rc != 0) {
 		return MDS_ERR_IO;
 	}
