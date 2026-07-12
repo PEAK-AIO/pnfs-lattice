@@ -143,6 +143,7 @@ struct rpc_server_config {
     bool skip_transient_ndb; /**< Skip NDB for open/layout state. */
     bool hide_referral_junctions; /**< Hide /shardN referral junctions from root READDIR. */
     bool posix_dac; /**< Enforce POSIX permission semantics for AUTH_SYS. */
+    bool referral_strict; /**< NFS4ERR_MOVED for foreign-shard FHs. */
     enum nfs_auth_mode min_auth; /**< Minimum NFS auth level. */
     struct mds_gss_table *gss_tbl; /**< GSS context table (NULL if SYS). */
     struct threadpool *tp; /**< Worker pool for COMPOUND dispatch (NULL = inline). */

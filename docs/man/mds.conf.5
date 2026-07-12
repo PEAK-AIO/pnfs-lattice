@@ -701,6 +701,15 @@ than AUTH_SYS (AUTH_NONE, RPCSEC_GSS) are not subject to these
 checks.
 .SS "Auto-split"
 .TP
+.B referral_strict
+= true|false (default: true)
+Enforce the referral topology.  Operations on a filehandle whose
+subtree is owned by another MDS return NFS4ERR_MOVED so the client
+re-walks the path and follows the junction referral.  Only registered
+/shardN partition subtrees are affected; the unsharded namespace is
+served by any MDS.  GETATTR requesting fs_locations and
+filehandle/session plumbing operations are exempt.
+.TP
 .B auto_split_enabled
 .I bool
 (default

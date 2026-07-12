@@ -855,6 +855,16 @@ struct mds_config {
      */
     bool                posix_dac;
 
+    /*
+     * Enforce referral topology: reject operations on filehandles
+     * whose subtree is owned by another MDS with NFS4ERR_MOVED so the
+     * client re-walks the path and follows the junction referral.
+     * Only affects registered /shardN partition subtrees; the
+     * unsharded namespace is served by any MDS.  Default ON.
+     * INI key: referral_strict = true|false.
+     */
+    bool                referral_strict;
+
     /* DS async prepare (Phase 6) */
     uint32_t            ds_prepare_queue_depth; /* Per-DS queue (0 = default 4096). */
     uint32_t            ds_prepare_workers;     /* Worker threads (0 = 1 per DS). */

@@ -1780,6 +1780,12 @@ struct layout_recall     *lr;
 	 * compound_init()'s zeroing and opt in explicitly. */
 	bool                      cfg_posix_dac;
 
+	/* Referral topology enforcement (`referral_strict` in mds.conf,
+	 * default true).  When set, operations on an FH whose subtree is
+	 * owned by another MDS return NFS4ERR_MOVED (compound.c dispatch
+	 * gate) instead of being served from the shared catalogue. */
+	bool                      cfg_referral_strict;
+
 	/* RFC 8881 §16.2.4 — current stateid tracking.
 	 *
 	 * Updated by ops that PRODUCE a stateid (OPEN, OPEN_DOWNGRADE,
