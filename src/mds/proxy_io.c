@@ -1076,7 +1076,7 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
                     + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
                 int64_t nth_us = (t2.tv_sec - t1.tv_sec) * 1000000LL
                     + (t2.tv_nsec - t1.tv_nsec) / 1000LL;
-                MDS_LOG_INFO(LOG_COMP_MDS,
+                MDS_LOG_DEBUG(LOG_COMP_MDS,
                     "FH_TIMING syscall: open=%" PRId64 "us nth=%" PRId64
                     "us total=%" PRId64 "us",
                     open_us, nth_us, open_us + nth_us);
@@ -1124,7 +1124,7 @@ fallback_rpc:
         {
             int64_t rpc_us = (tr1.tv_sec - tr0.tv_sec) * 1000000LL
                 + (tr1.tv_nsec - tr0.tv_nsec) / 1000LL;
-            MDS_LOG_INFO(LOG_COMP_MDS,
+            MDS_LOG_DEBUG(LOG_COMP_MDS,
                 "FH_TIMING rpc_fallback: %" PRId64 "us", rpc_us);
         }
         return MDS_OK;
