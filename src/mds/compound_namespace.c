@@ -66,6 +66,7 @@ static bool compound_next_op_requests_fs_locations(const struct compound_data *c
            nfs4_bitmap_test(next->arg.getattr.requested, FATTR4_FS_LOCATIONS);
 }
 
+
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum nfs4_status op_access(struct compound_data *cd,
 				  const struct nfs4_op *op,
@@ -335,6 +336,16 @@ enum nfs4_status op_putfh(struct compound_data *cd,
 		}
 	}
 
+	/* Subtree ownership comes from the wire FH itself: v1 FHs
+	 * round-trip the owner_mds_id stamped at LOOKUP/GETFH time, so a
+	 * cached FH deep inside a foreign shard still gates correctly
+	 * (compound.c MOVED dispatch) with no catalogue I/O here.  An
+	 * ancestry walk was tried instead and abandoned: it put an NDB
+	 * read on the PUTFH hot path, and a single wedged read left the
+	 * worker stuck mid-compound (client OPEN never answered).
+	 * Legacy v0 FHs decode owner 0 and are never gated (fail-open,
+	 * single-namespace semantics). */
+
 	return NFS4_OK;
 }
 
@@ -592,12 +603,13 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 
 	cd->current_fh.fileid = child.fileid;
 	/* FH-encoded subtree ownership (suggested by Gaurav Gangalwar's
-	 * code review): stamp the local MDS id so PUTFH-starting compounds
-	 * and the cross-MDS routing block (compound.c MOVED dispatch) can
-	 * recover ownership directly from the FH instead of relying on
-	 * compound-local path tracking that does not survive across
-	 * COMPOUND boundaries.  Local LOOKUP — owner is this MDS.  The
-	 * child's generation comes from the catalogue read above. */
+	 * code review): stamp the SUBTREE owner -- not the serving MDS --
+	 * so PUTFH-starting compounds and the cross-MDS routing block
+	 * (compound.c MOVED dispatch) can recover ownership directly from
+	 * the FH.  For the referral-discovery lookup of a junction this
+	 * tags the junction FH with its foreign owner, so nothing beyond
+	 * GETATTR(fs_locations) can be done with it.  The child's
+	 * generation comes from the catalogue read above. */
 	cd->current_fh.owner_mds_id = cd->mds_id;
 	cd->current_fh.generation = child.generation;
 	/* Seed snapshot with authoritative child inode from normal
@@ -623,6 +635,18 @@ enum nfs4_status op_lookup(struct compound_data *cd,
 		if (n < 0 || (size_t)n >= sizeof(cd->current_path) - plen) {
 			return NFS4ERR_NAMETOOLONG;
 }
+	}
+	/* FH-encoded subtree ownership: longest-prefix owner of the
+	 * resolved path (in-memory map lookup, no catalogue I/O).  The
+	 * root entry means unsharded namespace -- keep the local stamp. */
+	if (cd->cfg_referral_strict && cd->smap != NULL) {
+		struct subtree_entry sub_se;
+
+		if (subtree_map_lookup(cd->smap, cd->current_path,
+				       &sub_se) == MDS_OK &&
+		    !(sub_se.path[0] == '/' && sub_se.path[1] == '\0')) {
+			cd->current_fh.owner_mds_id = sub_se.owner_mds_id;
+		}
 	}
 	resolve_and_apply_shard(cd, cd->current_path);
 	return NFS4_OK;
@@ -3000,9 +3024,10 @@ enum nfs4_status op_lookupp(struct compound_data *cd,
 	}
 
 	cd->current_fh.fileid = inode.parent_fileid;
-	/* FH-encoded subtree ownership: the parent of a local inode is
-	 * itself local on this MDS.  Stamp owner_mds_id; generation is
-	 * filled in below once we have re-read the parent inode. */
+	/* FH-encoded subtree ownership: resolve the parent's subtree by
+	 * ancestry (a LOOKUPP from just inside a junction lands ON the
+	 * junction root, which is foreign); generation is filled in
+	 * below once we have re-read the parent inode. */
 	cd->current_fh.owner_mds_id = cd->mds_id;
 	cd->current_fh.generation = 0;
 	/* Update current_path when known. */

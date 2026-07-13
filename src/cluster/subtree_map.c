@@ -182,6 +182,50 @@ static int find_exact(const struct subtree_map *m, const char *path)
     return -1;
 }
 
+enum mds_status subtree_map_set_root_fileid(struct subtree_map *map,
+                                            const char *path,
+                                            uint64_t fileid)
+{
+    int idx;
+
+    if (map == NULL || path == NULL) { return MDS_ERR_INVAL;
+}
+    pthread_rwlock_wrlock(&map->lock);
+    idx = find_exact(map, path);
+    if (idx < 0) {
+        pthread_rwlock_unlock(&map->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    map->entries[idx].root_fileid = fileid;
+    pthread_rwlock_unlock(&map->lock);
+    return MDS_OK;
+}
+
+int subtree_map_owner_for_root_fileid(const struct subtree_map *map,
+                                      uint64_t fileid,
+                                      uint32_t *owner_out)
+{
+    struct subtree_map *m = (struct subtree_map *)(uintptr_t)map;
+    int found = 0;
+
+    if (m == NULL || fileid == 0) { return 0;
+}
+    pthread_rwlock_rdlock(&m->lock);
+    for (uint32_t i = 0; i < m->count; i++) {
+        if (m->entries[i].root_fileid != fileid) { continue;
+}
+        if (m->entries[i].path[0] == '/' &&
+            m->entries[i].path[1] == '\0') { continue;
+}
+        if (owner_out != NULL) { *owner_out = m->entries[i].owner_mds_id;
+}
+        found = 1;
+        break;
+    }
+    pthread_rwlock_unlock(&m->lock);
+    return found;
+}
+
 /* -----------------------------------------------------------------------
  * apply_subtree_upsert / apply_subtree_remove
  *
@@ -934,11 +978,15 @@ enum mds_status referral_build(const struct subtree_map *map,
     if (st != MDS_OK) { return st;
 }
 
-    /* rootpath is "/" -- each target MDS exports its subtree
-     * at its own root.  The client mounts MDS_N:/ and sees
-     * the subtree as the top-level namespace (RFC 8881 S11.11). */
+    /* rootpath is the subtree path itself: every MDS exports the
+     * full shared namespace at "/", so the fs_location must direct
+     * the client to <owner>:<subtree-path> (RFC 8881 S11.11).  The
+     * previous hard-coded "/" pointed clients at the owner's global
+     * root, silently aliasing every referral submount to the root
+     * directory: all subtrees shared one server directory (cross-
+     * subtree collisions) and the real subtree dirs stayed empty. */
     (void)snprintf(loc->rootpath, sizeof(loc->rootpath),
-                   "/");
+                   "%s", entry.path);
     return MDS_OK;
 }
 

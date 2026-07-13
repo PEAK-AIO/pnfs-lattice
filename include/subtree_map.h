@@ -33,6 +33,10 @@ struct subtree_entry {
     uint64_t            version;
     enum subtree_state  state;
     _Atomic uint64_t    op_count;  /**< Advisory per-subtree op counter. */
+    uint64_t            root_fileid; /**< Fileid of the subtree root dir
+                                       *  (0 = unresolved).  Lets FH-based
+                                       *  ancestry walks recognise a
+                                       *  junction without a path. */
 };
 
 /* -----------------------------------------------------------------------
@@ -210,6 +214,29 @@ uint32_t subtree_map_count(const struct subtree_map *map);
 enum mds_status subtree_map_get_entry(const struct subtree_map *map,
                                       uint32_t idx,
                                       struct subtree_entry *out);
+
+/**
+ * @brief Record the root-directory fileid for a subtree entry.
+ *
+ * Resolved once at startup (and again on partition reload) by walking
+ * the entry's path through the catalogue.  Enables fileid-based
+ * junction identification for FHs presented without a path.
+ */
+enum mds_status subtree_map_set_root_fileid(struct subtree_map *map,
+                                            const char *path,
+                                            uint64_t fileid);
+
+/**
+ * @brief Look up the owning MDS of a junction by its root fileid.
+ *
+ * Only matches non-root entries whose root_fileid has been resolved.
+ *
+ * @return 1 and sets *owner_out when fileid is a registered junction
+ *         root; 0 otherwise.
+ */
+int subtree_map_owner_for_root_fileid(const struct subtree_map *map,
+                                      uint64_t fileid,
+                                      uint32_t *owner_out);
 
 
 /**

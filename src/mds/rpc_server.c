@@ -23,6 +23,7 @@
 #include <netinet/tcp.h>
 
 #include "rpc_server.h"
+#include "mds_metrics.h"
 #include "nfs4_cb.h"    /* nfs4_cb_deliver_reply */
 #include "xdr_codec.h"
 #include "compound.h"
@@ -56,6 +57,14 @@ struct rpc_conn {
     bool      have_frag_hdr;  /**< Have we read the 4-byte frag header? */
     uint8_t   hdr_buf[4];    /**< Partial fragment header accumulator. */
     uint32_t  hdr_pos;        /**< Bytes of hdr_buf filled. */
+
+    /* Backpressure parking: when a fully-assembled record cannot be
+     * submitted (worker pool full) it stays in recv_buf, the conn goes
+     * on the server's park list with EPOLLIN off, and the epoll loop
+     * retries the dispatch every few milliseconds.  Both fields are
+     * owned exclusively by the epoll thread. */
+    bool      record_parked;
+    struct rpc_conn *park_next;
 
     /* Output queue for EAGAIN handling -- circular buffer.
      * send_head is the read position; send_len is the count of
@@ -102,6 +111,10 @@ struct rpc_server {
     bool                     auto_widen_lease_on_4k;
     uint64_t                 write_verf;
     uint32_t                 max_conns;
+    /* Backpressure park list (epoll-thread owned).  Conns holding an
+     * assembled-but-unsubmitted record; retried from the epoll loop. */
+    struct rpc_conn         *park_head;
+    uint32_t                 park_count;
     /* Phase 1: placement policy dispatcher for LAYOUTGET. */
     enum mds_placement_policy placement_policy;
     bool                     placement_policy_enabled;
@@ -132,6 +145,7 @@ struct rpc_server {
     bool skip_transient_ndb;
     bool hide_referral_junctions;
     bool posix_dac;
+    bool referral_strict;
     enum nfs_auth_mode min_auth;
     struct mds_proxy_ctx            *proxy;
     struct health_monitor           *hm;
@@ -1171,6 +1185,7 @@ wrongsec:
 	cd.skip_transient_ndb = srv->skip_transient_ndb;
 	cd.cfg_hide_referral_junctions = srv->hide_referral_junctions;
 	cd.cfg_posix_dac = srv->posix_dac;
+	cd.cfg_referral_strict = srv->referral_strict;
         cd.auth_flavor = cred_flavor;
         cd.cred_uid = cred_uid;
         cd.cred_gid = cred_gid;
@@ -1589,23 +1604,117 @@ static int dispatch_record(struct rpc_server *srv, struct rpc_conn *c)
     if (c->recv_len > 0) {
         memcpy(w->record, c->recv_buf, c->recv_len);
     }
-    c->recv_len = 0;  /* Record consumed; recv_buf free for the next one. */
 
     atomic_fetch_add_explicit(&c->inflight, 1, memory_order_relaxed);
 
     if (threadpool_submit(srv->tp, rpc_work_fn, w) != 0) {
-        /* Pool saturated.  Undo the in-flight bump and drop the record.
-         * NEVER process inline here: the epoll thread must not block on
-         * NDB/NFS I/O or it cannot drain comp_pipe completions. */
+        /* Pool saturated.  Undo the in-flight bump and RETAIN the
+         * record: recv_len stays non-zero so the bytes remain in
+         * recv_buf and the caller parks the connection for a retry
+         * from the epoll loop.  The old behaviour dropped the record
+         * here, forcing a 60s session-slot retransmit; repeated drops
+         * wedged the Linux client's session state machine.  NEVER
+         * process inline: the epoll thread must not block on NDB/NFS
+         * I/O. */
         atomic_fetch_sub_explicit(&c->inflight, 1, memory_order_relaxed);
         free(w);
         return 1;
     }
+    c->recv_len = 0;  /* Record consumed; recv_buf free for the next one. */
     return 0;
+}
+
+static void conn_begin_close(struct rpc_server *srv, struct rpc_conn *c);
+
+/** Disarm EPOLLIN and enqueue @a c on the park list (idempotent). */
+static void park_conn(struct rpc_server *srv, struct rpc_conn *c)
+{
+    struct epoll_event ev;
+
+    if (!c->record_parked) {
+        c->record_parked = true;
+        c->park_next = srv->park_head;
+        srv->park_head = c;
+        srv->park_count++;
+        atomic_fetch_add_explicit(&g_branch_metrics.rpc_parks, 1,
+                                  memory_order_relaxed);
+    }
+    ev.events = 0;
+    ev.data.fd = c->fd;
+    (void)epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, c->fd, &ev);
+}
+
+/** Remove @a c from the park list and clear its parked state. */
+static void park_unlink(struct rpc_server *srv, struct rpc_conn *c)
+{
+    struct rpc_conn **pp = &srv->park_head;
+
+    while (*pp != NULL) {
+        if (*pp == c) {
+            *pp = c->park_next;
+            srv->park_count--;
+            break;
+        }
+        pp = &(*pp)->park_next;
+    }
+    c->park_next = NULL;
+    c->record_parked = false;
+}
+
+/**
+ * Retry parked records.  Called from the epoll loop (which drops its
+ * wait timeout to a few ms while the list is non-empty).  Stops at the
+ * first still-saturated submit -- the pool is shared, so later entries
+ * would fail too.
+ */
+static void unpark_walk(struct rpc_server *srv)
+{
+    while (srv->park_head != NULL) {
+        struct rpc_conn *c = srv->park_head;
+        int dr;
+
+        if (c->fd < 0 || c->closing) {
+            park_unlink(srv, c);
+            continue;
+        }
+        dr = dispatch_record(srv, c);
+        if (dr == 1) {
+            break;  /* pool still full; retry next tick */
+        }
+        park_unlink(srv, c);
+        if (dr < 0) {
+            conn_begin_close(srv, c);
+            continue;
+        }
+        /* Dispatched: resume reading (and flushing) this conn. */
+        {
+            struct epoll_event rev;
+
+            rev.events = EPOLLIN;
+            pthread_mutex_lock(&c->send_lock);
+            if (c->send_len > 0) {
+                rev.events |= EPOLLOUT;
+            }
+            pthread_mutex_unlock(&c->send_lock);
+            rev.data.fd = c->fd;
+            (void)epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, c->fd, &rev);
+        }
+    }
 }
 
 static int conn_read(struct rpc_server *srv, struct rpc_conn *c)
 {
+    if (c->record_parked) {
+        /* A parked record still occupies recv_buf; the epoll loop's
+         * unpark walk owns the retry.  Keep EPOLLIN off (a worker
+         * completion may have re-armed it). */
+        struct epoll_event ev;
+
+        ev.events = 0;
+        ev.data.fd = c->fd;
+        (void)epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, c->fd, &ev);
+        return 0;
+    }
     for (;;) {
         /* Phase 1: read fragment header (4 bytes). */
         if (!c->have_frag_hdr) {
@@ -1679,9 +1788,11 @@ static int conn_read(struct rpc_server *srv, struct rpc_conn *c)
                     return -1;  /* allocation failure -- drop conn */
                 }
                 if (dr == 1) {
-                    /* Pool full: stop reading this cycle.  EPOLLIN stays
-                     * armed (level-triggered), so the next readiness
-                     * retries once the pool drains. */
+                    /* Pool full: park the assembled record and pause
+                     * this connection.  The epoll loop retries within
+                     * a few ms as workers drain -- no record is ever
+                     * dropped. */
+                    park_conn(srv, c);
                     return 0;
                 }
                 /* Bounded pipelining: at the in-flight cap, stop reading
@@ -1789,6 +1900,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->skip_transient_ndb = cfg->skip_transient_ndb;
     srv->hide_referral_junctions = cfg->hide_referral_junctions;
     srv->posix_dac = cfg->posix_dac;
+    srv->referral_strict = cfg->referral_strict;
     srv->min_auth = cfg->min_auth;
     srv->gss_tbl = cfg->gss_tbl;
     srv->tp = cfg->tp;
@@ -1998,6 +2110,9 @@ static void conn_begin_close(struct rpc_server *srv, struct rpc_conn *c)
         return;
     }
     c->closing = true;
+    if (c->record_parked) {
+        park_unlink(srv, c);
+    }
     /* Unbind backchannel before we stop watching the fd. */
     if (srv->st != NULL) {
         session_unbind_conn(srv->st, c);
@@ -2186,7 +2301,12 @@ int rpc_server_start(struct rpc_server *srv)
             drain_close_stack(srv);
         }
 
-        int nfds = epoll_wait(srv->epoll_fd, events, 64, 1000);
+        if (srv->park_head != NULL) {
+            unpark_walk(srv);
+        }
+
+        int nfds = epoll_wait(srv->epoll_fd, events, 64,
+                              srv->park_head != NULL ? 5 : 1000);
 
         if (nfds < 0) {
             if (errno == EINTR) {

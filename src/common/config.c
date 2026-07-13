@@ -261,6 +261,10 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * opt in with posix_dac=true; see pnfs_mds.h). */
     cfg->posix_dac = false;
 
+    /* Referral topology enforcement (default ON -- foreign-shard FHs
+     * get NFS4ERR_MOVED; see pnfs_mds.h). */
+    cfg->referral_strict = true;
+
     /* Transient state caching (default: off -- open/layout state
      * write-through to RonDB for cross-MDS correctness). */
     cfg->transient_state_cache = false;
@@ -1117,6 +1121,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "posix_dac") == 0) {
             cfg->posix_dac = (strcmp(val, "true") == 0 ||
                               strcmp(val, "1") == 0);
+        } else if (strcmp(key, "referral_strict") == 0) {
+            cfg->referral_strict = (strcmp(val, "true") == 0 ||
+                                    strcmp(val, "1") == 0);
         } else if (strcmp(key, "ds_fh_format") == 0) {
             if (strcmp(val, "opaque") == 0) {
                 cfg->ds_fh_knfsd_strict = false;

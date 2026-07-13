@@ -1214,22 +1214,51 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 	 * propagated through PUTFH/GETFH/LOOKUP (Phase 1 pending).
 	 * The guard is structurally ready for when v1 FH
 	 * round-trip is complete. */
-#if 0  /* Disabled: cross-subtree hard links not yet semantically complete. */
-	if (cd->current_fh_set && cd->current_fh.owner_mds_id != 0 &&
+	/* Referral topology enforcement (referral_strict, default on).
+	 *
+	 * The shared catalogue lets ANY MDS serve ANY fileid, so a client
+	 * holding cached FHs under a /shardN junction keeps operating
+	 * against the wrong MDS after its referral submount expires --
+	 * silently bypassing the referral topology (wrong-MDS load, and
+	 * nosharecache cross-instance visibility races).  Reject such
+	 * operations with NFS4ERR_MOVED so the client re-walks the path
+	 * and follows the junction referral.  FH/session plumbing ops
+	 * pass, as does GETATTR requesting fs_locations (RFC 8881
+	 * S8.5.1 referral discovery).  Ownership is stamped server-side
+	 * at PUTFH/LOOKUP time by subtree ancestry; owner 0 (legacy or
+	 * unsharded namespace) is never gated. */
+	if (cd->cfg_referral_strict && cd->current_fh_set &&
+	    cd->current_fh.owner_mds_id != 0 &&
 	    cd->current_fh.owner_mds_id != cd->mds_id) {
+		bool fh_moved = true;
+
 		switch (op->opnum) {
-		case OP_GETATTR: case OP_SETATTR:
-		case OP_OPEN: case OP_CLOSE:
-		case OP_READ: case OP_WRITE: case OP_COMMIT:
-		case OP_LOCK: case OP_LOCKT: case OP_LOCKU:
-		case OP_LAYOUTGET: case OP_LAYOUTRETURN:
-		case OP_LAYOUTCOMMIT:
-			return NFS4ERR_MOVED;
+		case OP_SEQUENCE: case OP_EXCHANGE_ID:
+		case OP_CREATE_SESSION: case OP_DESTROY_SESSION:
+		case OP_DESTROY_CLIENTID: case OP_BIND_CONN_TO_SESSION:
+		case OP_RECLAIM_COMPLETE:
+		case OP_PUTFH: case OP_PUTROOTFH: case OP_PUTPUBFH:
+		case OP_GETFH: case OP_SAVEFH: case OP_RESTOREFH:
+		case OP_SECINFO: case OP_SECINFO_NO_NAME:
+		case OP_RENEW: case OP_RELEASE_LOCKOWNER:
+			fh_moved = false;
+			break;
+		case OP_GETATTR:
+			if (nfs4_bitmap_test(op->arg.getattr.requested,
+					     FATTR4_FS_LOCATIONS)) {
+				fh_moved = false;
+			}
+			break;
 		default:
 			break;
 		}
+		if (fh_moved) {
+			atomic_fetch_add_explicit(
+				&g_branch_metrics.nfs_moved, 1,
+				memory_order_relaxed);
+			return NFS4ERR_MOVED;
+		}
 	}
-#endif
 
 	/* Increment NFS operation counters. */
 	atomic_fetch_add_explicit(&g_branch_metrics.nfs_ops_total, 1,

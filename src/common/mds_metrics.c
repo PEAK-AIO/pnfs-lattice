@@ -434,6 +434,24 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
     }
     base += extra;
 
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# HELP pnfs_mds_nfs_moved_total Operations rejected with "
+        "NFS4ERR_MOVED by referral_strict routing.\n"
+        "# TYPE pnfs_mds_nfs_moved_total counter\n"
+        "pnfs_mds_nfs_moved_total %lu\n"
+        "# HELP pnfs_mds_rpc_parks_total Requests parked under worker-pool "
+        "backpressure (previously dropped).\n"
+        "# TYPE pnfs_mds_rpc_parks_total counter\n"
+        "pnfs_mds_rpc_parks_total %lu\n",
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->nfs_moved),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->rpc_parks));
+    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+        return -1;
+    }
+    base += extra;
+
     /*
      * Per-phase latency for OP_OPEN on the CLAIM_NULL + create
      * path.  These are nanosecond sums with matching counts

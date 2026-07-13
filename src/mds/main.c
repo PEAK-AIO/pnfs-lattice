@@ -618,6 +618,62 @@ int main(int argc, char *argv[])
 		 * periodic refresh of subtree ownership and peers. */
 		rondb_hb_arg_g.smap = smap;
 		rondb_hb_arg_g.membership = membership;
+
+		/* 4a-junction-roots.  Resolve each partition subtree path
+		 * to its root-directory fileid so FH-based ancestry walks
+		 * (referral_strict MOVED enforcement) can recognise a
+		 * junction from a raw PUTFH with no path.  A subtree whose
+		 * directory does not exist yet resolves on the next
+		 * restart; until then enforcement for it is inert
+		 * (fail-open). */
+		{
+			uint32_t sm_count = subtree_map_count(smap);
+
+			for (uint32_t si = 0; si < sm_count; si++) {
+				struct subtree_entry se;
+				char pbuf[MDS_MAX_PATH];
+				char *comp, *save = NULL;
+				uint64_t fid = MDS_FILEID_ROOT;
+				bool resolved = true;
+
+				if (subtree_map_get_entry(smap, si,
+							  &se) != MDS_OK) {
+					continue;
+				}
+				if (se.path[0] == '/' &&
+				    se.path[1] == '\0') {
+					continue;
+				}
+				(void)snprintf(pbuf, sizeof(pbuf), "%s",
+					       se.path);
+				for (comp = strtok_r(pbuf, "/", &save);
+				     comp != NULL;
+				     comp = strtok_r(NULL, "/", &save)) {
+					struct mds_inode child;
+
+					if (mds_cat_ns_lookup(cat, fid, comp,
+							      &child)
+					    != MDS_OK) {
+						resolved = false;
+						break;
+					}
+					fid = child.fileid;
+				}
+				if (resolved) {
+					(void)subtree_map_set_root_fileid(
+						smap, se.path, fid);
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"junction root %s -> "
+						"fileid %llu", se.path,
+						(unsigned long long)fid);
+				} else {
+					MDS_LOG_WARN(LOG_COMP_MDS,
+						"junction root %s not "
+						"resolved (directory "
+						"missing?)", se.path);
+				}
+			}
+		}
 	}
 #endif
 
@@ -1363,6 +1419,7 @@ int main(int argc, char *argv[])
 		rpc_cfg.skip_transient_ndb = cfg.transient_state_cache;
 		rpc_cfg.hide_referral_junctions = cfg.hide_referral_junctions;
 		rpc_cfg.posix_dac = cfg.posix_dac;
+		rpc_cfg.referral_strict = cfg.referral_strict;
 
 		/* Kerberos auth: initialize GSS if krb5+ requested. */
 		struct mds_gss_table *gss_tbl = NULL;
