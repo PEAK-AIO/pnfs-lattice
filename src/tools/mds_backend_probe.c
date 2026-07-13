@@ -117,11 +117,14 @@ int main(int argc, char *argv[])
             (void)fprintf(stdout, "RonDB bootstrap: %s\n",
                     cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));
         }
-#endif
         else {
+#endif
             cmd_st = MDS_ERR_INVAL;
             (void)fprintf(stdout, "Bootstrap: unsupported backend.\n");
+#ifdef HAVE_RONDB
         }
+#endif
+
         if (cmd_st != MDS_OK) {
             final_st = cmd_st;
         }
@@ -160,11 +163,13 @@ int main(int argc, char *argv[])
             (void)fprintf(stdout, "RonDB cleanup: %s\n",
                     cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));
         }
-#endif
         else {
+#endif
             cmd_st = MDS_ERR_INVAL;
             (void)fprintf(stdout, "Cleanup: unsupported backend.\n");
+#ifdef HAVE_RONDB
         }
+#endif
 
         if (cmd_st != MDS_OK) {
             final_st = cmd_st;
