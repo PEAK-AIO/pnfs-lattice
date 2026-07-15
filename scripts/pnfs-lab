@@ -400,17 +400,19 @@ client_mds_index() {
 }
 
 build_known_hosts() {
+    # Scoped to the ACTIVE profile: validate/deps/ssh-mesh operate on
+    # these sets, and unioning both profiles forced operators to keep
+    # the inactive profile's inventory populated and reachable.  Must
+    # run after apply_profile.
     local host
 
     KNOWN_MDS_HOSTS=()
-    for host in "${LAB_PROFILE_SINGLE_MDS_HOSTS[@]}" \
-        "${LAB_PROFILE_MULTI_MDS_HOSTS[@]}"; do
+    for host in "${ACTIVE_MDS_HOSTS[@]}"; do
         append_unique KNOWN_MDS_HOSTS "${host}"
     done
 
     KNOWN_RONDB_DATA_HOSTS=()
-    for host in "${LAB_PROFILE_SINGLE_RONDB_DATA_HOSTS[@]}" \
-        "${LAB_PROFILE_MULTI_RONDB_DATA_HOSTS[@]}"; do
+    for host in "${ACTIVE_RONDB_DATA_HOSTS[@]}"; do
         append_unique KNOWN_RONDB_DATA_HOSTS "${host}"
     done
 
@@ -469,6 +471,8 @@ apply_profile() {
             fail "Unknown profile: ${PROFILE}"
             ;;
     esac
+
+    build_known_hosts
 }
 
 load_inventory() {
@@ -512,7 +516,6 @@ load_inventory() {
     fi
 
     normalize_clients
-    build_known_hosts
     apply_profile
 
     ensure_equal_lengths "LAB_DS_HOSTS" "${#LAB_DS_HOSTS[@]}" \

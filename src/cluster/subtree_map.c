@@ -597,6 +597,84 @@ enum mds_status subtree_map_refresh_rondb(struct subtree_map *map,
     lc.loaded = 0;
     return catalogue_rondb_partition_map_list(cat, pm_load_cb, &lc);
 }
+
+enum mds_status subtree_map_seed_shards_rondb(
+	struct subtree_map *map,
+	struct mds_catalogue *cat,
+	uint32_t cluster_size,
+	const char *const *peer_hosts,
+	uint32_t peer_count)
+{
+	if (map == NULL || cat == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	if (cluster_size <= 1 || subtree_map_count(map) > 1) {
+		return MDS_OK;
+	}
+
+	for (uint32_t si = 0; si < cluster_size; si++) {
+		char spath[64];
+		uint32_t mds_id = si + 1;
+		const char *host = NULL;
+		enum mds_status ast;
+		enum mds_status pst;
+
+		(void)snprintf(spath, sizeof(spath),
+			       "/shard%u", (unsigned)mds_id);
+		if (peer_hosts != NULL && si < peer_count &&
+		    peer_hosts[si] != NULL && peer_hosts[si][0] != '\0') {
+			host = peer_hosts[si];
+		}
+
+		/*
+		 * Membership is not wired yet, so owner_role_ok allows
+		 * any owner_id.  Add to the local cache first so this
+		 * boot can serve referrals even if RonDB put fails.
+		 */
+		ast = subtree_map_add(map, spath, mds_id, host,
+				      SUBTREE_ACTIVE, 1);
+		if (ast != MDS_OK && ast != MDS_ERR_EXISTS) {
+			MDS_LOG_WARN(LOG_COMP_CLUSTER,
+				"partition seed %s failed: %d",
+				spath, (int)ast);
+			continue;
+		}
+
+		/*
+		 * Persist with partition_id == mds_id (root uses 0).
+		 * writeTuple upsert — safe if every MDS races the seed.
+		 */
+		pst = catalogue_rondb_partition_map_put(
+			cat, mds_id, mds_id, PM_STATE_ACTIVE, spath);
+		if (pst != MDS_OK) {
+			MDS_LOG_WARN(LOG_COMP_CLUSTER,
+				"partition_map put %s (id=%u) failed: %d "
+				"(in-memory seed kept for this boot)",
+				spath, (unsigned)mds_id, (int)pst);
+			if (ast == MDS_OK) {
+				MDS_LOG_INFO(LOG_COMP_CLUSTER,
+					"seeded partition %s -> MDS %u "
+					"(memory only)",
+					spath, (unsigned)mds_id);
+			}
+			continue;
+		}
+
+		if (ast == MDS_OK) {
+			MDS_LOG_INFO(LOG_COMP_CLUSTER,
+				"seeded partition %s -> MDS %u "
+				"(persisted to partition_map)",
+				spath, (unsigned)mds_id);
+		} else {
+			MDS_LOG_INFO(LOG_COMP_CLUSTER,
+				"persisted existing partition %s -> "
+				"MDS %u to partition_map",
+				spath, (unsigned)mds_id);
+		}
+	}
+
+	return MDS_OK;
+}
 #endif /* HAVE_RONDB */
 
 /* -----------------------------------------------------------------------

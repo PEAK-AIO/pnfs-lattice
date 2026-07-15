@@ -12235,7 +12235,7 @@ int rondb_shim_partition_map_put(void *handle, uint32_t partition_id,
     if (tbl == nullptr) { return -1; }
 
     if (rondb_encode_varbinary_string(subtree_path,
-                                      (uint32_t)std::strlen(subtree_path) + 1,
+                                      2U,
                                       path_value, sizeof(path_value),
                                       &path_value_len) != 0) {
         return -1;

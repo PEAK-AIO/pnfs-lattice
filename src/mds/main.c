@@ -565,39 +565,23 @@ int main(int argc, char *argv[])
 		}
 		/* Load peers from RonDB node_registry. */
 		(void)cluster_membership_populate_rondb(membership, cat);
-		/* 4a-shard. Auto-seed partition_map with /shardN entries
+		/* 4a-shard. Auto-seed + persist /shardN partition_map rows
 		 * when cluster_size > 1 and only the root entry exists.
-		 * Each MDS gets its own subtree for referral-based sharding.
 		 * Must run BEFORE set_membership -- the membership check
 		 * would reject remote MDS IDs that haven't joined yet. */
-		if (cfg.cluster_size > 1 &&
-		    subtree_map_count(smap) <= 1) {
-			for (uint32_t si = 0; si < cfg.cluster_size; si++) {
-				char spath[64];
-				uint32_t mds_id = si + 1;
-				(void)snprintf(spath, sizeof(spath),
-					"/shard%u", (unsigned)mds_id);
-				char host[64] = "";
-				if (si < cfg.cluster_allowed_peer_count) {
-					(void)snprintf(host, sizeof(host),
-						"%s",
-						cfg.cluster_allowed_peers[si]);
-				}
-				enum mds_status ast = subtree_map_add(
-					smap, spath, mds_id, host,
-					SUBTREE_ACTIVE, 1);
-				if (ast == MDS_OK) {
-					MDS_LOG_INFO(LOG_COMP_MDS,
-						"seeded partition "
-						"%s -> MDS %u",
-						spath, (unsigned)mds_id);
-				} else if (ast != MDS_ERR_EXISTS) {
-					MDS_LOG_WARN(LOG_COMP_MDS,
-						"partition seed "
-						"%s failed: %d",
-						spath, (int)ast);
-				}
+		{
+			const char *peers[MDS_MAX_NODES];
+			uint32_t pc = cfg.cluster_allowed_peer_count;
+
+			if (pc > MDS_MAX_NODES) {
+				pc = MDS_MAX_NODES;
 			}
+			for (uint32_t pi = 0; pi < pc; pi++) {
+				peers[pi] = cfg.cluster_allowed_peers[pi];
+			}
+			(void)subtree_map_seed_shards_rondb(
+				smap, cat, cfg.cluster_size,
+				peers, pc);
 		}
 
 		/* 4a-hosts. Always register MDS hostnames from config

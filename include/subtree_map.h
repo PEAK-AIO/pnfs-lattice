@@ -120,6 +120,38 @@ enum mds_status subtree_map_refresh_rondb(struct subtree_map *map,
                                           struct mds_catalogue *cat);
 
 /**
+ * @brief Seed /shardN partition rows for a multi-MDS cluster.
+ *
+ * When @p cluster_size > 1 and the map still has only the root entry
+ * (fresh RonDB install, or a prior release that never persisted shards),
+ * register `/shard1` .. `/shard{N}` owned by MDS 1..N in the in-memory
+ * map **and** upsert the same rows into RonDB `mds_partition_map` so
+ * subsequent restarts load them instead of re-seeding from scratch.
+ *
+ * Idempotent: existing in-memory paths are left alone; RonDB puts use
+ * write-tuple upsert.  @p partition_id for `/shardK` is K (root uses 0).
+ *
+ * Must run before @c subtree_map_set_membership — remote MDS IDs in the
+ * seed are not yet membership-joined.
+ *
+ * @param map           Subtree map from @c subtree_map_init_rondb.
+ * @param cat           RonDB catalogue handle.
+ * @param cluster_size  Configured MDS count (number of /shardN rows).
+ * @param peer_hosts    Optional IB/hostname list (index 0 = MDS 1); may
+ *                      be NULL.  Used only to register referral nodes.
+ * @param peer_count    Length of @p peer_hosts.
+ * @return MDS_OK if every shard was added or already present (RonDB
+ *         persist failures are logged as warnings but do not fail the
+ *         call — the in-memory seed still enables referrals this boot).
+ */
+enum mds_status subtree_map_seed_shards_rondb(
+	struct subtree_map *map,
+	struct mds_catalogue *cat,
+	uint32_t cluster_size,
+	const char *const *peer_hosts,
+	uint32_t peer_count);
+
+/**
  * @brief Look up the owning MDS for a given path.
  * @param map   Map handle.
  * @param path  Absolute path to look up.
