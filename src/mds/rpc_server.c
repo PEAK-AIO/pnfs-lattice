@@ -1806,6 +1806,25 @@ static int conn_read(struct rpc_server *srv, struct rpc_conn *c)
                     ev.events = 0;
                     ev.data.fd = c->fd;
                     epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD, c->fd, &ev);
+                    /* Lost-wakeup guard: every worker that finished
+                     * between the inflight load above and the disarm
+                     * has already done its re-arm MOD, which our
+                     * stale disarm just overwrote.  Their decrements
+                     * are visible by now (fetch_sub is acq_rel), so
+                     * re-check: if the connection drained below the
+                     * cap, re-arm EPOLLIN ourselves.  Workers that
+                     * complete after this load re-arm on their own
+                     * and their MOD lands after ours.  Without this,
+                     * the connection goes dark -- queued requests and
+                     * the client's retransmissions on it are never
+                     * read again (multi-second to permanent stalls). */
+                    if (atomic_load_explicit(&c->inflight,
+                                memory_order_acquire) <
+                            srv->max_inflight_per_conn) {
+                        ev.events = EPOLLIN;
+                        epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD,
+                                  c->fd, &ev);
+                    }
                     return 0;
                 }
                 continue;
@@ -2252,6 +2271,23 @@ static void handle_epoll_conn(struct rpc_server *srv,
             emod.data.fd = c->fd;
             epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD,
                       c->fd, &emod);
+            /* Lost-wakeup guard, send-side mirror of the in-flight
+             * gate fix: a worker may have queued a new reply and armed
+             * EPOLLOUT in the window between our drain-to-empty (lock
+             * dropped above) and this EPOLLIN-only disarm, which just
+             * clobbered its EPOLLOUT.  Re-check under the lock; if
+             * bytes reappeared, re-arm EPOLLOUT.  Without this the
+             * reply sits unsent forever -- the client blocks on the
+             * missing response and its NFSv4.1 session stalls into the
+             * delayq (looks like an idle MDS + a wedged client). */
+            pthread_mutex_lock(&c->send_lock);
+            int again = (c->send_len > 0);
+            pthread_mutex_unlock(&c->send_lock);
+            if (again) {
+                emod.events = EPOLLIN | EPOLLOUT;
+                epoll_ctl(srv->epoll_fd, EPOLL_CTL_MOD,
+                          c->fd, &emod);
+            }
         }
     }
 
