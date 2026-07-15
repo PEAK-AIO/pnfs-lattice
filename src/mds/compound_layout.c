@@ -586,6 +586,25 @@ static enum nfs4_status layout_select_grant_range(
 	if (window == 0) {
 		window = 1;
 	}
+	/* Streaming-write fix: on a freshly written file the committed
+	 * size lags the client's writeback offsets (size only advances
+	 * at LAYOUTCOMMIT), so the remaining-to-EOF widening above never
+	 * fires for a first write and every writeback LAYOUTGET was
+	 * granted only the stripe-unit floor (64 KiB).  A multi-GiB
+	 * buffered write then accumulates tens of thousands of tiny
+	 * lsegs client-side; lseg list handling goes quadratic and the
+	 * client wedges in a LAYOUTGET/return-marking loop.  Widen every
+	 * grant to the configured maximum window instead -- RFC 8881
+	 * S18.43.3 explicitly allows returning more than requested, and
+	 * the whole-file RW grant is this server's stated policy (see
+	 * the Phase 6 comment in op_layoutget). */
+	{
+		uint64_t wide = atomic_load(&mds_layout_grant_max_length);
+
+		if (window < wide) {
+			window = wide;
+		}
+	}
 	window = layout_clamp_grant_length(a->offset, window);
 	if (window == 0) {
 		return NFS4ERR_INVAL;
