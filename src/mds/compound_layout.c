@@ -995,6 +995,22 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	    !(inode.flags & MDS_IFLAG_DS_PENDING)) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
 }
+
+	/* HPC-Shared wide-striped files: no shipping Linux flex-files
+	 * client can address a multi-DS stripe map correctly.  The
+	 * striped XDR form (one mirror, ds_count == stripe_count) is
+	 * only consumed by 6.18+ clients, and the legacy form makes a
+	 * pre-6.18 client treat the stripes as MIRRORS -- every byte
+	 * replicated to all N DSes on write and read from any one of
+	 * them, which both amplifies writes N-fold and returns EOF for
+	 * ranges the chosen replica never received.  Until the client
+	 * fleet understands the striped form, serve wide files through
+	 * MDS proxy I/O (same LAYOUTUNAVAILABLE contract as inline
+	 * files): the proxy addresses the stripe map server-side, so
+	 * capacity and bandwidth still spread across the stripe set. */
+	if ((inode.flags & MDS_IFLAG_HPC_SHARED) != 0) {
+		return NFS4ERR_LAYOUTUNAVAILABLE;
+}
 	nst = layout_select_grant_range(
 		a, &inode, cd->cfg_stripe_unit,
 		&grant_offset, &grant_length);
