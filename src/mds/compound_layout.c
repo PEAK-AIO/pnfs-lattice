@@ -908,6 +908,68 @@ static enum nfs4_status layout_revoke_unready_grant(
 	return NFS4ERR_DELAY;
 }
 
+/*
+ * Verify-on-serve for wide (multi-stripe) HPC-Shared files.
+ *
+ * The DS filehandle for each stripe is captured once at create time
+ * and replayed by every later LAYOUTGET.  A backing file can vanish
+ * behind the catalogue's back -- a wiped or reinstalled DS, an orphan
+ * reaped out from under a stale inode -- and the stored handle then
+ * points at nothing, so a client's direct I/O fails with ESTALE and
+ * it floods LAYOUTERROR/LAYOUTGET.
+ *
+ * mds_proxy_ensure_ds_file_fh() is idempotent: it re-creates the file
+ * if absent and returns its current knfsd handle, which changes when
+ * the file was re-created.  Refresh every stripe's handle before the
+ * layout is cached or emitted; when any changed, rewrite the stripe
+ * map so the new handles are durable.  Best-effort and gated on a
+ * proxy: on ensure failure the entry is left as-is and the downstream
+ * layout_entries_ready_for_grant check turns it into NFS4ERR_DELAY
+ * (client backs off) rather than a busy-loop.
+ */
+static void layout_refresh_wide_stripe_fhs(struct compound_data *cd,
+					   uint64_t fileid,
+					   struct mds_ds_map_entry *entries,
+					   uint32_t stripe_count,
+					   uint32_t stripe_unit,
+					   uint32_t mirror_count)
+{
+	uint32_t total;
+	uint32_t i;
+	bool changed = false;
+
+	if (cd == NULL || cd->proxy == NULL || entries == NULL ||
+	    stripe_count == 0 || mirror_count == 0) {
+		return;
+	}
+	total = stripe_count * mirror_count;
+	for (i = 0; i < total; i++) {
+		uint8_t fh[MDS_NFS_FH_MAX];
+		uint32_t fh_len = sizeof(fh);
+		uint32_t s = i / mirror_count;
+		uint32_t m = i % mirror_count;
+		enum mds_status st = mds_proxy_ensure_ds_file_fh(
+			cd->proxy, entries[i].ds_id, fileid, s, m,
+			fh, &fh_len);
+
+		if (st != MDS_OK || fh_len == 0 ||
+		    fh_len > sizeof(entries[i].nfs_fh)) {
+			continue;
+		}
+		if (fh_len != entries[i].nfs_fh_len ||
+		    memcmp(fh, entries[i].nfs_fh, fh_len) != 0) {
+			entries[i].nfs_fh_len = fh_len;
+			memcpy(entries[i].nfs_fh, fh, fh_len);
+			changed = true;
+		}
+	}
+	if (changed && cd->cat != NULL) {
+		(void)mds_cat_stripe_map_put(cd->cat, NULL, fileid,
+					     stripe_count, stripe_unit,
+					     mirror_count, entries);
+	}
+}
+
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum nfs4_status op_layoutget(struct compound_data *cd,
 				     const struct nfs4_op *op,
@@ -1967,6 +2029,16 @@ fill_layoutget_result:
 	 * that reach this label have entries[] verified FH-ready by
 	 * their own (per-branch) layout_entries_ready_for_grant
 	 * checks, so the cached snapshot is always servable. */
+	/* Verify-on-serve: re-ensure DS backing files + refresh their
+	 * handles for wide HPC-Shared layouts before caching/emitting,
+	 * so LAYOUTGET can only ever hand out handles for files that
+	 * exist.  Cache hits already carry verified entries; skip them. */
+	if (inode_is_hpc_shared && stripe_count > 1 &&
+	    !layout_cache_was_hit && entries != NULL) {
+		layout_refresh_wide_stripe_fhs(cd, cd->current_fh.fileid,
+					       entries, stripe_count,
+					       stripe_unit, mirror_count);
+	}
 	if (cd->lcache != NULL &&
 	    !layout_cache_was_hit && entries != NULL &&
 	    stripe_count > 0 && mirror_count > 0) {
@@ -3001,6 +3073,18 @@ enum nfs4_status op_layouterror(struct compound_data *cd,
 			"LAYOUTERROR from client for DS %u "
 			"(advisory, not driving health state)",
 			(unsigned)ds_id);
+	}
+
+	/* Self-heal: a client I/O failure against a DS most often means
+	 * the stripe's backing file or its stored filehandle went stale.
+	 * Drop this file's cached layout so the next LAYOUTGET takes the
+	 * catalogue path, which re-ensures the DS files and refreshes
+	 * their handles (layout_refresh_wide_stripe_fhs).  Without this a
+	 * stale handle is replayed on every retry and the client floods
+	 * LAYOUTERROR/LAYOUTGET forever.  DS *health* state stays owned
+	 * solely by the probe -- we only invalidate one cache entry. */
+	if (cd->lcache != NULL) {
+		layout_cache_invalidate(cd->lcache, cd->current_fh.fileid);
 	}
 	return NFS4_OK;
 }
