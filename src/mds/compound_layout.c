@@ -1008,7 +1008,8 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * MDS proxy I/O (same LAYOUTUNAVAILABLE contract as inline
 	 * files): the proxy addresses the stripe map server-side, so
 	 * capacity and bandwidth still spread across the stripe set. */
-	if ((inode.flags & MDS_IFLAG_HPC_SHARED) != 0) {
+	if ((inode.flags & MDS_IFLAG_HPC_SHARED) != 0 &&
+	    !cd->cfg_hpc_serve_layouts) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
 }
 	nst = layout_select_grant_range(

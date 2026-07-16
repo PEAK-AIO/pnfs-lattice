@@ -924,6 +924,15 @@ struct mds_config {
     uint32_t            hpc_max_stripe_count;              /**< 0 = default 128. */
     enum mds_hpc_xdr_form hpc_xdr_form;                    /**< Default AUTO. */
 
+    /* Serve pNFS layouts for HPC-Shared (wide-striped) inodes.  Off
+     * (default) answers their LAYOUTGET with LAYOUTUNAVAILABLE so
+     * clients do READ/WRITE through the MDS proxy, which addresses
+     * the stripe map server-side -- correct on every client kernel.
+     * Turn on ONLY when the whole client fleet runs Linux 6.18+
+     * (multi-DS-per-mirror flex-files support); older clients treat
+     * the striped form's stripes as mirrors and corrupt data. */
+    bool hpc_serve_layouts;                                /**< Default false. */
+
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is
      * skipped -- in-memory tables are authoritative.  Safe for

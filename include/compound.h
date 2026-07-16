@@ -1692,6 +1692,7 @@ struct layout_recall     *lr;
 	 * the legacy one-DS-per-mirror form regardless of this setting.
 	 */
 	enum mds_hpc_xdr_form     cfg_hpc_xdr_form;
+	bool                      cfg_hpc_serve_layouts;
 	uint32_t                  cfg_stripe_lease_duration_ms;
 	uint64_t                  write_verf;   /* Server boot epoch (writeverf4) */
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */
