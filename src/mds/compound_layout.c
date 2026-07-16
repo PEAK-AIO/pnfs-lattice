@@ -69,6 +69,39 @@ static uint32_t deviceid_to_ds_id(const uint8_t did[NFS4_DEVICEID4_SIZE])
 	return ntohl(ds);
 }
 
+/** XDR opaque/string payload length including the 4-byte pad to 4. */
+static uint32_t xdr_padded_bytes(uint32_t n)
+{
+	return (n + 3U) & ~3U;
+}
+
+/**
+ * Exact on-the-wire size of one ff_data_server4 (RFC 8435), matching
+ * encode_ff_data_server4() in xdr_ops_layout.c: deviceid + efficiency +
+ * stateid + fh_count + fh + utf8 owner/group strings.
+ */
+static uint32_t ff_data_server4_wire_bytes(uint32_t fh_len,
+					   uint32_t uid, uint32_t gid)
+{
+	char ubuf[16];
+	char gbuf[16];
+	int ulen;
+	int glen;
+
+	ulen = snprintf(ubuf, sizeof(ubuf), "%u", uid);
+	glen = snprintf(gbuf, sizeof(gbuf), "%u", gid);
+	if (ulen < 0) {
+		ulen = 10;
+	}
+	if (glen < 0) {
+		glen = 10;
+	}
+	return 16U + 4U + 16U + 4U + 4U
+	       + xdr_padded_bytes(fh_len)
+	       + 4U + xdr_padded_bytes((uint32_t)ulen)
+	       + 4U + xdr_padded_bytes((uint32_t)glen);
+}
+
 
 /** Map flex transport policy to required transport bitmask. */
 static uint8_t ff_policy_transport(enum ff_transport_policy pol)
@@ -2212,41 +2245,62 @@ fill_layoutget_result:
 			want_ff_mirror_count = 1;
 		}
 	}
-	/* QA review Blocker 1 -- honor loga_maxcount per RFC 8881 S18.43.4.
+	/* Honor loga_maxcount per RFC 8881 S18.43.4.
 	 *
-	 * Estimate the encoded LAYOUTGET reply size from the geometry we
+	 * Estimate the encoded LAYOUTGET4resok size from the geometry we
 	 * are about to emit.  If it would exceed a->maxcount, return
-	 * NFS4ERR_TOOSMALL so the client can retry with a larger
-	 * maxcount instead of receiving a truncated body.
+	 * NFS4ERR_TOOSMALL.
 	 *
 	 * Outer wrapper bytes (constant): return_on_close (4) +
 	 * stateid (16) + layout_count (4) + layout4 header
 	 * (offset 8 + length 8 + iomode 4 + type 4) + body_len (4) = 52.
 	 *
-	 * Body bytes (worst case, derived from xdr_ops_layout.c):
-	 *   files layout : 64 + want_ds_count * (4 + MDS_NFS_FH_MAX + 4)
-	 *   flex-files   : 64 + 4 * want_ff_mirror_count
-	 *                  + worst_ds_count * FF_DATA_SERVER4_MAX_BYTES
-	 *                  where FF_DATA_SERVER4_MAX_BYTES = 256.
-	 *
-	 * We over-estimate to leave headroom for GSS wrapping / outer
-	 * compound framing, since the same client maxcount budget has to
-	 * cover the entire RPC reply.  An over-estimate that triggers
-	 * NFS4ERR_TOOSMALL on a marginal layout is safe: the client
-	 * retries with a bumped budget, and Linux clients send
-	 * maxcount=0xFFFFFFFF in practice so the path is rarely taken. */
+	 * IMPORTANT -- Linux flex-files (and files) layoutdrivers hardcode
+	 *   max_layoutget_response = PNFS_LAYOUT_MAXSIZE = 4096
+	 * and never bump maxcount on NFS4ERR_TOOSMALL (see
+	 * pnfs_alloc_init_layoutget_args / nfs4_layoutget_handle_exception
+	 * in Linux 6.19).  A false TOOSMALL therefore permanently disables
+	 * client-direct I/O: the client falls back to MDS WRITE, which for
+	 * wide HPC files does not place data on the DS stripes.  The
+	 * estimate below must track the real XDR size (per-DS FH + uid/gid
+	 * string lengths), not a loose 256-byte-per-DS ceiling that rejects
+	 * a valid 16-stripe layout (~1.5-3 KiB) as 4216 > 4096. */
 	if (a->maxcount > 0 && a->maxcount < UINT32_MAX) {
 		uint64_t outer_bytes = 52;
 		uint64_t body_bytes;
 		if (r->layout_type == LAYOUT4_FLEX_FILES) {
-			/* Striped form (want_ff_mirror_count == 1) and legacy
-			 * form both place want_ds_count DS entries on the wire
-			 * -- striped puts them inside one ff_mirror4, legacy
-			 * spreads them across one DS per mirror.  Either way
-			 * the body cost scales with want_ds_count. */
-			body_bytes = 64
-				   + 4ULL * want_ff_mirror_count
-				   + (uint64_t)want_ds_count * 256ULL;
+			uint64_t ds_bytes = 0;
+			uint32_t mi;
+
+			for (mi = 0; mi < want_ds_count; mi++) {
+				uint32_t emit_stripe = emit_start_stripe +
+					(mi / mirror_count);
+				uint32_t emit_mirror = mi % mirror_count;
+				uint32_t src_idx = emit_stripe * mirror_count +
+					emit_mirror;
+				uint32_t fh_len = MDS_NFS_FH_MAX;
+
+				if (entries != NULL &&
+				    src_idx < stripe_count * mirror_count &&
+				    entries[src_idx].nfs_fh_len > 0 &&
+				    entries[src_idx].nfs_fh_len <=
+					MDS_NFS_FH_MAX) {
+					fh_len = entries[src_idx].nfs_fh_len;
+				}
+				/* Worst-case decimal uid/gid ("4294967295").
+				 * Synth uids are not known until after this
+				 * gate; over-sizing the strings by a few
+				 * bytes is fine, a 256-byte flat tax is not. */
+				ds_bytes += ff_data_server4_wire_bytes(
+					fh_len, UINT32_MAX, UINT32_MAX);
+			}
+			/* stripe_unit(8) + outer ff_mirror_count(4)
+			 * + one ds_count(4) per emitted ff_mirror4
+			 * + ff_flags(4) + stats_hint(4). */
+			body_bytes = 8ULL + 4ULL
+				   + 4ULL * (uint64_t)want_ff_mirror_count
+				   + ds_bytes
+				   + 4ULL + 4ULL;
 		} else {
 			body_bytes = 64
 				   + (uint64_t)want_ds_count *
