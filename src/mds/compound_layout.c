@@ -2098,7 +2098,26 @@ fill_layoutget_result:
 	uint32_t emit_start_stripe = 0;
 	uint32_t emit_end_stripe   = (stripe_count > 0)
 		? (stripe_count - 1) : 0;
-	if (stripe_count > 1 && stripe_unit > 0 &&
+	/* Byte-range stripe subsetting DISABLED -- it corrupts striped
+	 * reads.  The Linux 6.18+ flex-files client dispatches I/O with
+	 *     dss_id = nfs4_ff_layout_calc_dss_id(stripe_unit,
+	 *                                         dss_count, offset)
+	 * i.e. a pure function of the EMITTED array's dss_count.  When
+	 * we trimmed ds[] to the stripes covering a narrow request but
+	 * still advertised the whole-file grant range, the client
+	 * dispatched over the shrunken array: chunk at logical stripe k
+	 * landed on emitted entry (k mod trimmed_count) instead of the
+	 * DS that actually holds it.  Writes were immune (the wide-
+	 * grant writeback path requests length == UINT64_MAX, skipping
+	 * the trim) but every partial-range READ -- e.g. readahead
+	 * after cache eviction -- returned data from the wrong DS:
+	 * write-verifies passed from the page cache while true DS
+	 * read-back was garbage.  Trimming can only ever be safe if the
+	 * emitted segment's (offset,length) is narrowed to exactly the
+	 * trimmed stripes AND the client indexes stripes relative to
+	 * the segment start, which the modulo dispatcher does not do.
+	 * Always emit the full stripe array. */
+	if (0 && stripe_count > 1 && stripe_unit > 0 &&
 	    a->length != UINT64_MAX) {
 		/* Guard against zero-length requests (no stripes
 		 * cover them; emit just the start stripe so the
