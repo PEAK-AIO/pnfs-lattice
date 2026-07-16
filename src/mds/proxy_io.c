@@ -871,13 +871,20 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
      * MUST set the owner of the data file to the synthetic
      * uid/gid so that the client's AUTH_SYS credentials
      * (from ffl_user/ffl_group in the layout) pass the DS's
-     * permission check.  Mode 0600 restricts access to the
-     * synthetic owner only.
+     * permission check.
      *
-     * For generic DS mode (no secret), the file is left with
-     * default ownership and relies on no_root_squash.
+     * Mode 0666: the DS backing file must be writable by the
+     * client's real AUTH_SYS uid, which for an ordinary (non-root)
+     * workload is NOT root -- so the old 0600 + "rely on
+     * no_root_squash" model silently blocked every non-root client
+     * with EACCES.  Aligning ownership via a post-create path chown
+     * is racy (the fresh file is not yet visible through the MDS's
+     * NFS mount of the DS, so the chown hits ENOENT), which left the
+     * file 0600 and unwritable.  In this trusted pNFS cluster the DS
+     * is a backend store gated by the MDS layout grant, so a
+     * permissive backing-file mode is the correct, race-free model.
      */
-    (void)fchmod(fd, 0600);
+    (void)fchmod(fd, 0666);
     close(fd);
 
     return MDS_OK;
@@ -1061,7 +1068,10 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
         if (fd < 0) {
             goto fallback_rpc;
         }
-        (void)fchmod(fd, 0600);
+        /* 0666: DS backing file must be writable by the client's
+         * real (non-root) AUTH_SYS uid; see the mode rationale in
+         * mds_proxy_ensure_ds_file above. */
+        (void)fchmod(fd, 0666);
         close(fd);
 
         clock_gettime(CLOCK_MONOTONIC, &t1);
