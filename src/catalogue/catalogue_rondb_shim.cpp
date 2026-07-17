@@ -3664,6 +3664,13 @@ int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
     if (mask & 0x02U)  { merged.uid   = attrs_in.uid;   }  /* UID  */
     if (mask & 0x04U)  { merged.gid   = attrs_in.gid;   }  /* GID  */
     if (mask & 0x08U)  { merged.size  = attrs_in.size;  }  /* SIZE */
+    /* SIZE_EXTEND: grow-only — concurrent LAYOUTCOMMITs must not
+     * clobber a larger size already committed by a peer writer. */
+    if (mask & MDS_ATTR_SIZE_EXTEND) {
+        if (attrs_in.size > merged.size) {
+            merged.size = attrs_in.size;
+        }
+    }
     if (mask & 0x10U)  { merged.atime = attrs_in.atime; }  /* ATIME */
     if (mask & 0x20U)  { merged.mtime = attrs_in.mtime; }  /* MTIME */
     if (mask & 0x40U)  { merged.atime = now;            }  /* ATIME_NOW */

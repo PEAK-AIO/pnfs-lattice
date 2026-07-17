@@ -143,6 +143,8 @@ _Static_assert(0, "pnfs-mds requires GCC >= 11.1 -- see docs/architecture.md sec
 #define MDS_ATTR_ATIME_NOW  (1U << 6)
 #define MDS_ATTR_MTIME_NOW  (1U << 7)
 #define MDS_ATTR_FLAGS      (1U << 8)
+/* Grow-only size update (LAYOUTCOMMIT); RMW uses max(old,new). */
+#define MDS_ATTR_SIZE_EXTEND (1U << 9)
 
 /* Root inode is 2 to match POSIX convention
  * bad-block inode on ext2/3/4; NFS clients expect root != 0/1). */

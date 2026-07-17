@@ -3046,7 +3046,8 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 						return lc_nst;
 					}
 					lc_inode.size = new_size;
-					merged_mask |= MDS_ATTR_SIZE;
+					/* SIZE_EXTEND: concurrent LAYOUTCOMMITs take max(size). */
+					merged_mask |= MDS_ATTR_SIZE_EXTEND;
 					size_grew = true;
 				}
 			}
