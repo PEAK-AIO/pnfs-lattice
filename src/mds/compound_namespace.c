@@ -2871,6 +2871,8 @@ enum nfs4_status op_readdir(struct compound_data *cd,
 	memset(&res->res.readdir, 0, sizeof(res->res.readdir));
 	memcpy(res->res.readdir.requested, op->arg.readdir.requested,
 	       sizeof(res->res.readdir.requested));
+	res->res.readdir.fsid_major = referral_fsid_major(cd->mds_id);
+	res->res.readdir.fsid_minor = referral_fsid_minor(cd->mds_id);
 
 	/* Xattr namespace: list xattr names as directory entries. */
 	if (is_xattr_fh(cd->current_fh.fileid)) {
