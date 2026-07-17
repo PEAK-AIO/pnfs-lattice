@@ -120,6 +120,7 @@ struct rpc_server_config {
      * mixed-kernel fleets).  See enum mds_hpc_xdr_form. */
     enum mds_hpc_xdr_form hpc_xdr_form;
     bool hpc_serve_layouts;
+    bool serve_layouts;
 
     struct mds_catalogue    *cat; /**< Catalogue handle (authoritative). */
     struct session_table    *st;  /**< Session/clientid manager. */

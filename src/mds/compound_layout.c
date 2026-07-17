@@ -1089,7 +1089,14 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if ((inode.flags & MDS_IFLAG_INLINE) &&
 	    !(inode.flags & MDS_IFLAG_DS_PENDING)) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
-}
+	}
+
+	/* Master switch: serve_layouts=false forces MDS proxy I/O for
+	 * every file (LAYOUTUNAVAILABLE).  Used when client-direct DS
+	 * I/O is unsafe (LAYOUTERROR storms / missing DS backing files). */
+	if (!cd->cfg_serve_layouts) {
+		return NFS4ERR_LAYOUTUNAVAILABLE;
+	}
 
 	/* HPC-Shared wide-striped files: no shipping Linux flex-files
 	 * client can address a multi-DS stripe map correctly.  The
@@ -1106,7 +1113,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if ((inode.flags & MDS_IFLAG_HPC_SHARED) != 0 &&
 	    !cd->cfg_hpc_serve_layouts) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
-}
+	}
 	nst = layout_select_grant_range(
 		a, &inode, cd->cfg_stripe_unit,
 		&grant_offset, &grant_length);
@@ -2063,11 +2070,13 @@ fill_layoutget_result:
 	 * their own (per-branch) layout_entries_ready_for_grant
 	 * checks, so the cached snapshot is always servable. */
 	/* Verify-on-serve: re-ensure DS backing files + refresh their
-	 * handles for wide HPC-Shared layouts before caching/emitting,
-	 * so LAYOUTGET can only ever hand out handles for files that
-	 * exist.  Cache hits already carry verified entries; skip them. */
-	if (inode_is_hpc_shared && stripe_count > 1 &&
-	    !layout_cache_was_hit && entries != NULL) {
+	 * handles before caching/emitting, so LAYOUTGET only hands out
+	 * handles for files that exist.  Required for single-stripe too:
+	 * enterprise prealloc recover_pool can restore slots whose DS
+	 * files were wiped, leaving nfs_fh_len>0 but ENOENT on the DS.
+	 * Cache hits already carry verified entries; skip them. */
+	if (!layout_cache_was_hit && entries != NULL &&
+	    stripe_count > 0 && mirror_count > 0) {
 		layout_refresh_wide_stripe_fhs(cd, cd->current_fh.fileid,
 					       entries, stripe_count,
 					       stripe_unit, mirror_count);

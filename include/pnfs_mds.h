@@ -933,6 +933,14 @@ struct mds_config {
      * the striped form's stripes as mirrors and corrupt data. */
     bool hpc_serve_layouts;                                /**< Default false. */
 
+    /* Master switch for client-direct pNFS layouts.  When false, every
+     * LAYOUTGET returns LAYOUTUNAVAILABLE and clients fall back to MDS
+     * proxy READ/WRITE (correctness over speed).  Use this to keep I/O
+     * working while the DS-direct path is broken (stale FH / LAYOUTERROR
+     * storms).  Default true.  Independent of hpc_serve_layouts, which
+     * only gates wide HPC-Shared layouts when this switch is on. */
+    bool serve_layouts;                                    /**< Default true. */
+
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is
      * skipped -- in-memory tables are authoritative.  Safe for

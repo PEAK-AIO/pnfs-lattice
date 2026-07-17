@@ -131,6 +131,7 @@ struct rpc_server {
      * wire form for HPC-Shared inodes.  See enum mds_hpc_xdr_form. */
     enum mds_hpc_xdr_form    hpc_xdr_form;
     bool                     hpc_serve_layouts;
+    bool                     serve_layouts;
 
     struct mds_catalogue    *cat;
     struct session_table    *st;
@@ -1169,6 +1170,7 @@ wrongsec:
         cd.cfg_hpc_max_stripe_count = srv->hpc_max_stripe_count;
         cd.cfg_hpc_xdr_form = srv->hpc_xdr_form;
         cd.cfg_hpc_serve_layouts = srv->hpc_serve_layouts;
+        cd.cfg_serve_layouts = srv->serve_layouts;
         cd.write_verf = srv->write_verf;
         cd.minorversion = minorver;
 	cd.shard_map = srv->shard_map;
@@ -1893,6 +1895,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->hpc_max_stripe_count = cfg->hpc_max_stripe_count;
     srv->hpc_xdr_form = cfg->hpc_xdr_form;
     srv->hpc_serve_layouts = cfg->hpc_serve_layouts;
+    srv->serve_layouts = cfg->serve_layouts;
     srv->write_verf = cfg->write_verf;
     srv->cat = cfg->cat;
     srv->st = cfg->st;

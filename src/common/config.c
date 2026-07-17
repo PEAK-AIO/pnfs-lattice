@@ -339,6 +339,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      */
     cfg->hpc_max_stripe_count = 128;
     cfg->hpc_serve_layouts = false;
+    cfg->serve_layouts = true;
 
     /* Stripe lease duration (default 30s). */
     cfg->stripe_lease_duration_ms = 30000;
@@ -829,6 +830,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "hpc_serve_layouts") == 0) {
             cfg->hpc_serve_layouts = (strcmp(val, "true") == 0 ||
                                       strcmp(val, "1") == 0);
+        } else if (strcmp(key, "serve_layouts") == 0) {
+            cfg->serve_layouts = (strcmp(val, "true") == 0 ||
+                                 strcmp(val, "1") == 0);
         } else if (strcmp(key, "hpc_xdr_form") == 0) {
             /*
              * Three string tokens map to the three enum values.
