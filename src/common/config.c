@@ -595,7 +595,14 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             if (v > 0 && v <= 65535) {
                 cfg->ds_rdma_port = (uint16_t)v;
             }
-        } else if (strcmp(key, "stripe_unit_bytes") == 0) {
+        } else if (strcmp(key, "stripe_unit_bytes") == 0 ||
+                   strcmp(key, "stripe_unit") == 0) {
+            /* "stripe_unit" alias: the canonical key is
+             * stripe_unit_bytes, but the shorter form is what an
+             * operator naturally writes (and what several deploy
+             * templates used).  Silently defaulting to 64 KiB when
+             * the intended value was 1 MiB cost a full benchmark
+             * run in 16x RPC overhead -- accept both spellings. */
             unsigned long v = strtoul(val, NULL, 10);
             /* Bound before the uint32_t truncation: without the
              * upper check, 4294967296 silently became 0 and
@@ -606,8 +613,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 cfg->tuning_set |= MDS_CFG_SET_STRIPE_UNIT_BYTES;
 } else {
                 (void)fprintf(stderr,
-                    "ERROR: stripe_unit_bytes=%s out of range "
-                    "[1, 1073741824]\n", val);
+                    "ERROR: %s=%s out of range "
+                    "[1, 1073741824]\n", key, val);
                 (void)fclose(fp);
                 return MDS_ERR_INVAL;
             }
