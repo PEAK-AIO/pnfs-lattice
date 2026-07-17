@@ -1084,6 +1084,11 @@ phase_deps() {
     for host in "${LAB_DS_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-kernel-server, nfs-common"
         run_remote_root_script "${host}" "$(cat <<EOF
+# Keep needrestart from auto-restarting services after package installs:
+# on testbeds a broken daemon (e.g. Emulab pubsubd) makes apt exit non-zero
+# and aborts the phase, and restarting ssh.service drops the deploy session.
+install -d -m 0755 /etc/needrestart/conf.d
+printf '%s\n' '\$nrconf{restart} = "l";' > /etc/needrestart/conf.d/zz-pnfs-lab.conf
 $(render_ensure_packages)
 ensure_packages nfs-kernel-server nfs-common
 EOF
@@ -1093,6 +1098,11 @@ EOF
     for host in "${ACTIVE_MDS_HOSTS[@]}" "${CLIENT_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-common, attr"
         run_remote_root_script "${host}" "$(cat <<EOF
+# Keep needrestart from auto-restarting services after package installs:
+# on testbeds a broken daemon (e.g. Emulab pubsubd) makes apt exit non-zero
+# and aborts the phase, and restarting ssh.service drops the deploy session.
+install -d -m 0755 /etc/needrestart/conf.d
+printf '%s\n' '\$nrconf{restart} = "l";' > /etc/needrestart/conf.d/zz-pnfs-lab.conf
 $(render_ensure_packages)
 ensure_packages nfs-common attr
 EOF
@@ -1305,6 +1315,13 @@ phase_deploy() {
 
         run_remote_root_script "${host}" "$(cat <<EOF
 $(render_ensure_packages)
+if [ ! -e "${LAB_REMOTE_RONDB_LINK}/lib" ]; then
+    echo "ERROR: RonDB runtime missing at ${LAB_REMOTE_RONDB_LINK} on \$(hostname)." >&2
+    echo "       pnfs-mds needs libndbclient from the RonDB runtime; run the" >&2
+    echo "       'rondb' phase first (it installs the runtime on every MDS," >&2
+    echo "       and must be re-run after changing MDS/RonDB host arrays)." >&2
+    exit 1
+fi
 ensure_packages libntirpc-dev libgssapi-krb5-2 libssl3 nfs-common
 EOF
 )"

@@ -75,6 +75,13 @@ single-MDS cluster (the generated env contains both profiles).
 
 Notes:
 
+- The `deps` phase configures `needrestart` to list-only mode on every
+  node: on testbed images a broken daemon (e.g. Emulab's `pubsubd`)
+  otherwise makes apt exit non-zero and abort phases, and auto-restarting
+  `ssh.service` drops the deploy's own sessions.
+- The MDS deploy verifies the RonDB runtime is present on each MDS and
+  fails with instructions if not (re-run the `rondb` phase after changing
+  the MDS/RonDB host arrays — it installs the runtime on every MDS).
 - The MDS deploy ships any locally built runtime libraries (for example
   `libntirpc`) along with the binary and registers them via
   `ld.so.conf.d`, so non-build-host MDS run the same bits.
