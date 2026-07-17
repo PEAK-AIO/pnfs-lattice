@@ -579,6 +579,22 @@ enum mds_status mds_cat_dirent_put(struct mds_catalogue *cat,
                                   child_fileid, child_type));
 }
 
+enum mds_status mds_cat_dirent_insert(struct mds_catalogue *cat,
+                                      struct mds_cat_txn *txn,
+                                      uint64_t parent_fileid,
+                                      const char *name,
+                                      uint64_t child_fileid,
+                                      uint8_t child_type)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->dirent_insert == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return CAT_TIMED(MDS_CATOP_DIRENT_PUT,
+        cat->auth_ops->dirent_insert(cat, txn, parent_fileid, name,
+                                     child_fileid, child_type));
+}
+
 enum mds_status mds_cat_dirent_del(struct mds_catalogue *cat,
                                    struct mds_cat_txn *txn,
                                    uint64_t parent_fileid,

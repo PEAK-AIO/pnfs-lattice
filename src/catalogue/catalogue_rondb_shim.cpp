@@ -4048,6 +4048,76 @@ int rondb_shim_dirent_put(void *handle, uint64_t parent_fileid,
     return 0;
 }
 
+int rondb_shim_dirent_insert(void *handle, uint64_t parent_fileid,
+                             const char *name,
+                             uint64_t child_fileid, uint8_t child_type)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbError err;
+    uint8_t name_value[MDS_MAX_NAME + 2];
+    uint32_t name_value_len = 0;
+
+    if (state == nullptr || name == nullptr) { return -1; }
+    if (rondb_encode_varbinary_string(name, 1U,
+                                      name_value, sizeof(name_value),
+                                      &name_value_len) != 0) {
+        return -1;
+    }
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_DIRENTS);
+    if (tbl == nullptr) { return -1; }
+
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, parent_fileid);
+        tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
+    }
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                 "dirent_insert startTx");
+    }
+
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "dirent_insert getOp");
+    }
+
+    /* insertTuple, NOT writeTuple: the dirent PK is the uniqueness
+     * gate for open(O_CREAT) on an existing name.  writeTuple here
+     * silently REPLACES the dirent with a fresh fileid, orphaning the
+     * existing inode and its DS stripe data -- under an N-to-1 shared
+     * file open storm every opener minted a private file and all but
+     * the last opener's data vanished from the namespace. */
+    op->insertTuple();
+    (void)rondb_equal_u64(op, RONDB_DIR_COL_PARENT, parent_fileid);
+    op->equal(RONDB_DIR_COL_NAME, (const char *)name_value, name_value_len);
+    (void)rondb_set_value_u64(op, RONDB_DIR_COL_CHILD_FID, child_fileid);
+    op->setValue(RONDB_DIR_COL_CHILD_TYPE, (Uint32)child_type);
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.classification == NdbError::ConstraintViolation) {
+            return 1; /* EXISTS -- dirent PK conflict */
+        }
+        if (rondb_is_temporary(err)) {
+            return -2; /* Retryable */
+        }
+        return rondb_report_error(err, "dirent_insert commit");
+    }
+
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
 int rondb_shim_dirent_del(void *handle, uint64_t parent_fileid,
                           const char *name)
 {

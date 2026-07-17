@@ -277,10 +277,22 @@ static enum mds_status hpc_create_inode_and_dirent(
         return st;
     }
 
-    st = mds_cat_dirent_put(cat, txn, parent_fileid, name,
-                            child_fid, (uint8_t)MDS_FTYPE_REG);
+    /* Insert-only: OPEN4_CREATE(UNCHECKED) on an existing name must
+     * surface MDS_ERR_EXISTS so op_open falls through to the
+     * open-existing path.  The old dirent_put (writeTuple) silently
+     * REPLACED the dirent: every opener of a shared HPC file minted
+     * a private inode, all earlier openers' DS data was orphaned, and
+     * N-to-1 workloads (ior-hard) read back holes/short files. */
+    st = mds_cat_dirent_insert(cat, txn, parent_fileid, name,
+                               child_fid, (uint8_t)MDS_FTYPE_REG);
     if (st != MDS_OK) {
         mds_cat_txn_abort(txn);
+        /* RonDB catalogue writes are self-contained (txn is not a
+         * real transaction), so the inode row from mds_cat_inode_put
+         * above is already durable -- delete it or it leaks.  The
+         * fileid is fresh and unreferenced (no dirent), so this
+         * cannot race a reader. */
+        (void)mds_cat_inode_del(cat, NULL, child_fid);
         return st;
     }
 

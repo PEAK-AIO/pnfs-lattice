@@ -717,6 +717,15 @@ enum nfs4_status op_open(struct compound_data *cd,
 				st = compound_lookup_local_child(cd,
 					cd->current_fh.fileid,
 					a->name, &inode);
+				if (st == MDS_ERR_NOTFOUND) {
+					/* The winning creator exists (our
+					 * insert hit its dirent) but is
+					 * still HPC_CREATE_PENDING, which
+					 * the lookup filters.  Ask the
+					 * client to retry rather than
+					 * returning NOENT for a CREATE. */
+					return NFS4ERR_DELAY;
+				}
 				if (st != MDS_OK) {
 					return mds_status_to_nfs4(st);
 				}
