@@ -546,6 +546,67 @@ static void compute_stripe_addr(uint64_t offset,
  * Proxy READ
  * ----------------------------------------------------------------------- */
 
+/*
+ * Stripe-map lookup with v9 inline single-stripe fallback.
+ *
+ * Files created through the inline fast path (MDS_IFLAG_INLINE_STRIPE)
+ * store their one DS entry on the inode and have NO stripe-map row, so
+ * a bare mds_cat_stripe_map_get returns NOTFOUND.  The proxy I/O paths
+ * are the fallback data path when a client cannot (or may not) do
+ * DS-direct I/O -- e.g. LAYOUTUNAVAILABLE after a DS health event --
+ * and returning NOTFOUND there surfaced to applications as ENOENT on
+ * write(2) against a perfectly healthy file.  Synthesize the
+ * single-entry map from the inode instead, mirroring the inline fast
+ * path in op_layoutget.
+ *
+ * Caller frees *entries with free() in all cases, same as the raw
+ * catalogue call.
+ */
+static enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
+                                            uint64_t fileid,
+                                            uint32_t *stripe_count,
+                                            uint32_t *stripe_unit,
+                                            uint32_t *mirror_count,
+                                            struct mds_ds_map_entry **entries)
+{
+    enum mds_status st;
+    struct mds_inode inode;
+    struct mds_ds_map_entry *e;
+    uint32_t fhl;
+
+    st = mds_cat_stripe_map_get(cat, fileid, stripe_count,
+                                stripe_unit, mirror_count, entries);
+    if (st != MDS_ERR_NOTFOUND) {
+        return st;
+    }
+
+    st = mds_cat_ns_getattr(cat, fileid, &inode);
+    if (st != MDS_OK) {
+        return MDS_ERR_NOTFOUND;
+    }
+    if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) == 0 ||
+        inode.inline_fh_len == 0) {
+        return MDS_ERR_NOTFOUND;
+    }
+
+    e = calloc(1, sizeof(*e));
+    if (e == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    fhl = inode.inline_fh_len;
+    if (fhl > MDS_NFS_FH_MAX) {
+        fhl = MDS_NFS_FH_MAX;
+    }
+    e[0].ds_id = inode.inline_ds_id;
+    e[0].nfs_fh_len = fhl;
+    memcpy(e[0].nfs_fh, inode.inline_fh, fhl);
+    *stripe_count = 1;
+    *mirror_count = 1;
+    *stripe_unit = (inode.stripe_unit > 0) ? inode.stripe_unit : 65536;
+    *entries = e;
+    return MDS_OK;
+}
+
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
@@ -570,7 +631,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
     *eof = false;
 
     /* Look up stripe map via catalogue vtable. */
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                 &stripe_count, &stripe_unit,
                                 &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -719,7 +780,7 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
     *bytes_written = 0;
 
     /* Look up stripe map via catalogue vtable. */
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                 &stripe_count, &stripe_unit,
                                 &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -1217,7 +1278,7 @@ static int open_ds_file_ex(const struct mds_proxy_ctx *ctx,
         stripe_unit = pre_su;
         mirror_count = pre_mc;
     } else {
-        enum mds_status st = mds_cat_stripe_map_get(
+        enum mds_status st = proxy_stripe_map_get(
             cat, fileid, &stripe_count, &stripe_unit,
             &mirror_count, &fetched);
         if (st != MDS_OK) { return -1; }
@@ -1292,7 +1353,7 @@ enum mds_status mds_proxy_allocate(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
 }
 
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                  &stripe_count, &stripe_unit,
                                  &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -1365,7 +1426,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
 }
 
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                  &stripe_count, &stripe_unit,
                                  &mirror_count, &entries);
     if (st != MDS_OK) {
