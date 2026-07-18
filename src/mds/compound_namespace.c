@@ -1828,39 +1828,19 @@ enum nfs4_status op_remove(struct compound_data *cd,
 			}
 		}
 
-		/* RFC 8435 §14: fence DS backing files so a non-
-		 * cooperating client cannot continue I/O after the
-		 * layout is revoked and the inode is about to be
-		 * deleted.  Best-effort: do not fail the remove. */
-		if (cd->proxy != NULL && cd->cat != NULL) {
-			bool have_sm = false;
-
-			/*
-			 * Inline single-stripe (v9): rm_sm_entries was already
-			 * built from the inode above.  Otherwise read the
-			 * stripe map (multi-stripe / legacy side-table files).
-			 */
-			if (rm_sm_entries != NULL) {
-				have_sm = true;
-			} else if (mds_cat_stripe_map_get(cd->cat, rm_fileid,
+		/*
+		 * Prefetch the stripe map once so cat_remove_known() gets
+		 * the stripe count and the post-remove GC enqueue below can
+		 * reuse the entries.  No DS-side fence on the REMOVE path:
+		 * the namespace remove commits and the ds_gc reaper unlinks
+		 * the backing objects, and that unlink is what revokes any
+		 * straggler I/O (deferred-unlink model).
+		 * Layouts were already recalled above.
+		 */
+		if (cd->cat != NULL && rm_sm_entries == NULL) {
+			(void)mds_cat_stripe_map_get(cd->cat, rm_fileid,
 					&rm_sm_sc, &rm_sm_su, &rm_sm_mc,
-					&rm_sm_entries) == MDS_OK &&
-			    rm_sm_entries != NULL) {
-				have_sm = true;
-			}
-
-			if (have_sm && rm_sm_entries != NULL) {
-				uint32_t ftot = rm_sm_sc * rm_sm_mc;
-
-				for (uint32_t fi = 0; fi < ftot; fi++) {
-					(void)mds_proxy_fence_ds_file(
-						cd->proxy,
-						rm_sm_entries[fi].ds_id,
-						rm_fileid,
-						fi / rm_sm_mc,
-						fi % rm_sm_mc);
-				}
-			}
+					&rm_sm_entries);
 		}
 
 		/*
