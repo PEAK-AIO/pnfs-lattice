@@ -2397,7 +2397,8 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		return MDS_ERR_INVAL;
 	}
 
-	/* Peek prealloc for DS ID + stripe data before pop. */
+	/* Placement inputs -- all derived from the single prealloc pop
+	 * below so the fused transaction commits ONE consistent choice. */
 	uint32_t layout_ds_id = 0;
 	uint32_t layout_ds_count = 0;
 	uint8_t stripe_buf[256];
@@ -2412,13 +2413,24 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		struct mds_ds_map_entry ds_entry;
 		uint32_t stripe_unit = 0;
 		uint64_t prealloc_fid = 0;
-		if (ds_prealloc_peek(prealloc, &ds_entry, &stripe_unit) == 0) {
-			layout_ds_id = ds_entry.ds_id;
-			layout_ds_count = 1;
-		}
-		/* Pop and encode stripe data + pre-allocated fileid+FH. */
+		/*
+		 * Pop FIRST and derive every placement input (layout DS
+		 * id, stripe blob, fileid, synth owner) from the ONE
+		 * popped entry.  The previous peek-then-pop pair made two
+		 * independent placement picks: with empty prealloc rings
+		 * both calls fall back to the placement policy and can
+		 * select DIFFERENT DSes, and the fused transaction then
+		 * commits a split-brain file (layout row pinned to one
+		 * DS, stripe map to another).  Every small-file create
+		 * from a client that fuses OPEN+LAYOUTGET then reads
+		 * back EIO because the fused map never becomes FH-ready
+		 * on the layout DS.  One pop, one placement decision,
+		 * used everywhere below.
+		 */
 		if (ds_prealloc_pop(prealloc, &ds_entry, &stripe_unit,
 				    &prealloc_fid) == 0) {
+			layout_ds_id = ds_entry.ds_id;
+			layout_ds_count = 1;
 			if (prealloc_fid != 0) {
 				child_fid = prealloc_fid;
 			}
