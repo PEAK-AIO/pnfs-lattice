@@ -41,12 +41,14 @@ static _Atomic uint32_t g_rr_counter;
  * Round-robin placement
  * ----------------------------------------------------------------------- */
 
-enum mds_status placement_select2(const struct mds_ds_info *ds_list,
-                                  uint32_t ds_count,
-                                  uint32_t *stripe_count,
-                                  uint32_t mirror_count,
-                                  uint32_t stripe_unit,
-                                  struct mds_ds_map_entry *entries)
+enum mds_status placement_select_rr_at2(
+    const struct mds_ds_info *ds_list,
+    uint32_t ds_count,
+    uint32_t *stripe_count,
+    uint32_t mirror_count,
+    uint32_t stripe_unit,
+    uint64_t start_key,
+    struct mds_ds_map_entry *entries)
 {
     uint32_t *online = NULL;
     uint32_t online_count = 0;
@@ -60,7 +62,7 @@ enum mds_status placement_select2(const struct mds_ds_info *ds_list,
     if (ds_list == NULL || entries == NULL || stripe_count == NULL ||
         *stripe_count == 0 || mirror_count == 0) {
         return MDS_ERR_INVAL;
-}
+    }
 
     sc = *stripe_count;
     need = sc * mirror_count;
@@ -69,12 +71,12 @@ enum mds_status placement_select2(const struct mds_ds_info *ds_list,
     online = malloc(ds_count * sizeof(*online));
     if (online == NULL) {
         return MDS_ERR_NOMEM;
-}
+    }
 
     for (i = 0; i < ds_count; i++) {
         if (ds_list[i].state == DS_ONLINE) {
             online[online_count++] = i;
-}
+        }
     }
 
     /*
@@ -97,13 +99,14 @@ enum mds_status placement_select2(const struct mds_ds_info *ds_list,
         }
         need = sc * mirror_count;
     }
+    (void)need;
 
     /*
-     * Atomic fetch-add gives each concurrent caller a unique starting
-     * offset.  The modulo against online_count distributes the load.
+     * Per-file rotation: start_key (typically fileid) picks the
+     * window origin so wide layouts walk across the full ONLINE
+     * pool instead of always landing on the same first-N DSes.
      */
-    start = atomic_fetch_add_explicit(&g_rr_counter, need,
-                                      memory_order_relaxed);
+    start = (uint32_t)(start_key % (uint64_t)online_count);
 
     /*
      * Assign entries: outer loop = stripes, inner loop = mirrors.
@@ -130,6 +133,35 @@ enum mds_status placement_select2(const struct mds_ds_info *ds_list,
      * map (entries beyond sc * mirror_count were never filled). */
     *stripe_count = sc;
     return MDS_OK;
+}
+
+enum mds_status placement_select2(const struct mds_ds_info *ds_list,
+                                  uint32_t ds_count,
+                                  uint32_t *stripe_count,
+                                  uint32_t mirror_count,
+                                  uint32_t stripe_unit,
+                                  struct mds_ds_map_entry *entries)
+{
+    uint32_t sc;
+    uint32_t need;
+    uint32_t start;
+
+    if (ds_list == NULL || entries == NULL || stripe_count == NULL ||
+        *stripe_count == 0 || mirror_count == 0) {
+        return MDS_ERR_INVAL;
+    }
+
+    sc = *stripe_count;
+    need = sc * mirror_count;
+    /*
+     * Atomic fetch-add gives each concurrent caller a unique starting
+     * offset.  placement_select_rr_at2 then mods against ONLINE count.
+     */
+    start = atomic_fetch_add_explicit(&g_rr_counter, need,
+                                      memory_order_relaxed);
+    return placement_select_rr_at2(ds_list, ds_count, stripe_count,
+                                   mirror_count, stripe_unit,
+                                   (uint64_t)start, entries);
 }
 
 enum mds_status placement_select(const struct mds_ds_info *ds_list,

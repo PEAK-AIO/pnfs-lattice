@@ -252,12 +252,13 @@ struct ds_prealloc_batch_result {
 /**
  * @brief Run a wide pre-warm batch.
  *
- * Allocates one fileid, picks N DSes via ds_filter_compatible_preferred()
- * (and the internal plan cache so back-to-back CREATEs into the same
- * HPC profile reuse the placement decision), then issues parallel
- * mds_proxy_ensure_ds_file_fh() calls bounded by an internal worker
- * pool.  Each FH capture is retried up to 3 times with exponential
- * backoff (50/200/800 ms) before the batch aborts.
+ * Allocates one fileid (or honors fileid_hint), then picks N DSes via
+ * fileid-rotated round-robin (start = fileid % online_count) so
+ * successive wide CREATEs walk across the full ONLINE pool instead
+ * of collapsing onto one hot set.  Then issues FH captures via
+ * mds_proxy_ensure_ds_file_fh().  Each FH capture is retried up to
+ * 3 times with exponential backoff (50/200/800 ms) before the batch
+ * aborts.
  *
  * @param ctx Pre-existing prealloc context (provides catalogue +
  *            proxy handles + ONLINE-DS snapshot).
