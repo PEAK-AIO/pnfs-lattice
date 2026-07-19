@@ -19,6 +19,8 @@ add_executable(test_rename_2pc   unit/test_rename_2pc.c)
 add_executable(test_subtree_map  unit/test_subtree_map.c)
 add_executable(test_inode_cache  unit/test_inode_cache.c)
 add_executable(test_dirent_cache unit/test_dirent_cache.c)
+add_executable(test_parent_touch unit/test_parent_touch.c)
+add_executable(test_remove_manifest unit/test_remove_manifest.c)
 add_executable(test_compound     unit/test_compound.c)
 add_executable(test_cluster_transport unit/test_cluster_transport.c)
 add_executable(test_compound_cluster  unit/test_compound_cluster.c)
@@ -101,6 +103,8 @@ foreach(test_target
     test_subtree_map
     test_inode_cache
     test_dirent_cache
+    test_parent_touch
+    test_remove_manifest
     test_compound
     test_cluster_transport
     test_compound_cluster

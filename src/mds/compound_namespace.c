@@ -14,9 +14,11 @@
 
 #include "pnfs_mds.h"
 #include "compound.h"
+#include "remove_manifest.h"
 #include "compound_internal.h"
 #include "mds_catalogue.h"
 #include "delegation.h"
+#include "open_state.h"
 #include "hpc_shared.h"
 
 #include "subtree_map.h"
@@ -1852,6 +1854,66 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		if (cd->dt != NULL) {
 			deleg_revoke_file(cd->dt, rm_fileid);
 		}
+	}
+
+
+	/*
+	 * Async-REMOVE fast path (ported; delete-at-ack).  Eligible:
+	 * final unlink of a regular file whose parent change_info can be
+	 * served from the parent_touch aggregator, and no live writer
+	 * holds the file open (delete-at-ack must never destroy stripe
+	 * data under an active open; such removes keep the synchronous
+	 * path).  The recall /
+	 * delegation teardown above already ran.  The submit commits ONE
+	 * durable transaction (manifest row + dirent DELETE + inode
+	 * DELETE_PENDING flag), so the name is gone on EVERY MDS before
+	 * the client is acked; the drainer finalizes the inode, DS
+	 * objects and quota off the request thread.  Any failure falls
+	 * through to the synchronous path below.
+	 */
+	if (cd->rmf != NULL && st == MDS_OK && rm_final_data_unlink &&
+	    rm_fileid != 0 && cd->ot != NULL &&
+	    open_state_file_has_writers(cd->ot, rm_fileid) == 0 &&
+	    compound_parent_defer_ok(cd) &&
+	    parent_touch_prepare(cd->pt, cd->current_fh.fileid,
+				 rm_change_before) == 0) {
+		if (remove_manifest_submit(cd->rmf,
+					   cd->current_fh.fileid,
+					   op->arg.remove.name,
+					   rm_fileid,
+					   rm_inode.generation,
+					   true) == 0) {
+			struct timespec rm_async_now;
+			uint64_t rm_async_before = 0;
+			uint64_t rm_async_after = 0;
+
+			clock_gettime(CLOCK_REALTIME, &rm_async_now);
+			if (parent_touch_commit_prepared(cd->pt,
+					cd->current_fh.fileid,
+					rm_async_now,
+					&rm_async_before,
+					&rm_async_after) == 0) {
+				res->res.change_info.before =
+					rm_async_before;
+				res->res.change_info.after =
+					rm_async_after;
+			} else {
+				res->res.change_info.before =
+					rm_change_before;
+				res->res.change_info.after =
+					rm_change_before + 1;
+			}
+			compound_dirent_invalidate(cd,
+						   cd->current_fh.fileid,
+						   op->arg.remove.name);
+			compound_inode_invalidate(cd, cd->current_fh.fileid);
+			/* Ack txn mutated the child inode (DELETE_PENDING):
+			 * drop any cached copy. */
+			compound_inode_invalidate(cd, rm_fileid);
+			free(rm_sm_entries);
+			return NFS4_OK;
+		}
+		parent_touch_abort_prepared(cd->pt, cd->current_fh.fileid);
 	}
 
 	st = (st == MDS_OK)

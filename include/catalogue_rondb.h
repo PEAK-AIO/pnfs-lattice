@@ -54,6 +54,42 @@ int rondb_shim_connect_pool(const char *connect_string,
                             void **handle);
 
 /** One-time: create the dedicated RonDB probe table. */
+/* parent_touch: interpreted parent-inode update (change += delta, stamp). */
+/* Async-REMOVE delete manifest (ported). */
+typedef int (*rondb_remove_pending_scan_cb)(
+    const struct mds_remove_pending_entry *entry, void *ctx);
+int rondb_shim_remove_pending_seq_alloc(void *handle, uint64_t *seq_out);
+int rondb_shim_remove_pending_enqueue(void *handle, uint64_t seq,
+                                      uint64_t dir_fileid,
+                                      const char *name,
+                                      uint64_t child_fileid,
+                                      uint64_t child_generation,
+                                      uint64_t enqueued_ns);
+int rondb_shim_remove_pending_enqueue_unlink(void *handle, uint64_t seq,
+                                      uint64_t dir_fileid,
+                                      const char *name,
+                                      uint64_t child_fileid,
+                                      uint64_t child_generation,
+                                      uint64_t enqueued_ns);
+int rondb_shim_remove_pending_peek_batch(
+    void *handle, uint64_t now_ns,
+    struct mds_remove_pending_entry *entries,
+    uint32_t cap, uint32_t *n_out);
+int rondb_shim_remove_pending_scan_all(void *handle,
+                                       rondb_remove_pending_scan_cb cb,
+                                       void *ctx);
+int rondb_shim_remove_pending_claim(void *handle, uint64_t seq,
+                                    uint32_t mds_id,
+                                    uint64_t boot_epoch,
+                                    uint64_t now_ns,
+                                    uint64_t claim_expires_ns);
+int rondb_shim_remove_pending_complete(void *handle, uint64_t seq);
+int rondb_shim_remove_pending_bump_retry(void *handle, uint64_t seq);
+int rondb_shim_remove_pending_count(void *handle, uint32_t *count);
+
+int rondb_shim_ns_parent_touch(void *handle, uint64_t fileid,
+                               uint64_t change_delta,
+                               int64_t stamp_sec, uint32_t stamp_nsec);
 int rondb_shim_bootstrap(void *handle, const char *schema);
 
 /** Health probe: read/write canary row in pre-created table. No DDL. */

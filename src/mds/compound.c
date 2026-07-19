@@ -616,6 +616,7 @@ enum mds_status compound_inode_get(struct compound_data *cd,
 	    cd->current_fh.fileid == fileid &&
 	    cd->current_inode.fileid == fileid) {
 		*out = cd->current_inode;
+		compound_parent_touch_overlay(cd, fileid, out);
 		return MDS_OK;
 	}
 
@@ -625,6 +626,7 @@ enum mds_status compound_inode_get(struct compound_data *cd,
 	    cd->saved_fh.fileid == fileid &&
 	    cd->saved_inode.fileid == fileid) {
 		*out = cd->saved_inode;
+		compound_parent_touch_overlay(cd, fileid, out);
 		return MDS_OK;
 	}
 
@@ -633,6 +635,22 @@ enum mds_status compound_inode_get(struct compound_data *cd,
 	if (st != MDS_OK) {
 		return st;
 	}
+
+	/* delete-at-ack: a DELETE_PENDING inode is a corpse awaiting the
+	 * drainer.  Its NAME is already gone on every MDS; make its
+	 * FILEHANDLE equally dead so fh-based access (PUTFH/OPEN/WRITE
+	 * through cached handles) sees ESTALE exactly as it would after
+	 * a synchronous remove.  Without this a client writing through a
+	 * stale handle silently feeds the corpse and skips the re-lookup
+	 * that would recreate the file. */
+	if ((out->flags & MDS_IFLAG_DELETE_PENDING) != 0U) {
+		free(out->ds_map);
+		out->ds_map = NULL;
+		return MDS_ERR_STALE;
+	}
+
+	/* parent_touch: serve the authoritative logical view. */
+	compound_parent_touch_overlay(cd, fileid, out);
 
 	/* Seed current_inode if the fileid matches current_fh. */
 	if (cd->current_fh_set && cd->current_fh.fileid == fileid) {

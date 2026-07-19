@@ -247,6 +247,24 @@ enum cluster_mode {
  * (>1) and mirrored files keep the side tables and leave this clear.
  */
 #define MDS_IFLAG_INLINE_STRIPE (1U << 5)
+/* Final unlink acked (delete-at-ack): dirent already removed; the
+ * inode row awaits background finalize by the remove manifest. */
+#define MDS_IFLAG_DELETE_PENDING (1U << 6)
+
+/* One durable pending-remove manifest row (delete-at-ack). */
+struct mds_remove_pending_entry {
+	uint64_t remove_seq;        /**< Monotonic PK (per-MDS local minting). */
+	uint64_t dir_fileid;        /**< Parent directory of the pending remove. */
+	uint64_t child_fileid;      /**< Expected dirent target (guard). */
+	uint64_t child_generation;  /**< Expected inode generation (guard). */
+	uint64_t enqueued_ns;       /**< Wall-clock at ack time (diag only). */
+	uint32_t claim_mds_id;      /**< 0 = unclaimed; else owning MDS id. */
+	uint64_t claim_boot;        /**< Owning MDS's boot_epoch. */
+	uint64_t claim_expires_ns;  /**< Lease deadline; 0 if unclaimed. */
+	uint32_t retries;           /**< Incremented on retryable drainer failure. */
+	char     name[MDS_MAX_NAME + 1]; /**< Dirent name being removed. */
+};
+
 
 /* -----------------------------------------------------------------------
  * MDS Node Identity
@@ -948,6 +966,16 @@ struct mds_config {
      * skipped -- in-memory tables are authoritative.  Safe for
      * single-MDS deployments.  Default: false (RonDB write-through). */
     bool                transient_state_cache;
+    /* Deferred parent-dir attr maintenance (parent_touch). */
+    bool     parent_touch_deferred;
+    uint32_t parent_touch_flush_ms;
+    uint32_t parent_touch_max_dirs;
+    /* Async-REMOVE delete manifest (delete-at-ack, ported). */
+    bool     remove_async;
+    uint32_t remove_async_batch;
+    uint32_t remove_async_workers;
+    uint32_t remove_async_poll_ms;
+    uint32_t remove_async_claim_ttl_ms;
 
     /* Directory delegations (RFC 8881 S10.9, S18.39).
      * When false (the default), GET_DIR_DELEGATION responds with

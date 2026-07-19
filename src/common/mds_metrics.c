@@ -296,6 +296,42 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)snap->cat_compare_mismatches,
         (unsigned long)snap->cat_compare_skipped_lag,
         (unsigned long)snap->cat_replay_rebuild_completions);
+    if (extra > 0 && (size_t)extra < cap - (size_t)base) { base += extra; }
+    /* Async-REMOVE delete manifest (ported). */
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# TYPE pnfs_mds_remove_async_acked counter\n"
+        "pnfs_mds_remove_async_acked %lu\n"
+        "# TYPE pnfs_mds_remove_async_ack_unlinked counter\n"
+        "pnfs_mds_remove_async_ack_unlinked %lu\n"
+        "# TYPE pnfs_mds_remove_async_sync_fallback counter\n"
+        "pnfs_mds_remove_async_sync_fallback %lu\n"
+        "# TYPE pnfs_mds_remove_async_manifest_insert_fail counter\n"
+        "pnfs_mds_remove_async_manifest_insert_fail %lu\n"
+        "# TYPE pnfs_mds_remove_async_drained_ok counter\n"
+        "pnfs_mds_remove_async_drained_ok %lu\n"
+        "# TYPE pnfs_mds_remove_async_drain_mismatch counter\n"
+        "pnfs_mds_remove_async_drain_mismatch %lu\n"
+        "# TYPE pnfs_mds_remove_async_drain_fail counter\n"
+        "pnfs_mds_remove_async_drain_fail %lu\n"
+        "# TYPE pnfs_mds_remove_async_force_drain counter\n"
+        "pnfs_mds_remove_async_force_drain %lu\n"
+        "# TYPE pnfs_mds_remove_async_tombstone_hit counter\n"
+        "pnfs_mds_remove_async_tombstone_hit %lu\n"
+        "# TYPE pnfs_mds_remove_async_tombstone_scrubbed counter\n"
+        "pnfs_mds_remove_async_tombstone_scrubbed %lu\n"
+        "# TYPE pnfs_mds_remove_async_depth gauge\n"
+        "pnfs_mds_remove_async_depth %lu\n",
+        (unsigned long)atomic_load(&branch->remove_async_acked),
+        (unsigned long)atomic_load(&branch->remove_async_ack_unlinked),
+        (unsigned long)atomic_load(&branch->remove_async_sync_fallback),
+        (unsigned long)atomic_load(&branch->remove_async_manifest_insert_fail),
+        (unsigned long)atomic_load(&branch->remove_async_drained_ok),
+        (unsigned long)atomic_load(&branch->remove_async_drain_mismatch),
+        (unsigned long)atomic_load(&branch->remove_async_drain_fail),
+        (unsigned long)atomic_load(&branch->remove_async_force_drain),
+        (unsigned long)atomic_load(&branch->remove_async_tombstone_hit),
+        (unsigned long)atomic_load(&branch->remove_async_tombstone_scrubbed),
+        (unsigned long)atomic_load(&branch->remove_async_depth));
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
         return -1;
     }
@@ -547,6 +583,7 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->open_create_state_open_count),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->open_create_total_count));
+    if (extra > 0 && (size_t)extra < cap - (size_t)base) { base += extra; }
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
         return -1;
     }

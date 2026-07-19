@@ -69,6 +69,46 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name, const struct mds_inode *child,
         uint32_t stripe_count);
+    /* parent_touch flush target: one interpreted update on the parent
+     * inode row (change += delta, mtime/ctime = stamp).  Missing parent
+     * row is MDS_OK.  Optional slot: NULL => NOSUPPORT and the feature
+     * auto-disables at startup. */
+    enum mds_status (*ns_parent_touch)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t fileid,
+        uint64_t change_delta, struct timespec stamp);
+    /* Async-REMOVE delete manifest (schema v18, mds.conf
+     * `remove_async`).  Optional slots: a backend without the
+     * mds_remove_pending table leaves them NULL and the dispatcher
+     * returns MDS_ERR_NOSUPPORT, which keeps op_remove on the legacy
+     * synchronous path. */
+    enum mds_status (*remove_pending_enqueue)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
+        uint64_t child_fileid, uint64_t child_generation,
+        uint64_t *seq_out);
+    /* PHASE-R TEST: unlink-at-ack variant — manifest insert plus a guarded
+     * dirent delete and inode DELETE_PENDING flag in ONE committed txn.
+     * MDS_ERR_STALE on guard mismatch (caller falls back to sync).  Optional. */
+    enum mds_status (*remove_pending_enqueue_unlink)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
+        uint64_t child_fileid, uint64_t child_generation,
+        uint64_t *seq_out);
+    enum mds_status (*remove_pending_peek_batch)(struct mds_catalogue *cat,
+        uint64_t now_ns,
+        struct mds_remove_pending_entry *entries,
+        uint32_t cap, uint32_t *n_out);
+    enum mds_status (*remove_pending_claim)(struct mds_catalogue *cat,
+        uint64_t remove_seq, uint32_t mds_id, uint64_t boot_epoch,
+        uint64_t now_ns, uint64_t claim_ttl_ns);
+    enum mds_status (*remove_pending_complete)(struct mds_catalogue *cat,
+        uint64_t remove_seq);
+    enum mds_status (*remove_pending_bump_retry)(struct mds_catalogue *cat,
+        uint64_t remove_seq);
+    enum mds_status (*remove_pending_count)(struct mds_catalogue *cat,
+        uint32_t *count);
+    enum mds_status (*remove_pending_scan_all)(struct mds_catalogue *cat,
+        mds_cat_remove_pending_scan_cb cb, void *ctx);
+
+
     enum mds_status (*ns_rename)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t src_parent,
         const char *src_name, uint64_t dst_parent,

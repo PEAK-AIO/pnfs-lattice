@@ -268,6 +268,16 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Transient state caching (default: off -- open/layout state
      * write-through to RonDB for cross-MDS correctness). */
     cfg->transient_state_cache = false;
+    /* Deferred parent-dir attr maintenance (parent_touch). */
+    cfg->parent_touch_deferred = false;
+    cfg->parent_touch_flush_ms = 50;
+    cfg->parent_touch_max_dirs = 4096;
+    /* Async-REMOVE delete manifest (delete-at-ack). */
+    cfg->remove_async = false;
+    cfg->remove_async_batch = 128;
+    cfg->remove_async_workers = 4;
+    cfg->remove_async_poll_ms = 200;
+    cfg->remove_async_claim_ttl_ms = 30000;
 
     /* Stored synthetic DS owner (RFC 8435 S2.2).  Default off -> legacy
      * owner-aligned chown-on-LAYOUTGET path. */
@@ -812,6 +822,65 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "transient_state_cache") == 0) {
             cfg->transient_state_cache = (strcmp(val, "true") == 0 ||
                                           strcmp(val, "1") == 0);
+        } else if (strcmp(key, "parent_touch_deferred") == 0) {
+            cfg->parent_touch_deferred =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (strcmp(key, "parent_touch_flush_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1 && v <= 60000) {
+                cfg->parent_touch_flush_ms = (uint32_t)v;
+            }
+        } else if (strcmp(key, "parent_touch_max_dirs") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 16 && v <= 1048576) {
+                cfg->parent_touch_max_dirs = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async") == 0) {
+            cfg->remove_async =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (strcmp(key, "remove_async_batch") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1 && v <= 4096) {
+                cfg->remove_async_batch = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_workers") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1 && v <= 32) {
+                cfg->remove_async_workers = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_poll_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 10 && v <= 60000) {
+                cfg->remove_async_poll_ms = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_claim_ttl_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1000 && v <= 600000) {
+                cfg->remove_async_claim_ttl_ms = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async") == 0) {
+            cfg->remove_async =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (strcmp(key, "remove_async_batch") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1 && v <= 4096) {
+                cfg->remove_async_batch = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_workers") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1 && v <= 32) {
+                cfg->remove_async_workers = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_poll_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 10 && v <= 60000) {
+                cfg->remove_async_poll_ms = (uint32_t)v;
+            }
+        } else if (strcmp(key, "remove_async_claim_ttl_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 1000 && v <= 600000) {
+                cfg->remove_async_claim_ttl_ms = (uint32_t)v;
+            }
         } else if (strcmp(key, "ds_synth_owner") == 0) {
             cfg->ds_synth_owner = (strcmp(val, "true") == 0 ||
                                    strcmp(val, "1") == 0);

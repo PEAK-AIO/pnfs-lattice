@@ -180,6 +180,12 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
 					uint32_t stripe_count);
 
 /** Atomic rename: src dirent -> dst dirent + parent touches. */
+enum mds_status mds_cat_ns_parent_touch(struct mds_catalogue *cat,
+                                        uint64_t fileid,
+                                        uint64_t change_delta,
+                                        struct timespec stamp);
+bool mds_cat_ns_parent_touch_supported(const struct mds_catalogue *cat);
+
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
 				  struct mds_cat_txn *txn,
 				  uint64_t src_parent,
@@ -519,6 +525,63 @@ enum mds_status mds_cat_quota_usage_put(struct mds_catalogue *cat,
 /* -----------------------------------------------------------------------
  * Catalogue data -- GC queue
  * ----------------------------------------------------------------------- */
+
+/* --- Async-REMOVE delete manifest (ported, schema v10) --- */
+struct mds_remove_pending_entry;
+typedef int (*mds_cat_remove_pending_scan_cb)(
+		const struct mds_remove_pending_entry *entry, void *ctx);
+
+enum mds_status mds_cat_remove_pending_enqueue(struct mds_catalogue *cat,
+					       struct mds_cat_txn *txn,
+					       uint64_t dir_fileid,
+					       const char *name,
+					       uint64_t child_fileid,
+					       uint64_t child_generation,
+					       uint64_t *seq_out);
+enum mds_status mds_cat_remove_pending_enqueue_unlink(struct mds_catalogue *cat,
+					       struct mds_cat_txn *txn,
+					       uint64_t dir_fileid,
+					       const char *name,
+					       uint64_t child_fileid,
+					       uint64_t child_generation,
+					       uint64_t *seq_out);
+enum mds_status mds_cat_remove_pending_peek_batch(
+		struct mds_catalogue *cat, uint64_t now_ns,
+		struct mds_remove_pending_entry *entries,
+		uint32_t cap, uint32_t *n_out);
+enum mds_status mds_cat_remove_pending_claim(
+		struct mds_catalogue *cat, uint64_t remove_seq,
+		uint32_t mds_id, uint64_t boot_epoch,
+		uint64_t now_ns, uint64_t claim_ttl_ns);
+enum mds_status mds_cat_remove_pending_complete(struct mds_catalogue *cat,
+						uint64_t remove_seq);
+enum mds_status mds_cat_remove_pending_bump_retry(struct mds_catalogue *cat,
+						  uint64_t remove_seq);
+enum mds_status mds_cat_remove_pending_count(struct mds_catalogue *cat,
+					     uint32_t *count);
+enum mds_status mds_cat_remove_pending_scan_all(
+		struct mds_catalogue *cat,
+		mds_cat_remove_pending_scan_cb cb, void *ctx);
+
+/* Minimal ns_remove info result: the pre-remove child
+ * inode snapshot.  Only child_pre is consumed by the remove manifest's
+ * executor; the verified/info remove ops themselves are NOT ported
+ * (their dispatchers return NOSUPPORT below) — the delete-at-ack drain
+ * always takes the inode-inference path. */
+struct mds_ns_remove_info {
+	struct mds_inode child_pre;
+};
+
+enum mds_status mds_cat_ns_remove_info_flags(struct mds_catalogue *cat,
+		struct mds_cat_txn *txn, uint64_t parent_fileid,
+		const char *name, struct mds_ns_remove_info *out,
+		uint32_t ns_flags);
+enum mds_status mds_cat_ns_remove_info_verified_flags(
+		struct mds_catalogue *cat, struct mds_cat_txn *txn,
+		uint64_t parent_fileid, const char *name,
+		uint64_t expected_child_fid, uint64_t expected_generation,
+		struct mds_ns_remove_info *out, uint32_t ns_flags);
+#define MDS_CAT_NSF_DEFER_PARENT (1U << 0)
 
 enum mds_status mds_cat_gc_enqueue(struct mds_catalogue *cat,
 				   struct mds_cat_txn *txn,
