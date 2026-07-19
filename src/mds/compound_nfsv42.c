@@ -25,6 +25,23 @@
 #include "health.h"
 #include "hpc_shared.h"
 
+/* RFC 8276 S8.4: the "user." namespace prefix is NOT transmitted on
+ * the wire -- the Linux client strips it before XDR, so SETXATTR /
+ * GETXATTR / REMOVEXATTR arrive with a->name == "pnfs.hpc_shared".
+ * Accept both spellings so local tools that pass the full name and
+ * on-the-wire clients hit the same trigger. */
+static bool hpc_xattr_name_match(const char *name)
+{
+	if (name == NULL) {
+		return false;
+	}
+	if (strcmp(name, HPC_SHARED_XATTR_NAME) == 0) {
+		return true;
+	}
+	return strcmp(name, HPC_SHARED_XATTR_NAME +
+			    strlen("user.")) == 0;
+}
+
 
 /** ALLOCATE (RFC 7862 S15.1): preallocate space. */
 
@@ -949,7 +966,7 @@ enum nfs4_status op_getxattr(struct compound_data *cd,
 
 	/* Phase B HPC-Shared trigger: synthesize the value rather than
 	 * hitting the xattr table.  See include/hpc_shared.h. */
-	if (strcmp(a->name, HPC_SHARED_XATTR_NAME) == 0) {
+	if (hpc_xattr_name_match(a->name)) {
 		uint8_t buf[2];
 		uint32_t out_len = 0;
 		st = hpc_shared_xattr_synthesize_value(
@@ -1023,7 +1040,7 @@ enum nfs4_status op_setxattr(struct compound_data *cd,
 	 * instead of storing the bytes as a real xattr.  Honour the
 	 * SETXATTR4_REPLACE pre-condition (the synthetic xattr always
 	 * exists from the protocol's POV: it's a knob, not data). */
-	if (strcmp(a->name, HPC_SHARED_XATTR_NAME) == 0) {
+	if (hpc_xattr_name_match(a->name)) {
 		enum nfs4_status hpc_st;
 
 		if (a->option == SETXATTR4_CREATE) {
@@ -1203,7 +1220,7 @@ enum nfs4_status op_removexattr(struct compound_data *cd,
 
 	/* Phase B HPC-Shared trigger: REMOVEXATTR clears the inode flag
 	 * without touching the xattr table. */
-	if (strcmp(a->name, HPC_SHARED_XATTR_NAME) == 0) {
+	if (hpc_xattr_name_match(a->name)) {
 		enum nfs4_status hpc_st =
 			hpc_shared_xattr_apply(cd, NULL, 0, true);
 		if (hpc_st != NFS4_OK) {

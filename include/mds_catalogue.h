@@ -330,6 +330,16 @@ enum mds_status mds_cat_dirent_put(struct mds_catalogue *cat,
 				   uint64_t child_fileid,
 				   uint8_t child_type);
 
+/** Insert a dirent; MDS_ERR_EXISTS if the name is already present.
+ * Create paths MUST use this instead of mds_cat_dirent_put -- the
+ * put variant overwrites an existing name and orphans its inode. */
+enum mds_status mds_cat_dirent_insert(struct mds_catalogue *cat,
+				      struct mds_cat_txn *txn,
+				      uint64_t parent_fileid,
+				      const char *name,
+				      uint64_t child_fileid,
+				      uint8_t child_type);
+
 /** Delete a single dirent (used by 2PC rename, migration). */
 enum mds_status mds_cat_dirent_del(struct mds_catalogue *cat,
 				   struct mds_cat_txn *txn,

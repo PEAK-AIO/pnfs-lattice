@@ -146,6 +146,12 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name, uint64_t child_fileid, uint8_t child_type);
 
+    /* Insert-only dirent write: MDS_ERR_EXISTS on name collision
+     * instead of dirent_put's silent overwrite. */
+    enum mds_status (*dirent_insert)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t parent,
+        const char *name, uint64_t child_fileid, uint8_t child_type);
+
     /** Low-level dirent delete. */
     enum mds_status (*dirent_del)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent, const char *name);

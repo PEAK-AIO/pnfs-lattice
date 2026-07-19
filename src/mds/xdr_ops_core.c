@@ -1196,8 +1196,17 @@ bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
         }
 
         if (have_requested && rd->entry_attrs_valid[i]) {
-            if (!xdr_nfs4_fattr_encode(xdrs, &rd->entry_attrs[i],
-                                       rd->requested)) {
+            /* Same fsid as GETATTR would report on this tree; the
+             * plain encoder hardcodes fsid (1,0) which mismatches
+             * any shard with fsid != 1 and makes the client treat
+             * every entry as a filesystem crossing (auto-submount,
+             * rm -rf EBUSY).  No referral context on entries. */
+            if (!xdr_nfs4_fattr_encode_ex(xdrs, &rd->entry_attrs[i],
+                                          rd->requested, NULL,
+                                          (rd->fsid_major != 0)
+                                              ? rd->fsid_major : 1,
+                                          rd->fsid_minor,
+                                          NULL, NULL, NULL)) {
                 return false;
             }
         } else {

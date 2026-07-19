@@ -838,77 +838,47 @@ enum mds_status ds_prealloc_batch(
         return MDS_ERR_NOMEM;
     }
 
-    /* Reuse the cached spread for an identical profile (same geometry,
-     * filter, and ONLINE-DS count); otherwise compute + cache it. */
-    {
-        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
-        bool hit = false;
-
-        pthread_mutex_lock(&ctx->plan_lock);
-        for (uint32_t k = 0; k < DS_PREALLOC_PLAN_CACHE; k++) {
-            struct prealloc_plan *p = &ctx->plans[k];
-            if (p->valid && p->n == n &&
-                p->stripe_count == req->stripe_count &&
-                p->mirror_count == mc &&
-                p->required_mode == req->required_mode &&
-                p->required_transport == req->required_transport &&
-                p->preferred_transport == req->preferred_transport &&
-                p->preferred_caps == req->preferred_caps &&
-                p->strict_unique_ds == req->strict_unique_ds &&
-                p->ds_count_seen == ds_count) {
-                for (uint32_t i = 0; i < n; i++) {
-                    entries[i].ds_id = p->ds_ids[i];
-                }
-                hit = true;
-                break;
-            }
-        }
-        pthread_mutex_unlock(&ctx->plan_lock);
-
-        if (!hit) {
-            st = placement_select_ex(ctx->policy, ds_list, ds_count,
-                                     req->stripe_count, mc, stripe_unit,
-                                     entries);
-            if (st != MDS_OK) {
-                free(ds_list);
-                free(entries);
-                return MDS_ERR_NOSPC;
-            }
-            pthread_mutex_lock(&ctx->plan_lock);
-            struct prealloc_plan *slot =
-                &ctx->plans[ctx->plan_rr++ % DS_PREALLOC_PLAN_CACHE];
-            uint32_t *ids = malloc((size_t)n * sizeof(*ids));
-            if (ids != NULL) {
-                for (uint32_t i = 0; i < n; i++) {
-                    ids[i] = entries[i].ds_id;
-                }
-                free(slot->ds_ids);
-                slot->ds_ids             = ids;
-                slot->n                  = n;
-                slot->stripe_count       = req->stripe_count;
-                slot->mirror_count       = mc;
-                slot->required_mode      = req->required_mode;
-                slot->required_transport = req->required_transport;
-                slot->preferred_transport = req->preferred_transport;
-                slot->preferred_caps     = req->preferred_caps;
-                slot->strict_unique_ds   = req->strict_unique_ds;
-                slot->ds_count_seen      = ds_count;
-                slot->valid              = true;
-            }
-            pthread_mutex_unlock(&ctx->plan_lock);
-        }
-    }
-    free(ds_list);
-
+    /*
+     * Resolve fileid before placement so the RR window can rotate
+     * per file (start = fileid % online_count).  The old plan cache
+     * reused one absolute DS set for every CREATE with the same
+     * profile, which pinned all wide HPC files onto the same "hot
+     * N" DSes whenever capacity/WRR preferred them.
+     */
     fileid = req->fileid_hint;
     if (fileid == 0U) {
         st = mds_cat_alloc_fileid((struct mds_catalogue *)ctx->cat, NULL,
                                   &fileid);
         if (st != MDS_OK || fileid == 0U) {
+            free(ds_list);
             free(entries);
             return MDS_ERR_NOSPC;
         }
     }
+
+    {
+        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+        uint32_t sc = req->stripe_count;
+
+        /* Fileid-rotated RR spreads wide layouts across the pool;
+         * capacity/WRR would re-collapse onto the same hot N DSes. */
+        st = placement_select_rr_at2(ds_list, ds_count, &sc, mc,
+                                     stripe_unit, fileid, entries);
+        if (st != MDS_OK) {
+            free(ds_list);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+        /* strict_unique_ds: refuse graceful degrade — caller asked
+         * for a full-width unique spread and must see NOSPC rather
+         * than a silently narrower layout. */
+        if (req->strict_unique_ds && sc != req->stripe_count) {
+            free(ds_list);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+    }
+    free(ds_list);
 
     for (uint32_t i = 0; i < n; i++) {
         uint32_t stripe = i % req->stripe_count;

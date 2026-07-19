@@ -143,6 +143,8 @@ _Static_assert(0, "pnfs-mds requires GCC >= 11.1 -- see docs/architecture.md sec
 #define MDS_ATTR_ATIME_NOW  (1U << 6)
 #define MDS_ATTR_MTIME_NOW  (1U << 7)
 #define MDS_ATTR_FLAGS      (1U << 8)
+/* Grow-only size update (LAYOUTCOMMIT); RMW uses max(old,new). */
+#define MDS_ATTR_SIZE_EXTEND (1U << 9)
 
 /* Root inode is 2 to match POSIX convention
  * bad-block inode on ext2/3/4; NFS clients expect root != 0/1). */
@@ -923,6 +925,23 @@ struct mds_config {
      * Default AUTO. */
     uint32_t            hpc_max_stripe_count;              /**< 0 = default 128. */
     enum mds_hpc_xdr_form hpc_xdr_form;                    /**< Default AUTO. */
+
+    /* Serve pNFS layouts for HPC-Shared (wide-striped) inodes.  Off
+     * (default) answers their LAYOUTGET with LAYOUTUNAVAILABLE so
+     * clients do READ/WRITE through the MDS proxy, which addresses
+     * the stripe map server-side -- correct on every client kernel.
+     * Turn on ONLY when the whole client fleet runs Linux 6.18+
+     * (multi-DS-per-mirror flex-files support); older clients treat
+     * the striped form's stripes as mirrors and corrupt data. */
+    bool hpc_serve_layouts;                                /**< Default false. */
+
+    /* Master switch for client-direct pNFS layouts.  When false, every
+     * LAYOUTGET returns LAYOUTUNAVAILABLE and clients fall back to MDS
+     * proxy READ/WRITE (correctness over speed).  Use this to keep I/O
+     * working while the DS-direct path is broken (stale FH / LAYOUTERROR
+     * storms).  Default true.  Independent of hpc_serve_layouts, which
+     * only gates wide HPC-Shared layouts when this switch is on. */
+    bool serve_layouts;                                    /**< Default true. */
 
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is

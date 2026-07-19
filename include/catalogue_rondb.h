@@ -178,10 +178,16 @@ int rondb_shim_dirent_get(void *handle, uint64_t parent_fileid,
                           uint64_t *child_fileid, uint8_t *child_type,
                           int read_mode);
 
-/** Write/insert dirent. */
+/** Write dirent (writeTuple upsert -- rename/migration overwrite). */
 int rondb_shim_dirent_put(void *handle, uint64_t parent_fileid,
                           const char *name,
                           uint64_t child_fileid, uint8_t child_type);
+
+/** Insert dirent (insertTuple).  Returns 1 if the name already
+ * exists (dirent PK conflict), -2 on retryable NDB error. */
+int rondb_shim_dirent_insert(void *handle, uint64_t parent_fileid,
+                             const char *name,
+                             uint64_t child_fileid, uint8_t child_type);
 
 /** Delete dirent. */
 int rondb_shim_dirent_del(void *handle, uint64_t parent_fileid,

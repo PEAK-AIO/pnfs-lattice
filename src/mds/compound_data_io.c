@@ -717,6 +717,15 @@ enum nfs4_status op_open(struct compound_data *cd,
 				st = compound_lookup_local_child(cd,
 					cd->current_fh.fileid,
 					a->name, &inode);
+				if (st == MDS_ERR_NOTFOUND) {
+					/* The winning creator exists (our
+					 * insert hit its dirent) but is
+					 * still HPC_CREATE_PENDING, which
+					 * the lookup filters.  Ask the
+					 * client to retry rather than
+					 * returning NOENT for a CREATE. */
+					return NFS4ERR_DELAY;
+				}
 				if (st != MDS_OK) {
 					return mds_status_to_nfs4(st);
 				}
@@ -1698,6 +1707,26 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	uint32_t stripe_unit = 65536;
 	enum mds_status st;
 	enum nfs4_status nst = NFS4ERR_IO;
+
+	/* Honour the daemon's configured default stripe/mirror geometry,
+	 * same policy as the create-with-layout path in
+	 * compound_layout.c.  Promotion is the choke point every file
+	 * that outgrows the inline threshold passes through, so leaving
+	 * this hardcoded at 1/1 pinned every large file to a single DS
+	 * regardless of default_stripe_count -- one node's disk and NIC
+	 * then bound both the bandwidth and the capacity of shared-file
+	 * and large-sequential workloads.  Files that stay inline never
+	 * promote, so small-file create/remove paths are unaffected by
+	 * a wide default. */
+	if (cd->cfg_placement_policy_enabled &&
+	    cd->cfg_default_stripe_count > 0 &&
+	    cd->cfg_default_mirror_count > 0) {
+		stripe_count = cd->cfg_default_stripe_count;
+		mirror_count = cd->cfg_default_mirror_count;
+	}
+	if (cd->cfg_stripe_unit > 0) {
+		stripe_unit = cd->cfg_stripe_unit;
+	}
 
 	if (cd->proxy == NULL) {
 		return NFS4ERR_NOTSUPP;

@@ -70,6 +70,27 @@ enum mds_status placement_select2(const struct mds_ds_info *ds_list,
                                   struct mds_ds_map_entry *entries);
 
 /**
+ * Like placement_select2, but the RR window starts at
+ * `start_key % online_count` instead of the global atomic counter.
+ *
+ * Used by wide HPC pre-warm (`ds_prealloc_batch`) so successive
+ * fileids rotate across the full ONLINE pool (e.g. 16-wide files
+ * on a 50-DS cluster) rather than collapsing onto one hot set.
+ *
+ * @param start_key  Stable per-file key; typically the catalogue
+ *                   fileid.  Only the residue modulo the ONLINE
+ *                   count matters.
+ */
+enum mds_status placement_select_rr_at2(
+    const struct mds_ds_info *ds_list,
+    uint32_t ds_count,
+    uint32_t *stripe_count,
+    uint32_t mirror_count,
+    uint32_t stripe_unit,
+    uint64_t start_key,
+    struct mds_ds_map_entry *entries);
+
+/**
  * Select DS nodes for a new file's stripe layout under a specific
  * policy.  Thin superset of `placement_select`:
  *

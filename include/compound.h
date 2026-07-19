@@ -1077,6 +1077,14 @@ struct nfs4_res_readdir {
 	bool                 eof;
 	uint64_t             cookie_base; /**< Skip offset for absolute cookies */
 	uint64_t             dir_change;  /**< Dir inode change attr for cookieverf */
+	/* FSID the serving MDS reports for this tree (referral fsid
+	 * scheme, major = owner MDS id).  Entry attributes MUST encode
+	 * this same fsid: the legacy encoder hardcoded (1,0), so on any
+	 * shard with fsid != 1 every READDIRPLUS entry appeared to be a
+	 * separate filesystem and the Linux client auto-submounted each
+	 * listed directory, making rm -rf fail EBUSY on its own mounts. */
+	uint64_t             fsid_major;
+	uint64_t             fsid_minor;
 };
 
 struct nfs4_res_open {
@@ -1692,6 +1700,8 @@ struct layout_recall     *lr;
 	 * the legacy one-DS-per-mirror form regardless of this setting.
 	 */
 	enum mds_hpc_xdr_form     cfg_hpc_xdr_form;
+	bool                      cfg_hpc_serve_layouts;
+	bool                      cfg_serve_layouts;
 	uint32_t                  cfg_stripe_lease_duration_ms;
 	uint64_t                  write_verf;   /* Server boot epoch (writeverf4) */
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */

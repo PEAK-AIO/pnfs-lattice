@@ -119,7 +119,15 @@ static inline enum mds_status layout_ds_id_list_from_entries(
 	}
 
 	for (i = 0; i < entry_count; i++) {
-		if (entries[i].ds_id == 0) {
+		/* DS registration is 0-based (main.c seeds info.ds_id = di
+		 * from di=0), so ds_id 0 is a legitimate data server -- the
+		 * first one.  Only a genuinely unfilled/phantom stripe (no
+		 * ds_id AND no captured filehandle) is invalid; a real
+		 * stripe that happens to land on DS 0 carries a filehandle
+		 * and must be kept.  Rejecting ds_id==0 outright made every
+		 * wide layout that spans all DS (which necessarily includes
+		 * DS 0) fail with NFS4ERR_IO. */
+		if (entries[i].ds_id == 0 && entries[i].nfs_fh_len == 0) {
 			free(ids);
 			return MDS_ERR_INVAL;
 		}

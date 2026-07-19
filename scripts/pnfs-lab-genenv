@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Generate a pnfs-lab inventory (env file) from a simple cluster spec.
+
+Usage:
+    pnfs-lab-genenv SPEC.ini > pnfs-lab.env
+    pnfs-lab-genenv --sample > cluster-spec.ini     # print a spec template
+
+Spec format (INI-like; '#' comments allowed):
+
+    [cluster]
+    user = ubuntu
+    source_dir = /home/ubuntu/pnfs-lattice
+    # RonDB runtime: EITHER a local .deb path...
+    rondb_deb = /home/ubuntu/pnfs-rondb_26.02.4-1_amd64.deb
+    # ...OR a tarball URL (then leave rondb_deb unset):
+    # rondb_tarball_url = https://repo.hops.works/master/rondb-26.02.4-linux-glibc2.28-x86_64.tar.gz
+    rondb_version = 26.02.4
+    data_memory = 64G
+    transaction_memory = 2G
+    replicas = 2
+    client_mount = /pnfs
+    client_nconnect = 16
+    ds_export = /export/ds
+    ds_export_subnet = 10.118.1.0/24
+    ds_nconnect = 1
+    ds_nfsd_threads = 32
+    rondb_data_dir = /var/lib/rondb
+
+    [mds]
+    # one node per line:  <ssh-host>  <data-ip>
+    # single-network clusters may give just <ip> (used for both).
+    # The FIRST mds also hosts the RonDB management server (mgmd).
+    mds0.example.com  10.118.1.34
+    mds1.example.com  10.118.1.29
+
+    [ds]
+    ds00.example.com  10.118.1.12
+    ds01.example.com  10.118.1.124
+
+    [clients]
+    c00.example.com  10.118.1.78
+    c01.example.com  10.118.1.142
+
+Rules enforced:
+  - every section non-empty; hosts and IPs unique across the whole spec entry type
+  - RonDB: MDS count must be a multiple of `replicas` (NDB node-group rule)
+  - IPs must parse as IPv4 dotted quads
+Node IDs are assigned automatically (DS 0..N-1, MDS/RonDB 1..N, mgmd 65).
+"""
+
+import ipaddress
+import sys
+
+SAMPLE = __doc__.split("Spec format (INI-like; '#' comments allowed):", 1)[1]
+
+DEFAULTS = {
+    "user": "ubuntu",
+    "source_dir": "/home/ubuntu/pnfs-lattice",
+    "build_dir": "/var/tmp/pnfs-lattice-build",
+    "build_type": "Release",
+    "rondb_deb": "",
+    "rondb_tarball_url": "",
+    "rondb_version": "26.02.4",
+    "rondb_base": "/opt",
+    "rondb_link": "/opt/rondb",
+    "rondb_data_dir": "/var/lib/rondb",
+    "data_memory": "64G",
+    "transaction_memory": "2G",
+    "replicas": "2",
+    "schema_name": "pnfs_mds",
+    "mgm_node_id": "65",
+    "mgm_port": "1186",
+    "nfs_port": "2049",
+    "grpc_port": "50051",
+    "conf_dir": "/etc/pnfs-mds",
+    "run_dir": "/var/lib/pnfs-mds",
+    "ds_mount_fmt": "/mnt/ds%u",
+    "ds_export": "/export/ds",
+    "ds_export_subnet": "",
+    "ds_export_options": "rw,async,no_subtree_check,no_root_squash,insecure",
+    "ds_nconnect": "1",
+    "ds_nfsd_threads": "32",
+    "ds_transport": "tcp",
+    "ds_rdma_port": "20049",
+    "client_mount": "/pnfs",
+    "client_nconnect": "16",
+    "client_mds_assignment": "first",
+    "free_api_slots": "64",
+    "worker_threads": "48",
+    "prealloc_pool_size": "1000000",
+    "transient_state_cache": "true",
+}
+
+
+def die(msg):
+    sys.stderr.write("ERROR: %s\n" % msg)
+    sys.exit(1)
+
+
+def parse_spec(path):
+    cluster = dict(DEFAULTS)
+    nodes = {"mds": [], "ds": [], "clients": []}
+    section = None
+    for lineno, raw in enumerate(open(path), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            if section not in ("cluster", "mds", "ds", "clients"):
+                die("line %d: unknown section [%s]" % (lineno, section))
+            continue
+        if section is None:
+            die("line %d: content before any [section]" % lineno)
+        if section == "cluster":
+            if "=" not in line:
+                die("line %d: expected key = value" % lineno)
+            k, v = (t.strip() for t in line.split("=", 1))
+            k = k.lower()
+            if k not in DEFAULTS:
+                die("line %d: unknown cluster key '%s' (known: %s)"
+                    % (lineno, k, ", ".join(sorted(DEFAULTS))))
+            cluster[k] = v
+        else:
+            parts = line.split()
+            if len(parts) == 1:
+                host, ip = parts[0], parts[0]
+            elif len(parts) == 2:
+                host, ip = parts
+            else:
+                die("line %d: expected '<ssh-host> <data-ip>' (or single <ip>)"
+                    % lineno)
+            nodes[section].append((host, ip))
+    return cluster, nodes
+
+
+def validate(cluster, nodes):
+    for sec in ("mds", "ds", "clients"):
+        if not nodes[sec]:
+            die("section [%s] has no nodes" % sec)
+        ips = [ip for _, ip in nodes[sec]]
+        hosts = [h for h, _ in nodes[sec]]
+        if len(set(ips)) != len(ips):
+            dups = sorted({i for i in ips if ips.count(i) > 1})
+            die("[%s] duplicate data-ip(s): %s" % (sec, ", ".join(dups)))
+        if len(set(hosts)) != len(hosts):
+            dups = sorted({h for h in hosts if hosts.count(h) > 1})
+            die("[%s] duplicate host(s): %s" % (sec, ", ".join(dups)))
+        for _, ip in nodes[sec]:
+            try:
+                ipaddress.IPv4Address(ip)
+            except ipaddress.AddressValueError:
+                die("[%s] '%s' is not a valid IPv4 data address" % (sec, ip))
+    try:
+        replicas = int(cluster["replicas"])
+    except ValueError:
+        die("replicas must be an integer")
+    n_mds = len(nodes["mds"])
+    if replicas < 1:
+        die("replicas must be >= 1")
+    if n_mds % replicas != 0:
+        die("MDS count (%d) must be a multiple of replicas (%d) — "
+            "NDB requires data-node count to be a multiple of NoOfReplicas"
+            % (n_mds, replicas))
+    if not cluster["rondb_deb"] and not cluster["rondb_tarball_url"]:
+        sys.stderr.write(
+            "note: neither rondb_deb nor rondb_tarball_url set; set "
+            "rondb_tarball_url (e.g. https://repo.hops.works/master/"
+            "rondb-<ver>-linux-glibc2.28-x86_64.tar.gz) unless RonDB is "
+            "already installed at /opt/rondb on every node\n")
+    if not cluster["ds_export_subnet"]:
+        # derive a /24 from the first DS ip as a sane default
+        first = nodes["ds"][0][1]
+        cluster["ds_export_subnet"] = ".".join(first.split(".")[:3]) + ".0/24"
+        sys.stderr.write("note: ds_export_subnet not set; derived %s\n"
+                         % cluster["ds_export_subnet"])
+
+
+def bash_array(name, items, indent="    "):
+    out = ["%s=(" % name]
+    out += ['%s"%s"' % (indent, i) for i in items]
+    out.append(")")
+    return "\n".join(out)
+
+
+def generate(cluster, nodes):
+    c = cluster
+    mds = nodes["mds"]
+    ds = nodes["ds"]
+    cl = nodes["clients"]
+    mgm_host, mgm_ip = mds[0]
+    n = len(mds)
+
+    rondb_src = ('# RonDB runtime installed from .deb on every RonDB/MDS host.\n'
+                 'LAB_REMOTE_RONDB_DEB="%s"' % c["rondb_deb"]) if c["rondb_deb"] else \
+                '# No rondb_deb given: pnfs-lab falls back to its tarball flow.\nLAB_REMOTE_RONDB_DEB=""'
+
+    parts = []
+    a = parts.append
+    a("#!/usr/bin/env bash")
+    a("# shellcheck shell=bash")
+    a("# pnfs-lab inventory — GENERATED by pnfs-lab-genenv; edit the spec, not this file.")
+    a("# %d MDS / %d DS / %d clients; RonDB replicas=%s; mgmd on %s"
+      % (n, len(ds), len(cl), c["replicas"], mgm_host))
+    a("")
+    a('LAB_USER="%s"' % c["user"])
+    a("LAB_SSH_OPTS=(")
+    a("    -o BatchMode=yes")
+    a("    -o StrictHostKeyChecking=no")
+    a("    -o ConnectTimeout=8")
+    a("    -o ServerAliveInterval=10")
+    a("    -o ServerAliveCountMax=3")
+    a(")")
+    a("")
+    a('LAB_SOURCE_DIR="%s"' % c["source_dir"])
+    a('LAB_BUILD_DIR="%s"' % c["build_dir"])
+    a('LAB_BUILD_TYPE="%s"' % c["build_type"])
+    a("")
+    a('LAB_BUILD_HOST_RONDB_BASE="%s"' % c["rondb_base"])
+    a('LAB_BUILD_HOST_RONDB_LINK="%s"' % c["rondb_link"])
+    a('LAB_REMOTE_RONDB_VERSION="%s"' % c["rondb_version"])
+    if c["rondb_tarball_url"]:
+        a('LAB_REMOTE_RONDB_TARBALL_URL="%s"' % c["rondb_tarball_url"])
+    else:
+        a('LAB_REMOTE_RONDB_TARBALL_URL="file:///dev/null#rondb-%s-installed-from-deb"'
+          % c["rondb_version"])
+    a('LAB_REMOTE_RONDB_BASE="%s"' % c["rondb_base"])
+    a('LAB_REMOTE_RONDB_LINK="%s"' % c["rondb_link"])
+    a(rondb_src)
+    a("")
+    a('LAB_RONDB_SCHEMA_NAME="%s"' % c["schema_name"])
+    a('LAB_RONDB_MGM_HOST="%s"' % mgm_host)
+    a('LAB_RONDB_MGM_IP="%s"' % mgm_ip)
+    a('LAB_RONDB_MGM_NODE_ID="%s"' % c["mgm_node_id"])
+    a('LAB_RONDB_MGM_PORT="%s"' % c["mgm_port"])
+    a('LAB_RONDB_DATA_DIR="%s"' % c["rondb_data_dir"])
+    a('LAB_RONDB_DATA_MEMORY="%s"' % c["data_memory"])
+    a("# RonDB per-data-node transaction pool. 128M default storms RonDB error 4350")
+    a('# ("Transaction already aborted") under concurrent LAYOUTGET/metadata load.')
+    a('LAB_RONDB_TRANSACTION_MEMORY="%s"' % c["transaction_memory"])
+    a("")
+    a('LAB_MDS_NFS_PORT="%s"' % c["nfs_port"])
+    a('LAB_MDS_GRPC_PORT="%s"' % c["grpc_port"])
+    a('LAB_MDS_CONF_DIR="%s"' % c["conf_dir"])
+    a('LAB_MDS_RUN_DIR="%s"' % c["run_dir"])
+    a('LAB_MDS_DS_MOUNT_FMT="%s"' % c["ds_mount_fmt"])
+    a("")
+    a(bash_array("LAB_DS_HOSTS", [h for h, _ in ds]))
+    a(bash_array("LAB_DS_IPS", [i for _, i in ds]))
+    a(bash_array("LAB_DS_IDS", [str(i) for i in range(len(ds))]))
+    a(bash_array("LAB_DS_EXPORTS", [c["ds_export"]] * len(ds)))
+    a('LAB_DS_EXPORT_SUBNET="%s"' % c["ds_export_subnet"])
+    a('LAB_DS_EXPORT_OPTIONS="%s"' % c["ds_export_options"])
+    a('LAB_DS_NCONNECT="%s"' % c["ds_nconnect"])
+    a('LAB_DS_NFSD_THREADS="%s"' % c["ds_nfsd_threads"])
+    a('LAB_DS_TRANSPORT="%s"' % c["ds_transport"])
+    a('LAB_DS_RDMA_PORT="%s"' % c["ds_rdma_port"])
+    a("")
+    a(bash_array("LAB_CLIENT_HOSTS", [h for h, _ in cl]))
+    a(bash_array("LAB_CLIENT_IPS", [i for _, i in cl]))
+    a('LAB_CLIENT_MOUNT="%s"' % c["client_mount"])
+    a('LAB_CLIENT_NCONNECT="%s"' % c["client_nconnect"])
+    a("LAB_CLIENT_MOUNTS=()")
+    a("LAB_CLIENT_NCONNECTS=()")
+    a('LAB_CLIENT_MDS_ASSIGNMENT="%s"' % c["client_mds_assignment"])
+    a("")
+    a('LAB_PROFILE_DEFAULT="%s"' % ("multi-mds" if n > 1 else "single-mds"))
+    a("")
+    a("# ---- single-mds profile: first MDS only ----")
+    a(bash_array("LAB_PROFILE_SINGLE_MDS_HOSTS", [mgm_host]))
+    a(bash_array("LAB_PROFILE_SINGLE_MDS_IPS", [mgm_ip]))
+    a('LAB_PROFILE_SINGLE_MDS_IDS=("1")')
+    a(bash_array("LAB_PROFILE_SINGLE_RONDB_DATA_HOSTS", [mgm_host]))
+    a(bash_array("LAB_PROFILE_SINGLE_RONDB_DATA_IPS", [mgm_ip]))
+    a('LAB_PROFILE_SINGLE_RONDB_DATA_NODE_IDS=("1")')
+    a('LAB_PROFILE_SINGLE_RONDB_NUM_REPLICAS="1"')
+    a('LAB_PROFILE_SINGLE_RONDB_FREE_API_SLOTS="8"')
+    a('LAB_PROFILE_SINGLE_MDS_WORKER_THREADS="%s"' % c["worker_threads"])
+    a('LAB_PROFILE_SINGLE_MDS_PREALLOC_POOL_SIZE="%s"' % c["prealloc_pool_size"])
+    a('LAB_PROFILE_SINGLE_TRANSIENT_STATE_CACHE="%s"' % c["transient_state_cache"])
+    a("")
+    a("# ---- multi-mds profile: all MDS are pnfs-mds + RonDB data nodes ----")
+    a("# RonDB: mgmd on first MDS; NoOfReplicas=%s -> %d node group(s)."
+      % (c["replicas"], n // int(c["replicas"])))
+    a(bash_array("LAB_PROFILE_MULTI_MDS_HOSTS", [h for h, _ in mds]))
+    a(bash_array("LAB_PROFILE_MULTI_MDS_IPS", [i for _, i in mds]))
+    a(bash_array("LAB_PROFILE_MULTI_MDS_IDS",
+                 [str(i + 1) for i in range(n)]))
+    a(bash_array("LAB_PROFILE_MULTI_RONDB_DATA_HOSTS", [h for h, _ in mds]))
+    a(bash_array("LAB_PROFILE_MULTI_RONDB_DATA_IPS", [i for _, i in mds]))
+    a(bash_array("LAB_PROFILE_MULTI_RONDB_DATA_NODE_IDS",
+                 [str(i + 1) for i in range(n)]))
+    a('LAB_PROFILE_MULTI_RONDB_NUM_REPLICAS="%s"' % c["replicas"])
+    a('LAB_PROFILE_MULTI_RONDB_FREE_API_SLOTS="%s"' % c["free_api_slots"])
+    a('LAB_PROFILE_MULTI_MDS_WORKER_THREADS="%s"' % c["worker_threads"])
+    a('LAB_PROFILE_MULTI_MDS_PREALLOC_POOL_SIZE="%s"' % c["prealloc_pool_size"])
+    a('LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE="%s"' % c["transient_state_cache"])
+    a("")
+    return "\n".join(parts)
+
+
+def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--sample":
+        print(SAMPLE.strip())
+        return
+    if len(sys.argv) != 2 or sys.argv[1].startswith("-"):
+        sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
+        sys.exit(2)
+    cluster, nodes = parse_spec(sys.argv[1])
+    validate(cluster, nodes)
+    sys.stdout.write(generate(cluster, nodes))
+    sys.stderr.write(
+        "OK: %d MDS (%d node groups), %d DS, %d clients; profile default: %s\n"
+        % (len(nodes["mds"]),
+           len(nodes["mds"]) // int(cluster["replicas"]),
+           len(nodes["ds"]), len(nodes["clients"]),
+           "multi-mds" if len(nodes["mds"]) > 1 else "single-mds"))
+
+
+if __name__ == "__main__":
+    main()

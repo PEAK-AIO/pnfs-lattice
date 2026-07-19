@@ -69,6 +69,39 @@ static uint32_t deviceid_to_ds_id(const uint8_t did[NFS4_DEVICEID4_SIZE])
 	return ntohl(ds);
 }
 
+/** XDR opaque/string payload length including the 4-byte pad to 4. */
+static uint32_t xdr_padded_bytes(uint32_t n)
+{
+	return (n + 3U) & ~3U;
+}
+
+/**
+ * Exact on-the-wire size of one ff_data_server4 (RFC 8435), matching
+ * encode_ff_data_server4() in xdr_ops_layout.c: deviceid + efficiency +
+ * stateid + fh_count + fh + utf8 owner/group strings.
+ */
+static uint32_t ff_data_server4_wire_bytes(uint32_t fh_len,
+					   uint32_t uid, uint32_t gid)
+{
+	char ubuf[16];
+	char gbuf[16];
+	int ulen;
+	int glen;
+
+	ulen = snprintf(ubuf, sizeof(ubuf), "%u", uid);
+	glen = snprintf(gbuf, sizeof(gbuf), "%u", gid);
+	if (ulen < 0) {
+		ulen = 10;
+	}
+	if (glen < 0) {
+		glen = 10;
+	}
+	return 16U + 4U + 16U + 4U + 4U
+	       + xdr_padded_bytes(fh_len)
+	       + 4U + xdr_padded_bytes((uint32_t)ulen)
+	       + 4U + xdr_padded_bytes((uint32_t)glen);
+}
+
 
 /** Map flex transport policy to required transport bitmask. */
 static uint8_t ff_policy_transport(enum ff_transport_policy pol)
@@ -586,6 +619,25 @@ static enum nfs4_status layout_select_grant_range(
 	if (window == 0) {
 		window = 1;
 	}
+	/* Streaming-write fix: on a freshly written file the committed
+	 * size lags the client's writeback offsets (size only advances
+	 * at LAYOUTCOMMIT), so the remaining-to-EOF widening above never
+	 * fires for a first write and every writeback LAYOUTGET was
+	 * granted only the stripe-unit floor (64 KiB).  A multi-GiB
+	 * buffered write then accumulates tens of thousands of tiny
+	 * lsegs client-side; lseg list handling goes quadratic and the
+	 * client wedges in a LAYOUTGET/return-marking loop.  Widen every
+	 * grant to the configured maximum window instead -- RFC 8881
+	 * S18.43.3 explicitly allows returning more than requested, and
+	 * the whole-file RW grant is this server's stated policy (see
+	 * the Phase 6 comment in op_layoutget). */
+	{
+		uint64_t wide = atomic_load(&mds_layout_grant_max_length);
+
+		if (window < wide) {
+			window = wide;
+		}
+	}
 	window = layout_clamp_grant_length(a->offset, window);
 	if (window == 0) {
 		return NFS4ERR_INVAL;
@@ -889,6 +941,68 @@ static enum nfs4_status layout_revoke_unready_grant(
 	return NFS4ERR_DELAY;
 }
 
+/*
+ * Verify-on-serve for wide (multi-stripe) HPC-Shared files.
+ *
+ * The DS filehandle for each stripe is captured once at create time
+ * and replayed by every later LAYOUTGET.  A backing file can vanish
+ * behind the catalogue's back -- a wiped or reinstalled DS, an orphan
+ * reaped out from under a stale inode -- and the stored handle then
+ * points at nothing, so a client's direct I/O fails with ESTALE and
+ * it floods LAYOUTERROR/LAYOUTGET.
+ *
+ * mds_proxy_ensure_ds_file_fh() is idempotent: it re-creates the file
+ * if absent and returns its current knfsd handle, which changes when
+ * the file was re-created.  Refresh every stripe's handle before the
+ * layout is cached or emitted; when any changed, rewrite the stripe
+ * map so the new handles are durable.  Best-effort and gated on a
+ * proxy: on ensure failure the entry is left as-is and the downstream
+ * layout_entries_ready_for_grant check turns it into NFS4ERR_DELAY
+ * (client backs off) rather than a busy-loop.
+ */
+static void layout_refresh_wide_stripe_fhs(struct compound_data *cd,
+					   uint64_t fileid,
+					   struct mds_ds_map_entry *entries,
+					   uint32_t stripe_count,
+					   uint32_t stripe_unit,
+					   uint32_t mirror_count)
+{
+	uint32_t total;
+	uint32_t i;
+	bool changed = false;
+
+	if (cd == NULL || cd->proxy == NULL || entries == NULL ||
+	    stripe_count == 0 || mirror_count == 0) {
+		return;
+	}
+	total = stripe_count * mirror_count;
+	for (i = 0; i < total; i++) {
+		uint8_t fh[MDS_NFS_FH_MAX];
+		uint32_t fh_len = sizeof(fh);
+		uint32_t s = i / mirror_count;
+		uint32_t m = i % mirror_count;
+		enum mds_status st = mds_proxy_ensure_ds_file_fh(
+			cd->proxy, entries[i].ds_id, fileid, s, m,
+			fh, &fh_len);
+
+		if (st != MDS_OK || fh_len == 0 ||
+		    fh_len > sizeof(entries[i].nfs_fh)) {
+			continue;
+		}
+		if (fh_len != entries[i].nfs_fh_len ||
+		    memcmp(fh, entries[i].nfs_fh, fh_len) != 0) {
+			entries[i].nfs_fh_len = fh_len;
+			memcpy(entries[i].nfs_fh, fh, fh_len);
+			changed = true;
+		}
+	}
+	if (changed && cd->cat != NULL) {
+		(void)mds_cat_stripe_map_put(cd->cat, NULL, fileid,
+					     stripe_count, stripe_unit,
+					     mirror_count, entries);
+	}
+}
+
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum nfs4_status op_layoutget(struct compound_data *cd,
 				     const struct nfs4_op *op,
@@ -975,7 +1089,31 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if ((inode.flags & MDS_IFLAG_INLINE) &&
 	    !(inode.flags & MDS_IFLAG_DS_PENDING)) {
 		return NFS4ERR_LAYOUTUNAVAILABLE;
-}
+	}
+
+	/* Master switch: serve_layouts=false forces MDS proxy I/O for
+	 * every file (LAYOUTUNAVAILABLE).  Used when client-direct DS
+	 * I/O is unsafe (LAYOUTERROR storms / missing DS backing files). */
+	if (!cd->cfg_serve_layouts) {
+		return NFS4ERR_LAYOUTUNAVAILABLE;
+	}
+
+	/* HPC-Shared wide-striped files: no shipping Linux flex-files
+	 * client can address a multi-DS stripe map correctly.  The
+	 * striped XDR form (one mirror, ds_count == stripe_count) is
+	 * only consumed by 6.18+ clients, and the legacy form makes a
+	 * pre-6.18 client treat the stripes as MIRRORS -- every byte
+	 * replicated to all N DSes on write and read from any one of
+	 * them, which both amplifies writes N-fold and returns EOF for
+	 * ranges the chosen replica never received.  Until the client
+	 * fleet understands the striped form, serve wide files through
+	 * MDS proxy I/O (same LAYOUTUNAVAILABLE contract as inline
+	 * files): the proxy addresses the stripe map server-side, so
+	 * capacity and bandwidth still spread across the stripe set. */
+	if ((inode.flags & MDS_IFLAG_HPC_SHARED) != 0 &&
+	    !cd->cfg_hpc_serve_layouts) {
+		return NFS4ERR_LAYOUTUNAVAILABLE;
+	}
 	nst = layout_select_grant_range(
 		a, &inode, cd->cfg_stripe_unit,
 		&grant_offset, &grant_length);
@@ -1931,6 +2069,18 @@ fill_layoutget_result:
 	 * that reach this label have entries[] verified FH-ready by
 	 * their own (per-branch) layout_entries_ready_for_grant
 	 * checks, so the cached snapshot is always servable. */
+	/* Verify-on-serve: re-ensure DS backing files + refresh their
+	 * handles before caching/emitting, so LAYOUTGET only hands out
+	 * handles for files that exist.  Required for single-stripe too:
+	 * enterprise prealloc recover_pool can restore slots whose DS
+	 * files were wiped, leaving nfs_fh_len>0 but ENOENT on the DS.
+	 * Cache hits already carry verified entries; skip them. */
+	if (!layout_cache_was_hit && entries != NULL &&
+	    stripe_count > 0 && mirror_count > 0) {
+		layout_refresh_wide_stripe_fhs(cd, cd->current_fh.fileid,
+					       entries, stripe_count,
+					       stripe_unit, mirror_count);
+	}
 	if (cd->lcache != NULL &&
 	    !layout_cache_was_hit && entries != NULL &&
 	    stripe_count > 0 && mirror_count > 0) {
@@ -1990,7 +2140,26 @@ fill_layoutget_result:
 	uint32_t emit_start_stripe = 0;
 	uint32_t emit_end_stripe   = (stripe_count > 0)
 		? (stripe_count - 1) : 0;
-	if (stripe_count > 1 && stripe_unit > 0 &&
+	/* Byte-range stripe subsetting DISABLED -- it corrupts striped
+	 * reads.  The Linux 6.18+ flex-files client dispatches I/O with
+	 *     dss_id = nfs4_ff_layout_calc_dss_id(stripe_unit,
+	 *                                         dss_count, offset)
+	 * i.e. a pure function of the EMITTED array's dss_count.  When
+	 * we trimmed ds[] to the stripes covering a narrow request but
+	 * still advertised the whole-file grant range, the client
+	 * dispatched over the shrunken array: chunk at logical stripe k
+	 * landed on emitted entry (k mod trimmed_count) instead of the
+	 * DS that actually holds it.  Writes were immune (the wide-
+	 * grant writeback path requests length == UINT64_MAX, skipping
+	 * the trim) but every partial-range READ -- e.g. readahead
+	 * after cache eviction -- returned data from the wrong DS:
+	 * write-verifies passed from the page cache while true DS
+	 * read-back was garbage.  Trimming can only ever be safe if the
+	 * emitted segment's (offset,length) is narrowed to exactly the
+	 * trimmed stripes AND the client indexes stripes relative to
+	 * the segment start, which the modulo dispatcher does not do.
+	 * Always emit the full stripe array. */
+	if (0 && stripe_count > 1 && stripe_unit > 0 &&
 	    a->length != UINT64_MAX) {
 		/* Guard against zero-length requests (no stripes
 		 * cover them; emit just the start stripe so the
@@ -2085,41 +2254,62 @@ fill_layoutget_result:
 			want_ff_mirror_count = 1;
 		}
 	}
-	/* QA review Blocker 1 -- honor loga_maxcount per RFC 8881 S18.43.4.
+	/* Honor loga_maxcount per RFC 8881 S18.43.4.
 	 *
-	 * Estimate the encoded LAYOUTGET reply size from the geometry we
+	 * Estimate the encoded LAYOUTGET4resok size from the geometry we
 	 * are about to emit.  If it would exceed a->maxcount, return
-	 * NFS4ERR_TOOSMALL so the client can retry with a larger
-	 * maxcount instead of receiving a truncated body.
+	 * NFS4ERR_TOOSMALL.
 	 *
 	 * Outer wrapper bytes (constant): return_on_close (4) +
 	 * stateid (16) + layout_count (4) + layout4 header
 	 * (offset 8 + length 8 + iomode 4 + type 4) + body_len (4) = 52.
 	 *
-	 * Body bytes (worst case, derived from xdr_ops_layout.c):
-	 *   files layout : 64 + want_ds_count * (4 + MDS_NFS_FH_MAX + 4)
-	 *   flex-files   : 64 + 4 * want_ff_mirror_count
-	 *                  + worst_ds_count * FF_DATA_SERVER4_MAX_BYTES
-	 *                  where FF_DATA_SERVER4_MAX_BYTES = 256.
-	 *
-	 * We over-estimate to leave headroom for GSS wrapping / outer
-	 * compound framing, since the same client maxcount budget has to
-	 * cover the entire RPC reply.  An over-estimate that triggers
-	 * NFS4ERR_TOOSMALL on a marginal layout is safe: the client
-	 * retries with a bumped budget, and Linux clients send
-	 * maxcount=0xFFFFFFFF in practice so the path is rarely taken. */
+	 * IMPORTANT -- Linux flex-files (and files) layoutdrivers hardcode
+	 *   max_layoutget_response = PNFS_LAYOUT_MAXSIZE = 4096
+	 * and never bump maxcount on NFS4ERR_TOOSMALL (see
+	 * pnfs_alloc_init_layoutget_args / nfs4_layoutget_handle_exception
+	 * in Linux 6.19).  A false TOOSMALL therefore permanently disables
+	 * client-direct I/O: the client falls back to MDS WRITE, which for
+	 * wide HPC files does not place data on the DS stripes.  The
+	 * estimate below must track the real XDR size (per-DS FH + uid/gid
+	 * string lengths), not a loose 256-byte-per-DS ceiling that rejects
+	 * a valid 16-stripe layout (~1.5-3 KiB) as 4216 > 4096. */
 	if (a->maxcount > 0 && a->maxcount < UINT32_MAX) {
 		uint64_t outer_bytes = 52;
 		uint64_t body_bytes;
 		if (r->layout_type == LAYOUT4_FLEX_FILES) {
-			/* Striped form (want_ff_mirror_count == 1) and legacy
-			 * form both place want_ds_count DS entries on the wire
-			 * -- striped puts them inside one ff_mirror4, legacy
-			 * spreads them across one DS per mirror.  Either way
-			 * the body cost scales with want_ds_count. */
-			body_bytes = 64
-				   + 4ULL * want_ff_mirror_count
-				   + (uint64_t)want_ds_count * 256ULL;
+			uint64_t ds_bytes = 0;
+			uint32_t mi;
+
+			for (mi = 0; mi < want_ds_count; mi++) {
+				uint32_t emit_stripe = emit_start_stripe +
+					(mi / mirror_count);
+				uint32_t emit_mirror = mi % mirror_count;
+				uint32_t src_idx = emit_stripe * mirror_count +
+					emit_mirror;
+				uint32_t fh_len = MDS_NFS_FH_MAX;
+
+				if (entries != NULL &&
+				    src_idx < stripe_count * mirror_count &&
+				    entries[src_idx].nfs_fh_len > 0 &&
+				    entries[src_idx].nfs_fh_len <=
+					MDS_NFS_FH_MAX) {
+					fh_len = entries[src_idx].nfs_fh_len;
+				}
+				/* Worst-case decimal uid/gid ("4294967295").
+				 * Synth uids are not known until after this
+				 * gate; over-sizing the strings by a few
+				 * bytes is fine, a 256-byte flat tax is not. */
+				ds_bytes += ff_data_server4_wire_bytes(
+					fh_len, UINT32_MAX, UINT32_MAX);
+			}
+			/* stripe_unit(8) + outer ff_mirror_count(4)
+			 * + one ds_count(4) per emitted ff_mirror4
+			 * + ff_flags(4) + stats_hint(4). */
+			body_bytes = 8ULL + 4ULL
+				   + 4ULL * (uint64_t)want_ff_mirror_count
+				   + ds_bytes
+				   + 4ULL + 4ULL;
 		} else {
 			body_bytes = 64
 				   + (uint64_t)want_ds_count *
@@ -2856,7 +3046,8 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 						return lc_nst;
 					}
 					lc_inode.size = new_size;
-					merged_mask |= MDS_ATTR_SIZE;
+					/* SIZE_EXTEND: concurrent LAYOUTCOMMITs take max(size). */
+					merged_mask |= MDS_ATTR_SIZE_EXTEND;
 					size_grew = true;
 				}
 			}
@@ -2965,6 +3156,18 @@ enum nfs4_status op_layouterror(struct compound_data *cd,
 			"LAYOUTERROR from client for DS %u "
 			"(advisory, not driving health state)",
 			(unsigned)ds_id);
+	}
+
+	/* Self-heal: a client I/O failure against a DS most often means
+	 * the stripe's backing file or its stored filehandle went stale.
+	 * Drop this file's cached layout so the next LAYOUTGET takes the
+	 * catalogue path, which re-ensures the DS files and refreshes
+	 * their handles (layout_refresh_wide_stripe_fhs).  Without this a
+	 * stale handle is replayed on every retry and the client floods
+	 * LAYOUTERROR/LAYOUTGET forever.  DS *health* state stays owned
+	 * solely by the probe -- we only invalidate one cache entry. */
+	if (cd->lcache != NULL) {
+		layout_cache_invalidate(cd->lcache, cd->current_fh.fileid);
 	}
 	return NFS4_OK;
 }

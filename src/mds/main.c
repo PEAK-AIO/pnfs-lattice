@@ -1375,6 +1375,8 @@ int main(int argc, char *argv[])
 		rpc_cfg.hpc_getattr_mode = cfg.hpc_getattr_mode;
 		rpc_cfg.hpc_max_stripe_count = cfg.hpc_max_stripe_count;
 		rpc_cfg.hpc_xdr_form = cfg.hpc_xdr_form;
+	rpc_cfg.hpc_serve_layouts = cfg.hpc_serve_layouts;
+	rpc_cfg.serve_layouts = cfg.serve_layouts;
 		if (cfg.placement_policy_enabled) {
 			const char *pname =
 				(cfg.placement_policy == PLACEMENT_WEIGHTED_RR)

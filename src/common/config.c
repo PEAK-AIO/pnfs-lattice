@@ -338,6 +338,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * compile-bounded by MDS_MAX_STRIPES (1024) below in the parser.
      */
     cfg->hpc_max_stripe_count = 128;
+    cfg->hpc_serve_layouts = false;
+    cfg->serve_layouts = true;
 
     /* Stripe lease duration (default 30s). */
     cfg->stripe_lease_duration_ms = 30000;
@@ -593,7 +595,14 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             if (v > 0 && v <= 65535) {
                 cfg->ds_rdma_port = (uint16_t)v;
             }
-        } else if (strcmp(key, "stripe_unit_bytes") == 0) {
+        } else if (strcmp(key, "stripe_unit_bytes") == 0 ||
+                   strcmp(key, "stripe_unit") == 0) {
+            /* "stripe_unit" alias: the canonical key is
+             * stripe_unit_bytes, but the shorter form is what an
+             * operator naturally writes (and what several deploy
+             * templates used).  Silently defaulting to 64 KiB when
+             * the intended value was 1 MiB cost a full benchmark
+             * run in 16x RPC overhead -- accept both spellings. */
             unsigned long v = strtoul(val, NULL, 10);
             /* Bound before the uint32_t truncation: without the
              * upper check, 4294967296 silently became 0 and
@@ -604,8 +613,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 cfg->tuning_set |= MDS_CFG_SET_STRIPE_UNIT_BYTES;
 } else {
                 (void)fprintf(stderr,
-                    "ERROR: stripe_unit_bytes=%s out of range "
-                    "[1, 1073741824]\n", val);
+                    "ERROR: %s=%s out of range "
+                    "[1, 1073741824]\n", key, val);
                 (void)fclose(fp);
                 return MDS_ERR_INVAL;
             }
@@ -825,6 +834,12 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 (void)fclose(fp);
                 return MDS_ERR_INVAL;
             }
+        } else if (strcmp(key, "hpc_serve_layouts") == 0) {
+            cfg->hpc_serve_layouts = (strcmp(val, "true") == 0 ||
+                                      strcmp(val, "1") == 0);
+        } else if (strcmp(key, "serve_layouts") == 0) {
+            cfg->serve_layouts = (strcmp(val, "true") == 0 ||
+                                 strcmp(val, "1") == 0);
         } else if (strcmp(key, "hpc_xdr_form") == 0) {
             /*
              * Three string tokens map to the three enum values.

@@ -65,6 +65,8 @@ Commands:
   deps           Install prerequisite packages on lab hosts
   ds             Configure DS exports
   rondb          Install or refresh RonDB and start the RonDB cluster
+  rondb-reinit   WIPE RonDB namespace + DS backing files, restart fresh
+                 (requires --confirm-reset; unmounts clients first)
   build          Build pnfs-mds locally with RonDB enabled
   deploy         Deploy pnfs-mds for the selected profile
   single-mds     Deploy the single-MDS profile
@@ -487,6 +489,7 @@ load_inventory() {
     LAB_PROFILE_DEFAULT="${LAB_PROFILE_DEFAULT:-single-mds}"
     LAB_RONDB_DATA_DIR="${LAB_RONDB_DATA_DIR:-/var/lib/rondb}"
     LAB_RONDB_DATA_MEMORY="${LAB_RONDB_DATA_MEMORY:-2G}"
+    LAB_RONDB_TRANSACTION_MEMORY="${LAB_RONDB_TRANSACTION_MEMORY:-2G}"
     LAB_MDS_NFS_PORT="${LAB_MDS_NFS_PORT:-2049}"
     LAB_MDS_GRPC_PORT="${LAB_MDS_GRPC_PORT:-50051}"
     LAB_MDS_CONF_DIR="${LAB_MDS_CONF_DIR:-/etc/pnfs-mds}"
@@ -624,7 +627,7 @@ FileSystemPath=${LAB_RONDB_DATA_DIR}/data
 DataMemory=${LAB_RONDB_DATA_MEMORY}
 SharedGlobalMemory=256M
 RedoBuffer=64M
-TransactionMemory=128M
+TransactionMemory=${LAB_RONDB_TRANSACTION_MEMORY}
 IndexMemory=64M
 
 EOF
@@ -1069,9 +1072,23 @@ phase_deps() {
 
     log "Command: deps (profile: ${ACTIVE_PROFILE_NAME})"
 
+    # pnfs-mds builds from source on THIS host; make sure the toolchain and
+    # build-time headers are present (fresh machines lack libntirpc-dev /
+    # libkrb5-dev and the build fails half-way in).
+    log "  [build-host] ensure build packages (cmake, libntirpc-dev, libkrb5-dev, ...)"
+    run_local sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends \
+        build-essential cmake pkg-config \
+        libntirpc-dev libkrb5-dev libssl-dev
+
     for host in "${LAB_DS_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-kernel-server, nfs-common"
         run_remote_root_script "${host}" "$(cat <<EOF
+# Keep needrestart from auto-restarting services after package installs:
+# on testbeds a broken daemon (e.g. Emulab pubsubd) makes apt exit non-zero
+# and aborts the phase, and restarting ssh.service drops the deploy session.
+install -d -m 0755 /etc/needrestart/conf.d
+printf '%s\n' '\$nrconf{restart} = "l";' > /etc/needrestart/conf.d/zz-pnfs-lab.conf
 $(render_ensure_packages)
 ensure_packages nfs-kernel-server nfs-common
 EOF
@@ -1081,6 +1098,11 @@ EOF
     for host in "${ACTIVE_MDS_HOSTS[@]}" "${CLIENT_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-common, attr"
         run_remote_root_script "${host}" "$(cat <<EOF
+# Keep needrestart from auto-restarting services after package installs:
+# on testbeds a broken daemon (e.g. Emulab pubsubd) makes apt exit non-zero
+# and aborts the phase, and restarting ssh.service drops the deploy session.
+install -d -m 0755 /etc/needrestart/conf.d
+printf '%s\n' '\$nrconf{restart} = "l";' > /etc/needrestart/conf.d/zz-pnfs-lab.conf
 $(render_ensure_packages)
 ensure_packages nfs-common attr
 EOF
@@ -1132,6 +1154,13 @@ ensure_packages nfs-kernel-server nfs-common
 install -d -m 0777 "${export_path}"
 install -d -m 0777 "${export_path}/data"
 install -d -m 0755 /etc/exports.d
+# A pre-existing entry for the same path in /etc/exports (e.g. from an
+# earlier manual setup) would duplicate ours and make exportfs abort the
+# whole phase; comment it out (one-time backup kept).
+if grep -qs "^${export_path}[[:space:]]" /etc/exports; then
+    cp -n /etc/exports /etc/exports.pnfs-lab.bak
+    sed -i "s|^${export_path}[[:space:]].*|# pnfs-lab: superseded by /etc/exports.d/pnfs-ds.exports|" /etc/exports
+fi
 cat > /etc/exports.d/pnfs-ds.exports <<'EOC'
 ${export_path} ${LAB_DS_EXPORT_SUBNET}(${LAB_DS_EXPORT_OPTIONS})
 EOC
@@ -1286,6 +1315,13 @@ phase_deploy() {
 
         run_remote_root_script "${host}" "$(cat <<EOF
 $(render_ensure_packages)
+if [ ! -e "${LAB_REMOTE_RONDB_LINK}/lib" ]; then
+    echo "ERROR: RonDB runtime missing at ${LAB_REMOTE_RONDB_LINK} on \$(hostname)." >&2
+    echo "       pnfs-mds needs libndbclient from the RonDB runtime; run the" >&2
+    echo "       'rondb' phase first (it installs the runtime on every MDS," >&2
+    echo "       and must be re-run after changing MDS/RonDB host arrays)." >&2
+    exit 1
+fi
 ensure_packages libntirpc-dev libgssapi-krb5-2 libssl3 nfs-common
 EOF
 )"
@@ -1293,6 +1329,28 @@ EOF
         copy_to_host "${pnfs_mds_bin}" "${host}" "/tmp/pnfs-mds"
         if [ -x "${mds_admin_bin}" ]; then
             copy_to_host "${mds_admin_bin}" "${host}" "/tmp/mds-admin"
+        fi
+
+        # Ship non-distro runtime libs with the binary.  Anything the build
+        # resolved from /usr/local (e.g. a locally built libntirpc) is not
+        # provided by distro packages on the target host -- without this the
+        # daemon exits 127 ("error while loading shared libraries") on every
+        # MDS that is not the build host.
+        lib_snippet=""
+        # The script sets a newline/tab-only IFS globally; restore
+        # space-splitting just for this read.
+        while IFS=' ' read -r lib_soname lib_path; do
+            [ -n "${lib_path}" ] || continue
+            copy_to_host "${lib_path}" "${host}" "/tmp/${lib_soname}"
+            lib_snippet="${lib_snippet}install -m 0644 /tmp/${lib_soname} /usr/local/lib/pnfs-mds/${lib_soname}
+rm -f /tmp/${lib_soname}
+"
+        done < <(ldd "${pnfs_mds_bin}" 2>/dev/null | awk '$3 ~ "^/usr/local/" {print $1, $3}')
+        if [ -n "${lib_snippet}" ]; then
+            lib_snippet="install -d -m 0755 /usr/local/lib/pnfs-mds
+${lib_snippet}printf '%s\n' /usr/local/lib/pnfs-mds > /etc/ld.so.conf.d/pnfs-mds.conf
+ldconfig
+"
         fi
 
         run_remote_root_script "${host}" "$(cat <<EOF
@@ -1313,6 +1371,7 @@ if [ -f /tmp/mds-admin ]; then
     install -m 0755 /tmp/mds-admin /usr/local/bin/mds-admin
 fi
 rm -f /tmp/pnfs-mds /tmp/mds-admin
+${lib_snippet}
 cat > "${LAB_MDS_CONF_DIR}/rondb.conf" <<'EOC'
 connect_string = ${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT}
 schema_name = ${LAB_RONDB_SCHEMA_NAME}
@@ -1344,24 +1403,119 @@ EOF
     done
 
     if [ "${DRY_RUN}" -eq 0 ]; then
-        log "  [${ACTIVE_MDS_HOSTS[0]}] wait for pnfs-mds NFS port ${LAB_MDS_NFS_PORT}"
-        local attempt=0
-        local max_attempts=30
-        local ready=0
-        while [ "${attempt}" -lt "${max_attempts}" ]; do
-            if capture_remote_cmd "${ACTIVE_MDS_HOSTS[0]}" \
-                "ss -tln | grep -q ':${LAB_MDS_NFS_PORT} '" >/dev/null 2>&1; then
-                ready=1
+        # First-ever start creates the whole RonDB schema and rebuilds
+        # indexes: regularly 80-90s.  Wait up to 180s, and check EVERY MDS,
+        # not just the first one.
+        local wait_host
+        local attempt
+        local ready
+        local max_attempts=90
+        for wait_host in "${ACTIVE_MDS_HOSTS[@]}"; do
+            log "  [${wait_host}] wait for pnfs-mds NFS port ${LAB_MDS_NFS_PORT} (up to $((max_attempts * 2))s)"
+            attempt=0
+            ready=0
+            while [ "${attempt}" -lt "${max_attempts}" ]; do
+                if capture_remote_cmd "${wait_host}" \
+                    "ss -tln | grep -q ':${LAB_MDS_NFS_PORT} '" >/dev/null 2>&1; then
+                    ready=1
+                    break
+                fi
+                attempt=$((attempt + 1))
+                sleep 2
+            done
+            if [ "${ready}" -ne 1 ]; then
+                log "  [${wait_host}] pnfs-mds diagnostics follow:"
+                run_remote_root_script "${wait_host}" "
+systemctl --no-pager -l status pnfs-mds 2>&1 | head -12 || true
+journalctl -u pnfs-mds -n 15 --no-pager 2>&1 || true
+ldd /usr/local/bin/pnfs-mds 2>&1 | grep 'not found' || true
+" || true
+                fail "pnfs-mds did not open port ${LAB_MDS_NFS_PORT} on ${wait_host} within $((max_attempts * 2))s (diagnostics above)"
+            fi
+            log "  [${wait_host}] pnfs-mds is listening on ${LAB_MDS_NFS_PORT}"
+        done
+    fi
+}
+
+phase_rondb_reinit() {
+    local host
+    local idx
+    local attempt
+    local started
+
+    log "Command: rondb-reinit (profile: ${ACTIVE_PROFILE_NAME})"
+    [ "${CONFIRM_RESET}" -eq 1 ] || \
+        fail "rondb-reinit WIPES the RonDB namespace AND all DS backing files; rerun with --confirm-reset"
+
+    # Order matters: a live RonDB re-init invalidates client NFS sessions and
+    # wedges their kernel nfs_client state (only a reboot recovers) -- always
+    # unmount first.  And a restarted fileid counter + stale DS backing files
+    # silently corrupt data (fileid collision), so the DS wipe is mandatory.
+    log "  [clients] unmount ${#CLIENT_HOSTS[@]} client(s)"
+    for idx in "${!CLIENT_HOSTS[@]}"; do
+        run_remote_root_script "${CLIENT_HOSTS[$idx]}" \
+            "umount -f -l '${CLIENT_MOUNTS[$idx]}' 2>/dev/null || true"
+    done
+
+    log "  [mds] stop pnfs-mds"
+    for host in "${ACTIVE_MDS_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "systemctl stop pnfs-mds 2>/dev/null || true"
+    done
+
+    log "  [rondb] stop data nodes + mgmd"
+    for host in "${ACTIVE_RONDB_DATA_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "systemctl stop rondb-ndbmtd 2>/dev/null || true"
+    done
+    run_remote_root_script "${LAB_RONDB_MGM_HOST}" \
+        "systemctl stop rondb-mgmd 2>/dev/null || true"
+
+    log "  [rondb] wipe data + mgm dirs (contents only; the daemons refuse to start without the dirs)"
+    for host in "${ACTIVE_RONDB_DATA_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "
+install -d -m 0755 '${LAB_RONDB_DATA_DIR}/data'
+find '${LAB_RONDB_DATA_DIR}/data' -mindepth 1 -delete"
+    done
+    run_remote_root_script "${LAB_RONDB_MGM_HOST}" "
+install -d -m 0755 '${LAB_RONDB_DATA_DIR}/mgm'
+find '${LAB_RONDB_DATA_DIR}/mgm' -mindepth 1 -delete"
+
+    log "  [ds] wipe backing files on ${#LAB_DS_HOSTS[@]} DS"
+    for idx in "${!LAB_DS_HOSTS[@]}"; do
+        run_remote_root_script "${LAB_DS_HOSTS[$idx]}" \
+            "find '${LAB_DS_EXPORTS[$idx]}/data' -mindepth 1 -delete 2>/dev/null || true"
+    done
+
+    log "  [rondb] start mgmd + data nodes (fresh --initial via empty data dirs)"
+    run_remote_root_script "${LAB_RONDB_MGM_HOST}" "systemctl restart rondb-mgmd"
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        sleep 5
+    fi
+    for host in "${ACTIVE_RONDB_DATA_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "systemctl restart rondb-ndbmtd"
+    done
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        attempt=0
+        started=0
+        while [ "${attempt}" -lt 60 ]; do
+            started="$(capture_remote_cmd "${LAB_RONDB_MGM_HOST}" \
+                "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm -e show 2>/dev/null | grep -c 'Nodegroup:'" \
+                2>/dev/null || echo 0)"
+            if [ "${started}" = "${#ACTIVE_RONDB_DATA_IPS[@]}" ]; then
                 break
             fi
             attempt=$((attempt + 1))
-            sleep 2
+            sleep 5
         done
-        if [ "${ready}" -ne 1 ]; then
-            fail "pnfs-mds did not open port ${LAB_MDS_NFS_PORT} on ${ACTIVE_MDS_HOSTS[0]} within $((max_attempts * 2))s"
-        fi
-        log "  [${ACTIVE_MDS_HOSTS[0]}] pnfs-mds is listening on ${LAB_MDS_NFS_PORT}"
+        [ "${started}" = "${#ACTIVE_RONDB_DATA_IPS[@]}" ] || \
+            fail "RonDB data nodes did not all start (${started}/${#ACTIVE_RONDB_DATA_IPS[@]})"
+        log "  [rondb] all ${started} data node(s) started"
     fi
+
+    log "  [mds] start pnfs-mds (first start recreates the schema; allow ~2min)"
+    for host in "${ACTIVE_MDS_HOSTS[@]}"; do
+        run_remote_root_script "${host}" "systemctl restart pnfs-mds"
+    done
+    log "  NOTE: remount clients with the 'client' phase once the MDS listen on ${LAB_MDS_NFS_PORT}"
 }
 
 phase_client() {
@@ -1788,6 +1942,9 @@ run_command() {
             ;;
         rondb)
             phase_rondb
+            ;;
+        rondb-reinit)
+            phase_rondb_reinit
             ;;
         build)
             phase_build

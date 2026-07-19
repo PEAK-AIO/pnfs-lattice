@@ -11,10 +11,14 @@
  * Data file naming convention (architecture.md S3.4):
  *   {mount_path}/data/{fileid}_{stripe}_{mirror}
  *
- * Stripe addressing for single-stripe-unit operations:
+ * Stripe addressing for single-stripe-unit operations (sparse):
  *   stripe_idx  = (offset / stripe_unit) % stripe_count
- *   stripe_pos  = offset / stripe_unit / stripe_count
- *   local_off   = stripe_pos * stripe_unit + (offset % stripe_unit)
+ *   local_off   = offset
+ *
+ * Matches the Linux flex-files striped client, which writes each
+ * chunk at its logical offset in the stripe's DS file.  Dense packing
+ * (stripe_pos * stripe_unit + intra) would self-corrupt mixed
+ * client-direct + MDS-proxy I/O on stripe_count > 1.
  *
  * Mirror writes: the same data is written to every mirror of the
  * target stripe.
@@ -528,7 +532,6 @@ static void compute_stripe_addr(uint64_t offset,
                                 uint64_t *local_offset)
 {
     uint64_t stripe_num;  /* Which logical stripe unit we're in. */
-    uint64_t stripe_pos;  /* Position within the DS file's stripe space. */
 
     if (stripe_unit == 0 || stripe_count == 0) {
         *stripe_idx = 0;
@@ -538,13 +541,74 @@ static void compute_stripe_addr(uint64_t offset,
 
     stripe_num = offset / stripe_unit;
     *stripe_idx = (uint32_t)(stripe_num % stripe_count);
-    stripe_pos = stripe_num / stripe_count;
-    *local_offset = stripe_pos * stripe_unit + (offset % stripe_unit);
+    /* Sparse: DS-file offset == logical file offset (see file header). */
+    *local_offset = offset;
 }
 
 /* -----------------------------------------------------------------------
  * Proxy READ
  * ----------------------------------------------------------------------- */
+
+/*
+ * Stripe-map lookup with v9 inline single-stripe fallback.
+ *
+ * Files created through the inline fast path (MDS_IFLAG_INLINE_STRIPE)
+ * store their one DS entry on the inode and have NO stripe-map row, so
+ * a bare mds_cat_stripe_map_get returns NOTFOUND.  The proxy I/O paths
+ * are the fallback data path when a client cannot (or may not) do
+ * DS-direct I/O -- e.g. LAYOUTUNAVAILABLE after a DS health event --
+ * and returning NOTFOUND there surfaced to applications as ENOENT on
+ * write(2) against a perfectly healthy file.  Synthesize the
+ * single-entry map from the inode instead, mirroring the inline fast
+ * path in op_layoutget.
+ *
+ * Caller frees *entries with free() in all cases, same as the raw
+ * catalogue call.
+ */
+static enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
+                                            uint64_t fileid,
+                                            uint32_t *stripe_count,
+                                            uint32_t *stripe_unit,
+                                            uint32_t *mirror_count,
+                                            struct mds_ds_map_entry **entries)
+{
+    enum mds_status st;
+    struct mds_inode inode;
+    struct mds_ds_map_entry *e;
+    uint32_t fhl;
+
+    st = mds_cat_stripe_map_get(cat, fileid, stripe_count,
+                                stripe_unit, mirror_count, entries);
+    if (st != MDS_ERR_NOTFOUND) {
+        return st;
+    }
+
+    st = mds_cat_ns_getattr(cat, fileid, &inode);
+    if (st != MDS_OK) {
+        return MDS_ERR_NOTFOUND;
+    }
+    if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) == 0 ||
+        inode.inline_fh_len == 0) {
+        return MDS_ERR_NOTFOUND;
+    }
+
+    e = calloc(1, sizeof(*e));
+    if (e == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    fhl = inode.inline_fh_len;
+    if (fhl > MDS_NFS_FH_MAX) {
+        fhl = MDS_NFS_FH_MAX;
+    }
+    e[0].ds_id = inode.inline_ds_id;
+    e[0].nfs_fh_len = fhl;
+    memcpy(e[0].nfs_fh, inode.inline_fh, fhl);
+    *stripe_count = 1;
+    *mirror_count = 1;
+    *stripe_unit = (inode.stripe_unit > 0) ? inode.stripe_unit : 65536;
+    *entries = e;
+    return MDS_OK;
+}
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
@@ -570,7 +634,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
     *eof = false;
 
     /* Look up stripe map via catalogue vtable. */
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                 &stripe_count, &stripe_unit,
                                 &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -719,7 +783,7 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
     *bytes_written = 0;
 
     /* Look up stripe map via catalogue vtable. */
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                 &stripe_count, &stripe_unit,
                                 &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -871,13 +935,20 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
      * MUST set the owner of the data file to the synthetic
      * uid/gid so that the client's AUTH_SYS credentials
      * (from ffl_user/ffl_group in the layout) pass the DS's
-     * permission check.  Mode 0600 restricts access to the
-     * synthetic owner only.
+     * permission check.
      *
-     * For generic DS mode (no secret), the file is left with
-     * default ownership and relies on no_root_squash.
+     * Mode 0666: the DS backing file must be writable by the
+     * client's real AUTH_SYS uid, which for an ordinary (non-root)
+     * workload is NOT root -- so the old 0600 + "rely on
+     * no_root_squash" model silently blocked every non-root client
+     * with EACCES.  Aligning ownership via a post-create path chown
+     * is racy (the fresh file is not yet visible through the MDS's
+     * NFS mount of the DS, so the chown hits ENOENT), which left the
+     * file 0600 and unwritable.  In this trusted pNFS cluster the DS
+     * is a backend store gated by the MDS layout grant, so a
+     * permissive backing-file mode is the correct, race-free model.
      */
-    (void)fchmod(fd, 0600);
+    (void)fchmod(fd, 0666);
     close(fd);
 
     return MDS_OK;
@@ -1061,7 +1132,10 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
         if (fd < 0) {
             goto fallback_rpc;
         }
-        (void)fchmod(fd, 0600);
+        /* 0666: DS backing file must be writable by the client's
+         * real (non-root) AUTH_SYS uid; see the mode rationale in
+         * mds_proxy_ensure_ds_file above. */
+        (void)fchmod(fd, 0666);
         close(fd);
 
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -1207,7 +1281,7 @@ static int open_ds_file_ex(const struct mds_proxy_ctx *ctx,
         stripe_unit = pre_su;
         mirror_count = pre_mc;
     } else {
-        enum mds_status st = mds_cat_stripe_map_get(
+        enum mds_status st = proxy_stripe_map_get(
             cat, fileid, &stripe_count, &stripe_unit,
             &mirror_count, &fetched);
         if (st != MDS_OK) { return -1; }
@@ -1282,7 +1356,7 @@ enum mds_status mds_proxy_allocate(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
 }
 
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                  &stripe_count, &stripe_unit,
                                  &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -1355,7 +1429,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_INVAL;
 }
 
-    st = mds_cat_stripe_map_get(cat, fileid,
+    st = proxy_stripe_map_get(cat, fileid,
                                  &stripe_count, &stripe_unit,
                                  &mirror_count, &entries);
     if (st != MDS_OK) {
@@ -1455,10 +1529,9 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
     close(fd);
 
     /*
-     * Translate DS-local offset back to logical offset.
-     * For single-stripe files (the common fast path), local == logical.
-     * For multi-stripe, we'd need the inverse of compute_stripe_addr.
-     * For now, we use the delta from the requested offset.
+     * Translate DS-local offset back to logical offset.  Sparse
+     * addressing makes local == logical, so the delta from the
+     * requested offset is exact for both single- and multi-stripe.
      */
     *out_offset = offset + ((uint64_t)result - local_offset);
     return MDS_OK;

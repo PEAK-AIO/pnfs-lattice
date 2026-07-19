@@ -12,8 +12,8 @@
  *     and creates ZERO DS files (no rollback work needed)
  *   - FH capture failure (no proxy + synthetic FH disabled) returns
  *     MDS_ERR_NOSPC and leaves out->entries == NULL
- *   - back-to-back batches with the same key reuse the cached plan
- *     (verified indirectly via deterministic ds_id assignment)
+ *   - successive fileids rotate the DS window (fileid % online)
+ *   - identical fileid_hint yields an identical DS spread
  *   - batch_result_destroy is NULL-safe and idempotent
  *
  * The tests run against the in-memory test catalogue and use the
@@ -274,38 +274,59 @@ static void test_fh_capture_failure_rolls_back(void)
 }
 
 /* -------------------------------------------------------------------
- * Test 6: back-to-back batches -- second call with the same key
- * still returns deterministic placements because the plan cache
- * preserves the ds_id ordering.  We don't assert on the literal
- * cache hit (no metric exposed), but the spread must be consistent
- * across calls when the snapshot generation is stable.
+ * Test 6: fileid-rotated placement.
+ *
+ *   - Same fileid_hint => identical DS spread (deterministic).
+ *   - Distinct consecutive fileids with stripe_count < online_count
+ *     must not all land on the same DS set (the old plan-cache /
+ *     capacity-hot-N bug).
  * ------------------------------------------------------------------- */
 
-static void test_repeat_same_key(void)
+static void test_fileid_rotates_spread(void)
 {
     struct mds_catalogue *db = open_test_catalogue();
     assert(db != NULL);
-    struct ds_prealloc_ctx *ctx = make_ctx(db, 4, true);
+    /* 8 ONLINE DSes, 4-wide layouts => windows of length 4 rotate. */
+    struct ds_prealloc_ctx *ctx = make_ctx(db, 8, true);
     assert(ctx != NULL);
 
     struct ds_prealloc_batch_request req;
-    struct ds_prealloc_batch_result  r1, r2;
+    struct ds_prealloc_batch_result  r1, r2, r3;
     make_req(&req, 4, 1, true);
 
-    enum mds_status st = ds_prealloc_batch(ctx, &req, &r1);
-    ASSERT_EQ(st, MDS_OK);
-    st = ds_prealloc_batch(ctx, &req, &r2);
-    ASSERT_EQ(st, MDS_OK);
-
-    /* Each DS-id slot in r1 must equal the corresponding slot in r2. */
+    /* Same hint => same spread. */
+    req.fileid_hint = 100;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &r1), MDS_OK);
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &r2), MDS_OK);
     for (uint32_t i = 0; i < 4; i++) {
         ASSERT_EQ(r1.entries[i].ds_id, r2.entries[i].ds_id);
     }
-    /* Fileids must differ -- every batch allocates a fresh one. */
-    ASSERT_NE(r1.fileid, r2.fileid);
+    ASSERT_EQ(r1.fileid, r2.fileid);
+
+    /* fileid+1 shifts the window by one ONLINE slot. */
+    req.fileid_hint = 101;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &r3), MDS_OK);
+    ASSERT_NE(r1.entries[0].ds_id, r3.entries[0].ds_id);
+
+    /* Across two consecutive 4-wide files on 8 DSes, union covers
+     * more than 4 distinct DSes (not stuck on a hot set). */
+    bool seen[64] = {false};
+    uint32_t uniq = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        if (!seen[r1.entries[i].ds_id]) {
+            seen[r1.entries[i].ds_id] = true;
+            uniq++;
+        }
+        if (!seen[r3.entries[i].ds_id]) {
+            seen[r3.entries[i].ds_id] = true;
+            uniq++;
+        }
+    }
+    ASSERT_TRUE(uniq > 4);
 
     ds_prealloc_batch_result_destroy(&r1);
     ds_prealloc_batch_result_destroy(&r2);
+    ds_prealloc_batch_result_destroy(&r3);
     ds_prealloc_destroy(ctx);
     mds_catalogue_close(db);
 }
@@ -408,8 +429,8 @@ int main(void)
     test_fh_capture_failure_rolls_back();
     printf("  test_fh_capture_failure_rolls_back      PASS\n");
 
-    test_repeat_same_key();
-    printf("  test_repeat_same_key                    PASS\n");
+    test_fileid_rotates_spread();
+    printf("  test_fileid_rotates_spread              PASS\n");
 
     test_fileid_hint_is_honored();
     printf("  test_fileid_hint_is_honored             PASS\n");
