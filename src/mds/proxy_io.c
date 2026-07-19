@@ -11,10 +11,14 @@
  * Data file naming convention (architecture.md S3.4):
  *   {mount_path}/data/{fileid}_{stripe}_{mirror}
  *
- * Stripe addressing for single-stripe-unit operations:
+ * Stripe addressing for single-stripe-unit operations (sparse):
  *   stripe_idx  = (offset / stripe_unit) % stripe_count
- *   stripe_pos  = offset / stripe_unit / stripe_count
- *   local_off   = stripe_pos * stripe_unit + (offset % stripe_unit)
+ *   local_off   = offset
+ *
+ * Matches the Linux flex-files striped client, which writes each
+ * chunk at its logical offset in the stripe's DS file.  Dense packing
+ * (stripe_pos * stripe_unit + intra) would self-corrupt mixed
+ * client-direct + MDS-proxy I/O on stripe_count > 1.
  *
  * Mirror writes: the same data is written to every mirror of the
  * target stripe.
@@ -528,7 +532,6 @@ static void compute_stripe_addr(uint64_t offset,
                                 uint64_t *local_offset)
 {
     uint64_t stripe_num;  /* Which logical stripe unit we're in. */
-    uint64_t stripe_pos;  /* Position within the DS file's stripe space. */
 
     if (stripe_unit == 0 || stripe_count == 0) {
         *stripe_idx = 0;
@@ -538,18 +541,7 @@ static void compute_stripe_addr(uint64_t offset,
 
     stripe_num = offset / stripe_unit;
     *stripe_idx = (uint32_t)(stripe_num % stripe_count);
-    (void)stripe_pos;
-    /* SPARSE stripe addressing: the DS-file offset is the file's
-     * LOGICAL offset, not a densely packed per-stripe position.
-     * The Linux flex-files client (v6.18+ striped decoder) writes
-     * each chunk at its logical offset in the stripe's DS file, so
-     * the proxy MUST address identically -- a shared file written
-     * partly client-direct and partly through the proxy fallback
-     * (e.g. after a transient DS health event) is otherwise
-     * self-corrupting: each side reads where the other did not
-     * write.  For stripe_count == 1 the dense formula already
-     * reduced to the logical offset, so this changes nothing for
-     * default single-stripe files. */
+    /* Sparse: DS-file offset == logical file offset (see file header). */
     *local_offset = offset;
 }
 
@@ -1537,10 +1529,9 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
     close(fd);
 
     /*
-     * Translate DS-local offset back to logical offset.
-     * For single-stripe files (the common fast path), local == logical.
-     * For multi-stripe, we'd need the inverse of compute_stripe_addr.
-     * For now, we use the delta from the requested offset.
+     * Translate DS-local offset back to logical offset.  Sparse
+     * addressing makes local == logical, so the delta from the
+     * requested offset is exact for both single- and multi-stripe.
      */
     *out_offset = offset + ((uint64_t)result - local_offset);
     return MDS_OK;

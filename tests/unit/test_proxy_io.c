@@ -175,6 +175,44 @@ static void setup_mirrored_stripe(struct mds_catalogue *db,
     ASSERT_EQ(mds_cat_txn_commit(txn), 0);
 }
 
+/** Register a 2-stripe (1 mirror each) map on two DS mounts. */
+static void setup_wide_stripe(struct mds_catalogue *db,
+                              uint32_t ds0, uint32_t ds1,
+                              uint64_t fileid,
+                              uint32_t stripe_unit)
+{
+    struct mds_cat_txn *txn = NULL;
+    struct mds_ds_info info;
+    struct mds_ds_map_entry entries[2];
+
+    memset(&info, 0, sizeof(info));
+    info.ds_id = ds0;
+    info.state = DS_ONLINE;
+    info.port = 2049;
+    snprintf(info.addr, sizeof(info.addr), "10.0.0.%u:/ds", ds0);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_cat_ds_put(db, txn, &info), MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), 0);
+
+    memset(&info, 0, sizeof(info));
+    info.ds_id = ds1;
+    info.state = DS_ONLINE;
+    info.port = 2049;
+    snprintf(info.addr, sizeof(info.addr), "10.0.0.%u:/ds", ds1);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_cat_ds_put(db, txn, &info), MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), 0);
+
+    memset(entries, 0, sizeof(entries));
+    entries[0].ds_id = ds0;
+    entries[1].ds_id = ds1;
+
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_cat_stripe_map_put(db, txn,
+              fileid, 2, stripe_unit, 1, entries), MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), 0);
+}
+
 /* -----------------------------------------------------------------------
  * test_proxy_read_write -- basic write then read round-trip
  * ----------------------------------------------------------------------- */
@@ -333,6 +371,68 @@ static void test_proxy_mirror_write(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_proxy_sparse_stripe_addr -- wide-stripe proxy write lands at the
+ * LOGICAL offset in the stripe DS file (not densely packed at 0).
+ * ----------------------------------------------------------------------- */
+
+static void test_proxy_sparse_stripe_addr(void)
+{
+    struct mds_catalogue *db;
+    struct mds_proxy_ctx *proxy;
+    char *db_path, *ds0_path, *ds1_path;
+    uint64_t fileid = 400;
+    uint32_t stripe_unit = 4096;
+    const char *payload = "sparse-stripe";
+    uint32_t data_len = (uint32_t)strlen(payload);
+    uint64_t off = (uint64_t)stripe_unit; /* stripe 1 of 2 */
+    uint32_t bytes;
+    char path[4200];
+    uint8_t at_logical[32], at_dense[32];
+    FILE *f;
+    size_t n;
+
+    db = open_test_db(&db_path);
+    ds0_path = make_ds_dir();
+    ds1_path = make_ds_dir();
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds0_path), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 2, ds1_path), MDS_OK);
+
+    setup_wide_stripe(db, 1, 2, fileid, stripe_unit);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, fileid, 0, 0), MDS_OK);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 2, fileid, 1, 0), MDS_OK);
+
+    ASSERT_EQ(mds_proxy_write(proxy, (struct mds_catalogue *)db, fileid, off,
+              payload, data_len, &bytes), MDS_OK);
+    ASSERT_EQ(bytes, data_len);
+
+    /* Stripe 1 lives on DS 2 as {fileid}_1_0. */
+    snprintf(path, sizeof(path), "%s/data/%" PRIu64 "_1_0", ds1_path, fileid);
+    f = fopen(path, "rb");
+    ASSERT_TRUE(f != NULL);
+
+    /* Sparse: data at logical offset. */
+    ASSERT_EQ(fseek(f, (long)off, SEEK_SET), 0);
+    memset(at_logical, 0, sizeof(at_logical));
+    n = fread(at_logical, 1, data_len, f);
+    ASSERT_EQ(n, (size_t)data_len);
+    ASSERT_EQ(memcmp(at_logical, payload, data_len), 0);
+
+    /* Dense packing would have put the first stripe-1 unit at local 0. */
+    ASSERT_EQ(fseek(f, 0, SEEK_SET), 0);
+    memset(at_dense, 0xFF, sizeof(at_dense));
+    n = fread(at_dense, 1, data_len, f);
+    ASSERT_TRUE(n == 0 || memcmp(at_dense, payload, data_len) != 0);
+    fclose(f);
+
+    mds_proxy_ctx_destroy(proxy);
+    close_test_db(db, db_path);
+    rm_ds_dir(ds0_path);
+    rm_ds_dir(ds1_path);
+}
+
+/* -----------------------------------------------------------------------
  * test_extract_server_fh_formats -- the opaque default accepts knfsd
  * AND NetApp ONTAP server FHs (RFC 8435: DS FHs are opaque); strict
  * knfsd mode pins the legacy 0x01 first byte.
@@ -416,14 +516,15 @@ int main(void)
     fprintf(stdout, "Running proxy I/O tests:\n");
 
     RUN_TEST(test_extract_server_fh_formats);
+    RUN_TEST(test_proxy_sparse_stripe_addr);
 
-    /* Proxy I/O read/write tests require DS stripe maps created via
-     * patched-DS synthetic FH derivation, which was removed.
-     * Generic-only DS mode needs live NFS proxy mounts for
-     * FH capture.  Skip until integration test harness
-     * provides actual DS mounts. */
+    /* Remaining proxy I/O read/write tests require DS stripe maps
+     * created via patched-DS synthetic FH derivation, which was
+     * removed.  Generic-only DS mode needs live NFS proxy mounts
+     * for FH capture.  Skip until an integration harness provides
+     * actual DS mounts. */
     fprintf(stdout,
-            "  (read/write tests skipped -- require DS proxy mounts)\n");
+            "  (other read/write tests skipped -- require DS proxy mounts)\n");
 
     fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
