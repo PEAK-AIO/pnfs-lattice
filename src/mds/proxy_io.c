@@ -538,8 +538,19 @@ static void compute_stripe_addr(uint64_t offset,
 
     stripe_num = offset / stripe_unit;
     *stripe_idx = (uint32_t)(stripe_num % stripe_count);
-    stripe_pos = stripe_num / stripe_count;
-    *local_offset = stripe_pos * stripe_unit + (offset % stripe_unit);
+    (void)stripe_pos;
+    /* SPARSE stripe addressing: the DS-file offset is the file's
+     * LOGICAL offset, not a densely packed per-stripe position.
+     * The Linux flex-files client (v6.18+ striped decoder) writes
+     * each chunk at its logical offset in the stripe's DS file, so
+     * the proxy MUST address identically -- a shared file written
+     * partly client-direct and partly through the proxy fallback
+     * (e.g. after a transient DS health event) is otherwise
+     * self-corrupting: each side reads where the other did not
+     * write.  For stripe_count == 1 the dense formula already
+     * reduced to the logical offset, so this changes nothing for
+     * default single-stripe files. */
+    *local_offset = offset;
 }
 
 /* -----------------------------------------------------------------------
