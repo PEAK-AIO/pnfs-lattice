@@ -110,6 +110,22 @@ Clients must be unmounted before the re-init (the subcommand does this):
 a live re-init invalidates client NFS sessions and wedges the kernel
 client state — only a reboot recovers a wedged client.
 
+### State persistence per profile
+
+`transient_state_cache` decides whether open/layout state is written to
+RonDB or held in the granting MDS's memory:
+
+- **single-mds**: `true`. No peer can take the state over, so persisting
+  it costs a round-trip per operation and buys nothing.
+- **multi-mds**: `false`. State must outlive the MDS that granted it or
+  a failover peer cannot reconstruct what clients still hold.
+
+Persistent state means mass-delete scans hit NDB; that is what
+`LAB_RONDB_TRANSACTION_MEMORY` (2G by default) sizes for, so do not
+lower it on the multi-mds profile.  Override per profile with
+`LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE` /
+`LAB_PROFILE_SINGLE_TRANSIENT_STATE_CACHE` in the inventory.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

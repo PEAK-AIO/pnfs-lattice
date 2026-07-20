@@ -451,6 +451,9 @@ apply_profile() {
             ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_SINGLE_RONDB_FREE_API_SLOTS}"
             ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_SINGLE_MDS_WORKER_THREADS}"
             ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_SINGLE_MDS_PREALLOC_POOL_SIZE}"
+            # Single MDS: no peer can take over its layout state, so
+            # persisting open/layout state to NDB buys nothing and costs
+            # a round-trip per operation.  Keep it in memory.
             ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_SINGLE_TRANSIENT_STATE_CACHE:-true}"
             ;;
         multi-mds)
@@ -467,7 +470,16 @@ apply_profile() {
             ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_MULTI_RONDB_FREE_API_SLOTS}"
             ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_MULTI_MDS_WORKER_THREADS}"
             ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_MULTI_MDS_PREALLOC_POOL_SIZE}"
-            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE:-true}"
+            # Multi-MDS: open/layout state must outlive the MDS that
+            # granted it, otherwise a failover peer cannot reconstruct
+            # what clients still hold.  transient_state_cache=true keeps
+            # that state in one process's memory only, so it defaults to
+            # false here despite the extra NDB round-trip.
+            #
+            # Persistent state means mass-delete scans hit NDB, which is
+            # what LAB_RONDB_TRANSACTION_MEMORY (2G by default) sizes
+            # for; do not lower it on this profile.
+            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE:-false}"
             ;;
         *)
             fail "Unknown profile: ${PROFILE}"
