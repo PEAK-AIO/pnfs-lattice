@@ -10336,98 +10336,149 @@ int rondb_shim_layout_get_by_stateid(void *handle,
     tbl = dict->getTable(RONDB_TBL_LAYOUT_STATE);
     if (tbl == nullptr) { return -1; }
 
-    tx = rondb_get_ndb(state)->startTransaction();
-    if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "layout_get_sid startTx");
-    }
+    /* Two attempts: the bounded index scan on ix_layout_state_stateid
+     * first, then a table scan with a pushed-down stateid filter.
+     *
+     * The index attempt can fail in two distinct ways.  Creating the
+     * scan operation returns nullptr when the index is absent from this
+     * connection's dictionary cache -- handled inline below.  But the
+     * operation can also be created and then fail at execute() time,
+     * typically when the ndb_index_stat system tables were never
+     * created (a deployment step, see docs/pnfs-lab-deploy-guide.md):
+     * NDB reports 4243 and aborts the transaction, and every later
+     * error on it surfaces as 4350 "Transaction already aborted".
+     * Erroring out there made a missing deployment step look like a
+     * server fault and, because this probe backs layout-stateid
+     * renewal, cost the seqid continuity RFC 8881 S12.5.3 expects.
+     * Retry the same lookup on the table-scan path instead: the result
+     * is identical, only slower, and layout_state is small.
+     */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        const bool use_index = (attempt == 0);
 
-    /* Fast path: bounded scan on ix_layout_state_stateid.
-     * Falls back to a full table scan + filter when the index is absent. */
-    iscan = tx->getNdbIndexScanOperation(
-        RONDB_IX_LS_STATEID, RONDB_TBL_LAYOUT_STATE);
-    if (iscan != nullptr) {
-        if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
-            err = iscan->getNdbError();
-            rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "layout_get_sid idx readTuples");
+        scan = nullptr;
+        iscan = nullptr;
+
+        tx = rondb_get_ndb(state)->startTransaction();
+        if (tx == nullptr) {
+            return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                     "layout_get_sid startTx");
         }
-        if (iscan->setBound(RONDB_LS_COL_STATEID,
-                            NdbIndexScanOperation::BoundEQ,
-                            sid_enc, sid_enc_len) != 0) {
-            err = iscan->getNdbError();
-            rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "layout_get_sid setBound");
+
+        if (use_index) {
+            iscan = tx->getNdbIndexScanOperation(
+                RONDB_IX_LS_STATEID, RONDB_TBL_LAYOUT_STATE);
+            if (iscan == nullptr) {
+                /* Index absent from this connection's cache: go
+                 * straight to the table scan, no error worth
+                 * reporting. */
+                rondb_get_ndb(state)->closeTransaction(tx);
+                continue;
+            }
+            if (iscan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+                err = iscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "layout_get_sid idx readTuples");
+            }
+            if (iscan->setBound(RONDB_LS_COL_STATEID,
+                                NdbIndexScanOperation::BoundEQ,
+                                sid_enc, sid_enc_len) != 0) {
+                err = iscan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "layout_get_sid setBound");
+            }
+            scan = iscan;
+        } else {
+            scan = tx->getNdbScanOperation(tbl);
+            if (scan == nullptr) {
+                err = tx->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "layout_get_sid getScanOp");
+            }
+            if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+                err = scan->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err, "layout_get_sid readTuples");
+            }
+            {
+                NdbScanFilter filter(scan);
+                filter.begin(NdbScanFilter::AND);
+                filter.cmp(NdbScanFilter::COND_EQ,
+                           tbl->getColumn(RONDB_LS_COL_STATEID)->getColumnNo(),
+                           sid_enc, (Uint32)sid_enc_len);
+                filter.end();
+            }
         }
-        scan = iscan;
-    } else {
-        scan = tx->getNdbScanOperation(tbl);
-        if (scan == nullptr) {
+
+        a_cid = scan->getValue(RONDB_LS_COL_CLIENTID, nullptr);
+        a_fid = scan->getValue(RONDB_LS_COL_FILEID, nullptr);
+        a_io  = scan->getValue(RONDB_LS_COL_IOMODE, nullptr);
+        a_off = scan->getValue(RONDB_LS_COL_OFFSET, nullptr);
+        a_len = scan->getValue(RONDB_LS_COL_LENGTH, nullptr);
+        a_seq = scan->getValue(RONDB_LS_COL_SEQID, nullptr);
+        a_sid = scan->getValue(RONDB_LS_COL_STATEID, nullptr);
+        if (a_cid == nullptr || a_fid == nullptr || a_io == nullptr ||
+            a_off == nullptr || a_len == nullptr || a_seq == nullptr ||
+            a_sid == nullptr) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
+
+        if (tx->execute(NdbTransaction::NoCommit) == -1) {
             err = tx->getNdbError();
             rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "layout_get_sid getScanOp");
+            if (use_index) {
+                /* Warn once per 64 occurrences: this is a persistent
+                 * cluster-configuration condition, not a per-request
+                 * event, and the retry keeps the lookup correct. */
+                static int _sid_ix_warn = 0;
+                if ((_sid_ix_warn++ & 0x3F) == 0) {
+                    std::fprintf(stderr,
+                        "WARN: layout_get_sid: index %s unusable "
+                        "(code=%d), falling back to table scan -- create "
+                        "the ndb_index_stat system tables "
+                        "(ndb_index_stat --sys-create-if-not-exist) and "
+                        "restart pnfs-mds to restore the fast path\n",
+                        RONDB_IX_LS_STATEID, err.code);
+                }
+                continue;
+            }
+            return rondb_report_error(err, "layout_get_sid exec");
         }
-        if (scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+
+        int scan_rc;
+        while ((scan_rc = scan->nextResult(true)) == 0) {
+            /* Defensive stateid equality recheck. */
+            const char *ref = a_sid->aRef();
+            if (ref == nullptr) { continue; }
+            uint32_t row_len = (uint32_t)(uint8_t)ref[0];
+            if (row_len != 12 ||
+                std::memcmp(ref + 1, stateid_other, 12) != 0) {
+                continue;
+            }
+            if (clientid != nullptr) { *clientid = a_cid->u_64_value(); }
+            if (fileid != nullptr)   { *fileid   = a_fid->u_64_value(); }
+            if (iomode != nullptr)   { *iomode   = a_io->u_32_value(); }
+            if (offset != nullptr)   { *offset   = a_off->u_64_value(); }
+            if (length != nullptr)   { *length   = a_len->u_64_value(); }
+            if (seqid != nullptr)    { *seqid    = a_seq->u_32_value(); }
+            rc = 0;
+            break;
+        }
+        if (scan_rc != 0 && scan_rc != 1) {
             err = scan->getNdbError();
+            scan->close();
             rondb_get_ndb(state)->closeTransaction(tx);
-            return rondb_report_error(err, "layout_get_sid readTuples");
+            return rondb_report_error(err, "layout_get_sid nextResult");
         }
-        {
-            NdbScanFilter filter(scan);
-            filter.begin(NdbScanFilter::AND);
-            filter.cmp(NdbScanFilter::COND_EQ,
-                       tbl->getColumn(RONDB_LS_COL_STATEID)->getColumnNo(),
-                       sid_enc, (Uint32)sid_enc_len);
-            filter.end();
-        }
-    }
-
-    a_cid = scan->getValue(RONDB_LS_COL_CLIENTID, nullptr);
-    a_fid = scan->getValue(RONDB_LS_COL_FILEID, nullptr);
-    a_io  = scan->getValue(RONDB_LS_COL_IOMODE, nullptr);
-    a_off = scan->getValue(RONDB_LS_COL_OFFSET, nullptr);
-    a_len = scan->getValue(RONDB_LS_COL_LENGTH, nullptr);
-    a_seq = scan->getValue(RONDB_LS_COL_SEQID, nullptr);
-    a_sid = scan->getValue(RONDB_LS_COL_STATEID, nullptr);
-    if (a_cid == nullptr || a_fid == nullptr || a_io == nullptr ||
-        a_off == nullptr || a_len == nullptr || a_seq == nullptr ||
-        a_sid == nullptr) {
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return -1;
-    }
-
-    if (tx->execute(NdbTransaction::NoCommit) == -1) {
-        err = tx->getNdbError();
-        rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_get_sid exec");
-    }
-
-    int scan_rc;
-    while ((scan_rc = scan->nextResult(true)) == 0) {
-        /* Defensive stateid equality recheck. */
-        const char *ref = a_sid->aRef();
-        if (ref == nullptr) { continue; }
-        uint32_t row_len = (uint32_t)(uint8_t)ref[0];
-        if (row_len != 12 || std::memcmp(ref + 1, stateid_other, 12) != 0) {
-            continue;
-        }
-        if (clientid != nullptr) { *clientid = a_cid->u_64_value(); }
-        if (fileid != nullptr)   { *fileid   = a_fid->u_64_value(); }
-        if (iomode != nullptr)   { *iomode   = a_io->u_32_value(); }
-        if (offset != nullptr)   { *offset   = a_off->u_64_value(); }
-        if (length != nullptr)   { *length   = a_len->u_64_value(); }
-        if (seqid != nullptr)    { *seqid    = a_seq->u_32_value(); }
-        rc = 0;
-        break;
-    }
-    if (scan_rc != 0 && scan_rc != 1) {
-        err = scan->getNdbError();
         scan->close();
         rondb_get_ndb(state)->closeTransaction(tx);
-        return rondb_report_error(err, "layout_get_sid nextResult");
+        return rc;
     }
-    scan->close();
-    rondb_get_ndb(state)->closeTransaction(tx);
+
+    /* Unreachable in practice: the table-scan attempt always returns
+     * or reports an error above.  Kept so the function has a defined
+     * result if that ever changes. */
     return rc;
 }
 
