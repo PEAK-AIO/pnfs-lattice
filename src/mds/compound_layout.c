@@ -1706,6 +1706,41 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 						     &mirror_count, &entries);
 		}
 		if (st == MDS_ERR_NOTFOUND) {
+			/*
+			 * A file that already holds data must never be
+			 * re-placed.  The fallback below chooses a DS by
+			 * placement policy -- not by where the bytes
+			 * actually live -- and then persists that choice as
+			 * the file's stripe map.  Doing that for a non-empty
+			 * file strands the existing data on the original DS
+			 * and every subsequent read is served from a DS that
+			 * has no backing file, i.e. it returns zeros, with
+			 * the correct size, permanently and silently.
+			 *
+			 * "No stripe map" is only legitimate for a file that
+			 * has no data yet (the first LAYOUTGET after CREATE).
+			 * For anything else it means the map lookup failed or
+			 * the map is stored somewhere this path did not
+			 * consult (e.g. a v9 MDS_IFLAG_INLINE_STRIPE inode,
+			 * whose single entry lives on the inode and is served
+			 * by the fast path above -- when that path is skipped
+			 * the table lookup can never find it).  Fail loudly
+			 * instead of silently relocating the file.
+			 */
+			if (inode.size > 0) {
+				MDS_LOG_ERROR(LOG_COMP_MDS,
+					"LAYOUTGET fileid=%llu: stripe map "
+					"missing for a non-empty file "
+					"(size=%llu flags=0x%x inline_fh_len=%u "
+					"inline_ds_id=%u) -- refusing placement "
+					"fallback that would strand its data",
+					(unsigned long long)cd->current_fh.fileid,
+					(unsigned long long)inode.size,
+					(unsigned)inode.flags,
+					(unsigned)inode.inline_fh_len,
+					(unsigned)inode.inline_ds_id);
+				return NFS4ERR_IO;
+			}
 			MDS_LOG_DEBUG(LOG_COMP_MDS,
 				"LAYOUTGET fileid=%llu: no stripe map, "
 				"entering placement fallback",
