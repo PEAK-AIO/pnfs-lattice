@@ -1467,8 +1467,19 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * HPC cache hit.  DS_PENDING and FH-less inodes are excluded so the
 	 * legacy ds_prepare / FH-capture flow still handles them.
 	 */
+	/*
+	 * inline_ds_id == 0 means the inline slot was never populated with a
+	 * DS: the inode can carry INLINE_STRIPE and a captured file handle
+	 * while ds_id is still zero, and serving that hands the client a
+	 * layout pointing at DS 0 with a handle belonging to a different DS.
+	 * The file's data is then unreachable and reads return zeros at the
+	 * correct size, silently.  Treat zero as "unset" and fall through to
+	 * the authoritative stripe-map lookup, matching the
+	 * stripe_cached_ds_id != 0 guard on the sibling fast path below.
+	 */
 	if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) &&
 	    !(inode.flags & MDS_IFLAG_DS_PENDING) &&
+	    inode.inline_ds_id != 0 &&
 	    inode.inline_fh_len > 0) {
 		struct nfs4_stateid layout_sid;
 		uint32_t fhl = inode.inline_fh_len;
@@ -1509,6 +1520,17 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		}
 		r->stateid = layout_sid;
 		goto fill_layoutget_result;
+	}
+
+	if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) &&
+	    !(inode.flags & MDS_IFLAG_DS_PENDING) &&
+	    inode.inline_ds_id == 0 && inode.inline_fh_len > 0) {
+		MDS_LOG_WARN(LOG_COMP_MDS,
+			"LAYOUTGET fileid=%llu: INLINE_STRIPE inode has "
+			"fh_len=%u but inline_ds_id=0 -- ignoring the inline "
+			"slot and using the stripe map instead",
+			(unsigned long long)cd->current_fh.fileid,
+			(unsigned)inode.inline_fh_len);
 	}
 
 	if (layout_state_is_root_global(cd)) {
