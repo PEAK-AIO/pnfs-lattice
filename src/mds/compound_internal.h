@@ -682,6 +682,19 @@ cat_setattr(struct compound_data *cd, uint64_t fid,
 	return mds_cat_ns_setattr(cd->cat, NULL, fid, attrs,
 				  mask);
 }
+static inline enum mds_status
+cat_setattr_size_extend(struct compound_data *cd,
+			uint64_t fid,
+			const struct mds_inode *attrs,
+			uint32_t mask,
+			struct mds_size_extend_result *result)
+{
+	if (cd->cat == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	return mds_cat_ns_setattr_size_extend(cd->cat, NULL, fid, attrs,
+					      mask, result);
+}
 
 static inline enum mds_status
 cat_nlink_adjust(struct compound_data *cd, uint64_t fid,

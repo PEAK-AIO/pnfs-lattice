@@ -70,6 +70,8 @@ struct subtree_map;
 struct cluster_membership;
 struct threadpool;
 struct mds_shard_map;
+struct cluster_cache_invalidator;
+struct ds_gc;
 
 /**
  * RPC server configuration.
@@ -79,7 +81,7 @@ struct mds_shard_map;
  */
 struct rpc_server_config {
     const char *bind_addr;      /**< Bind address (NULL = "0.0.0.0"). */
-    uint16_t    port;           /**< TCP port (0 = RPC_DEFAULT_PORT). */
+    uint16_t    port;           /**< TCP port (0 = OS-assigned ephemeral port). */
     uint32_t    mds_id;         /**< MDS node ID for stateid/deviceid. */
     uint64_t    write_verf;     /**< Server boot epoch for writeverf4. */
     uint32_t    stripe_unit;    /**< Stripe unit (0 = 64 KiB default). */
@@ -146,6 +148,9 @@ struct rpc_server_config {
     bool hide_referral_junctions; /**< Hide /shardN referral junctions from root READDIR. */
     bool posix_dac; /**< Enforce POSIX permission semantics for AUTH_SYS. */
     bool referral_strict; /**< NFS4ERR_MOVED for foreign-shard FHs. */
+    bool remove_async; /**< Atomic delete-at-ack final regular-file unlink. */
+    struct ds_gc *gc; /**< GC worker and cached REMOVE backpressure state. */
+    struct cluster_cache_invalidator *cache_invalidator;
     enum nfs_auth_mode min_auth; /**< Minimum NFS auth level. */
     struct mds_gss_table *gss_tbl; /**< GSS context table (NULL if SYS). */
     struct threadpool *tp; /**< Worker pool for COMPOUND dispatch (NULL = inline). */

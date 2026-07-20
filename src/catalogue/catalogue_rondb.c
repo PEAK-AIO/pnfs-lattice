@@ -652,6 +652,89 @@ enum mds_status catalogue_rondb_ns_create(
 	return MDS_OK;
 }
 
+static enum mds_status catalogue_rondb_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries)
+{
+	void *handle = rondb_handle(cat);
+	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
+	uint8_t *stripe_buf;
+	size_t stripe_buf_len;
+	size_t stripe_offset;
+	int rc = -1;
+
+	if (handle == NULL || name == NULL || child == NULL || entries == NULL ||
+	    child->fileid == 0 || child->parent_fileid != parent_fileid ||
+	    child->type != MDS_FTYPE_REG || stripe_count == 0 ||
+	    stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+	    mirror_count != 1 ||
+	    (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+		return MDS_ERR_INVAL;
+	}
+	if (rondb_inode_serialize(child, 0, child_buf, sizeof(child_buf)) < 0) {
+		return MDS_ERR_IO;
+	}
+
+	stripe_buf_len = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
+		    entries[stripe_index].nfs_fh_len >
+		    SIZE_MAX - stripe_buf_len - 8U) {
+			return MDS_ERR_INVAL;
+		}
+		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
+	}
+	if (stripe_buf_len > UINT32_MAX) {
+		return MDS_ERR_INVAL;
+	}
+
+	stripe_buf = malloc(stripe_buf_len);
+	if (stripe_buf == NULL) {
+		return MDS_ERR_NOMEM;
+	}
+	stripe_offset = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		const struct mds_ds_map_entry *entry = &entries[stripe_index];
+
+		fdb_put_u32(stripe_buf + stripe_offset, entry->ds_id);
+		fdb_put_u32(stripe_buf + stripe_offset + 4U, entry->nfs_fh_len);
+		if (entry->nfs_fh_len > 0) {
+			memcpy(stripe_buf + stripe_offset + 8U, entry->nfs_fh,
+			       entry->nfs_fh_len);
+		}
+		stripe_offset += 8U + entry->nfs_fh_len;
+	}
+
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_create_wide(
+			handle, parent_fileid, name, child_buf,
+			RONDB_INODE_FIXED_SIZE, stripe_count, stripe_unit,
+			mirror_count, stripe_buf, (uint32_t)stripe_buf_len);
+		if (rc != -2) {
+			break;
+		}
+		rondb_transient_backoff(attempt);
+	}
+	free(stripe_buf);
+	if (rc == 1) {
+		return MDS_ERR_EXISTS;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	catalog_stat_inc(&cat->stats.authority_writes);
+	return MDS_OK;
+}
+
 enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 						uint64_t parent_fileid,
 						const char *name,
@@ -761,16 +844,21 @@ enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
-					   uint64_t fileid,
-					   const struct mds_inode *attrs,
-					   uint32_t mask)
+static enum mds_status catalogue_rondb_ns_setattr_rmw(
+	struct mds_catalogue *cat,
+	uint64_t fileid,
+	const struct mds_inode *attrs,
+	uint32_t mask,
+	struct mds_size_extend_result *size_result)
 {
 	void *h = rondb_handle(cat);
 	uint8_t buf[RONDB_INODE_MAX_SIZE];
+	uint64_t locked_old_size = 0;
+	uint64_t committed_size = 0;
 	int rc;
 
-	if (h == NULL || attrs == NULL) {
+	if (h == NULL || attrs == NULL ||
+	    (size_result != NULL && !(mask & MDS_ATTR_SIZE_EXTEND))) {
 		return MDS_ERR_INVAL;
 	}
 
@@ -794,16 +882,75 @@ enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
 		return MDS_ERR_IO;
 	}
 	rc = rondb_shim_inode_setattr_rmw(h, fileid, mask, buf,
-					  RONDB_INODE_FIXED_SIZE);
+					  RONDB_INODE_FIXED_SIZE,
+					  size_result == NULL ? NULL : &locked_old_size,
+					  size_result == NULL ? NULL : &committed_size);
 	if (rc == 1) {
 		return MDS_ERR_NOTFOUND;
 	}
 	if (rc != 0) {
 		return MDS_ERR_IO;
 	}
+	if (size_result != NULL) {
+		size_result->locked_old_size = locked_old_size;
+		size_result->committed_size = committed_size;
+	}
 
 	catalog_stat_inc(&cat->stats.authority_writes);
 	return MDS_OK;
+}
+static enum mds_status catalogue_rondb_ns_remove_final_file(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	uint64_t expected_fileid,
+	uint64_t expected_generation,
+	struct mds_final_unlink_result *result)
+{
+	void *handle = rondb_handle(cat);
+	uint64_t parent_change_before = 0;
+	uint64_t parent_change_after = 0;
+	int rc = -1;
+
+	if (handle == NULL || name == NULL || expected_fileid == 0 ||
+	    expected_generation == 0 || result == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_remove_final_file(
+			handle, parent_fileid, name, expected_fileid,
+			expected_generation, &parent_change_before,
+			&parent_change_after);
+		if (rc != -2) {
+			break;
+		}
+		rondb_transient_backoff(attempt);
+	}
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc == 2) {
+		return MDS_ERR_STALE;
+	}
+	if (rc == -2) {
+		return MDS_ERR_DELAY;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	result->parent_change_before = parent_change_before;
+	result->parent_change_after = parent_change_after;
+	catalog_stat_inc(&cat->stats.authority_writes);
+	return MDS_OK;
+}
+
+enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
+					   uint64_t fileid,
+					   const struct mds_inode *attrs,
+					   uint32_t mask)
+{
+	return catalogue_rondb_ns_setattr_rmw(cat, fileid, attrs, mask, NULL);
 }
 
 /**
@@ -1637,7 +1784,13 @@ enum mds_status catalogue_rondb_stripe_map_del(
 	 * the rows in the same transaction as the namespace delete.
 	 */
 	for (int attempt = 0; attempt < 3; attempt++) {
-		rc = rondb_shim_stripe_del(h, fileid, MDS_MAX_STRIPES);
+		/*
+		 * A zero count asks the shim to read the stripe_maps header
+		 * inside its transaction and delete precisely that geometry.
+		 * Passing MDS_MAX_STRIPES issued blind deletes for every
+		 * possible row, even when the file had one stripe.
+		 */
+		rc = rondb_shim_stripe_del(h, fileid, 0);
 		if (rc == 0) {
 			break;
 		}
@@ -1646,6 +1799,169 @@ enum mds_status catalogue_rondb_stripe_map_del(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
+static enum mds_status catalogue_rondb_gc_task_stats(
+	struct mds_catalogue *cat, struct mds_gc_task_stats *stats)
+{
+	void *handle = rondb_handle(cat);
+
+	if (handle == NULL || stats == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	return rondb_shim_gc_task_stats(handle, stats) == 0
+		? MDS_OK : MDS_ERR_IO;
+}
+static enum mds_status catalogue_rondb_gc_task_enqueue(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	const struct mds_gc_task *task)
+{
+	void *h = rondb_handle(cat);
+
+	(void)txn;
+	if (h == NULL || task == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	return rondb_shim_gc_task_enqueue(h, task) == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_claim_batch(
+	struct mds_catalogue *cat, struct mds_gc_task *tasks, uint32_t cap,
+	uint32_t *n_out, uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+	uint32_t lease_ms, uint32_t stale_owner_ms)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (n_out != NULL) {
+		*n_out = 0;
+	}
+	if (h == NULL || tasks == NULL || cap == 0 || n_out == NULL ||
+	    lease_ms == 0) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_gc_task_claim_batch(
+		h, tasks, cap, n_out, owner_mds_id, owner_boot_epoch, lease_ms,
+		stale_owner_ms);
+	return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_renew(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL || lease_ms == 0) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_gc_task_renew(
+		h, task_kind, task_id, owner_mds_id, owner_boot_epoch, lease_ms);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc == 2) {
+		return MDS_ERR_STALE;
+	}
+	return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_reschedule(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+	uint32_t retry_ms)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_gc_task_reschedule(
+		h, task_kind, task_id, owner_mds_id, owner_boot_epoch, last_error,
+		retry_ms);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc == 2) {
+		return MDS_ERR_STALE;
+	}
+	return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_complete(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_gc_task_complete(
+		h, task_kind, task_id, owner_mds_id, owner_boot_epoch);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc == 2) {
+		return MDS_ERR_STALE;
+	}
+	return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_quarantine(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error)
+{
+    void *handle = rondb_handle(cat);
+    int rc;
+
+    if (handle == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    rc = rondb_shim_gc_task_quarantine(
+        handle, task_kind, task_id, owner_mds_id, owner_boot_epoch,
+        last_error);
+    if (rc == 1) {
+        return MDS_ERR_NOTFOUND;
+    }
+    if (rc == 2) {
+        return MDS_ERR_STALE;
+    }
+    return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_gc_task_finalize_file(
+    struct mds_catalogue *cat, uint64_t fileid,
+    uint64_t expected_generation, uint32_t owner_mds_id,
+    uint64_t owner_boot_epoch)
+{
+    void *handle = rondb_handle(cat);
+    int rc = -1;
+
+    if (handle == NULL || fileid == 0 || expected_generation == 0) {
+        return MDS_ERR_INVAL;
+    }
+    for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+        rc = rondb_shim_gc_task_finalize_file(
+            handle, fileid, expected_generation, owner_mds_id,
+            owner_boot_epoch);
+        if (rc != -2) {
+            break;
+        }
+        rondb_transient_backoff(attempt);
+    }
+    if (rc == 1) {
+        return MDS_ERR_NOTFOUND;
+    }
+    if (rc == 2) {
+        return MDS_ERR_STALE;
+    }
+    if (rc == -2) {
+        return MDS_ERR_DELAY;
+    }
+    return rc == 0 ? MDS_OK : MDS_ERR_IO;
+}
 /* -----------------------------------------------------------------------
  * Extended attributes (composite PK: fileid + attr_name)
  * ----------------------------------------------------------------------- */
@@ -1982,6 +2298,7 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 {
 	void *h = rondb_handle(cat);
 	uint64_t seq = 0;
+	struct mds_gc_task task;
 	int rc;
 
 	(void)txn;
@@ -1993,9 +2310,16 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 	if (rc != 0) {
 		return MDS_ERR_IO;
 	}
-
-	rc = rondb_shim_gc_enqueue(h, seq, fileid, ds_id, nfs_fh, fh_len,
-				   rondb_self_mds_id(cat));
+	memset(&task, 0, sizeof(task));
+	task.task_kind = MDS_GC_TASK_LEGACY_DS_UNLINK;
+	task.task_id = seq;
+	task.fileid = fileid;
+	task.ds_id = ds_id;
+	task.nfs_fh_len = fh_len;
+	if (fh_len > 0 && nfs_fh != NULL) {
+		memcpy(task.nfs_fh, nfs_fh, fh_len);
+	}
+	rc = rondb_shim_gc_task_enqueue(h, &task);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -2042,7 +2366,7 @@ static enum mds_status catalogue_rondb_gc_count(
 		return MDS_ERR_INVAL;
 	}
 
-	rc = rondb_shim_gc_count(h, count, rondb_self_mds_id(cat));
+	rc = rondb_shim_gc_task_count(h, count);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -2426,12 +2750,23 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		return MDS_ERR_INVAL;
 	}
 
-	/* Peek prealloc for DS ID + stripe data before pop. */
+	/*
+	 * Pop once and derive every placement input from that entry.
+	 *
+	 * A prior peek followed by a separate pop could select different
+	 * entries under concurrent CREATEs.  That persisted one DS in the
+	 * stripe map while granting a layout for another DS.
+	 */
 	uint32_t layout_ds_id = 0;
 	uint32_t layout_ds_count = 0;
 	uint8_t stripe_buf[256];
 	uint32_t stripe_buf_len = 0;
 	uint32_t stripe_count_for_create = 0;
+	/* Stripe unit persisted with the 1x1 map.  Defaults to the
+	 * historical 65536 and is replaced by the popped prealloc
+	 * entry's configured unit below, so the durable header matches
+	 * the ring's (config-derived) geometry. */
+	uint32_t create_stripe_unit = 65536;
 	/* v8: synth owner carried out of the pop block onto the child inode. */
 	uint32_t child_synth_suid = 0;
 	uint32_t child_synth_sgid = 0;
@@ -2441,13 +2776,14 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		struct mds_ds_map_entry ds_entry;
 		uint32_t stripe_unit = 0;
 		uint64_t prealloc_fid = 0;
-		if (ds_prealloc_peek(prealloc, &ds_entry, &stripe_unit) == 0) {
-			layout_ds_id = ds_entry.ds_id;
-			layout_ds_count = 1;
-		}
 		/* Pop and encode stripe data + pre-allocated fileid+FH. */
 		if (ds_prealloc_pop(prealloc, &ds_entry, &stripe_unit,
 				    &prealloc_fid) == 0) {
+			layout_ds_id = ds_entry.ds_id;
+			layout_ds_count = 1;
+			if (stripe_unit != 0) {
+				create_stripe_unit = stripe_unit;
+			}
 			if (prealloc_fid != 0) {
 				child_fid = prealloc_fid;
 			}
@@ -2521,6 +2857,7 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			parent_nlink_delta,
 			stripe_count_for_create > 0 ? stripe_buf : NULL,
 			stripe_buf_len, stripe_count_for_create,
+			create_stripe_unit, 1,
 			layout_clientid, layout_iomode,
 			layout_offset, layout_length,
 			layout_stateid ? layout_stateid->other : NULL,
@@ -2761,6 +3098,21 @@ static enum mds_status rondb_auth_ns_create(
 					mode, uid, gid, prealloc, out);
 }
 
+static enum mds_status rondb_auth_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries)
+{
+	return catalogue_rondb_ns_create_wide(
+		cat, parent, name, child, stripe_count, stripe_unit,
+		mirror_count, entries);
+}
+
 static enum mds_status rondb_auth_ns_remove(
 	struct mds_catalogue *cat, struct mds_cat_txn *txn,
 	uint64_t parent, const char *name)
@@ -2777,6 +3129,18 @@ static enum mds_status rondb_auth_ns_remove_known(
 	(void)txn;
 	return catalogue_rondb_ns_remove_known(cat, parent, name, child,
 					       stripe_count);
+}
+
+static enum mds_status rondb_auth_ns_remove_final_file(
+	struct mds_catalogue *cat,
+	uint64_t parent,
+	const char *name,
+	uint64_t expected_fileid,
+	uint64_t expected_generation,
+	struct mds_final_unlink_result *result)
+{
+	return catalogue_rondb_ns_remove_final_file(
+		cat, parent, name, expected_fileid, expected_generation, result);
 }
 
 static enum mds_status rondb_auth_ns_rename(
@@ -2803,6 +3167,18 @@ static enum mds_status rondb_auth_ns_setattr(
 {
 	(void)txn;
 	return catalogue_rondb_ns_setattr(cat, fileid, attrs, mask);
+}
+
+static enum mds_status rondb_auth_ns_setattr_size_extend(
+	struct mds_catalogue *cat,
+	struct mds_cat_txn *txn,
+	uint64_t fileid,
+	const struct mds_inode *attrs,
+	uint32_t mask,
+	struct mds_size_extend_result *result)
+{
+	(void)txn;
+	return catalogue_rondb_ns_setattr_rmw(cat, fileid, attrs, mask, result);
 }
 
 static enum mds_status rondb_auth_ns_readdir(
@@ -3362,13 +3738,16 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
 
 static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
+	.ns_remove_final_file = rondb_auth_ns_remove_final_file,
 	.ns_rename         = rondb_auth_ns_rename,
 	.ns_link           = rondb_auth_ns_link,
 	.ns_lookup         = catalogue_rondb_ns_lookup,
 	.ns_getattr        = catalogue_rondb_ns_getattr,
 	.ns_setattr        = rondb_auth_ns_setattr,
+	.ns_setattr_size_extend = rondb_auth_ns_setattr_size_extend,
 	.ns_readdir        = rondb_auth_ns_readdir,
 	.ns_readdir_plus   = rondb_auth_ns_readdir_plus,
 	.ns_readdir_plus_from = rondb_auth_ns_readdir_plus_from,
@@ -3407,6 +3786,14 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.gc_peek           = catalogue_rondb_gc_peek,
 	.gc_dequeue        = catalogue_rondb_gc_dequeue,
 	.gc_count          = catalogue_rondb_gc_count,
+	.gc_task_stats     = catalogue_rondb_gc_task_stats,
+	.gc_task_enqueue   = catalogue_rondb_gc_task_enqueue,
+	.gc_task_claim_batch = catalogue_rondb_gc_task_claim_batch,
+	.gc_task_renew     = catalogue_rondb_gc_task_renew,
+	.gc_task_reschedule = catalogue_rondb_gc_task_reschedule,
+	.gc_task_complete  = catalogue_rondb_gc_task_complete,
+	.gc_task_quarantine = catalogue_rondb_gc_task_quarantine,
+	.gc_task_finalize_file = catalogue_rondb_gc_task_finalize_file,
 	.gc_peek_batch     = catalogue_rondb_gc_peek_batch,
 	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
 	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
@@ -3454,13 +3841,16 @@ static const struct mds_authority_ops rondb_authority_ops = {
 
 static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
+	.ns_remove_final_file = rondb_auth_ns_remove_final_file,
 	.ns_rename         = rondb_locked_ns_rename,
 	.ns_link           = rondb_auth_ns_link,
 	.ns_lookup         = catalogue_rondb_ns_lookup,
 	.ns_getattr        = catalogue_rondb_ns_getattr,
 	.ns_setattr        = rondb_auth_ns_setattr,
+	.ns_setattr_size_extend = rondb_auth_ns_setattr_size_extend,
 	.ns_readdir        = rondb_auth_ns_readdir,
 	.ns_readdir_plus   = rondb_auth_ns_readdir_plus,
 	.ns_readdir_plus_from = rondb_auth_ns_readdir_plus_from,
@@ -3499,6 +3889,14 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.gc_peek           = catalogue_rondb_gc_peek,
 	.gc_dequeue        = catalogue_rondb_gc_dequeue,
 	.gc_count          = catalogue_rondb_gc_count,
+	.gc_task_stats     = catalogue_rondb_gc_task_stats,
+	.gc_task_enqueue   = catalogue_rondb_gc_task_enqueue,
+	.gc_task_claim_batch = catalogue_rondb_gc_task_claim_batch,
+	.gc_task_renew     = catalogue_rondb_gc_task_renew,
+	.gc_task_reschedule = catalogue_rondb_gc_task_reschedule,
+	.gc_task_complete  = catalogue_rondb_gc_task_complete,
+	.gc_task_quarantine = catalogue_rondb_gc_task_quarantine,
+	.gc_task_finalize_file = catalogue_rondb_gc_task_finalize_file,
 	.gc_peek_batch     = catalogue_rondb_gc_peek_batch,
 	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
 	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,

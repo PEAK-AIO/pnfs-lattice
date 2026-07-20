@@ -1636,6 +1636,57 @@ static void test_open_result_encode(void)
     ASSERT_TRUE(xdr_getpos(&enc) > 0);
 }
 
+static void test_open_result_preserve_unlinked_flag(void)
+{
+    char buf[BUF_SIZE];
+    struct nfs4_result result;
+    XDR enc;
+    XDR dec;
+
+    for (uint32_t preserve = 0; preserve <= 1; preserve++) {
+        uint32_t compound_status;
+        uint32_t tag_len;
+        uint32_t result_count;
+        uint32_t opnum;
+        uint32_t op_status;
+        uint32_t rflags;
+        int32_t atomic;
+        uint64_t before;
+        uint64_t after;
+        struct nfs4_stateid stateid;
+
+        memset(&result, 0, sizeof(result));
+        result.opnum = OP_OPEN;
+        result.status = NFS4_OK;
+        result.res.open.stateid.seqid = 1;
+        result.res.open.inode.change = 5;
+        result.res.open.preserve_unlinked = preserve != 0;
+        xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+        ASSERT_EQ(nfs4_encode_compound_res(
+                      &enc, NFS4_OK, "", &result, 1),
+                  0);
+
+        xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+        ASSERT_TRUE(xdr_uint32_t(&dec, &compound_status));
+        ASSERT_TRUE(xdr_uint32_t(&dec, &tag_len));
+        ASSERT_EQ(compound_status, (uint32_t)NFS4_OK);
+        ASSERT_EQ(tag_len, 0);
+        ASSERT_TRUE(xdr_uint32_t(&dec, &result_count));
+        ASSERT_TRUE(xdr_uint32_t(&dec, &opnum));
+        ASSERT_TRUE(xdr_uint32_t(&dec, &op_status));
+        ASSERT_EQ(result_count, 1);
+        ASSERT_EQ(opnum, (uint32_t)OP_OPEN);
+        ASSERT_EQ(op_status, (uint32_t)NFS4_OK);
+        ASSERT_TRUE(xdr_nfs4_stateid_decode(&dec, &stateid));
+        ASSERT_TRUE(xdr_getbool(&dec, &atomic));
+        ASSERT_TRUE(xdr_uint64_t(&dec, &before));
+        ASSERT_TRUE(xdr_uint64_t(&dec, &after));
+        ASSERT_TRUE(xdr_uint32_t(&dec, &rflags));
+        ASSERT_EQ((rflags & OPEN4_RESULT_PRESERVE_UNLINKED) != 0,
+                  preserve != 0);
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Exchange ID result encode test
  * ----------------------------------------------------------------------- */
@@ -2170,6 +2221,7 @@ int main(void)
     RUN_TEST(test_compound_result_error_stops);
     RUN_TEST(test_readdir_result_encode);
     RUN_TEST(test_open_result_encode);
+    RUN_TEST(test_open_result_preserve_unlinked_flag);
     RUN_TEST(test_exchange_id_result_encode);
     RUN_TEST(test_create_session_result_encode);
 

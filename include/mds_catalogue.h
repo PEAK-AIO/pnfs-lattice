@@ -42,6 +42,7 @@ struct mds_ds_info;
 struct mds_quota_rule;
 struct mds_quota_usage;
 struct mds_gc_entry;
+struct mds_gc_task;
 
 /* -----------------------------------------------------------------------
  * Backend-neutral types
@@ -164,6 +165,36 @@ enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
 				  uint64_t uid, uint64_t gid,
 				  struct ds_prealloc_ctx *prealloc,
 				  struct mds_inode *out);
+/**
+ * Atomically create a preallocated wide regular file.
+ *
+ * Inserts the supplied child inode, its insert-only parent dirent, the exact
+ * stripe-map header and entries, and the parent timestamp/change update in
+ * one backend transaction.  @p child must contain a unique preallocated
+ * fileid and must not carry MDS_IFLAG_HPC_CREATE_PENDING.
+ *
+ * @param cat            Catalogue handle.
+ * @param parent_fileid  Parent directory fileid.
+ * @param name           New child name.
+ * @param child          Fully initialized child inode.
+ * @param stripe_count   Number of logical stripes.
+ * @param stripe_unit    Bytes per logical stripe.
+ * @param mirror_count   Mirrors per logical stripe.
+ * @param entries        Stripe-major DS entries.
+ * @return MDS_OK on success, MDS_ERR_EXISTS on name collision, or an error.
+ *
+ * Ownership: callers retain @p child and @p entries.
+ * Thread safety: backend transaction serializes concurrent namespace changes.
+ */
+enum mds_status mds_cat_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries);
 
 /** Remove a dirent + inode (if nlink drops to 0) + parent touch. */
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
@@ -178,6 +209,37 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
 					const char *name,
 					const struct mds_inode *child,
 					uint32_t stripe_count);
+/**
+ * Transaction-authoritative parent change information from a final-file
+ * unlink. Values are populated only after the backend transaction commits.
+ */
+struct mds_final_unlink_result {
+	uint64_t parent_change_before;
+	uint64_t parent_change_after;
+};
+
+/**
+ * Atomically acknowledge the final unlink of a regular file.
+ *
+ * The backend validates the named inode identity, removes the dirent,
+ * retains the inode with nlink=0 and MDS_IFLAG_DELETE_PENDING, and inserts
+ * the fileid-keyed GC task in one transaction. Stripe metadata remains
+ * attached to the retained inode for finalization.
+ *
+ * This is a dedicated backend primitive because mds_cat_txn_* is logical
+ * only and cannot compose all RonDB operations atomically.
+ *
+ * @return MDS_OK on commit, MDS_ERR_NOTFOUND if the name disappeared,
+ *         MDS_ERR_STALE if the final-unlink precondition changed, or an
+ *         error. @p result is valid only on MDS_OK.
+ */
+enum mds_status mds_cat_ns_remove_final_file(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	uint64_t expected_fileid,
+	uint64_t expected_generation,
+	struct mds_final_unlink_result *result);
 
 /** Atomic rename: src dirent -> dst dirent + parent touches. */
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
@@ -211,6 +273,32 @@ enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
 				   uint64_t fileid,
 				   const struct mds_inode *attrs,
 				   uint32_t mask);
+
+/**
+ * Authoritative result of a grow-only inode size update.
+ *
+ * @c locked_old_size is read while the inode row is exclusively locked.
+ * @c committed_size is the size durable after the same transaction commits.
+ */
+struct mds_size_extend_result {
+	uint64_t locked_old_size;
+	uint64_t committed_size;
+};
+
+/**
+ * Apply a masked inode update with a grow-only size component.
+ *
+ * @p mask must include MDS_ATTR_SIZE_EXTEND. Other setattr bits may be
+ * included and are coalesced with the size update in the same transaction.
+ * The result is populated only after the transaction commits successfully.
+ */
+enum mds_status mds_cat_ns_setattr_size_extend(
+	struct mds_catalogue *cat,
+	struct mds_cat_txn *txn,
+	uint64_t fileid,
+	const struct mds_inode *attrs,
+	uint32_t mask,
+	struct mds_size_extend_result *result);
 
 /** Iterate directory entries (start_after = NULL for first page).
  *  When max_entries > 0, return at most that many entries (0 = unlimited). */
@@ -561,6 +649,78 @@ enum mds_status mds_cat_gc_dequeue(struct mds_catalogue *cat,
 
 enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
 				 uint32_t *count);
+
+/**
+ * Read a low-frequency snapshot of durable file-unlink tasks.  This is
+ * intended for the GC coordinator rather than the per-REMOVE hot path.
+ */
+enum mds_status mds_cat_gc_task_stats(
+	struct mds_catalogue *cat, struct mds_gc_task_stats *stats);
+/**
+ * Insert a durable GC task.  The composite (task_kind, task_id) makes a
+ * repeated insert idempotent; callers do not allocate a global sequence for
+ * file-unlink tasks.
+ */
+enum mds_status mds_cat_gc_task_enqueue(struct mds_catalogue *cat,
+					struct mds_cat_txn *txn,
+					const struct mds_gc_task *task);
+
+/**
+ * Claim up to @a cap eligible tasks under a time-limited lease.
+ *
+ * A task is eligible when it is unclaimed, its retry delay elapsed, its
+ * lease expired, or its owner is absent/stale in the shared node registry.
+ * The backend sets the claim time from its clock and increments attempts.
+ */
+enum mds_status mds_cat_gc_task_claim_batch(
+	struct mds_catalogue *cat, struct mds_gc_task *tasks, uint32_t cap,
+	uint32_t *n_out, uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+	uint32_t lease_ms, uint32_t stale_owner_ms);
+
+/** Renew a currently held GC-task lease. */
+enum mds_status mds_cat_gc_task_renew(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms);
+
+/**
+ * Return a claimed task to pending state after a retryable failure.
+ * @a retry_ms is a lower bound before another MDS may claim the task.
+ */
+enum mds_status mds_cat_gc_task_reschedule(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+	uint32_t retry_ms);
+
+/** Complete a task only when the caller still holds its lease. */
+enum mds_status mds_cat_gc_task_complete(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch);
+/**
+ * Permanently quarantine a claimed task that cannot safely be retried.
+ *
+ * The transition is lease-owner guarded.  Quarantined tasks remain durable
+ * for administrative inspection and are excluded from subsequent claims.
+ */
+enum mds_status mds_cat_gc_task_quarantine(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error);
+
+/**
+ * Atomically finalize a claimed file-unlink task after its exact DS objects
+ * were removed.
+ *
+ * The backend verifies the claimed task lease and retained pending inode
+ * generation, removes retained side-table stripe metadata and the inode,
+ * releases durable user/group quota usage when present, and deletes the task
+ * in one physical transaction.  A missing inode returns MDS_ERR_NOTFOUND so
+ * callers can complete the already-obsolete task.  MDS_ERR_STALE means an
+ * ownership, generation, or pending-state guard failed and must be
+ * quarantined rather than retried.
+ */
+enum mds_status mds_cat_gc_task_finalize_file(
+	struct mds_catalogue *cat, uint64_t fileid,
+	uint64_t expected_generation, uint32_t owner_mds_id,
+	uint64_t owner_boot_epoch);
 
 
 /* -----------------------------------------------------------------------

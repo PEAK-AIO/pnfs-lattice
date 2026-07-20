@@ -64,6 +64,8 @@ struct open_state_table {
     struct mds_catalogue   *cat;  /**< RonDB catalogue (shared-attr). */
     uint64_t                boot_epoch; /**< For fencing (shared-attr). */
     bool                    skip_ndb_persist; /**< Skip NDB writes for perf. */
+    open_state_close_notify_fn close_notify;
+    void                   *close_notify_arg;
     pthread_mutex_t         locks[OPEN_STATE_LOCK_STRIPES];
     pthread_rwlock_t        stateid_locks[OPEN_STATE_LOCK_STRIPES];
 };
@@ -111,6 +113,9 @@ static inline uint32_t stateid_lock_stripe(
 {
     return hash_other(other) % OPEN_STATE_LOCK_STRIPES;
 }
+
+static enum mds_status open_state_persist_record(
+    const struct open_state_table *ot, const struct nfs4_open_state *os);
 
 /* -----------------------------------------------------------------------
  * Internal: generate a unique stateid "other"
@@ -447,6 +452,15 @@ void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip)
     }
 }
 
+void open_state_table_set_close_notify(
+    struct open_state_table *ot, open_state_close_notify_fn notify, void *arg)
+{
+    if (ot != NULL) {
+        ot->close_notify = notify;
+        ot->close_notify_arg = arg;
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Share conflict check against RonDB open-state rows.
  * ----------------------------------------------------------------------- */
@@ -488,14 +502,11 @@ static int rondb_share_check_cb(const struct mds_coord_open_row *row,
 
 /* ----------------------------------------------------------------------- */
 
-int open_state_open(struct open_state_table *ot,
-                    uint64_t clientid,
-                    const uint8_t *open_owner,
-                    uint32_t open_owner_len,
-                    uint64_t fileid,
-                    uint32_t share_access,
-                    uint32_t share_deny,
-                    struct nfs4_stateid *out_stateid)
+int open_state_open_with_token(
+    struct open_state_table *ot, uint64_t clientid,
+    const uint8_t *open_owner, uint32_t open_owner_len,
+    uint64_t fileid, uint32_t share_access, uint32_t share_deny,
+    struct nfs4_stateid *out_stateid, struct open_state_open_token *token)
 {
     struct file_opens *fo;
     struct nfs4_open_state *os = NULL;
@@ -514,6 +525,9 @@ int open_state_open(struct open_state_table *ot,
     if (open_owner_len > NFS4_OPEN_OWNER_MAX) {
         return -3;
 }
+    if (token != NULL) {
+        memset(token, 0, sizeof(*token));
+    }
 
     MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
@@ -547,6 +561,7 @@ int open_state_open(struct open_state_table *ot,
     }
 
     if (existing != NULL) {
+        struct nfs4_open_state previous = *existing;
         uint32_t merged_access =
             existing->share_access | share_access;
         uint32_t merged_deny =
@@ -577,32 +592,22 @@ int open_state_open(struct open_state_table *ot,
         existing->share_access = merged_access;
         existing->share_deny = merged_deny;
 
-        *out_stateid = existing->stateid;
-
-        pthread_rwlock_unlock(
-            &ot->stateid_locks[stateid_lock_idx]);
-
-        /* Persist updated row (same primary key as the original
-         * insert, so this is an in-place update). */
-        if (ot->cat != NULL && !ot->skip_ndb_persist) {
-            struct mds_coord_open_row row;
-            memset(&row, 0, sizeof(row));
-            memcpy(row.stateid_other, existing->stateid.other,
-                   NFS4_OTHER_SIZE);
-            row.seqid = existing->stateid.seqid;
-            row.clientid = clientid;
-            row.fileid = fileid;
-            row.share_access = merged_access;
-            row.share_deny = merged_deny;
-            if (open_owner != NULL && open_owner_len > 0) {
-                memcpy(row.open_owner, open_owner,
-                       open_owner_len);
-            }
-            row.open_owner_len = open_owner_len;
-            row.owner_mds_id = ot->mds_id;
-            row.owner_boot_epoch = ot->boot_epoch;
-            (void)mds_coord_open_put(ot->cat, &row);
+        if (open_state_persist_record(ot, existing) != MDS_OK) {
+            existing->stateid = previous.stateid;
+            existing->share_access = previous.share_access;
+            existing->share_deny = previous.share_deny;
+            pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+            pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+            return -4;
         }
+        if (token != NULL) {
+            token->created = false;
+            token->previous = previous;
+            token->previous.hash_next = NULL;
+            token->previous.file_next = NULL;
+        }
+        *out_stateid = existing->stateid;
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
 
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
         return 0;
@@ -652,30 +657,19 @@ int open_state_open(struct open_state_table *ot,
     idx = hash_other(os->stateid.other);
     os->hash_next = ot->stateid_hash[idx];
     ot->stateid_hash[idx] = os;
-    pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
-
-    /* Output. */
-    *out_stateid = os->stateid;
-
-    /* Persist to RonDB if catalogue is set (shared-attr)
-     * and transient caching is off. */
-    if (ot->cat != NULL && !ot->skip_ndb_persist) {
-        struct mds_coord_open_row row;
-        memset(&row, 0, sizeof(row));
-        memcpy(row.stateid_other, os->stateid.other, NFS4_OTHER_SIZE);
-        row.seqid = os->stateid.seqid;
-        row.clientid = clientid;
-        row.fileid = fileid;
-        row.share_access = share_access;
-        row.share_deny = share_deny;
-        if (open_owner != NULL && open_owner_len > 0) {
-            memcpy(row.open_owner, open_owner, open_owner_len);
-        }
-        row.open_owner_len = open_owner_len;
-        row.owner_mds_id = ot->mds_id;
-        row.owner_boot_epoch = ot->boot_epoch;
-        (void)mds_coord_open_put(ot->cat, &row);
+    if (open_state_persist_record(ot, os) != MDS_OK) {
+        unhash_stateid(ot, os);
+        unlink_from_file(ot, os);
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        free(os);
+        return -4;
     }
+    if (token != NULL) {
+        token->created = true;
+    }
+    *out_stateid = os->stateid;
+    pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
 
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);
     return rc;
@@ -690,6 +684,107 @@ out_unlock:
     return rc;
 }
 
+int open_state_open(
+    struct open_state_table *ot, uint64_t clientid,
+    const uint8_t *open_owner, uint32_t open_owner_len,
+    uint64_t fileid, uint32_t share_access, uint32_t share_deny,
+    struct nfs4_stateid *out_stateid)
+{
+    return open_state_open_with_token(
+        ot, clientid, open_owner, open_owner_len, fileid, share_access,
+        share_deny, out_stateid, NULL);
+}
+
+static enum mds_status open_state_persist_record(
+    const struct open_state_table *ot, const struct nfs4_open_state *os)
+{
+    struct mds_coord_open_row row;
+
+    if (ot->cat == NULL || ot->skip_ndb_persist) {
+        return MDS_OK;
+    }
+    memset(&row, 0, sizeof(row));
+    memcpy(row.stateid_other, os->stateid.other, NFS4_OTHER_SIZE);
+    row.seqid = os->stateid.seqid;
+    row.clientid = os->clientid;
+    row.fileid = os->fileid;
+    row.share_access = os->share_access;
+    row.share_deny = os->share_deny;
+    if (os->open_owner_len > 0) {
+        memcpy(row.open_owner, os->open_owner, os->open_owner_len);
+    }
+    row.open_owner_len = os->open_owner_len;
+    row.owner_mds_id = ot->mds_id;
+    row.owner_boot_epoch = ot->boot_epoch;
+    return mds_coord_open_put(ot->cat, &row);
+}
+
+bool open_state_table_has_durable_shared_state(
+    const struct open_state_table *ot)
+{
+    return ot != NULL && ot->cat != NULL && !ot->skip_ndb_persist;
+}
+
+int open_state_rollback_open(
+    struct open_state_table *ot, uint64_t clientid,
+    const struct nfs4_stateid *stateid,
+    const struct open_state_open_token *token)
+{
+    struct nfs4_open_state *os;
+    struct nfs4_open_state current;
+    uint32_t file_lock_idx;
+    uint32_t stateid_lock_idx;
+    uint64_t fileid;
+
+    if (ot == NULL || stateid == NULL || token == NULL) {
+        return -1;
+    }
+    if (token->created) {
+        if (open_state_find(ot, stateid, &current) != 0) {
+            return -1;
+        }
+        fileid = current.fileid;
+    } else {
+        fileid = token->previous.fileid;
+    }
+    file_lock_idx = lock_stripe(fileid);
+    stateid_lock_idx = stateid_lock_stripe(stateid->other);
+    pthread_mutex_lock(&ot->locks[file_lock_idx]);
+    pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
+    os = find_by_other(ot, stateid->other);
+    if (os == NULL || os->fileid != fileid || os->clientid != clientid ||
+        os->stateid.seqid != stateid->seqid) {
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return -1;
+    }
+    if (token->created) {
+        if (ot->cat != NULL && !ot->skip_ndb_persist &&
+            mds_coord_open_del(ot->cat, stateid->other) != MDS_OK) {
+            pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+            pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+            return -1;
+        }
+        unhash_stateid(ot, os);
+        unlink_from_file(ot, os);
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        free(os);
+        return 0;
+    }
+    if (open_state_persist_record(ot, &token->previous) != MDS_OK) {
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return -1;
+    }
+    os->stateid = token->previous.stateid;
+    os->share_access = token->previous.share_access;
+    os->share_deny = token->previous.share_deny;
+    pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+    pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+    return 0;
+}
+
 /* ----------------------------------------------------------------------- */
 
 int open_state_close(struct open_state_table *ot,
@@ -701,6 +796,7 @@ int open_state_close(struct open_state_table *ot,
     uint32_t file_lock_idx;
     uint32_t stateid_lock_idx;
     uint64_t fileid;
+    bool notify = false;
     int rc = 0;
 
     if (ot == NULL || stateid == NULL || out_stateid == NULL) {
@@ -757,21 +853,28 @@ int open_state_close(struct open_state_table *ot,
     *out_stateid = os->stateid;
     out_stateid->seqid = os->stateid.seqid + 1;
 
-    /* Remove from both hash tables. */
-    unhash_stateid(ot, os);
-    unlink_from_file(ot, os);
 
     /* Delete from RonDB if catalogue is set (shared-attr)
      * and transient caching is off. */
     if (ot->cat != NULL && !ot->skip_ndb_persist) {
-        (void)mds_coord_open_del(ot->cat, stateid->other);
+        if (mds_coord_open_del(ot->cat, stateid->other) != MDS_OK) {
+            rc = -5;  /* durable state remains; caller retries CLOSE */
+            goto out;
+        }
     }
+    /* Remove from both hash tables only after the durable delete. */
+    unhash_stateid(ot, os);
+    unlink_from_file(ot, os);
 
     free(os);
+    notify = true;
 
 out:
     pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+    if (notify && ot->close_notify != NULL) {
+        ot->close_notify(ot->close_notify_arg);
+    }
     return rc;
 }
 
@@ -821,6 +924,50 @@ int open_state_file_has_writers(struct open_state_table *ot, uint64_t fileid)
     return has_writers;
 }
 
+struct open_state_has_opens_ctx {
+    bool found;
+};
+
+static int open_state_has_opens_cb(
+    const struct mds_coord_open_row *row, void *arg)
+{
+    struct open_state_has_opens_ctx *ctx = arg;
+
+    (void)row;
+    ctx->found = true;
+    return 1;
+}
+
+int open_state_file_has_opens(struct open_state_table *ot, uint64_t fileid)
+{
+    const struct file_opens *fo;
+    struct open_state_has_opens_ctx ctx;
+    enum mds_status status;
+    uint32_t file_lock_idx;
+
+    if (ot == NULL) {
+        return -1;
+    }
+    if (ot->cat != NULL) {
+        if (ot->skip_ndb_persist) {
+            return -1;
+        }
+        memset(&ctx, 0, sizeof(ctx));
+        status = mds_coord_open_scan_file(
+            ot->cat, fileid, open_state_has_opens_cb, &ctx);
+        if (status != MDS_OK) {
+            return -1;
+        }
+        return ctx.found ? 1 : 0;
+    }
+    file_lock_idx = lock_stripe(fileid);
+    pthread_mutex_lock(&ot->locks[file_lock_idx]);
+    fo = find_file_opens(ot, fileid);
+    status = (fo != NULL && fo->head != NULL) ? MDS_OK : MDS_ERR_NOTFOUND;
+    pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+    return status == MDS_OK ? 1 : 0;
+}
+
 bool open_state_has_other_writer(struct open_state_table *ot,
                                  uint64_t fileid,
                                  uint64_t clientid)
@@ -854,6 +1001,7 @@ void open_state_close_all_for_client(struct open_state_table *ot,
                                      uint64_t clientid)
 {
     uint32_t b, s;
+    bool notify = false;
     if (ot == NULL) { return; }
 
     /* Lock all stripes to prevent races during bulk cleanup. */
@@ -869,9 +1017,16 @@ void open_state_close_all_for_client(struct open_state_table *ot,
         while (*pp != NULL) {
             struct nfs4_open_state *os = *pp;
             if (os->clientid == clientid) {
+                if (ot->cat != NULL && !ot->skip_ndb_persist &&
+                    mds_coord_open_del(ot->cat, os->stateid.other) !=
+                        MDS_OK) {
+                    pp = &os->hash_next;
+                    continue;
+                }
                 *pp = os->hash_next;
                 unlink_from_file(ot, os);
                 free(os);
+                notify = true;
             } else {
                 pp = &os->hash_next;
             }
@@ -883,6 +1038,9 @@ void open_state_close_all_for_client(struct open_state_table *ot,
     }
     for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
         pthread_mutex_unlock(&ot->locks[s]);
+    }
+    if (notify && ot->close_notify != NULL) {
+        ot->close_notify(ot->close_notify_arg);
     }
 }
 

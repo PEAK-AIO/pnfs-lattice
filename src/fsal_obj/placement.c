@@ -36,6 +36,30 @@
  * ----------------------------------------------------------------------- */
 
 static _Atomic uint32_t g_rr_counter;
+enum mds_status placement_geometry_entry_count(
+    uint32_t requested_stripe_count,
+    uint32_t effective_stripe_count,
+    uint32_t mirror_count,
+    uint32_t *entry_count)
+{
+    uint64_t total;
+
+    if (entry_count == NULL || requested_stripe_count == 0 ||
+        requested_stripe_count > MDS_MAX_STRIPES ||
+        effective_stripe_count == 0 ||
+        effective_stripe_count > requested_stripe_count ||
+        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS) {
+        return MDS_ERR_INVAL;
+    }
+
+    total = (uint64_t)effective_stripe_count * mirror_count;
+    if (total > UINT32_MAX) {
+        return MDS_ERR_INVAL;
+    }
+
+    *entry_count = (uint32_t)total;
+    return MDS_OK;
+}
 
 /* -----------------------------------------------------------------------
  * Round-robin placement

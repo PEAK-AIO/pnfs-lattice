@@ -1252,18 +1252,21 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
      * bit unconditionally so Linux clients enable their POSIX-lock
      * code path.
      *
-     * Other rflags bits intentionally not set:
+     * Other rflags policy:
      *   OPEN4_RESULT_CONFIRM           — v4.0 OPEN_CONFIRM, deprecated
      *                                    by RFC 8881 sessions; never
      *                                    set on a v4.1+ server.
-     *   OPEN4_RESULT_PRESERVE_UNLINKED — silly-rename is client-side
-     *                                    on Linux; we don't promise
-     *                                    server-side preservation.
+     *   OPEN4_RESULT_PRESERVE_UNLINKED — set below only when the
+     *                                    completed async-REMOVE safety
+     *                                    contract is active for this OPEN.
      *   OPEN4_RESULT_MAY_NOTIFY_LOCK   — we don't implement
      *                                    CB_NOTIFY_LOCK upcalls.
      */
     uint32_t rflags = OPEN4_RESULT_LOCKTYPE_POSIX;
     const uint32_t empty_bm[NFS4_BITMAP_WORDS] = {0, 0};
+    if (o->preserve_unlinked) {
+        rflags |= OPEN4_RESULT_PRESERVE_UNLINKED;
+    }
 
     /* stateid4 */
     if (!xdr_nfs4_stateid_encode(xdrs, &o->stateid)) {

@@ -310,7 +310,7 @@ static void test_lookup_junction_getattr_fs_locations(void)
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_server,
                        "10.10.10.51") == 0);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_rootpath,
-                       "/") == 0);
+                       "/foreign") == 0);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_fs_root,
                        "/foreign") == 0);
 

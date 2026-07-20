@@ -37,6 +37,7 @@
 #include "xdr_codec.h"
 #include "mds_metrics.h"
 #include "mds_op_metrics.h"
+#include "hpc_shared.h"
 
 /* Internal counter helper, defined in dir_delegation.c. */
 void dir_deleg_count_conflict_unavail(struct dir_deleg_table *ddt);
@@ -487,16 +488,10 @@ enum nfs4_status op_get_dir_delegation(struct compound_data *cd,
  * Checks the global inode cache first; on miss dispatches through
  * the catalogue vtable.  Populates the cache on read-through.
  *
- * Phase 3 of the QA plan: any inode carrying MDS_IFLAG_HPC_CREATE_PENDING
- * is treated as not-yet-visible to NFS clients.  The flag is set during
- * the wide-CREATE atomic window in hpc_shared_create_wide_layout and
- * cleared after the stripe map row commits.  We filter the flag here
- * (the central NFS-facing inode read) and refuse to populate the inode
- * cache with a PENDING entry, so a stale cache hit cannot resurrect
- * the file once the create completes or is rolled back.  Catalogue
- * primitives invoked directly (mds_cat_ns_getattr, mds_cat_ns_setattr's
- * internal read) bypass this helper and remain free to see the orphan
- * for cleanup.
+ * Legacy releases could persist MDS_IFLAG_HPC_CREATE_PENDING between
+ * individual inode, dirent, and stripe-map commits.  This NFS-facing
+ * read promotes a complete legacy map or reaps the incomplete row
+ * before caching or exposing it.
  */
 static enum mds_status compound_cat_inode_get(
 	struct compound_data *cd, uint64_t fileid,
@@ -526,9 +521,12 @@ static enum mds_status compound_cat_inode_get(
 		return st;
 	}
 
-	/* Phase 3 visibility filter: HPC-Shared wide CREATE atomic window. */
+	/* Recover rows written by pre-atomic wide CREATE implementations. */
 	if (out->flags & MDS_IFLAG_HPC_CREATE_PENDING) {
-		return MDS_ERR_NOTFOUND;
+		st = hpc_shared_recover_pending(cd, out);
+		if (st != MDS_OK) {
+			return st;
+		}
 	}
 
 	/* Populate cache on miss. */
@@ -575,6 +573,12 @@ static enum mds_status compound_cat_dirent_get(
 
 	st = mds_cat_ns_lookup(cd->cat, parent_fileid, name, &child);
 	if (st == MDS_OK) {
+		if (child.flags & MDS_IFLAG_HPC_CREATE_PENDING) {
+			st = hpc_shared_recover_pending(cd, &child);
+			if (st != MDS_OK) {
+				return st;
+			}
+		}
 		*child_fileid = child.fileid;
 		*type = (uint8_t)child.type;
 		if (cd->dcache != NULL) {
@@ -763,14 +767,12 @@ enum mds_status compound_lookup_local_child(
 		return st;
 	}
 
-	/* Phase 3 visibility filter: hide HPC-Shared wide CREATEs whose
-	 * stripe map has not yet been persisted.  Do not populate the
-	 * dirent or inode caches with the PENDING inode -- either the
-	 * create is still in flight (the next read will see the flag
-	 * cleared and cache normally) or the MDS crashed mid-create and
-	 * the orphan must remain invisible until reaped. */
+	/* Repair legacy wide-create rows before exposing or caching them. */
 	if (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) {
-		return MDS_ERR_NOTFOUND;
+		st = hpc_shared_recover_pending(cd, child);
+		if (st != MDS_OK) {
+			return st;
+		}
 	}
 
 	/* Populate both caches on miss. */
@@ -1879,6 +1881,7 @@ void nfs4_result_destroy(struct nfs4_result *r)
 void compound_init(struct compound_data *cd)
 {
 	memset(cd, 0, sizeof(*cd));
+	cd->cfg_serve_layouts = true;
 }
 
 

@@ -15,6 +15,7 @@
  * (s, m) layout.
  */
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,7 +27,9 @@
 #include "pnfs_mds.h"
 #include "test_helpers.h"
 #include "mds_catalogue.h"
+#include "mds_metrics.h"
 #include "ds_gc.h"
+#include "open_state.h"
 #include "proxy_io.h"
 
 /* -----------------------------------------------------------------------
@@ -74,11 +77,117 @@ static char *make_ds_dir(void)
     return tpl;
 }
 
+static void rm_ds_dir(char *path);
+
+static enum mds_status wait_for_inode_absent(
+    struct mds_catalogue *cat, uint64_t fileid, uint32_t timeout_ms);
+
+static void test_file_unlink_task_waits_for_durable_open(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct mds_proxy_ctx *proxy = NULL;
+    struct ds_gc *gc = NULL;
+    struct open_state_table *open_state = NULL;
+    struct mds_inode child;
+    struct mds_final_unlink_result result;
+    struct mds_ds_map_entry entry;
+    struct nfs4_stateid stateid;
+    struct nfs4_stateid closed_stateid;
+    char *ds_dir = make_ds_dir();
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_dir), MDS_OK);
+    ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT, "open-gc",
+                                MDS_FTYPE_REG, 0644, 1000, 1000, NULL,
+                                &child),
+              MDS_OK);
+    memset(&entry, 0, sizeof(entry));
+    entry.ds_id = 1;
+    ASSERT_EQ(mds_cat_stripe_map_put(
+                  cat, NULL, child.fileid, 1, 65536, 1, &entry),
+              MDS_OK);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, child.fileid, 0, 0),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(1, &open_state), 0);
+    open_state_table_set_cat(open_state, cat, 1);
+    ASSERT_EQ(open_state_open(
+                  open_state, 101, NULL, 0, child.fileid,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE, &stateid),
+              0);
+    ASSERT_EQ(mds_cat_ns_remove_final_file(
+                  cat, MDS_FILEID_ROOT, "open-gc", child.fileid,
+                  child.generation, &result),
+              MDS_OK);
+    ASSERT_EQ(ds_gc_start_ex(cat, proxy, 100U, 1U, 1U, &gc), 0);
+    ASSERT_TRUE(gc != NULL);
+    ds_gc_set_open_state(gc, open_state);
+
+    usleep(300U * 1000U);
+    ASSERT_EQ(mds_cat_ns_getattr(cat, child.fileid, &child), MDS_OK);
+    ASSERT_EQ(open_state_close(open_state, 101, &stateid, &closed_stateid),
+              0);
+    ASSERT_EQ(wait_for_inode_absent(cat, child.fileid, 10000U),
+              MDS_ERR_NOTFOUND);
+
+    ds_gc_stop(gc);
+    open_state_table_destroy(open_state);
+    mds_proxy_ctx_destroy(proxy);
+    mds_catalogue_close(cat);
+    rm_ds_dir(ds_dir);
+}
+
+static void test_async_remove_backpressure_hysteresis(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct mds_proxy_ctx *proxy = NULL;
+    struct ds_gc *gc = NULL;
+    char *ds_dir = make_ds_dir();
+
+    atomic_store(&g_branch_metrics.gc_pending, 0);
+    atomic_store(&g_branch_metrics.gc_deferred_quota_bytes, 0);
+    atomic_store(&g_branch_metrics.gc_deferred_quota_inodes, 0);
+    atomic_store(&g_branch_metrics.remove_async_backpressure_active, 0);
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_dir), MDS_OK);
+    ASSERT_EQ(ds_gc_start_ex(cat, proxy, 100U, 1U, 1U, &gc), 0);
+    ASSERT_TRUE(gc != NULL);
+    ds_gc_set_backpressure(gc, 2, 1);
+
+    ASSERT_TRUE(!ds_gc_should_backpressure(gc));
+    ds_gc_note_file_unlink(gc, 10);
+    ASSERT_TRUE(!ds_gc_should_backpressure(gc));
+    ds_gc_note_file_unlink(gc, 20);
+    ASSERT_TRUE(ds_gc_should_backpressure(gc));
+    ASSERT_EQ(atomic_load(&g_branch_metrics.gc_pending), 2);
+    ASSERT_EQ(atomic_load(&g_branch_metrics.gc_deferred_quota_bytes), 30);
+    ASSERT_EQ(atomic_load(&g_branch_metrics.gc_deferred_quota_inodes), 2);
+
+    atomic_store(&g_branch_metrics.gc_pending, 1);
+    ASSERT_TRUE(!ds_gc_should_backpressure(gc));
+    ASSERT_EQ(atomic_load(
+                  &g_branch_metrics.remove_async_backpressure_active),
+              0);
+
+    ds_gc_stop(gc);
+    mds_proxy_ctx_destroy(proxy);
+    mds_catalogue_close(cat);
+    rm_ds_dir(ds_dir);
+}
+
 static void rm_ds_dir(char *path)
 {
-    char cmd[4200];
-    (void)snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    char data_path[256];
+
+    if (snprintf(data_path, sizeof(data_path), "%s/data", path) < 0 ||
+        (rmdir(data_path) != 0 && errno != ENOENT)) {
+        fprintf(stderr, "FAIL: cannot remove test data directory %s\n",
+                data_path);
+        exit(1);
+    }
+    if (rmdir(path) != 0) {
+        fprintf(stderr, "FAIL: cannot remove test directory %s\n", path);
+        exit(1);
+    }
     free(path);
 }
 
@@ -119,6 +228,25 @@ static uint32_t wait_for_count(struct mds_catalogue *cat,
     return count;
 }
 
+static enum mds_status wait_for_inode_absent(
+    struct mds_catalogue *cat, uint64_t fileid, uint32_t timeout_ms)
+{
+    const uint32_t step_ms = 10;
+    struct mds_inode inode;
+    uint32_t elapsed = 0;
+    enum mds_status status = MDS_ERR_IO;
+
+    while (elapsed < timeout_ms) {
+        status = mds_cat_ns_getattr(cat, fileid, &inode);
+        if (status == MDS_ERR_NOTFOUND) {
+            return status;
+        }
+        usleep(step_ms * 1000U);
+        elapsed += step_ms;
+    }
+    return mds_cat_ns_getattr(cat, fileid, &inode);
+}
+
 /* -----------------------------------------------------------------------
  * Tests
  * ----------------------------------------------------------------------- */
@@ -156,6 +284,58 @@ static void test_empty_queue_clean_stop(void)
     ASSERT_EQ(mds_cat_gc_count(cat, &count_after), MDS_OK);
     ASSERT_EQ(count_after, 0);
 
+    mds_proxy_ctx_destroy(proxy);
+    mds_catalogue_close(cat);
+    rm_ds_dir(ds_dir);
+}
+
+static void test_file_unlink_task_finalizes_retained_inode(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct mds_proxy_ctx *proxy = NULL;
+    struct ds_gc *gc = NULL;
+    struct open_state_table *open_state = NULL;
+    struct mds_inode child;
+    struct mds_final_unlink_result result;
+    struct mds_ds_map_entry entry;
+    struct mds_ds_map_entry *entries = NULL;
+    char *ds_dir = make_ds_dir();
+    uint32_t stripe_count = 0;
+    uint32_t stripe_unit = 0;
+    uint32_t mirror_count = 0;
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, /*ds_id*/ 1, ds_dir), MDS_OK);
+    ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT, "file-gc",
+                                MDS_FTYPE_REG, 0644, 1000, 1000, NULL,
+                                &child),
+              MDS_OK);
+    memset(&entry, 0, sizeof(entry));
+    entry.ds_id = 1;
+    ASSERT_EQ(mds_cat_stripe_map_put(
+                  cat, NULL, child.fileid, 1, 65536, 1, &entry),
+              MDS_OK);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(
+                  proxy, 1, child.fileid, 0, 0),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_ns_remove_final_file(
+                  cat, MDS_FILEID_ROOT, "file-gc", child.fileid,
+                  child.generation, &result),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(1, &open_state), 0);
+    open_state_table_set_cat(open_state, cat, 1);
+    ASSERT_EQ(ds_gc_start_ex(cat, proxy, 100U, 1U, 1U, &gc), 0);
+    ASSERT_TRUE(gc != NULL);
+    ds_gc_set_open_state(gc, open_state);
+    ASSERT_EQ(wait_for_inode_absent(cat, child.fileid, 10000U),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_stripe_map_get(
+                  cat, child.fileid, &stripe_count, &stripe_unit,
+                  &mirror_count, &entries),
+              MDS_ERR_NOTFOUND);
+
+    ds_gc_stop(gc);
+    open_state_table_destroy(open_state);
     mds_proxy_ctx_destroy(proxy);
     mds_catalogue_close(cat);
     rm_ds_dir(ds_dir);
@@ -299,8 +479,11 @@ int main(void)
     fprintf(stdout, "ds_gc parallel drainer tests\n");
 
     RUN_TEST(test_empty_queue_clean_stop);
+    RUN_TEST(test_async_remove_backpressure_hysteresis);
     RUN_TEST(test_disabled_inputs);
+    RUN_TEST(test_file_unlink_task_waits_for_durable_open);
     RUN_TEST(test_legacy_start_wrapper);
+    RUN_TEST(test_file_unlink_task_finalizes_retained_inode);
     RUN_TEST(test_workers_one_parity);
     RUN_TEST(test_backlog_drains_with_workers);
 

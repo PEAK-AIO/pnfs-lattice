@@ -77,7 +77,7 @@ threads sharing one address space.
 | Catalogue I/O threads | `src/catalogue/catalogue_rondb_shim.cpp` | Bound to NDB cluster connections; drive transactions on behalf of compound workers. |
 | Commit queue | `src/mds/commit_queue.c` | Optional batched-write path that coalesces small NDB writes (inline data, dirent updates) into larger transactions. |
 | Layout recall | `src/mds/layout_recall.c` | CB_LAYOUTRECALL deliveries on the back-channel. |
-| DS GC | `src/mds/ds_gc.c` | Coordinator + worker pool; drains the GC queue (orphan stripe rows from final-unlink) and issues NFS UNLINK to the DSes. |
+| DS GC | `src/modules/ds_gc/ds_gc.c` | Coordinator + worker pool; drains durable final-unlink tasks and issues fenced DS cleanup. |
 | DS pre-allocator | `src/mds/ds_prealloc.c` | Refills a small per-DS lookahead pool of stripe coordinates so OPEN(create)+LAYOUTGET hits no NDB pre-write. |
 | DS health | `src/mds/ds_health.c` | Periodic NFS NULL probe + LAYOUTERROR aggregation; feeds placement. |
 | Cluster transport | `src/cluster/cluster_transport.c` | gRPC peer messaging for cross-MDS cache invalidation, hard-link 2PC, etc. |
@@ -165,7 +165,8 @@ Tables (logical, not literal NDB DDL):
 | `stripe_maps` | Per-file layout: stripe count, mirror count, ordered (ds_id, FH) list. |
 | `inline_data` | Small-file payload + symlink targets. |
 | `xattrs` | RFC 8276 user xattrs. |
-| `gc_queue` | Orphan stripes scheduled for DS-side cleanup. |
+| `gc_tasks` | Durable lease-fenced cleanup work, keyed by task kind and ID. |
+| `gc_queue` | Legacy migration source retained until its rows become `gc_tasks`. |
 | `delegations` (optional) | Persisted file delegations for cross-MDS visibility. |
 | `layouts` (optional) | Persisted layout state for cross-MDS visibility. |
 | `coord_*` | Cross-MDS coordination state (subtree ownership, fencing). |
@@ -215,21 +216,111 @@ Both share the same in-MDS pipeline:
 The DS pre-allocator (`ds_prealloc.c`) and ds_cache (`ds_cache.c`) exist to
 cut the LAYOUTGET fast path to a single in-memory lookup; on cache miss the
 fallback is a normal catalogue read.
+### DS file-handle verification
+Before LAYOUTGET emits stripe-map entries that did not come from the layout
+cache, `compound_layout.c` verifies each DS file handle through the configured
+proxy.  A changed handle is first persisted to the stripe map, then replaces
+any cached map.  If verification or the durable rewrite fails, Lattice
+invalidates the local layout-cache entry, revokes the provisional layout,
+marks the file `DS_PENDING`, and returns `NFS4ERR_DELAY`; it never emits a
+stale nonzero DS file handle from the verify path.  Layout-cache hits are
+served without re-verification: entries only enter the cache after a verified
+serve, and re-ensuring every (stripe, mirror) handle per hit would cost
+`stripe_count * mirror_count` serial DS round trips per LAYOUTGET.  A handle
+that goes stale behind a cached entry is recovered through the client's
+`LAYOUTERROR`: `op_layouterror` invalidates the cache entry, so the next
+LAYOUTGET misses and takes the fail-closed verify path.  Deployments without
+a proxy retain their existing synthetic-handle behavior.
+### Authoritative `LAYOUTCOMMIT` size
+For ordinary (non-aggregated) `LAYOUTCOMMIT` size growth, the byte quota is
+enforced before the durable write using the request-snapshot delta (a
+conservative estimate), exactly as on the aggregated HPC path.  The write
+itself, `mds_cat_ns_setattr_size_extend`, performs one exclusive-row
+read-modify-write transaction and returns both the size observed under the
+row lock and the size durable after commit.  The reply reports that durable
+size, while quota accounting uses only the locked-to-committed delta.  Thus a
+stale smaller commit following a larger concurrent commit cannot reduce the
+reported size or charge the already-accounted growth again, and an over-quota
+caller is rejected before any durable change.
 ### Final-unlink GC
 When `op_remove` drops the last link of a regular file
 (`compound_namespace.c` → `enqueue_gc_for_final_unlink`), the MDS:
 1. Reads the file's stripe map.
-2. Enqueues one row in `gc_queue` per unique DS in the map (the worker
+2. Enqueues one durable cleanup task per unique DS in the map (the worker
    later sweeps stripe/mirror coordinates within each DS).
 3. Drops the stripe-map row.
 4. Frees any in-memory delegation grants for the now-gone file
    (`deleg_revoke_file`).
-The DS GC subsystem (`ds_gc.c`) drains the queue with a coordinator + worker
-pool: the coordinator batches rows out of `gc_queue` via
-`mds_cat_gc_peek_batch`, hands them to N workers that issue NFS UNLINK to
-the DSes, and then deletes the queue row on success.  Transient errors put
-the row back in the queue with a back-off; permanent errors flag it and
-move on.
+The DS GC subsystem (`ds_gc.c`) drains tasks with a coordinator + worker pool:
+the coordinator claims batches via `mds_cat_gc_task_claim_batch`, hands them
+to workers that issue NFS UNLINK to the DSes, and completes a task only after
+successful cleanup.  Every DS mount or I/O error reschedules the task with a
+back-off; cleanup work is never silently dropped.
+
+The durable task implementation uses `mds_gc_tasks`, keyed by
+`(task_kind, task_id)`.  A worker claims a task with its MDS ID and boot epoch;
+another worker can reclaim it only after lease expiry or when the recorded
+owner is absent, restarted, or stale in the shared node registry.  Completion,
+renewal, and retry release require the same fenced owner identity.  Thus an
+unavailable DS mount or I/O failure moves the task back to `PENDING` with a
+retry time instead of discarding cleanup work.  During the schema-v10 upgrade,
+each legacy queue row is copied into an idempotent legacy task and removed only
+as part of the durable task migration transaction.  Malformed legacy rows are
+converted atomically into quarantined tasks instead of preventing startup.
+Claim scans likewise quarantine malformed task rows after the scan and continue
+claiming valid work from the same batch.
+### Atomic final-file unlink handoff
+`mds_cat_ns_remove_final_file` is the dedicated delete-at-ack catalogue
+primitive for a final regular-file unlink.  In one backend transaction, it
+validates the named fileid and generation, removes the dirent, retains the
+inode with `nlink=0` and `MDS_IFLAG_DELETE_PENDING`, advances the parent
+change counter, and inserts the `(FILE_UNLINK, fileid)` durable task.  The
+retained stripe map supplies the exact DS cleanup layout; no legacy GC queue
+row or sequence number is created.  The transaction reports the authoritative
+parent change values after commit.
+
+`remove_async` is default-off. When enabled, it additionally requires a live
+GC worker, durable shared open-state persistence, and cross-MDS cache
+invalidation. The remove request does no DS RPC after a successful atomic
+handoff. The inode remains delete-pending until the worker observes no durable
+opens, fences and unlinks its exact DS objects, finalizes metadata, and releases
+the deferred quota exactly once. New opens that encounter delete-pending state
+fail `NFS4ERR_STALE`.
+
+Open-unlinked retention currently lasts only for the running server instance.
+`CLAIM_PREVIOUS` recovery is not implemented, so an open-unlinked lifetime
+cannot be reconstructed safely after restart.  OPEN therefore intentionally
+withholds `OPEN4_RESULT_PRESERVE_UNLINKED`, even when `remove_async` is active.
+The encoder retains support for the flag, but it must not be advertised until
+restart-safe reclaim completes the wire-level contract.
+
+The GC coordinator periodically snapshots active durable file tasks. Request
+threads make a cache-only hysteretic decision: reaching
+`remove_async_high_watermark` switches final unlinks to the established
+synchronous path, and async handoff resumes only at or below
+`remove_async_low_watermark`. Each accepted async handoff increments the
+cached backlog immediately. This bounds queue growth without a request-thread
+catalogue scan or an acknowledged-but-untracked delete.
+### Synchronous REMOVE baseline
+`tests/integration/bench_remove_sync.c` is a manually invoked serial baseline
+for the synchronous final-unlink implementation.  It pre-seeds a dedicated
+parent directory with one-stripe regular files and local DS backing objects,
+then measures the full in-process `SEQUENCE + PUTFH + REMOVE` compound.  The
+benchmark sets `skip_transient_ndb=true`, so it confirms the active
+transient-state fallback still fences every mapped DS object before replying.
+Its explicit cleanup removes only benchmark-created object IDs and drains
+only verified benchmark GC rows.  The default memdb result is a regression
+signal; RonDB measurements must use an isolated schema with an empty GC
+queue.  Neither mode includes front-channel RPC or client-network latency.
+
+Directory change accounting remains exact by default and by implementation:
+each namespace mutation atomically advances the durable parent inode change
+counter and timestamps.  The former `PNFS_RELAX_DIR_CHANGE` environment
+bypass is not supported because it can expose stale directory change
+attributes.  A scalable parent-delta mode requires an independently reviewed
+durable bucket schema, derived GETATTR and `change_info4` values, cache and
+crash behavior, and concurrent multi-MDS RonDB measurements.  The serial
+memdb baseline above cannot establish that prerequisite.
 ## 8. Concurrency and consistency
 ### State partitioning
 - **Catalogue rows** — authoritative.  Concurrent writers are serialised by
@@ -285,10 +376,13 @@ gRPC over TCP for the cluster transport (`src/cluster/cluster_transport.c`,
 - The 2PC paths (`rename_2pc`, `hardlink_2pc`) that may live alongside
   multi-cluster deployments.
 ## 10. Observability
-- **Metrics.**  Prometheus text format on a configurable HTTP endpoint
-  (`metrics_http.c`).  Counters cover NFS op rates, catalogue txn rates,
-  placement decisions, GC backlog, layout error counts, branch-level
-  latency histograms.
+- **Metrics.** Prometheus text format on a configurable HTTP endpoint
+  (`metrics_http.c`). Counters cover NFS op rates, catalogue txn rates,
+  placement decisions, layout error counts, and branch-level latency
+  histograms. Async final-file REMOVE exports active/claimed/oldest GC-task
+  gauges; claim, retry, open-blocked, unavailable-DS, takeover, permanent
+  failure, and completion totals; deferred quota gauges; and the synchronous
+  fallback and backpressure-active state.
 - **Structured logs.**  Journald via systemd by default; one line per
   significant event (recall, revoke, deadlock-class NDB error, GC error).
 - **Optional eBPF tracepoints.**  `src/bpf/` ships a minimal set of USDT
@@ -361,3 +455,70 @@ Files without the bit set continue to use the legacy paths
 bit-for-bit unchanged.  Operator-facing surface — triggers, tunables,
 deferred phases, caveats — is in `hpc-shared-files.md`.  The full
 phase plan and design rationale is in `hpc-nto1-plan.md`.
+### Atomic wide create and legacy recovery
+HPC wide CREATE allocates a fileid, preallocates and captures every DS file
+handle, then commits the child inode, insert-only parent dirent, complete
+stripe map, and parent change/timestamp update in one RonDB transaction.
+No new wide create sets `MDS_IFLAG_HPC_CREATE_PENDING`; a failed catalogue
+commit leaves no reachable namespace metadata and queues the captured DS
+handles for cleanup.
+
+`MDS_IFLAG_HPC_CREATE_PENDING` remains a compatibility marker for rows left
+by earlier releases that committed these pieces separately.  Recovery runs
+lazily on every NFS inode and directory lookup that encounters a marked row:
+a valid complete map is promoted by clearing the marker; incomplete metadata
+is removed and any captured DS handles are queued for cleanup.  Legacy rows
+are therefore never exposed as partially initialized files.  An optional
+startup sweep (`hpc_pending_recovery_scan = true`, default off) additionally
+walks the whole namespace to reclaim marked rows nobody looks up; because it
+is a full catalogue walk, enable it once after upgrading from an affected
+release rather than permanently.
+
+Rolling upgrades are protected by a reap grace window: an incomplete marked
+row younger than the window (300 s) is hidden, not reaped, because it may be
+an in-flight create on a peer MDS still running the pre-atomic release.
+Complete maps are promoted immediately regardless of age; a crashed create
+becomes reapable once it ages past the window.
+### Sparse proxy reads and logical EOF
+When client-direct layouts are unavailable, including with
+`serve_layouts=false`, READ, READ_PLUS, and copy fallback use the inode's
+authoritative logical size rather than any individual DS file length.  A
+request is clamped to that size; an in-range short successful DS read is a
+sparse hole, so the MDS zero-fills the rest of the stripe unit and continues
+through later stripe units.  Global EOF is reported only at logical EOF.
+
+READ_PLUS walks the same logical stripe sequence when locating data or holes.
+This prevents an empty sparse DS object from hiding later-stripe data, while
+read-open and read-I/O failures still use configured mirror failover.
+### Effective placement geometry
+Placement callers allocate for their requested stripe and mirror geometry, but
+persist and operate only on placement's effective stripe count.  The shared
+geometry validator bounds the effective stripe-map entry count and prevents
+degraded placement from creating zero-initialized phantom entries; DS ID zero
+is a valid placement and is never used as an unfilled-entry sentinel.
+
+Wide preallocation first filters ONLINE DSes by required mode and transport,
+then selects a deterministic preferred transport/capability subset when one is
+available.  It applies strict placement checks to that eligible set, returns
+the effective geometry, and interprets entries in stripe-major order:
+`entry_index / mirror_count` is the stripe and
+`entry_index % mirror_count` is the mirror.  Inline promotion uses the same
+effective geometry before creating DS files and persisting its stripe map.
+It splits existing inline payloads at logical stripe-unit boundaries, writes
+each segment at its sparse logical offset, and copies that segment to every
+mirror of the selected stripe before the metadata flip makes the DS layout
+visible.
+### Create placement and final-unlink fencing
+The fused CREATE plus LAYOUTGET path consumes one preallocation entry and
+derives the stripe map and layout grant DS from that same entry.  The
+commit-queue variant reads the just-persisted single-stripe map before it
+records a layout pregrant; if the map is unavailable, the following
+LAYOUTGET uses its normal path rather than granting speculative placement.
+
+Stripe-map cleanup is header-bounded: deletion obtains the stored geometry
+inside the RonDB transaction, so single-stripe files do not issue deletes for
+every possible stripe index.  Final `REMOVE` continues to fence each known DS
+file synchronously before the namespace mutation replies.  This remains true
+when transient protocol state is enabled: the mode skips only persisted
+layout-recall enumeration, never the DS fence needed for a non-cooperating
+client.

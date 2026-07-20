@@ -27,6 +27,21 @@
  * @return Catalogue handle (never NULL).
  */
 extern struct mds_catalogue *catalogue_memdb_open(void);
+/** Make the next atomic final-unlink call return @a status unchanged. */
+void catalogue_memdb_fail_next_final_unlink(
+	struct mds_catalogue *cat, enum mds_status status);
+
+/** Atomically unlink a named file immediately after the next open-state put. */
+void catalogue_memdb_unlink_after_next_open_put(
+	struct mds_catalogue *cat, uint64_t parent_fileid, const char *name,
+	uint64_t fileid, uint64_t generation);
+
+/** Insert and inspect raw GC tasks without production enqueue validation. */
+enum mds_status catalogue_memdb_inject_raw_gc_task(
+	struct mds_catalogue *cat, const struct mds_gc_task *task);
+enum mds_status catalogue_memdb_get_gc_task(
+	struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+	struct mds_gc_task *task);
 
 static inline struct mds_catalogue *open_test_catalogue(void)
 {

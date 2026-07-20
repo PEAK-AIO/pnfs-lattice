@@ -85,7 +85,12 @@ struct commit_op_create {
 	uint64_t            layout_offset;
 	uint64_t            layout_length;
 	struct nfs4_stateid layout_stateid;
-	const uint32_t     *layout_ds_ids; /**< Borrowed; valid during submit. */
+	/*
+	 * Deprecated for CREATE pregrants: the commit path derives DS IDs
+	 * from the just-persisted stripe map.  Retained for ABI compatibility
+	 * with existing callers.
+	 */
+	const uint32_t     *layout_ds_ids;
 	uint32_t            layout_ds_count;
 	/*
 	 * When true, the CQ writer skips the mds_coord_layout_grant

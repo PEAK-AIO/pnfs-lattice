@@ -82,6 +82,8 @@ add_executable(test_coord_shared_state unit/test_coord_shared_state.c)
 add_executable(test_dir_delegation  unit/test_dir_delegation.c)
 add_executable(test_delegation      unit/test_delegation.c)
 add_executable(test_ds_capacity     unit/test_ds_capacity.c)
+add_executable(test_gc_tasks        unit/test_gc_tasks.c)
+add_executable(test_final_unlink    unit/test_final_unlink.c)
 if(ENABLE_DS_GC)
     add_executable(test_ds_gc       unit/test_ds_gc.c)
 endif()
@@ -145,6 +147,8 @@ foreach(test_target
     test_dir_delegation
     test_delegation
     test_ds_capacity
+    test_gc_tasks
+    test_final_unlink
     test_ds_gc
     test_hpc_shared
     test_layout_cache
@@ -204,6 +208,9 @@ target_link_libraries(test_xdr_layout_form PRIVATE
     pnfs_cluster
     pnfs_fsal_obj
     pnfs_common
+    pnfs_mds_core
+    pnfs_cluster
+    pnfs_mds_core
     rondb_schema
     ${NTIRPC_LIB}
     pthread
@@ -347,6 +354,27 @@ foreach(test_target test_cluster test_failover test_client_lifecycle
     add_test(NAME ${test_target} COMMAND ${test_target})
     set_tests_properties(${test_target} PROPERTIES LABELS "integration")
 endforeach()
+
+# Manual performance harness.  It creates and removes benchmark-owned DS
+# objects, so it is deliberately not registered with CTest.
+add_executable(bench_remove_sync integration/bench_remove_sync.c)
+target_include_directories(bench_remove_sync PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src/tools
+    ${PROJECT_SOURCE_DIR}/src/catalogue
+    ${PROJECT_SOURCE_DIR}/tests
+)
+target_link_libraries(bench_remove_sync PRIVATE
+    test_memdb
+    pnfs_mds_core
+    pnfs_cluster
+    pnfs_fsal_obj
+    pnfs_common
+    pnfs_mds_core
+    pnfs_cluster
+    pnfs_mds_core
+    pthread
+)
 # set_tests_properties(test_failover PROPERTIES TIMEOUT 120)
 target_link_libraries(test_layout_recall PRIVATE
     test_memdb

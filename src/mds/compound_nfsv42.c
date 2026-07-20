@@ -81,7 +81,7 @@ enum nfs4_status op_allocate(struct compound_data *cd,
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
 		return nst;
-}
+	}
 
 	if (cd->proxy == NULL) {
 		return NFS4ERR_NOTSUPP;
@@ -101,7 +101,7 @@ enum nfs4_status op_allocate(struct compound_data *cd,
 				  OPEN4_SHARE_ACCESS_WRITE);
 	if (nst != NFS4_OK) {
 		return nst;
-}
+	}
 
 	/* CERT INT30-C: check for uint64 overflow on offset+length. */
 	if (a->length > 0 && a->offset > UINT64_MAX - a->length) {
@@ -205,6 +205,7 @@ enum nfs4_status op_seek(struct compound_data *cd,
 {
 	const struct nfs4_arg_seek *a = &op->arg.seek;
 	struct nfs4_res_seek *r = &res->res.seek;
+	struct mds_inode inode;
 	enum nfs4_status nst;
 	enum mds_status st;
 
@@ -230,7 +231,12 @@ enum nfs4_status op_seek(struct compound_data *cd,
 		return nst;
 }
 
+	st = cat_getattr(cd, cd->current_fh.fileid, &inode);
+	if (st != MDS_OK) {
+		return mds_status_to_nfs4(st);
+	}
 	st = mds_proxy_seek(cd->proxy, cd->cat, cd->current_fh.fileid,
+			    inode.size,
 			    a->offset, a->what,
 			    &r->offset, &r->eof);
 	return mds_status_to_nfs4(st);
@@ -243,9 +249,11 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 {
 	const struct nfs4_arg_read_plus *a = &op->arg.read_plus;
 	struct nfs4_res_read_plus *r = &res->res.read_plus;
+	struct mds_inode inode;
 	enum nfs4_status nst;
 	enum mds_status st;
 	uint64_t hole_off = 0;
+	uint64_t read_count;
 	bool hole_eof = false;
 
 	nst = require_current_fh(cd);
@@ -269,6 +277,19 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 	if (nst != NFS4_OK) {
 		return nst;
 }
+	st = cat_getattr(cd, cd->current_fh.fileid, &inode);
+	if (st != MDS_OK) {
+		return mds_status_to_nfs4(st);
+	}
+	if (a->offset >= inode.size) {
+		r->eof = true;
+		r->seg_count = 0;
+		return NFS4_OK;
+	}
+	read_count = inode.size - a->offset;
+	if (read_count > a->count) {
+		read_count = a->count;
+	}
 
 	/*
 	 * Check if the region starts in a hole by seeking for data.
@@ -276,25 +297,32 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 	 * segment first.
 	 */
 	st = mds_proxy_seek(cd->proxy, cd->cat, cd->current_fh.fileid,
+			    inode.size,
 			    a->offset, NFS4_CONTENT_DATA,
 			    &hole_off, &hole_eof);
 	if (st != MDS_OK && st != MDS_ERR_IO) {
-		/* No stripe map -- file may be empty; return single hole. */
-		r->eof = true;
+		/* No stripe map -- file may be empty; return single hole.
+		 * eof is true only when this reply reaches logical EOF:
+		 * a shorter request must keep the client reading the
+		 * remaining (all-hole) range. */
+		r->eof = (a->offset + read_count >= inode.size);
 		r->seg_count = 1;
 		r->segs[0].content_type = NFS4_CONTENT_HOLE;
 		r->segs[0].offset = a->offset;
-		r->segs[0].u.hole.length = a->count;
+		r->segs[0].u.hole.length = read_count;
 		return NFS4_OK;
 	}
 
 	if (hole_eof) {
-		/* Entire range is beyond EOF. */
-		r->eof = true;
+		/* No data anywhere in [offset, logical EOF): the in-range
+		 * segment is a hole.  eof only when the reply covers the
+		 * rest of the file; a count-limited request must not make
+		 * the client believe the file ended early. */
+		r->eof = (a->offset + read_count >= inode.size);
 		r->seg_count = 1;
 		r->segs[0].content_type = NFS4_CONTENT_HOLE;
 		r->segs[0].offset = a->offset;
-		r->segs[0].u.hole.length = a->count;
+		r->segs[0].u.hole.length = read_count;
 		return NFS4_OK;
 	}
 
@@ -302,8 +330,8 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 		/* Hole segment before data. */
 		uint64_t hole_len = hole_off - a->offset;
 
-		if (hole_len > a->count) {
-			hole_len = a->count;
+		if (hole_len > read_count) {
+			hole_len = read_count;
 }
 		r->segs[0].content_type = NFS4_CONTENT_HOLE;
 		r->segs[0].offset = a->offset;
@@ -315,7 +343,7 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 
 	/* Data segment: read actual bytes via proxy. */
 	{
-		uint32_t count = a->count;
+		uint32_t count = (uint32_t)read_count;
 		uint32_t nr = 0;
 		bool eof_flag = false;
 
@@ -324,6 +352,7 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 }
 
 		st = mds_proxy_read(cd->proxy, cd->cat, cd->current_fh.fileid,
+				    inode.size,
 				    a->offset, count,
 				    r->segs[0].u.data.data, &nr, &eof_flag);
 		if (st != MDS_OK) {

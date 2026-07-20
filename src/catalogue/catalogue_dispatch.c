@@ -201,6 +201,26 @@ enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
         cat->auth_ops->ns_create(cat, txn, parent_fileid, name,
                                  type, mode, uid, gid, prealloc, out));
 }
+enum mds_status mds_cat_ns_create_wide(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    const char *name,
+    const struct mds_inode *child,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const struct mds_ds_map_entry *entries)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->ns_create_wide == NULL || name == NULL ||
+        child == NULL || entries == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return CAT_TIMED(MDS_CATOP_NS_CREATE,
+        cat->auth_ops->ns_create_wide(cat, parent_fileid, name, child,
+                                      stripe_count, stripe_unit, mirror_count,
+                                      entries));
+}
 
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
                                   struct mds_cat_txn *txn,
@@ -231,6 +251,25 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
     }
     return CAT_TIMED(MDS_CATOP_NS_REMOVE,
         cat->auth_ops->ns_remove(cat, txn, parent_fileid, name));
+}
+
+enum mds_status mds_cat_ns_remove_final_file(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t expected_fileid,
+    uint64_t expected_generation,
+    struct mds_final_unlink_result *result)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->ns_remove_final_file == NULL || name == NULL ||
+        expected_fileid == 0 || expected_generation == 0 || result == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return CAT_TIMED(MDS_CATOP_NS_REMOVE,
+        cat->auth_ops->ns_remove_final_file(
+            cat, parent_fileid, name, expected_fileid, expected_generation,
+            result));
 }
 
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
@@ -296,6 +335,24 @@ enum mds_status mds_cat_ns_setattr(struct mds_catalogue *cat,
     }
     return CAT_TIMED(MDS_CATOP_NS_SETATTR,
         cat->auth_ops->ns_setattr(cat, txn, fileid, attrs, mask));
+}
+enum mds_status mds_cat_ns_setattr_size_extend(
+    struct mds_catalogue *cat,
+    struct mds_cat_txn *txn,
+    uint64_t fileid,
+    const struct mds_inode *attrs,
+    uint32_t mask,
+    struct mds_size_extend_result *result)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->ns_setattr_size_extend == NULL ||
+        attrs == NULL || result == NULL ||
+        !(mask & MDS_ATTR_SIZE_EXTEND)) {
+        return MDS_ERR_INVAL;
+    }
+    return CAT_TIMED(MDS_CATOP_NS_SETATTR,
+        cat->auth_ops->ns_setattr_size_extend(cat, txn, fileid, attrs,
+                                              mask, result));
 }
 
 enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
@@ -1282,7 +1339,108 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
     }
     return cat->auth_ops->gc_count(cat, count);
 }
+enum mds_status mds_cat_gc_task_stats(
+    struct mds_catalogue *cat, struct mds_gc_task_stats *stats)
+{
+    if (cat == NULL || cat->auth_ops == NULL || stats == NULL ||
+        cat->auth_ops->gc_task_stats == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_stats(cat, stats);
+}
 
+enum mds_status mds_cat_gc_task_enqueue(
+    struct mds_catalogue *cat, struct mds_cat_txn *txn,
+    const struct mds_gc_task *task)
+{
+    if (cat == NULL || cat->auth_ops == NULL || task == NULL ||
+        cat->auth_ops->gc_task_enqueue == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_enqueue(cat, txn, task);
+}
+
+enum mds_status mds_cat_gc_task_claim_batch(
+    struct mds_catalogue *cat, struct mds_gc_task *tasks, uint32_t cap,
+    uint32_t *n_out, uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+    uint32_t lease_ms, uint32_t stale_owner_ms)
+{
+    if (n_out != NULL) {
+        *n_out = 0;
+    }
+    if (cat == NULL || cat->auth_ops == NULL || tasks == NULL ||
+        cap == 0 || n_out == NULL ||
+        cat->auth_ops->gc_task_claim_batch == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_claim_batch(
+        cat, tasks, cap, n_out, owner_mds_id, owner_boot_epoch, lease_ms,
+        stale_owner_ms);
+}
+
+enum mds_status mds_cat_gc_task_renew(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->gc_task_renew == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_renew(
+        cat, task_kind, task_id, owner_mds_id, owner_boot_epoch, lease_ms);
+}
+
+enum mds_status mds_cat_gc_task_reschedule(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+    uint32_t retry_ms)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->gc_task_reschedule == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_reschedule(
+        cat, task_kind, task_id, owner_mds_id, owner_boot_epoch, last_error,
+        retry_ms);
+}
+
+enum mds_status mds_cat_gc_task_complete(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->gc_task_complete == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_complete(
+        cat, task_kind, task_id, owner_mds_id, owner_boot_epoch);
+}
+
+enum mds_status mds_cat_gc_task_quarantine(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error)
+{
+    if (cat == NULL || cat->auth_ops == NULL ||
+        cat->auth_ops->gc_task_quarantine == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_quarantine(
+        cat, task_kind, task_id, owner_mds_id, owner_boot_epoch, last_error);
+}
+
+enum mds_status mds_cat_gc_task_finalize_file(
+    struct mds_catalogue *cat, uint64_t fileid,
+    uint64_t expected_generation, uint32_t owner_mds_id,
+    uint64_t owner_boot_epoch)
+{
+    if (cat == NULL || cat->auth_ops == NULL || fileid == 0 ||
+        expected_generation == 0 ||
+        cat->auth_ops->gc_task_finalize_file == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return cat->auth_ops->gc_task_finalize_file(
+        cat, fileid, expected_generation, owner_mds_id, owner_boot_epoch);
+}
 /* -----------------------------------------------------------------------
  * Authority ops dispatch -- DS prealloc pool (optional)
  * ----------------------------------------------------------------------- */

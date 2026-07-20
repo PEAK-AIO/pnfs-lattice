@@ -53,6 +53,9 @@
 #include "cluster_drain.h"
 #include "subtree_split.h"
 #include "failover.h"
+#include "inode_cache.h"
+#include "dirent_cache.h"
+#include "layout_cache.h"
 
 /* rename_2pc catalogue-aware wrappers are declared in rename_2pc.h
  * (included above).  They use the catalogue handle internally
@@ -155,6 +158,75 @@ static enum mds_status decode_wire_status(uint8_t wire_byte)
  * ----------------------------------------------------------------------- */
 
 #define CT_MAX_PEERS 128  /* Must be >= MDS_MAX_NODES for full-mesh clusters */
+#define CT_CACHE_INVALIDATION_QUEUE_CAP 256
+
+struct cache_invalidation_event {
+    uint64_t parent_fileid;
+    uint64_t child_fileid;
+    uint16_t name_len;
+    char name[MDS_MAX_NAME + 1];
+};
+
+struct cluster_cache_invalidator {
+    const struct cluster_membership *membership;
+    uint32_t self_mds_id;
+    struct inode_cache *inode_cache;
+    struct dirent_cache *dirent_cache;
+    struct layout_cache *layout_cache;
+    pthread_t worker;
+    pthread_mutex_t lock;
+    pthread_cond_t event_ready;
+    bool running;
+    bool worker_started;
+    uint32_t head;
+    uint32_t count;
+    struct cache_invalidation_event events[
+        CT_CACHE_INVALIDATION_QUEUE_CAP];
+};
+
+static void cache_invalidation_send(
+    const struct cluster_cache_invalidator *invalidator,
+    const struct cache_invalidation_event *event);
+
+static void cache_invalidation_apply(
+    const struct cluster_cache_invalidator *invalidator,
+    uint64_t parent_fileid, const char *name, uint64_t child_fileid)
+{
+    if (invalidator == NULL) {
+        return;
+    }
+    dirent_cache_invalidate(invalidator->dirent_cache, parent_fileid, name);
+    inode_cache_invalidate(invalidator->inode_cache, parent_fileid);
+    inode_cache_invalidate(invalidator->inode_cache, child_fileid);
+    layout_cache_invalidate(invalidator->layout_cache, child_fileid);
+}
+
+static void *cache_invalidation_worker(void *arg)
+{
+    struct cluster_cache_invalidator *invalidator = arg;
+
+    for (;;) {
+        struct cache_invalidation_event event;
+
+        pthread_mutex_lock(&invalidator->lock);
+        while (invalidator->running && invalidator->count == 0) {
+            pthread_cond_wait(&invalidator->event_ready,
+                              &invalidator->lock);
+        }
+        if (!invalidator->running && invalidator->count == 0) {
+            pthread_mutex_unlock(&invalidator->lock);
+            break;
+        }
+        event = invalidator->events[invalidator->head];
+        invalidator->head = (invalidator->head + 1) %
+                            CT_CACHE_INVALIDATION_QUEUE_CAP;
+        invalidator->count--;
+        pthread_mutex_unlock(&invalidator->lock);
+
+        cache_invalidation_send(invalidator, &event);
+    }
+    return NULL;
+}
 
 struct cluster_server {
     int                listen_fd;
@@ -225,6 +297,9 @@ struct cluster_server {
     /* C2: borrowed pointer to the daemon's live config.
      * NULL disables CONFIG_SHOW (responds with MDS_ERR_INVAL). */
     const struct mds_config *cfg;
+
+    /* Best-effort peer cache invalidation receiver. */
+    struct cluster_cache_invalidator *cache_invalidator;
 };
 
 /**
@@ -1518,6 +1593,34 @@ static void handle_ds_set_weight_admin(
 static void handle_ds_capacity_probe_admin(
     const struct cluster_server *srv, int conn_fd,
     const uint8_t *payload, uint32_t plen);
+static void handle_cache_invalidate(
+    const struct cluster_server *srv, int conn_fd,
+    const uint8_t *payload, uint32_t plen)
+{
+    uint64_t parent_fileid_be;
+    uint64_t child_fileid_be;
+    uint16_t name_len_be;
+    uint16_t name_len;
+    char name[MDS_MAX_NAME + 1];
+
+    (void)conn_fd;
+    if (srv->cache_invalidator == NULL || payload == NULL || plen < 18) {
+        return;
+    }
+    memcpy(&parent_fileid_be, payload, 8);
+    memcpy(&child_fileid_be, payload + 8, 8);
+    memcpy(&name_len_be, payload + 16, 2);
+    name_len = be16toh(name_len_be);
+    if (name_len == 0 || name_len > MDS_MAX_NAME ||
+        plen != (uint32_t)(18 + name_len)) {
+        return;
+    }
+    memcpy(name, payload + 18, name_len);
+    name[name_len] = '\0';
+    cache_invalidation_apply(srv->cache_invalidator,
+                             be64toh(parent_fileid_be), name,
+                             be64toh(child_fileid_be));
+}
 
 /* Cross-subtree nlink handlers (impl near the nlink client code). */
 static void handle_nlink_inc(const struct cluster_server *srv, int conn_fd,
@@ -1736,6 +1839,9 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
 
         case CT_MSG_DS_CAPACITY_PROBE_REQ:
             handle_ds_capacity_probe_admin(srv, conn_fd, payload, payload_len);
+            break;
+        case CT_MSG_CACHE_INVALIDATE:
+            handle_cache_invalidate(srv, conn_fd, payload, payload_len);
             break;
 
         case CT_MSG_METRICS_REQ:
@@ -2093,6 +2199,105 @@ uint16_t cluster_transport_server_port(const struct cluster_server *srv)
         return 0;
     }
     return srv->port;
+}
+int cluster_cache_invalidator_create(
+    const struct cluster_membership *membership,
+    uint32_t self_mds_id,
+    struct inode_cache *inode_cache,
+    struct dirent_cache *dirent_cache,
+    struct layout_cache *layout_cache,
+    struct cluster_cache_invalidator **out)
+{
+    struct cluster_cache_invalidator *invalidator;
+
+    if (membership == NULL || out == NULL) {
+        return -1;
+    }
+    *out = NULL;
+    invalidator = calloc(1, sizeof(*invalidator));
+    if (invalidator == NULL) {
+        return -1;
+    }
+    invalidator->membership = membership;
+    invalidator->self_mds_id = self_mds_id;
+    invalidator->inode_cache = inode_cache;
+    invalidator->dirent_cache = dirent_cache;
+    invalidator->layout_cache = layout_cache;
+    if (pthread_mutex_init(&invalidator->lock, NULL) != 0) {
+        free(invalidator);
+        return -1;
+    }
+    if (pthread_cond_init(&invalidator->event_ready, NULL) != 0) {
+        pthread_mutex_destroy(&invalidator->lock);
+        free(invalidator);
+        return -1;
+    }
+    invalidator->running = true;
+    if (pthread_create(&invalidator->worker, NULL,
+                       cache_invalidation_worker, invalidator) != 0) {
+        pthread_cond_destroy(&invalidator->event_ready);
+        pthread_mutex_destroy(&invalidator->lock);
+        free(invalidator);
+        return -1;
+    }
+    invalidator->worker_started = true;
+    *out = invalidator;
+    return 0;
+}
+
+void cluster_cache_invalidator_destroy(
+    struct cluster_cache_invalidator *invalidator)
+{
+    if (invalidator == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&invalidator->lock);
+    invalidator->running = false;
+    pthread_cond_broadcast(&invalidator->event_ready);
+    pthread_mutex_unlock(&invalidator->lock);
+    if (invalidator->worker_started) {
+        (void)pthread_join(invalidator->worker, NULL);
+    }
+    pthread_cond_destroy(&invalidator->event_ready);
+    pthread_mutex_destroy(&invalidator->lock);
+    free(invalidator);
+}
+
+void cluster_cache_invalidator_enqueue(
+    struct cluster_cache_invalidator *invalidator,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t child_fileid)
+{
+    size_t name_len;
+    uint32_t tail;
+    struct cache_invalidation_event *event;
+
+    if (invalidator == NULL || name == NULL) {
+        return;
+    }
+    name_len = strnlen(name, MDS_MAX_NAME + 1);
+    if (name_len == 0 || name_len > MDS_MAX_NAME) {
+        return;
+    }
+
+    pthread_mutex_lock(&invalidator->lock);
+    if (!invalidator->running ||
+        invalidator->count == CT_CACHE_INVALIDATION_QUEUE_CAP) {
+        pthread_mutex_unlock(&invalidator->lock);
+        return;
+    }
+    tail = (invalidator->head + invalidator->count) %
+           CT_CACHE_INVALIDATION_QUEUE_CAP;
+    event = &invalidator->events[tail];
+    event->parent_fileid = parent_fileid;
+    event->child_fileid = child_fileid;
+    event->name_len = (uint16_t)name_len;
+    memcpy(event->name, name, name_len);
+    event->name[name_len] = '\0';
+    invalidator->count++;
+    pthread_cond_signal(&invalidator->event_ready);
+    pthread_mutex_unlock(&invalidator->lock);
 }
 
 /* -----------------------------------------------------------------------
@@ -2902,6 +3107,57 @@ static int ct_client_connect(const char *host, uint16_t port)
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     return fd;
+}
+static void cache_invalidation_send(
+    const struct cluster_cache_invalidator *invalidator,
+    const struct cache_invalidation_event *event)
+{
+    struct cluster_member *members = NULL;
+    uint32_t member_count = 0;
+    uint8_t payload[18 + MDS_MAX_NAME];
+    uint64_t fileid_be;
+    uint16_t name_len_be;
+
+    if (invalidator == NULL || event == NULL ||
+        event->name_len == 0 || event->name_len > MDS_MAX_NAME) {
+        return;
+    }
+    if (cluster_membership_list(invalidator->membership, &members,
+                                &member_count) != MDS_OK) {
+        return;
+    }
+
+    fileid_be = htobe64(event->parent_fileid);
+    memcpy(payload, &fileid_be, 8);
+    fileid_be = htobe64(event->child_fileid);
+    memcpy(payload + 8, &fileid_be, 8);
+    name_len_be = htobe16(event->name_len);
+    memcpy(payload + 16, &name_len_be, 2);
+    memcpy(payload + 18, event->name, event->name_len);
+
+    for (uint32_t index = 0; index < member_count; index++) {
+        char host[256];
+        uint16_t port;
+        int fd;
+
+        if (members[index].mds_id == invalidator->self_mds_id) {
+            continue;
+        }
+        if (cluster_membership_resolve_peer(
+                invalidator->membership, members[index].mds_id,
+                host, sizeof(host), &port) != MDS_OK) {
+            continue;
+        }
+        fd = ct_client_connect(host, port);
+        if (fd < 0) {
+            continue;
+        }
+        (void)send_header(fd, CT_MSG_CACHE_INVALIDATE,
+                          (uint32_t)(18 + event->name_len));
+        (void)send_all(fd, payload, 18 + event->name_len);
+        close(fd);
+    }
+    free(members);
 }
 
 /* -----------------------------------------------------------------------
@@ -5291,6 +5547,15 @@ void cluster_transport_server_set_ds_cache(struct cluster_server *srv,
     }
 }
 
+void cluster_transport_server_set_cache_invalidator(
+    struct cluster_server *srv,
+    struct cluster_cache_invalidator *invalidator)
+{
+    if (srv != NULL) {
+        srv->cache_invalidator = invalidator;
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Rolling upgrade client request functions (Item 46)
  * ----------------------------------------------------------------------- */
@@ -6654,6 +6919,8 @@ static void render_cfg_misc_state(const struct mds_config *cfg,
     size_t off = *offp;
     RENDER_KEY("transient_state_cache", "%s",
                cfg->transient_state_cache ? "true" : "false");
+    RENDER_KEY("remove_async", "%s",
+               cfg->remove_async ? "true" : "false");
     RENDER_KEY("shard_enabled", "%s",
                cfg->shard_enabled ? "true" : "false");
     RENDER_KEY("ndb_async_writes", "%s",

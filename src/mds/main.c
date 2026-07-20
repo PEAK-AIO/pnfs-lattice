@@ -58,6 +58,7 @@
 #include "mds_metrics.h"
 #include "mds_op_metrics.h"
 #include "mountd_compat.h"
+#include "hpc_shared.h"
 #ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
 #include "catalog_image.h"
@@ -127,6 +128,11 @@ static void ds_fail_recall_cb(uint32_t ds_id, void *ctx)
 	struct layout_recall *lr = ctx;
 
 	(void)layout_recall_for_ds(lr, ds_id);
+}
+
+static void ds_gc_open_state_close_cb(void *ctx)
+{
+	ds_gc_wake(ctx);
 }
 
 /* -----------------------------------------------------------------------
@@ -250,6 +256,7 @@ int main(int argc, char *argv[])
 	struct cluster_membership *membership = NULL;
 	struct mds_proxy_ctx *proxy = NULL;
 	struct cluster_server *ct_srv = NULL;
+	struct cluster_cache_invalidator *cache_invalidator = NULL;
 	struct threadpool *rpc_tp = NULL;
 	struct commit_queue *cq = NULL;
 	struct session_table *session_tbl = NULL;
@@ -495,6 +502,31 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+	/* Pre-atomic releases could leave a PENDING wide-create inode after
+	 * persisting its namespace rows separately from its stripe map.
+	 * The scan repairs those legacy rows before requests are accepted,
+	 * but walks the entire namespace from the root, so it is opt-in
+	 * (run it once after upgrading from an affected release).  Lazy
+	 * lookup-time recovery is always active regardless, so leaving the
+	 * scan off only defers reclaiming rows nobody looks up.  A scan
+	 * failure is non-fatal for the same reason. */
+	if (cfg.hpc_pending_recovery_scan) {
+		struct hpc_pending_recovery_stats pending_stats;
+
+		rc = hpc_shared_recover_pending_scan(cat, &pending_stats);
+		if (rc != MDS_OK) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"legacy HPC pending recovery scan failed: %d",
+				(int)rc);
+		} else if (pending_stats.promoted != 0 ||
+			   pending_stats.reaped != 0) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"legacy HPC pending recovery: promoted=%llu "
+				"reaped=%llu",
+				(unsigned long long)pending_stats.promoted,
+				(unsigned long long)pending_stats.reaped);
+		}
+	}
 
 	/* Create cluster TLS contexts if configured.
 	 * Server context for the inbound listener; client context
@@ -1055,11 +1087,21 @@ int main(int argc, char *argv[])
 	 *      large enough that NDB peek traffic stays below the
 	 *      noise floor on the catalogue. */
 	if (cfg.ds_count > 0 && proxy != NULL && cat != NULL) {
-		if (ds_gc_start_ex(cat, proxy, 5000U,
-				   cfg.ds_gc_workers,
-				   cfg.ds_gc_batch_size,
-				   &ds_gc) == 0 &&
+		uint64_t gc_boot_epoch = 0;
+
+#ifdef HAVE_RONDB
+		if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+			gc_boot_epoch = rondb_boot_epoch;
+		}
+#endif
+		if (ds_gc_start_ex_with_identity(
+			    cat, proxy, 5000U, cfg.ds_gc_workers,
+			    cfg.ds_gc_batch_size, cfg.self.id, gc_boot_epoch,
+			    &ds_gc) == 0 &&
 		    ds_gc != NULL) {
+			ds_gc_set_backpressure(ds_gc,
+				cfg.remove_async_high_watermark,
+				cfg.remove_async_low_watermark);
 			MDS_LOG_INFO(LOG_COMP_MDS,
 				"DS GC drainer active "
 				"(poll=5000 ms, workers=%u, batch=%u)",
@@ -1256,6 +1298,16 @@ int main(int argc, char *argv[])
 			"(open+lock write-through to RonDB)");
 	}
 #endif
+	/* File-unlink cleanup must query the durable shared open-state table
+	 * before touching a retained inode's DS objects.  Until this binding is
+	 * complete, the worker reschedules file tasks without side effects. */
+	if (ds_gc != NULL) {
+		ds_gc_set_open_state(ds_gc, ot);
+		if (ot != NULL) {
+			open_state_table_set_close_notify(
+				ot, ds_gc_open_state_close_cb, ds_gc);
+		}
+	}
 
 	/* 6e. Resilver worker (admin-triggered, not auto-started). */
 	if (resilver_init(cat, cq, proxy, ot, &rw) != 0) {
@@ -1406,6 +1458,8 @@ int main(int argc, char *argv[])
 		rpc_cfg.hide_referral_junctions = cfg.hide_referral_junctions;
 		rpc_cfg.posix_dac = cfg.posix_dac;
 		rpc_cfg.referral_strict = cfg.referral_strict;
+		rpc_cfg.remove_async = false;
+		rpc_cfg.gc = ds_gc;
 
 		/* Kerberos auth: initialize GSS if krb5+ requested. */
 		struct mds_gss_table *gss_tbl = NULL;
@@ -1532,7 +1586,14 @@ int main(int argc, char *argv[])
 					(unsigned)neg_ttl,
 					(unsigned)cache_pos_ttl_ms);
 			} else {
-				MDS_LOG_INFO(LOG_COMP_MDS, cfg.dirent_cache_size ? "dirent_cache_init failed" : "dirent cache disabled (dirent_cache_size=0)");
+				if (dcache_size > 0) {
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"dirent_cache_init failed");
+				} else {
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"dirent cache disabled "
+						"(dirent_cache_size=0)");
+				}
 			}
 		rpc_cfg.dcache = dcache;
 		}
@@ -1552,15 +1613,43 @@ int main(int argc, char *argv[])
 		{
 			struct layout_cache *lcache = NULL;
 			uint32_t lcache_size = cfg.layout_cache_size;
-			if (lcache_size > 0 && layout_cache_init(lcache_size, &lcache) == 0) {
+			if (lcache_size > 0 &&
+			    layout_cache_init(lcache_size, &lcache) == 0) {
 				MDS_LOG_INFO(LOG_COMP_MDS,
 					"HPC layout cache active "
 					"(max=%u entries)",
 					(unsigned)lcache_size);
 			} else {
-				MDS_LOG_INFO(LOG_COMP_MDS, cfg.layout_cache_size ? "layout_cache_init failed; falling back to catalogue reads" : "HPC layout cache disabled (layout_cache_size=0)");
+				if (lcache_size > 0) {
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"layout_cache_init failed; "
+						"falling back to catalogue reads");
+				} else {
+					MDS_LOG_INFO(LOG_COMP_MDS,
+						"HPC layout cache disabled "
+						"(layout_cache_size=0)");
+				}
 			}
 			rpc_cfg.lcache = lcache;
+		}
+
+		if (cfg.remove_async && ds_gc != NULL &&
+		    open_state_table_has_durable_shared_state(ot) &&
+		    cluster_cache_invalidator_create(
+			membership, cfg.self.id, rpc_cfg.icache,
+			rpc_cfg.dcache, rpc_cfg.lcache,
+			&cache_invalidator) == 0) {
+			rpc_cfg.cache_invalidator = cache_invalidator;
+			rpc_cfg.remove_async = true;
+			cluster_transport_server_set_cache_invalidator(
+				ct_srv, cache_invalidator);
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"asynchronous final-file REMOVE enabled");
+		} else if (cfg.remove_async) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"asynchronous final-file REMOVE disabled: "
+				"durable open state, GC worker, or cache "
+				"invalidator unavailable");
 		}
 
 		/* HPC-Shared LAYOUTCOMMIT aggregator (Phase F of
@@ -1890,6 +1979,8 @@ cleanup:
 	if (ct_srv != NULL) {
 		cluster_transport_server_stop(ct_srv);
 	}
+	cluster_cache_invalidator_destroy(cache_invalidator);
+	cache_invalidator = NULL;
 
 	/* Phase 3b: RonDB heartbeat + changefeed poller stop + deregister. */
 #ifdef HAVE_RONDB

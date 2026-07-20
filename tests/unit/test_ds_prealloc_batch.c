@@ -65,18 +65,21 @@ static int g_fail;
     } g_pass++; \
 } while (0)
 
-static void seed_ds(struct mds_catalogue *db, uint32_t ds_id)
+static void seed_ds_profile(struct mds_catalogue *db, uint32_t ds_id,
+                            uint32_t state, uint8_t mode,
+                            uint8_t transport, uint32_t capabilities)
 {
     struct mds_ds_info info;
     struct mds_cat_txn *txn = NULL;
 
     memset(&info, 0, sizeof(info));
     info.ds_id = ds_id;
-    info.state = DS_ONLINE;
+    info.state = state;
     info.port = 2049;
     info.tcp_port = 2049;
-    info.transport = DS_TRANSPORT_TCP;
-    info.mode = DS_MODE_GENERIC;
+    info.transport = transport;
+    info.mode = mode;
+    info.capabilities = capabilities;
     snprintf(info.addr, sizeof(info.addr), "10.0.0.%u:/data", ds_id);
     snprintf(info.host, sizeof(info.host), "10.0.0.%u", ds_id);
     snprintf(info.export_path, sizeof(info.export_path), "/data");
@@ -86,6 +89,12 @@ static void seed_ds(struct mds_catalogue *db, uint32_t ds_id)
         mds_cat_txn_abort(txn); return;
     }
     mds_cat_txn_commit(txn);
+}
+
+static void seed_ds(struct mds_catalogue *db, uint32_t ds_id)
+{
+    seed_ds_profile(db, ds_id, DS_ONLINE, DS_MODE_GENERIC,
+                    DS_TRANSPORT_TCP, 0);
 }
 
 static struct ds_prealloc_ctx *make_ctx(struct mds_catalogue *db,
@@ -183,6 +192,138 @@ static void test_happy_1x1(void)
     ASSERT_EQ(res.entries, NULL);
     ASSERT_EQ(res.fileid, 0);
 
+    ds_prealloc_destroy(ctx);
+    mds_catalogue_close(db);
+}
+/* ------------------------------------------------------------------- */
+/* Non-strict placement must retain the effective geometry and must not
+ * mistake a valid DS ID of zero for an unfilled phantom entry. */
+/* ------------------------------------------------------------------- */
+
+static void test_non_strict_degradation_keeps_ds_zero(void)
+{
+    struct mds_catalogue *db = open_test_catalogue();
+    struct ds_prealloc_ctx *ctx;
+    struct ds_prealloc_batch_request req;
+    struct ds_prealloc_batch_result res;
+    bool saw_zero = false;
+    bool saw_one = false;
+
+    assert(db != NULL);
+    ctx = make_ctx(db, 2, true);
+    assert(ctx != NULL);
+
+    make_req(&req, 3, 1, false);
+    req.fileid_hint = 100;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &res), MDS_OK);
+    ASSERT_EQ(res.stripe_count, 2);
+    ASSERT_EQ(res.mirror_count, 1);
+    for (uint32_t entry_index = 0; entry_index < res.stripe_count;
+         entry_index++) {
+        ASSERT_EQ(res.entries[entry_index].nfs_fh_len, 16);
+        if (res.entries[entry_index].ds_id == 0) {
+            saw_zero = true;
+        }
+        if (res.entries[entry_index].ds_id == 1) {
+            saw_one = true;
+        }
+    }
+    ASSERT_TRUE(saw_zero);
+    ASSERT_TRUE(saw_one);
+
+    ds_prealloc_batch_result_destroy(&res);
+    ds_prealloc_destroy(ctx);
+    mds_catalogue_close(db);
+}
+
+/* ------------------------------------------------------------------- */
+/* Placement stores entries stripe-major: [s0m0, s0m1, s1m0, s1m1]. */
+/* ------------------------------------------------------------------- */
+
+static void test_multi_mirror_entries_are_stripe_major(void)
+{
+    struct mds_catalogue *db = open_test_catalogue();
+    struct ds_prealloc_ctx *ctx;
+    struct ds_prealloc_batch_request req;
+    struct ds_prealloc_batch_result res;
+
+    assert(db != NULL);
+    ctx = make_ctx(db, 4, true);
+    assert(ctx != NULL);
+
+    make_req(&req, 2, 2, true);
+    req.fileid_hint = 100;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &res), MDS_OK);
+    ASSERT_EQ(res.stripe_count, 2);
+    ASSERT_EQ(res.mirror_count, 2);
+    ASSERT_EQ(res.entries[0].ds_id, 0);
+    ASSERT_EQ(res.entries[1].ds_id, 1);
+    ASSERT_EQ(res.entries[2].ds_id, 2);
+    ASSERT_EQ(res.entries[3].ds_id, 3);
+    for (uint32_t entry_index = 0; entry_index < 4; entry_index++) {
+        ASSERT_EQ(res.entries[entry_index].nfs_fh_len, 16);
+    }
+
+    ds_prealloc_batch_result_destroy(&res);
+    ds_prealloc_destroy(ctx);
+    mds_catalogue_close(db);
+}
+
+/* ------------------------------------------------------------------- */
+/* Required mode/transport exclude incompatible DSes; a populated
+ * preferred subset deterministically wins over the required set. */
+/* ------------------------------------------------------------------- */
+
+static void test_profile_filtering_and_preference(void)
+{
+    struct mds_catalogue *db = open_test_catalogue();
+    struct ds_prealloc_ctx *ctx = NULL;
+    struct ds_prealloc_batch_request req;
+    struct ds_prealloc_batch_result res;
+    bool saw_rdma_only = false;
+    bool saw_rdma_preferred = false;
+
+    assert(db != NULL);
+    seed_ds_profile(db, 10, DS_ONLINE, DS_MODE_GENERIC,
+                    DS_TRANSPORT_TCP, 0);
+    seed_ds_profile(db, 20, DS_ONLINE, DS_MODE_GENERIC,
+                    DS_TRANSPORT_RDMA, 0);
+    seed_ds_profile(db, 30, DS_ONLINE, DS_MODE_GENERIC,
+                    DS_TRANSPORT_TCP | DS_TRANSPORT_RDMA,
+                    DS_CAP_GPUDIRECT);
+    seed_ds_profile(db, 40, DS_ONLINE, 0, DS_TRANSPORT_RDMA,
+                    DS_CAP_GPUDIRECT);
+    ASSERT_EQ(ds_prealloc_init(db, NULL, 16, &ctx), 0);
+    ds_prealloc_test_enable_synthetic_fh(ctx, true);
+
+    make_req(&req, 1, 1, false);
+    req.fileid_hint = 100;
+    req.required_transport = DS_TRANSPORT_RDMA;
+    req.preferred_transport = DS_TRANSPORT_RDMA;
+    req.preferred_caps = DS_CAP_GPUDIRECT;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &res), MDS_OK);
+    ASSERT_EQ(res.entries[0].ds_id, 30);
+    ds_prealloc_batch_result_destroy(&res);
+
+    make_req(&req, 2, 1, true);
+    req.fileid_hint = 100;
+    req.required_transport = DS_TRANSPORT_RDMA;
+    ASSERT_EQ(ds_prealloc_batch(ctx, &req, &res), MDS_OK);
+    for (uint32_t entry_index = 0; entry_index < res.stripe_count;
+         entry_index++) {
+        if (res.entries[entry_index].ds_id == 20) {
+            saw_rdma_only = true;
+        }
+        if (res.entries[entry_index].ds_id == 30) {
+            saw_rdma_preferred = true;
+        }
+        ASSERT_TRUE(res.entries[entry_index].ds_id != 10);
+        ASSERT_TRUE(res.entries[entry_index].ds_id != 40);
+    }
+    ASSERT_TRUE(saw_rdma_only);
+    ASSERT_TRUE(saw_rdma_preferred);
+
+    ds_prealloc_batch_result_destroy(&res);
     ds_prealloc_destroy(ctx);
     mds_catalogue_close(db);
 }
@@ -419,6 +560,14 @@ int main(void)
 
     test_happy_1x1();
     printf("  test_happy_1x1                          PASS\n");
+    test_non_strict_degradation_keeps_ds_zero();
+    printf("  test_non_strict_degradation_keeps_ds_zero PASS\n");
+
+    test_multi_mirror_entries_are_stripe_major();
+    printf("  test_multi_mirror_entries_are_stripe_major PASS\n");
+
+    test_profile_filtering_and_preference();
+    printf("  test_profile_filtering_and_preference   PASS\n");
 
     test_happy_4x1_unique_spread();
     printf("  test_happy_4x1_unique_spread            PASS\n");

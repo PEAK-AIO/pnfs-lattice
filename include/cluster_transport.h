@@ -196,6 +196,9 @@ struct rename_2pc_transport {
 #define CT_MSG_DS_CAPACITY_PROBE_REQ  87
 #define CT_MSG_DS_CAPACITY_PROBE_RESP 88
 
+/* Best-effort peer cache-coherence notification. */
+#define CT_MSG_CACHE_INVALIDATE      89
+
 /** Wire header: [msg_type u8][payload_len u32 BE] = 5 bytes. */
 #define CT_HEADER_SIZE  5
 
@@ -205,6 +208,10 @@ struct rename_2pc_transport {
 
 struct mds_tls_ctx;
 struct cluster_server;
+struct inode_cache;
+struct dirent_cache;
+struct layout_cache;
+struct cluster_cache_invalidator;
 
 /**
  * @brief Start the cluster transport server.
@@ -245,6 +252,32 @@ void cluster_transport_server_stop(struct cluster_server *srv);
  * Useful when port 0 was passed to server_start (OS-assigned).
  */
 uint16_t cluster_transport_server_port(const struct cluster_server *srv);
+
+/**
+ * Create a bounded background sender for namespace cache invalidations.
+ *
+ * An enqueue never waits for network I/O. A full queue drops the event;
+ * catalogue reads and configured cache TTLs remain the correctness fallback.
+ */
+int cluster_cache_invalidator_create(
+    const struct cluster_membership *membership,
+    uint32_t self_mds_id,
+    struct inode_cache *inode_cache,
+    struct dirent_cache *dirent_cache,
+    struct layout_cache *layout_cache,
+    struct cluster_cache_invalidator **out);
+void cluster_cache_invalidator_destroy(
+    struct cluster_cache_invalidator *invalidator);
+void cluster_cache_invalidator_enqueue(
+    struct cluster_cache_invalidator *invalidator,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t child_fileid);
+
+/** Attach the invalidation receiver to a running transport server. */
+void cluster_transport_server_set_cache_invalidator(
+    struct cluster_server *srv,
+    struct cluster_cache_invalidator *invalidator);
 
 /* -----------------------------------------------------------------------
  * TCP transport client

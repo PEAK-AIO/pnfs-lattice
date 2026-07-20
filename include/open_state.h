@@ -167,12 +167,24 @@ struct nfs4_open_state {
     struct nfs4_open_state *file_next;  /* per-fileid chain (share checks) */
 };
 
+/**
+ * Records the mutation made by a tokenized OPEN.
+ *
+ * A raced OPEN must remove only a new stateid or restore the state that was
+ * upgraded, never close a pre-existing open-unlinked file.
+ */
+struct open_state_open_token {
+    bool                   created;
+    struct nfs4_open_state previous;
+};
+
 /* -----------------------------------------------------------------------
  * Open state table (top-level container)
  * ----------------------------------------------------------------------- */
 
 struct open_state_table;  /* Opaque -- defined in open_state.c */
 struct mds_catalogue;     /* Forward for open_state_table_set_cat() */
+typedef void (*open_state_close_notify_fn)(void *arg);
 
 /* -----------------------------------------------------------------------
  * API -- Lifecycle
@@ -225,6 +237,15 @@ void open_state_table_set_cat(struct open_state_table *ot,
  */
 void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
 
+/**
+ * Register a best-effort notification invoked after a durable CLOSE succeeds.
+ *
+ * The callback runs after internal locks are released and is used to wake
+ * deferred finalization; polling remains the correctness fallback.
+ */
+void open_state_table_set_close_notify(
+    struct open_state_table *ot, open_state_close_notify_fn notify, void *arg);
+
 /* -----------------------------------------------------------------------
  * API -- OPEN (RFC 8881 S18.16)
  * ----------------------------------------------------------------------- */
@@ -249,6 +270,7 @@ void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
  *         -1 = NFS4ERR_SHARE_DENIED (share conflict).
  *         -2 = allocation failure (NFS4ERR_RESOURCE).
  *         -3 = invalid parameters.
+ *         -4 = durable state persistence failed (NFS4ERR_DELAY).
  */
 int open_state_open(struct open_state_table *ot,
                     uint64_t clientid,
@@ -258,6 +280,33 @@ int open_state_open(struct open_state_table *ot,
                     uint32_t share_access,
                     uint32_t share_deny,
                     struct nfs4_stateid *out_stateid);
+
+/**
+ * Process an OPEN and retain enough information to undo it safely.
+ *
+ * Used by the async-REMOVE pending-inode race check.  Regular callers should
+ * continue using open_state_open().
+ */
+int open_state_open_with_token(
+    struct open_state_table *ot, uint64_t clientid,
+    const uint8_t *open_owner, uint32_t open_owner_len,
+    uint64_t fileid, uint32_t share_access, uint32_t share_deny,
+    struct nfs4_stateid *out_stateid, struct open_state_open_token *token);
+
+/**
+ * Undo an OPEN made by open_state_open_with_token().
+ *
+ * Returns 0 on success or -1 when the state no longer matches the token or
+ * the durable rollback could not be written.
+ */
+int open_state_rollback_open(
+    struct open_state_table *ot, uint64_t clientid,
+    const struct nfs4_stateid *stateid,
+    const struct open_state_open_token *token);
+
+/** True only if this table persists open state through the catalogue. */
+bool open_state_table_has_durable_shared_state(
+    const struct open_state_table *ot);
 
 /* -----------------------------------------------------------------------
  * API -- CLOSE (RFC 8881 S18.2)
@@ -278,6 +327,7 @@ int open_state_open(struct open_state_table *ot,
  * @return 0 on success.
  *         -1 = NFS4ERR_BAD_STATEID (not found, seqid mismatch, or
  *              wrong owner).
+ *         -5 = durable delete failed; caller must retry.
  */
 int open_state_close(struct open_state_table *ot,
                      uint64_t clientid,
@@ -313,6 +363,14 @@ int open_state_find(struct open_state_table *ot,
  *         Returns 0 if ot is NULL (feature disabled).
  */
 int open_state_file_has_writers(struct open_state_table *ot, uint64_t fileid);
+
+/**
+ * Check whether any read or write open exists for @a fileid.
+ *
+ * Shared-state tables are queried durably.  Returns 1 when open state exists,
+ * 0 when none exists, and -1 when the durable query is unavailable or fails.
+ */
+int open_state_file_has_opens(struct open_state_table *ot, uint64_t fileid);
 
 /** Release all open state for a given client (lease expiry). */
 int open_state_downgrade(struct open_state_table *ot,

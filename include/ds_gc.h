@@ -29,10 +29,12 @@
 #ifndef DS_GC_H
 #define DS_GC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct mds_catalogue;
 struct mds_proxy_ctx;
+struct open_state_table;
 struct ds_gc;
 
 /**
@@ -96,6 +98,44 @@ int ds_gc_start_ex(struct mds_catalogue *cat,
                    uint32_t workers,
                    uint32_t batch_size,
                    struct ds_gc **out);
+
+/**
+ * Start the drainer with its stable MDS identity for durable task leases.
+ *
+ * A zero identity is permitted for non-RonDB test backends; production
+ * active-active deployments pass the registered MDS ID and boot epoch.
+ */
+int ds_gc_start_ex_with_identity(struct mds_catalogue *cat,
+                                 struct mds_proxy_ctx *proxy,
+                                 uint32_t poll_ms,
+                                 uint32_t workers,
+                                 uint32_t batch_size,
+                                 uint32_t mds_id,
+                                 uint64_t boot_epoch,
+                                 struct ds_gc **out);
+
+/**
+ * Attach the shared open-state table used to preserve open-unlinked files.
+ *
+ * File-unlink tasks remain retryable until this is set and a durable scan
+ * confirms that no read or write opens remain.
+ */
+void ds_gc_set_open_state(struct ds_gc *gc, struct open_state_table *ot);
+/**
+ * Configure hysteretic async-REMOVE backpressure.  A high watermark of zero
+ * disables the gate; otherwise low_watermark must be lower than high.
+ */
+void ds_gc_set_backpressure(struct ds_gc *gc, uint32_t high_watermark,
+                            uint32_t low_watermark);
+
+/** Return true when a new async final unlink must take the synchronous path. */
+bool ds_gc_should_backpressure(struct ds_gc *gc);
+
+/** Record an asynchronously accepted final unlink after its transaction commits. */
+void ds_gc_note_file_unlink(struct ds_gc *gc, uint64_t deferred_quota_bytes);
+
+/** Wake the coordinator after a close or lease cleanup changes open state. */
+void ds_gc_wake(struct ds_gc *gc);
 
 /**
  * @brief Stop the background drainer and free resources.

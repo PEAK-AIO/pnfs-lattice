@@ -193,6 +193,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         return MDS_ERR_INVAL;
     }
 
+
     memset(cfg, 0, sizeof(*cfg));
 
     /* Set safe defaults */
@@ -268,6 +269,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Transient state caching (default: off -- open/layout state
      * write-through to RonDB for cross-MDS correctness). */
     cfg->transient_state_cache = false;
+    cfg->remove_async = false;
+    cfg->remove_async_high_watermark = 4096;
+    cfg->remove_async_low_watermark = 2048;
 
     /* Stored synthetic DS owner (RFC 8435 S2.2).  Default off -> legacy
      * owner-aligned chown-on-LAYOUTGET path. */
@@ -285,7 +289,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * Apply sane defaults here; INI keys override below. */
     cfg->inline_max_size = 65536;          /* 64 KiB */
     cfg->inode_cache_size = 0;             /* 0 = disabled; set >0 to enable */
-    cfg->dirent_cache_size = 0;     /* disabled by default: per-MDS namespace caches cannot stay coherent across the referral cluster */
+    /* Disabled by default: per-MDS namespace caches cannot stay
+     * coherent across the referral cluster. */
+    cfg->dirent_cache_size = 0;
     cfg->layout_cache_size = 0;     /* disabled by default */
     cfg->negative_cache_ttl_ms = 5000;
 
@@ -339,6 +345,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      */
     cfg->hpc_max_stripe_count = 128;
     cfg->hpc_serve_layouts = false;
+    cfg->hpc_pending_recovery_scan = false;
     cfg->serve_layouts = true;
 
     /* Stripe lease duration (default 30s). */
@@ -812,6 +819,29 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "transient_state_cache") == 0) {
             cfg->transient_state_cache = (strcmp(val, "true") == 0 ||
                                           strcmp(val, "1") == 0);
+        } else if (strcmp(key, "remove_async") == 0) {
+            cfg->remove_async = (strcmp(val, "true") == 0 ||
+                                 strcmp(val, "1") == 0);
+        } else if (strcmp(key, "remove_async_high_watermark") == 0) {
+            unsigned long value = strtoul(val, NULL, 10);
+
+            if (value >= 1 && value <= 1000000UL) {
+                cfg->remove_async_high_watermark = (uint32_t)value;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: remove_async_high_watermark=%lu out of range "
+                    "(1..1000000)\n", value);
+            }
+        } else if (strcmp(key, "remove_async_low_watermark") == 0) {
+            unsigned long value = strtoul(val, NULL, 10);
+
+            if (value <= 1000000UL) {
+                cfg->remove_async_low_watermark = (uint32_t)value;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: remove_async_low_watermark=%lu out of range "
+                    "(0..1000000)\n", value);
+            }
         } else if (strcmp(key, "ds_synth_owner") == 0) {
             cfg->ds_synth_owner = (strcmp(val, "true") == 0 ||
                                    strcmp(val, "1") == 0);
@@ -837,6 +867,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "hpc_serve_layouts") == 0) {
             cfg->hpc_serve_layouts = (strcmp(val, "true") == 0 ||
                                       strcmp(val, "1") == 0);
+        } else if (strcmp(key, "hpc_pending_recovery_scan") == 0) {
+            cfg->hpc_pending_recovery_scan = (strcmp(val, "true") == 0 ||
+                                              strcmp(val, "1") == 0);
         } else if (strcmp(key, "serve_layouts") == 0) {
             cfg->serve_layouts = (strcmp(val, "true") == 0 ||
                                  strcmp(val, "1") == 0);
@@ -1283,6 +1316,23 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         (void)fprintf(stderr,
             "ERROR: catalog_compare_reads=true requires "
             "catalog_image_mode=shadow|compare|primary\n");
+        return MDS_ERR_INVAL;
+    }
+
+    if (cfg->remove_async && cfg->transient_state_cache) {
+        (void)fprintf(stderr,
+            "ERROR: remove_async=true requires "
+            "transient_state_cache=false\n");
+        return MDS_ERR_INVAL;
+    }
+    if (cfg->remove_async &&
+        (cfg->remove_async_high_watermark == 0 ||
+         cfg->remove_async_low_watermark >=
+             cfg->remove_async_high_watermark)) {
+        (void)fprintf(stderr,
+            "ERROR: remove_async requires 0 <= "
+            "remove_async_low_watermark < "
+            "remove_async_high_watermark\n");
         return MDS_ERR_INVAL;
     }
 

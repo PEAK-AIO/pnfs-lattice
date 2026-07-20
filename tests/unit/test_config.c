@@ -146,6 +146,37 @@ static void test_parse_new_cache_keys(void)
     unlink(path);
 }
 
+static void test_remove_async_backpressure_config(void)
+{
+    char path[128];
+    struct mds_config cfg;
+
+    ASSERT_EQ(write_tmp_ini("", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.remove_async_high_watermark, 4096);
+    ASSERT_EQ((int)cfg.remove_async_low_watermark, 2048);
+    unlink(path);
+
+    ASSERT_EQ(write_tmp_ini(
+        "remove_async = true\n"
+        "remove_async_high_watermark = 128\n"
+        "remove_async_low_watermark = 64\n",
+        path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_TRUE(cfg.remove_async);
+    ASSERT_EQ((int)cfg.remove_async_high_watermark, 128);
+    ASSERT_EQ((int)cfg.remove_async_low_watermark, 64);
+    unlink(path);
+
+    ASSERT_EQ(write_tmp_ini(
+        "remove_async = true\n"
+        "remove_async_high_watermark = 64\n"
+        "remove_async_low_watermark = 64\n",
+        path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_ERR_INVAL);
+    unlink(path);
+}
+
 static void test_parse_promoted_knobs(void)
 {
     char path[128];
@@ -415,6 +446,7 @@ int main(void)
     RUN_TEST(test_parse_promoted_knobs);
     RUN_TEST(test_promoted_knob_defaults);
     RUN_TEST(test_out_of_range_rejected);
+    RUN_TEST(test_remove_async_backpressure_config);
 
     /* mountd_compat keys. */
     RUN_TEST(test_mountd_compat_defaults);

@@ -795,7 +795,12 @@ enum mds_status ds_prealloc_batch(
 {
     struct mds_ds_info *ds_list = NULL;
     struct mds_ds_map_entry *entries = NULL;
-    uint32_t ds_count = 0, n;
+    uint32_t ds_count = 0;
+    uint32_t requested_entry_count;
+    uint32_t effective_entry_count;
+    uint32_t requested_stripe_count;
+    uint32_t effective_stripe_count;
+    uint32_t mirror_count;
     uint32_t stripe_unit;
     uint64_t fileid = 0;
     enum mds_status st;
@@ -807,12 +812,13 @@ enum mds_status ds_prealloc_batch(
         req->stripe_count == 0U || req->stripe_count > MDS_MAX_STRIPES) {
         return MDS_ERR_INVAL;
     }
-    {
-        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
-        if (mc > MDS_MAX_MIRRORS) {
-            return MDS_ERR_INVAL;
-        }
-        n = req->stripe_count * mc;
+    requested_stripe_count = req->stripe_count;
+    mirror_count = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+    st = placement_geometry_entry_count(
+        requested_stripe_count, requested_stripe_count, mirror_count,
+        &requested_entry_count);
+    if (st != MDS_OK) {
+        return st;
     }
     stripe_unit = (req->stripe_unit != 0U) ? req->stripe_unit
                                            : ctx->stripe_unit;
@@ -823,16 +829,34 @@ enum mds_status ds_prealloc_batch(
         free(ds_list);
         return MDS_ERR_NOSPC;
     }
+    {
+        struct mds_ds_info *compatible = NULL;
+        uint32_t compatible_count = 0;
+
+        st = ds_filter_compatible_preferred(
+            ds_list, ds_count, req->required_mode, req->required_transport,
+            req->preferred_transport, req->preferred_caps,
+            &compatible, &compatible_count);
+        free(ds_list);
+        ds_list = compatible;
+        ds_count = compatible_count;
+        if (st != MDS_OK) {
+            return st;
+        }
+        if (ds_count == 0) {
+            return MDS_ERR_NOSPC;
+        }
+    }
     /* strict_unique_ds: every stripe must land on a distinct DS, so the
-     * online pool must be at least stripe_count wide. */
-    if (req->strict_unique_ds && ds_count < req->stripe_count) {
+     * compatible pool must be at least stripe_count wide. */
+    if (req->strict_unique_ds && ds_count < requested_stripe_count) {
         free(ds_list);
         return MDS_ERR_NOSPC;
     }
     if (ctx->cache != NULL) {
         ds_cache_overlay_weights(ctx->cache, ds_list, ds_count);
     }
-    entries = calloc(n, sizeof(*entries));
+    entries = calloc(requested_entry_count, sizeof(*entries));
     if (entries == NULL) {
         free(ds_list);
         return MDS_ERR_NOMEM;
@@ -856,33 +880,40 @@ enum mds_status ds_prealloc_batch(
         }
     }
 
-    {
-        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
-        uint32_t sc = req->stripe_count;
+    effective_stripe_count = requested_stripe_count;
 
-        /* Fileid-rotated RR spreads wide layouts across the pool;
-         * capacity/WRR would re-collapse onto the same hot N DSes. */
-        st = placement_select_rr_at2(ds_list, ds_count, &sc, mc,
-                                     stripe_unit, fileid, entries);
-        if (st != MDS_OK) {
-            free(ds_list);
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
-        /* strict_unique_ds: refuse graceful degrade — caller asked
-         * for a full-width unique spread and must see NOSPC rather
-         * than a silently narrower layout. */
-        if (req->strict_unique_ds && sc != req->stripe_count) {
-            free(ds_list);
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
+    /* Fileid-rotated RR spreads wide layouts across the pool;
+     * capacity/WRR would re-collapse onto the same hot N DSes. */
+    st = placement_select_rr_at2(
+        ds_list, ds_count, &effective_stripe_count, mirror_count,
+        stripe_unit, fileid, entries);
+    if (st != MDS_OK) {
+        free(ds_list);
+        free(entries);
+        return MDS_ERR_NOSPC;
+    }
+    st = placement_geometry_entry_count(
+        requested_stripe_count, effective_stripe_count, mirror_count,
+        &effective_entry_count);
+    if (st != MDS_OK) {
+        free(ds_list);
+        free(entries);
+        return st;
+    }
+    /* strict_unique_ds: refuse graceful degrade — caller asked
+     * for a full-width unique spread and must see NOSPC rather
+     * than a silently narrower layout. */
+    if (req->strict_unique_ds &&
+        effective_stripe_count != requested_stripe_count) {
+        free(ds_list);
+        free(entries);
+        return MDS_ERR_NOSPC;
     }
     free(ds_list);
 
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t stripe = i % req->stripe_count;
-        uint32_t mirror = i / req->stripe_count;
+    for (uint32_t i = 0; i < effective_entry_count; i++) {
+        uint32_t stripe = i / mirror_count;
+        uint32_t mirror = i % mirror_count;
         bool captured = false;
 
         if (ctx->proxy != NULL) {
@@ -919,8 +950,8 @@ enum mds_status ds_prealloc_batch(
     }
 
     out->fileid = fileid;
-    out->stripe_count = req->stripe_count;
-    out->mirror_count = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+    out->stripe_count = effective_stripe_count;
+    out->mirror_count = mirror_count;
     out->stripe_unit = stripe_unit;
     out->entries = entries;
     return MDS_OK;

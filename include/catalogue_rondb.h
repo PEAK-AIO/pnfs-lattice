@@ -153,12 +153,18 @@ int rondb_shim_inode_setattr_atomic(void *handle, uint64_t fileid,
  *  serialised `mds_inode`; only fields whose mask bit is set are
  *  honoured -- everything else comes from the locked read.
  *
+ *  When non-NULL, `locked_old_size` and `committed_size` receive the size
+ *  read under the exclusive lock and the size committed by this transaction.
+ *  They are written only after a successful commit.
+ *
  *  Returns 0 on success, 1 on NOTFOUND, -1 on error.
  */
 int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
                                  uint32_t mask,
                                  const uint8_t *attrs_buf,
-                                 uint32_t attrs_buflen);
+                                 uint32_t attrs_buflen,
+                                 uint64_t *locked_old_size,
+                                 uint64_t *committed_size);
 
 /** Delete inode row. */
 int rondb_shim_inode_del(void *handle, uint64_t fileid);
@@ -240,6 +246,23 @@ int rondb_shim_ns_create(void *handle,
                          const uint8_t *stripe_buf, uint32_t stripe_len,
                          uint32_t stripe_count);
 
+/** Atomic wide CREATE: insert an already allocated regular-file inode,
+ *  dirent, exact stripe header/entries, and parent update in one NDB
+ *  transaction.  Entries use the same variable-length wire encoding as
+ *  rondb_shim_ns_create.  Returns 0 on success, 1 on name collision,
+ *  -2 on a retryable NDB error, or -1 on a permanent error. */
+int rondb_shim_ns_create_wide(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    const uint8_t *child_inode_buf,
+    uint32_t child_ino_len,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const uint8_t *stripe_buf,
+    uint32_t stripe_len);
+
 /** Atomic RENAME: single NDB transaction (T2/T3 class).
  *  Deletes src dirent, writes dst dirent, atomically updates both
  *  parent inodes via interpretedUpdateTuple, optionally handles
@@ -278,6 +301,22 @@ int rondb_shim_ns_remove_full(void *handle,
                               uint64_t parent_fileid, const char *name,
                               uint8_t *out_child_type,
                               uint32_t *out_old_nlink);
+/**
+ * Atomically remove a final regular-file name, retain its inode as
+ * DELETE_PENDING, advance the parent change counter, and insert its
+ * fileid-keyed durable GC task. Stripe metadata is retained for cleanup.
+ *
+ * Returns 0 on success, 1 if the name disappeared, 2 if the expected child
+ * identity or final-file precondition changed, -2 if retryable, or -1.
+ */
+int rondb_shim_ns_remove_final_file(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t expected_fileid,
+    uint64_t expected_generation,
+    uint64_t *parent_change_before,
+    uint64_t *parent_change_after);
 
 /** Readdir callback for shim -- called per dirent found.
  *  Return 0 to continue, non-zero to stop. */
@@ -485,6 +524,32 @@ int rondb_shim_gc_dequeue(void *handle, uint64_t gc_seq);
 /** Count queued entries owned by `self_mds_id` (or 0 = legacy). */
 int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id);
 
+/* Durable GC tasks (mds_gc_tasks: PK=(task_kind, task_id)). */
+int rondb_shim_gc_task_enqueue(void *handle, const struct mds_gc_task *task);
+int rondb_shim_gc_task_claim_batch(
+    void *handle, struct mds_gc_task *tasks, uint32_t cap, uint32_t *n_out,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms,
+    uint32_t stale_owner_ms);
+int rondb_shim_gc_task_renew(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms);
+int rondb_shim_gc_task_reschedule(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+    uint32_t retry_ms);
+int rondb_shim_gc_task_complete(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch);
+int rondb_shim_gc_task_quarantine(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error);
+int rondb_shim_gc_task_finalize_file(
+    void *handle, uint64_t fileid, uint64_t expected_generation,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch);
+int rondb_shim_gc_task_count(void *handle, uint32_t *count);
+int rondb_shim_gc_task_stats(void *handle,
+                             struct mds_gc_task_stats *stats);
+
 /* DS prealloc pool (mds_prealloc_pool: PK=fileid). */
 int rondb_shim_prealloc_pool_insert(void *handle, uint64_t fileid,
                                     uint32_t ds_id, const uint8_t *nfs_fh,
@@ -537,6 +602,7 @@ int rondb_shim_ns_create_with_layout(
     const uint8_t *child_inode_buf, uint32_t child_ino_len,
     int32_t parent_nlink_delta,
     const uint8_t *stripe_buf, uint32_t stripe_len, uint32_t stripe_count,
+    uint32_t stripe_unit, uint32_t mirror_count,
     uint64_t layout_clientid, uint32_t layout_iomode,
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,

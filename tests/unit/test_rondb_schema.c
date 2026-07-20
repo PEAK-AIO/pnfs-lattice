@@ -120,14 +120,14 @@ static void test_inode_round_trip(void)
 }
 
 /* -----------------------------------------------------------------------
- * 2. Inode size is exactly 137 bytes (FDB 133 + home_shard_id 4)
+ * 2. Inode size includes the v8 owner and v9 inline-stripe trailers.
  * ----------------------------------------------------------------------- */
 
 static void test_inode_size(void)
 {
-	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 137);
-	/* 137 = 133 (base inode fields) + 4 (home_shard_id). */
-	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 133 + 4);
+	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 285);
+	/* 285 = v1 137 + v8 owner 8 + v9 geometry 12 + padded FH 128. */
+	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 137 + 8 + 12 + MDS_NFS_FH_MAX);
 }
 
 /* -----------------------------------------------------------------------
@@ -271,7 +271,7 @@ static void test_table_count(void)
 {
 	/* Verify RONDB_TABLE_COUNT matches the number of table name macros.
 	 * Not automated -- just a sanity check that the constant is right. */
-	ASSERT_EQ(RONDB_TABLE_COUNT, 35);
+	ASSERT_EQ(RONDB_TABLE_COUNT, 36);
 	/* Original 9 tables. */
 	ASSERT_TRUE(RONDB_TBL_META[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_INODES[0] != '\0');
@@ -289,6 +289,8 @@ static void test_table_count(void)
 	ASSERT_TRUE(RONDB_TBL_QUOTA_RULES[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_QUOTA_USAGE[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_GC_QUEUE[0] != '\0');
+	/* Schema v10: durable lease-based asynchronous cleanup tasks. */
+	ASSERT_TRUE(RONDB_TBL_GC_TASKS[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_LAYOUT_STATE[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_LAYOUT_BY_CLIENT[0] != '\0');
 	ASSERT_TRUE(RONDB_TBL_LAYOUT_BY_FILE[0] != '\0');

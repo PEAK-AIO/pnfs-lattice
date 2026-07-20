@@ -145,6 +145,9 @@ static void test_invalid_args(void)
     ASSERT_EQ(layout_cache_put(lc, 1, MDS_MAX_STRIPES + 1, 65536,
                                1, &e),
               -1);
+    ASSERT_EQ(layout_cache_put(lc, 1, 1, 65536,
+                               MDS_MAX_MIRRORS + 1, &e),
+              -1);
 
     /* invalidate(NULL) safe */
     layout_cache_invalidate(NULL, 1);
@@ -426,7 +429,7 @@ static void test_clear(void)
 
     layout_cache_stats_get(lc, &st);
     ASSERT_EQ(st.entry_count, 0u);
-    ASSERT_TRUE(st.invalidations >= 32u);
+    ASSERT_TRUE(st.evictions >= 32u);
 
     /* All previously cached fileids must miss. */
     uint32_t sc, su, mc;

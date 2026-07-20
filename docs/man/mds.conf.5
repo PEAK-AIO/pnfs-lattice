@@ -452,6 +452,37 @@ Maximum entries fetched per coordinator tick.  Sizes the bounded
 queue between the coordinator and the workers; larger values
 amortise the gc_peek scan over more entries at the cost of a longer
 stop-drain window.
+.SS "Asynchronous final-file REMOVE"
+.TP
+.B remove_async
+.I bool
+(default
+.BR false ).
+Opt in to acknowledge the final unlink of a regular file after the durable
+delete-pending transaction commits, rather than after DS-side cleanup.  The
+daemon enables this only when durable shared open state, the GC worker, and
+cross-MDS cache invalidation are all available.  It cannot be combined with
+.BR transient_state_cache=true .
+.TP
+.B remove_async_high_watermark
+.IR uint ,
+range
+.I "1..1000000"
+(default
+.BR 4096 ).
+At or above this active durable file-task count, new final unlinks use the
+synchronous cleanup path.
+.TP
+.B remove_async_low_watermark
+.IR uint ,
+range
+.I "0..1000000"
+(default
+.BR 2048 ).
+At or below this count, asynchronous final unlinks resume.  When
+.B remove_async
+is enabled, this value must be strictly lower than
+.BR remove_async_high_watermark .
 .TP
 .B ds_prepare_queue_depth
 .IR uint ,

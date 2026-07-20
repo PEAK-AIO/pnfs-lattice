@@ -205,35 +205,15 @@ enum cluster_mode {
  * Phase F (aggregated LAYOUTCOMMIT).  Persisted in the inode flags
  * column so all MDSes observe the mode. */
 #define MDS_IFLAG_HPC_SHARED (1U << 3)
-/* Phase 3 of the QA plan -- HPC-Shared wide CREATE in flight.
+/* Legacy HPC-Shared wide CREATE crash marker.
  *
- * Set by hpc_shared_create_wide_layout() on the freshly-created
- * inode BEFORE the wide stripe map is persisted.  Cleared after
- * mds_cat_stripe_map_put() returns MDS_OK.  An MDS crash between
- * the inode commit and the stripe-map commit leaves the file with
- * this bit set; the inode + dirent are visible in the catalogue
- * but should not be reachable via NFSv4 because the wide stripe map
- * is missing.
- *
- * The compound read path (compound_inode_get, compound_lookup_local_child)
- * filters inodes carrying this flag so clients see NFS4ERR_NOENT
- * instead of an inconsistent file.
- *
- * Cleanup status (QA review Blocker 5).  The runtime filter is the
- * ONLY mechanism shipped today -- there is NO lazy-reap-on-access and
- * NO scan-based reaper.  A persistent orphan inode that survives an
- * MDS crash stays in the catalogue indefinitely; it is harmless
- * (invisible to every client and to readdir) but consumes a fileid
- * row.  Adding a startup / periodic scanner that walks inodes by flag
- * and removes any whose stripe_map row is absent is tracked as a
- * focused follow-up (see docs/hpc-shared-files.md "Deferred").  Do
- * NOT rely on the GC drainer's stripe_map_scan to reap these: the
- * GC drainer reclaims orphan stripe_map rows whose inode is gone,
- * NOT orphan inodes whose stripe_map is gone -- the inverse direction.
- *
- * Plain (non-HPC) CREATEs do NOT set this flag -- the legacy 1x1
- * fused CREATE primitive in catalogue_rondb_ns_create_with_layout
- * already gives crash atomicity. */
+ * Earlier releases committed the inode and dirent before separately writing
+ * the wide stripe map.  A crash in that window leaves this bit set.  Current
+ * hpc_shared_create_wide_layout() uses one RonDB transaction and never sets
+ * the bit.  NFS-facing reads continue to hide legacy marked inodes until the
+ * migration/recovery path verifies a complete stripe map or removes the
+ * incomplete namespace entry.
+ */
 #define MDS_IFLAG_HPC_CREATE_PENDING (1U << 4)
 
 /*
@@ -247,6 +227,11 @@ enum cluster_mode {
  * (>1) and mirrored files keep the side tables and leave this clear.
  */
 #define MDS_IFLAG_INLINE_STRIPE (1U << 5)
+/*
+ * Final regular-file unlink removed the namespace entry, but its DS objects
+ * and retained layout metadata still await durable GC completion.
+ */
+#define MDS_IFLAG_DELETE_PENDING (1U << 6)
 
 /* -----------------------------------------------------------------------
  * MDS Node Identity
@@ -326,7 +311,61 @@ struct mds_ds_info {
 };
 
 /* -----------------------------------------------------------------------
- * GC queue entry
+ * GC cleanup tasks
+ * ----------------------------------------------------------------------- */
+
+/*
+ * GC task identity is the composite (task_kind, task_id).  File-unlink
+ * tasks use the non-reusable fileid as task_id.  Legacy DS-object tasks keep
+ * their old gc_seq as task_id only while the older synchronous paths remain.
+ */
+enum mds_gc_task_kind {
+	MDS_GC_TASK_FILE_UNLINK = 1,
+	MDS_GC_TASK_LEGACY_DS_UNLINK = 2,
+};
+
+enum mds_gc_task_state {
+	MDS_GC_TASK_PENDING = 1,
+	MDS_GC_TASK_CLAIMED = 2,
+	MDS_GC_TASK_QUARANTINED = 3,
+};
+/* Transient claim metadata returned by claim_batch, never persisted. */
+#define MDS_GC_TASK_CLAIM_F_TAKEOVER (1U << 0)
+
+struct mds_gc_task {
+	uint8_t  task_kind;
+	uint8_t  state;
+	uint8_t  claim_flags;
+	uint64_t task_id;
+	uint64_t fileid;
+	uint64_t inode_generation;
+	uint64_t created_ns;
+	uint64_t not_before_ns;
+	uint32_t attempt_count;
+	int32_t  last_error;
+	uint32_t lease_owner_mds_id;
+	uint64_t lease_owner_boot_epoch;
+	uint64_t lease_expiry_ns;
+	/* Legacy DS-object payload.  File-unlink tasks retain their durable
+	 * stripe metadata and leave these fields clear. */
+	uint32_t ds_id;
+	uint32_t nfs_fh_len;
+	uint8_t  nfs_fh[MDS_NFS_FH_MAX];
+};
+/*
+ * Low-frequency coordinator snapshot for asynchronous final-unlink
+ * backpressure and operator metrics.  Active excludes quarantined tasks;
+ * oldest_file_task_created_ns is zero when there are no active file tasks.
+ */
+struct mds_gc_task_stats {
+	uint32_t active_file_tasks;
+	uint32_t claimed_file_tasks;
+	uint32_t quarantined_file_tasks;
+	uint64_t oldest_file_task_created_ns;
+};
+
+/* -----------------------------------------------------------------------
+ * Legacy GC queue entry
  * ----------------------------------------------------------------------- */
 
 struct mds_gc_entry {
@@ -935,6 +974,14 @@ struct mds_config {
      * the striped form's stripes as mirrors and corrupt data. */
     bool hpc_serve_layouts;                                /**< Default false. */
 
+    /* Startup namespace scan that repairs MDS_IFLAG_HPC_CREATE_PENDING
+     * rows left by pre-atomic wide-create releases.  The scan walks the
+     * whole namespace from the root, so it is opt-in: enable it once
+     * after upgrading from an affected release.  Lazy lookup-time
+     * recovery is always active regardless of this switch.
+     * INI key: hpc_pending_recovery_scan = true|false. */
+    bool hpc_pending_recovery_scan;                        /**< Default false. */
+
     /* Master switch for client-direct pNFS layouts.  When false, every
      * LAYOUTGET returns LAYOUTUNAVAILABLE and clients fall back to MDS
      * proxy READ/WRITE (correctness over speed).  Use this to keep I/O
@@ -948,6 +995,23 @@ struct mds_config {
      * skipped -- in-memory tables are authoritative.  Safe for
      * single-MDS deployments.  Default: false (RonDB write-through). */
     bool                transient_state_cache;
+
+    /*
+     * Acknowledge final regular-file unlinks after the atomic metadata
+     * handoff, while DS cleanup is performed by the durable GC worker.
+     * This remains disabled by default and requires durable shared open
+     * state; startup rejects the incompatible transient-state setting.
+     */
+    bool                remove_async;
+
+    /*
+     * Hysteretic queue limits for asynchronous final-file REMOVE.  When
+     * active file-unlink tasks reach high water, new final unlinks use the
+     * established synchronous path until the cached backlog falls to low
+     * water.  Both limits are required when remove_async is enabled.
+     */
+    uint32_t            remove_async_high_watermark;
+    uint32_t            remove_async_low_watermark;
 
     /* Directory delegations (RFC 8881 S10.9, S18.39).
      * When false (the default), GET_DIR_DELEGATION responds with

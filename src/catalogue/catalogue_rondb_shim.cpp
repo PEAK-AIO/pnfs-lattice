@@ -40,6 +40,16 @@ extern "C" {
 #include "mds_coordination.h"
 #include "rondb_schema.h"
 #include "quota.h"         /* struct mds_quota_rule, mds_quota_usage */
+
+static int rondb_equal_u64(NdbOperation *op, const char *column,
+                           uint64_t value);
+static int rondb_set_value_u64(NdbOperation *op, const char *column,
+                               uint64_t value);
+static int rondb_encode_varbinary_string(const char *value,
+                                         uint32_t prefix_len,
+                                         uint8_t *encoded,
+                                         uint32_t encoded_cap,
+                                         uint32_t *encoded_len_out);
 }
 
 namespace {
@@ -646,6 +656,265 @@ static int rondb_update_probe_value(rondb_shim_handle *state,
     rondb_get_ndb(state)->closeTransaction(tx);
     return 0;
 }
+/*
+ * The dirent, retained inode, parent inode, and file task are committed by
+ * one physical NDB transaction.  Public catalogue transactions are logical
+ * wrappers and cannot preserve this acknowledgment boundary.
+ */
+static int rondb_ns_remove_final_file_impl(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t expected_fileid,
+    uint64_t expected_generation,
+    uint64_t *parent_change_before,
+    uint64_t *parent_change_after)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *inode_table;
+    const NdbDictionary::Table *dirent_table;
+    const NdbDictionary::Table *task_table;
+    NdbTransaction *transaction;
+    NdbOperation *operation;
+    NdbError err;
+    NdbRecAttr *dirent_fileid;
+    NdbRecAttr *dirent_type;
+    NdbRecAttr *inode_type;
+    NdbRecAttr *inode_nlink;
+    NdbRecAttr *inode_generation;
+    NdbRecAttr *inode_flags;
+    NdbRecAttr *inode_change;
+    NdbRecAttr *parent_change;
+    struct timespec now;
+    uint64_t now_ns;
+    uint64_t child_change;
+    uint64_t parent_before;
+    uint32_t child_flags;
+    uint8_t name_value[MDS_MAX_NAME + 2];
+    uint32_t name_value_len = 0;
+    uint8_t empty_fh[] = { 0 };
+
+    if (state == nullptr || name == nullptr || expected_fileid == 0 ||
+        expected_generation == 0 || parent_change_before == nullptr ||
+        parent_change_after == nullptr ||
+        clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return -1;
+    }
+    now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+    if (rondb_encode_varbinary_string(name, 1U, name_value,
+                                      sizeof(name_value),
+                                      &name_value_len) != 0) {
+        return -1;
+    }
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) {
+        return -1;
+    }
+    inode_table = dict->getTable(RONDB_TBL_INODES);
+    dirent_table = dict->getTable(RONDB_TBL_DIRENTS);
+    task_table = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (inode_table == nullptr || dirent_table == nullptr ||
+        task_table == nullptr) {
+        return -1;
+    }
+
+    {
+        uint8_t partition_key[8];
+
+        fdb_put_u64(partition_key, parent_fileid);
+        transaction = rondb_get_ndb(state)->startTransaction(
+            dirent_table, (const char *)partition_key, sizeof(partition_key));
+    }
+    if (transaction == nullptr) {
+        err = rondb_get_ndb(state)->getNdbError();
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "final_file_unlink startTx");
+    }
+
+    operation = transaction->getNdbOperation(dirent_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(operation, RONDB_DIR_COL_PARENT, parent_fileid);
+    operation->equal(RONDB_DIR_COL_NAME, (const char *)name_value,
+                     name_value_len);
+    dirent_fileid = operation->getValue(RONDB_DIR_COL_CHILD_FID, nullptr);
+    dirent_type = operation->getValue(RONDB_DIR_COL_CHILD_TYPE, nullptr);
+    if (dirent_fileid == nullptr || dirent_type == nullptr) {
+        goto final_file_unlink_error;
+    }
+    if (transaction->execute(NdbTransaction::NoCommit) == -1) {
+        err = transaction->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        if (err.code == 626) {
+            return 1;
+        }
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "final_file_unlink dirent");
+    }
+    if (operation->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return 1;
+    }
+    if (dirent_fileid->u_64_value() != expected_fileid ||
+        dirent_type->u_8_value() != MDS_FTYPE_REG) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return 2;
+    }
+
+    operation = transaction->getNdbOperation(inode_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(operation, RONDB_INO_COL_FILEID, expected_fileid);
+    inode_type = operation->getValue(RONDB_INO_COL_TYPE, nullptr);
+    inode_nlink = operation->getValue(RONDB_INO_COL_NLINK, nullptr);
+    inode_generation = operation->getValue(RONDB_INO_COL_GENERATION, nullptr);
+    inode_flags = operation->getValue(RONDB_INO_COL_FLAGS, nullptr);
+    inode_change = operation->getValue(RONDB_INO_COL_CHANGE, nullptr);
+    if (inode_type == nullptr || inode_nlink == nullptr ||
+        inode_generation == nullptr || inode_flags == nullptr ||
+        inode_change == nullptr) {
+        goto final_file_unlink_error;
+    }
+    if (transaction->execute(NdbTransaction::NoCommit) == -1) {
+        err = transaction->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        if (err.code == 626) {
+            return 1;
+        }
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "final_file_unlink inode");
+    }
+    if (operation->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return 1;
+    }
+    child_flags = inode_flags->u_32_value();
+    child_change = inode_change->u_64_value();
+    if (inode_type->u_8_value() != MDS_FTYPE_REG ||
+        inode_nlink->u_32_value() != 1 ||
+        inode_generation->u_64_value() != expected_generation ||
+        (child_flags & MDS_IFLAG_DELETE_PENDING) != 0 ||
+        child_change == UINT64_MAX) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return 2;
+    }
+
+    operation = transaction->getNdbOperation(inode_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(operation, RONDB_INO_COL_FILEID, parent_fileid);
+    parent_change = operation->getValue(RONDB_INO_COL_CHANGE, nullptr);
+    if (parent_change == nullptr) {
+        goto final_file_unlink_error;
+    }
+    if (transaction->execute(NdbTransaction::NoCommit) == -1) {
+        err = transaction->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        if (err.code == 626) {
+            return 1;
+        }
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "final_file_unlink parent");
+    }
+    if (operation->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return 1;
+    }
+    parent_before = parent_change->u_64_value();
+    if (parent_before == UINT64_MAX) {
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return -1;
+    }
+
+    operation = transaction->getNdbOperation(dirent_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->deleteTuple();
+    (void)rondb_equal_u64(operation, RONDB_DIR_COL_PARENT, parent_fileid);
+    operation->equal(RONDB_DIR_COL_NAME, (const char *)name_value,
+                     name_value_len);
+
+    operation = transaction->getNdbOperation(inode_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->updateTuple();
+    (void)rondb_equal_u64(operation, RONDB_INO_COL_FILEID, expected_fileid);
+    operation->setValue(RONDB_INO_COL_NLINK, (Uint32)0);
+    operation->setValue(RONDB_INO_COL_FLAGS,
+                        child_flags | MDS_IFLAG_DELETE_PENDING);
+    (void)rondb_set_value_u64(operation, RONDB_INO_COL_CTIME_SEC,
+                              (uint64_t)now.tv_sec);
+    operation->setValue(RONDB_INO_COL_CTIME_NSEC, (Uint32)now.tv_nsec);
+    (void)rondb_set_value_u64(operation, RONDB_INO_COL_CHANGE,
+                              child_change + 1U);
+
+    operation = transaction->getNdbOperation(inode_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->updateTuple();
+    (void)rondb_equal_u64(operation, RONDB_INO_COL_FILEID, parent_fileid);
+    (void)rondb_set_value_u64(operation, RONDB_INO_COL_CHANGE,
+                              parent_before + 1U);
+    (void)rondb_set_value_u64(operation, RONDB_INO_COL_MTIME_SEC,
+                              (uint64_t)now.tv_sec);
+    operation->setValue(RONDB_INO_COL_MTIME_NSEC, (Uint32)now.tv_nsec);
+    (void)rondb_set_value_u64(operation, RONDB_INO_COL_CTIME_SEC,
+                              (uint64_t)now.tv_sec);
+    operation->setValue(RONDB_INO_COL_CTIME_NSEC, (Uint32)now.tv_nsec);
+
+    operation = transaction->getNdbOperation(task_table);
+    if (operation == nullptr) {
+        goto final_file_unlink_error;
+    }
+    operation->insertTuple();
+    operation->equal(RONDB_GCT_COL_KIND, (Uint32)MDS_GC_TASK_FILE_UNLINK);
+    (void)rondb_equal_u64(operation, RONDB_GCT_COL_ID, expected_fileid);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_FILEID,
+                              expected_fileid);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_GENERATION,
+                              expected_generation);
+    operation->setValue(RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_PENDING);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_CREATED_NS, now_ns);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_NOT_BEFORE, now_ns);
+    operation->setValue(RONDB_GCT_COL_ATTEMPTS, (Uint32)0);
+    operation->setValue(RONDB_GCT_COL_LAST_ERROR, (Uint32)0);
+    operation->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_LEASE_EPOCH, 0);
+    (void)rondb_set_value_u64(operation, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    operation->setValue(RONDB_GCT_COL_DS_ID, (Uint32)0);
+    operation->setValue(RONDB_GCT_COL_NFS_FH_LEN, (Uint32)0);
+    operation->setValue(RONDB_GCT_COL_NFS_FH, (const char *)empty_fh,
+                        sizeof(empty_fh));
+
+    if (transaction->execute(NdbTransaction::Commit) == -1) {
+        err = transaction->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(transaction);
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "final_file_unlink commit");
+    }
+
+    rondb_get_ndb(state)->closeTransaction(transaction);
+    *parent_change_before = parent_before;
+    *parent_change_after = parent_before + 1U;
+    return 0;
+
+final_file_unlink_error:
+    err = transaction->getNdbError();
+    rondb_get_ndb(state)->closeTransaction(transaction);
+    return rondb_is_temporary(err) ? -2 :
+        rondb_report_error(err, "final_file_unlink operation");
+}
 
 static int rondb_write_probe_value(rondb_shim_handle *state, unsigned int value)
 {
@@ -721,6 +990,19 @@ static int rondb_read_probe_value(rondb_shim_handle *state, unsigned int *value_
 }  // namespace
 
 extern "C" {
+int rondb_shim_ns_remove_final_file(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t expected_fileid,
+    uint64_t expected_generation,
+    uint64_t *parent_change_before,
+    uint64_t *parent_change_after)
+{
+    return rondb_ns_remove_final_file_impl(
+        handle, parent_fileid, name, expected_fileid, expected_generation,
+        parent_change_before, parent_change_after);
+}
 
 int rondb_shim_connect(const char *connect_string,
                        const char *schema,
@@ -1414,16 +1696,6 @@ static int rondb_add_lock_holder_delete(NdbTransaction *tx,
  * @param nlink_delta    +1 (dir create), -1 (dir remove), 0 (file ops).
  * @return 0 on success, -1 on error.
  */
-/* Experimental scale knob (env PNFS_RELAX_DIR_CHANGE=1): skip the
- * synchronous change-counter + mtime bump on the PARENT directory inode
- * for FILE create/remove (parent_nlink_delta == 0).  That bump is an
- * exclusive lock on one shared row that serialises every same-directory
- * metadata op -- the dominant scale bottleneck for both shared-dir create
- * and mass remove.  The directory's NFS changeid/mtime then lags, which
- * is acceptable for scale/benchmark workloads.  Directory ops (nlink
- * delta != 0) always update, preserving nlink correctness. */
-static const bool g_relax_dir_change =
-    (std::getenv("PNFS_RELAX_DIR_CHANGE") != nullptr);
 
 static int rondb_interpreted_parent_update(
     NdbTransaction *tx,
@@ -1568,6 +1840,7 @@ static void rondb_set_inode_inline_stripe(NdbOperation *op,
 static bool rondb_inode_try_inline_stripe(struct mds_inode *ino,
                                           const uint8_t *stripe_buf,
                                           uint32_t stripe_count,
+                                          uint32_t stripe_unit,
                                           uint32_t stripe_len)
 {
     if (stripe_buf == nullptr || stripe_count != 1 || stripe_len < 8) {
@@ -1586,7 +1859,7 @@ static bool rondb_inode_try_inline_stripe(struct mds_inode *ino,
     ino->flags        |= MDS_IFLAG_INLINE_STRIPE;
     ino->stripe_count  = 1;
     ino->mirror_count  = 1;
-    ino->stripe_unit   = 65536U;   /* matches the side-table header default */
+    ino->stripe_unit   = stripe_unit;
     ino->inline_ds_id  = ds_id;
     ino->inline_fh_len = fh_len;
     std::memset(ino->inline_fh, 0, MDS_NFS_FH_MAX);
@@ -1826,6 +2099,73 @@ static int rondb_create_table_if_not_exists(
             return 0;
         }
         return rondb_report_error(err, table.getName());
+    }
+    return 0;
+}
+
+static void rondb_add_bigunsigned(NdbDictionary::Table &tbl,
+                                   const char *name, bool pk, bool part);
+static void rondb_add_unsigned(NdbDictionary::Table &tbl, const char *name);
+static void rondb_add_tinyunsigned(NdbDictionary::Table &tbl,
+                                   const char *name);
+static void rondb_add_varbinary(NdbDictionary::Table &tbl, const char *name,
+                                int length, bool pk, bool part);
+
+static int rondb_define_gc_tasks_table(NdbDictionary::Dictionary *dict)
+{
+    NdbDictionary::Table tbl;
+    NdbDictionary::Column kind;
+    NdbDictionary::Column id;
+    int rc;
+
+    tbl.setName(RONDB_TBL_GC_TASKS);
+    kind.setName(RONDB_GCT_COL_KIND);
+    kind.setType(NdbDictionary::Column::Tinyunsigned);
+    kind.setPrimaryKey(true);
+    kind.setPartitionKey(false);
+    kind.setNullable(false);
+    tbl.addColumn(kind);
+
+    id.setName(RONDB_GCT_COL_ID);
+    id.setType(NdbDictionary::Column::Bigunsigned);
+    id.setPrimaryKey(true);
+    id.setPartitionKey(true);
+    id.setNullable(false);
+    tbl.addColumn(id);
+
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_FILEID, false, false);
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_GENERATION, false, false);
+    rondb_add_tinyunsigned(tbl, RONDB_GCT_COL_STATE);
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_CREATED_NS, false, false);
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_NOT_BEFORE, false, false);
+    rondb_add_unsigned(tbl, RONDB_GCT_COL_ATTEMPTS);
+    rondb_add_unsigned(tbl, RONDB_GCT_COL_LAST_ERROR);
+    rondb_add_unsigned(tbl, RONDB_GCT_COL_LEASE_MDS);
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_LEASE_EPOCH, false, false);
+    rondb_add_bigunsigned(tbl, RONDB_GCT_COL_LEASE_EXPIRY, false, false);
+    rondb_add_unsigned(tbl, RONDB_GCT_COL_DS_ID);
+    rondb_add_unsigned(tbl, RONDB_GCT_COL_NFS_FH_LEN);
+    rondb_add_varbinary(tbl, RONDB_GCT_COL_NFS_FH, MDS_NFS_FH_MAX,
+                        false, false);
+    rc = rondb_create_table_if_not_exists(dict, tbl);
+    if (rc != 0) {
+        return rc;
+    }
+
+    dict->invalidateIndex(RONDB_IX_GC_TASK_ORDER, RONDB_TBL_GC_TASKS);
+    NdbDictionary::Index ix(RONDB_IX_GC_TASK_ORDER);
+    ix.setTable(RONDB_TBL_GC_TASKS);
+    ix.setType(NdbDictionary::Index::OrderedIndex);
+    ix.setLogging(false);
+    ix.addColumnName(RONDB_GCT_COL_KIND);
+    ix.addColumnName(RONDB_GCT_COL_CREATED_NS);
+    ix.addColumnName(RONDB_GCT_COL_ID);
+    if (dict->createIndex(ix) != 0) {
+        NdbError err = dict->getNdbError();
+        if (err.classification != NdbError::SchemaObjectExists &&
+            err.code != 4714) {
+            return rondb_report_error(err, RONDB_IX_GC_TASK_ORDER);
+        }
     }
     return 0;
 }
@@ -2367,6 +2707,568 @@ static int rondb_seed_root_inode(rondb_shim_handle *state)
     return 0;
 }
 
+enum rondb_gc_task_validation_error {
+    RONDB_GC_TASK_VALID = 0,
+    RONDB_GC_TASK_INVALID_FH_ENCODING,
+    RONDB_GC_TASK_INVALID_KIND,
+    RONDB_GC_TASK_INVALID_IDENTITY,
+    RONDB_GC_TASK_INVALID_STATE,
+    RONDB_GC_TASK_INVALID_FILE_GENERATION,
+    RONDB_GC_TASK_INVALID_FILE_PAYLOAD,
+    RONDB_GC_TASK_INVALID_LEGACY_PAYLOAD,
+};
+
+struct rondb_malformed_gc_task {
+    uint8_t task_kind;
+    uint64_t task_id;
+    enum rondb_gc_task_validation_error reason;
+};
+
+static const char *rondb_gc_task_validation_name(
+    enum rondb_gc_task_validation_error reason)
+{
+    switch (reason) {
+    case RONDB_GC_TASK_VALID:
+        return "valid";
+    case RONDB_GC_TASK_INVALID_FH_ENCODING:
+        return "invalid file-handle encoding";
+    case RONDB_GC_TASK_INVALID_KIND:
+        return "unknown task kind";
+    case RONDB_GC_TASK_INVALID_IDENTITY:
+        return "invalid task identity";
+    case RONDB_GC_TASK_INVALID_STATE:
+        return "invalid task state";
+    case RONDB_GC_TASK_INVALID_FILE_GENERATION:
+        return "invalid file-unlink generation";
+    case RONDB_GC_TASK_INVALID_FILE_PAYLOAD:
+        return "invalid file-unlink payload";
+    case RONDB_GC_TASK_INVALID_LEGACY_PAYLOAD:
+        return "invalid legacy-unlink payload";
+    }
+    return "unknown validation error";
+}
+
+static enum rondb_gc_task_validation_error rondb_gc_task_validate(
+    const struct mds_gc_task *task, bool fh_encoding_valid)
+{
+    if (!fh_encoding_valid) {
+        return RONDB_GC_TASK_INVALID_FH_ENCODING;
+    }
+    if (task->task_kind != MDS_GC_TASK_FILE_UNLINK &&
+        task->task_kind != MDS_GC_TASK_LEGACY_DS_UNLINK) {
+        return RONDB_GC_TASK_INVALID_KIND;
+    }
+    if (task->task_id == 0 || task->fileid == 0) {
+        return RONDB_GC_TASK_INVALID_IDENTITY;
+    }
+    if (task->state != MDS_GC_TASK_PENDING &&
+        task->state != MDS_GC_TASK_CLAIMED &&
+        task->state != MDS_GC_TASK_QUARANTINED) {
+        return RONDB_GC_TASK_INVALID_STATE;
+    }
+    if (task->task_kind == MDS_GC_TASK_FILE_UNLINK) {
+        if (task->task_id != task->fileid || task->inode_generation == 0) {
+            return RONDB_GC_TASK_INVALID_FILE_GENERATION;
+        }
+        if (task->ds_id != 0 || task->nfs_fh_len != 0) {
+            return RONDB_GC_TASK_INVALID_FILE_PAYLOAD;
+        }
+        return RONDB_GC_TASK_VALID;
+    }
+    if (task->inode_generation != 0 || task->nfs_fh_len == 0 ||
+        task->nfs_fh_len > MDS_NFS_FH_MAX) {
+        return RONDB_GC_TASK_INVALID_LEGACY_PAYLOAD;
+    }
+    return RONDB_GC_TASK_VALID;
+}
+
+enum rondb_gc_task_owned_update {
+    RONDB_GC_TASK_RENEW,
+    RONDB_GC_TASK_RESCHEDULE,
+    RONDB_GC_TASK_COMPLETE,
+    RONDB_GC_TASK_QUARANTINE,
+};
+
+static int rondb_gc_task_update_owned(
+    rondb_shim_handle *state, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+    enum rondb_gc_task_owned_update update_kind, int32_t last_error,
+    uint32_t delay_ms)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *read_op;
+    NdbOperation *write_op;
+    NdbRecAttr *a_state;
+    NdbRecAttr *a_owner_mds;
+    NdbRecAttr *a_owner_epoch;
+    NdbError err;
+    uint64_t now_ns;
+    uint64_t delay_ns;
+
+    if (rondb_now_ns(&now_ns) != 0) { return -1; }
+    delay_ns = (uint64_t)delay_ms * 1000000ULL;
+    if (UINT64_MAX - now_ns < delay_ns) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    read_op = tx->getNdbOperation(tbl);
+    if (read_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    read_op->readTuple(NdbOperation::LM_Exclusive);
+    read_op->equal(RONDB_GCT_COL_KIND, (Uint32)task_kind);
+    (void)rondb_equal_u64(read_op, RONDB_GCT_COL_ID, task_id);
+    a_state = read_op->getValue(RONDB_GCT_COL_STATE, nullptr);
+    a_owner_mds = read_op->getValue(RONDB_GCT_COL_LEASE_MDS, nullptr);
+    a_owner_epoch = read_op->getValue(RONDB_GCT_COL_LEASE_EPOCH, nullptr);
+    if (a_state == nullptr || a_owner_mds == nullptr || a_owner_epoch == nullptr ||
+        tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return err.code == 626 ? 1 : -1;
+    }
+    if (a_state->u_8_value() != MDS_GC_TASK_CLAIMED ||
+        a_owner_mds->u_32_value() != owner_mds_id ||
+        a_owner_epoch->u_64_value() != owner_boot_epoch) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 2;
+    }
+    write_op = tx->getNdbOperation(tbl);
+    if (write_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    if (update_kind == RONDB_GC_TASK_COMPLETE) {
+        write_op->deleteTuple();
+    } else {
+        write_op->updateTuple();
+    }
+    write_op->equal(RONDB_GCT_COL_KIND, (Uint32)task_kind);
+    (void)rondb_equal_u64(write_op, RONDB_GCT_COL_ID, task_id);
+    if (update_kind == RONDB_GC_TASK_RENEW) {
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_LEASE_EXPIRY,
+                                  now_ns + delay_ns);
+    } else if (update_kind == RONDB_GC_TASK_RESCHEDULE) {
+        write_op->setValue(RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_PENDING);
+        write_op->setValue(RONDB_GCT_COL_LAST_ERROR, (Uint32)last_error);
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_NOT_BEFORE,
+                                  now_ns + delay_ns);
+        write_op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_LEASE_EPOCH, 0);
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    } else if (update_kind == RONDB_GC_TASK_QUARANTINE) {
+        write_op->setValue(
+            RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_QUARANTINED);
+        write_op->setValue(RONDB_GCT_COL_LAST_ERROR, (Uint32)last_error);
+        write_op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_LEASE_EPOCH, 0);
+        (void)rondb_set_value_u64(write_op, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    }
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_update_owned commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
+int rondb_shim_gc_task_renew(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+
+    if (state == nullptr || task_kind == 0 || task_id == 0 || lease_ms == 0) {
+        return -1;
+    }
+    return rondb_gc_task_update_owned(
+        state, task_kind, task_id, owner_mds_id, owner_boot_epoch,
+        RONDB_GC_TASK_RENEW, 0, lease_ms);
+}
+
+int rondb_shim_gc_task_reschedule(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+    uint32_t retry_ms)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+
+    if (state == nullptr || task_kind == 0 || task_id == 0) {
+        return -1;
+    }
+    return rondb_gc_task_update_owned(
+        state, task_kind, task_id, owner_mds_id, owner_boot_epoch,
+        RONDB_GC_TASK_RESCHEDULE, last_error, retry_ms);
+}
+
+int rondb_shim_gc_task_complete(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+
+    if (state == nullptr || task_kind == 0 || task_id == 0) {
+        return -1;
+    }
+    return rondb_gc_task_update_owned(
+        state, task_kind, task_id, owner_mds_id, owner_boot_epoch,
+        RONDB_GC_TASK_COMPLETE, 0, 0);
+}
+
+int rondb_shim_gc_task_quarantine(
+    void *handle, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+
+    if (state == nullptr || task_kind == 0 || task_id == 0) {
+        return -1;
+    }
+    return rondb_gc_task_update_owned(
+        state, task_kind, task_id, owner_mds_id, owner_boot_epoch,
+        RONDB_GC_TASK_QUARANTINE, last_error, 0);
+}
+
+static int rondb_gc_task_delete_legacy_source(rondb_shim_handle *state,
+                                              uint64_t gc_seq)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbError err;
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_QUEUE);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    op->deleteTuple();
+    (void)rondb_equal_u64(op, RONDB_GC_COL_SEQ, gc_seq);
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return err.code == 626 ? 0 : -1;
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
+static int rondb_gc_task_migrate_one(rondb_shim_handle *state,
+                                     uint64_t gc_seq)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *legacy_tbl;
+    const NdbDictionary::Table *task_tbl;
+    NdbTransaction *tx;
+    NdbOperation *read_op;
+    NdbOperation *insert_op;
+    NdbOperation *delete_op;
+    NdbRecAttr *a_fileid;
+    NdbRecAttr *a_ds_id;
+    NdbRecAttr *a_fh_len;
+    NdbRecAttr *a_fh;
+    NdbError err;
+    uint64_t now_ns;
+    uint32_t fh_len;
+    const char *fh;
+    uint8_t empty_fh[] = {0};
+    struct mds_gc_task task;
+    enum rondb_gc_task_validation_error validation_error;
+    bool fh_encoding_valid;
+
+    if (rondb_now_ns(&now_ns) != 0) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    legacy_tbl = dict->getTable(RONDB_TBL_GC_QUEUE);
+    task_tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (legacy_tbl == nullptr || task_tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    read_op = tx->getNdbOperation(legacy_tbl);
+    if (read_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    read_op->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(read_op, RONDB_GC_COL_SEQ, gc_seq);
+    a_fileid = read_op->getValue(RONDB_GC_COL_FILEID, nullptr);
+    a_ds_id = read_op->getValue(RONDB_GC_COL_DS_ID, nullptr);
+    a_fh_len = read_op->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
+    a_fh = read_op->getValue(RONDB_GC_COL_NFS_FH, nullptr);
+    if (a_fileid == nullptr || a_ds_id == nullptr || a_fh_len == nullptr ||
+        a_fh == nullptr || tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return err.code == 626 ? 0 : -1;
+    }
+    fh_len = a_fh_len->u_32_value();
+    fh = a_fh->aRef();
+    fh_encoding_valid = fh_len <= MDS_NFS_FH_MAX && fh != nullptr &&
+                        (uint32_t)(uint8_t)fh[0] == fh_len;
+    std::memset(&task, 0, sizeof(task));
+    task.task_kind = MDS_GC_TASK_LEGACY_DS_UNLINK;
+    task.task_id = gc_seq;
+    task.fileid = a_fileid->u_64_value();
+    task.state = MDS_GC_TASK_PENDING;
+    task.ds_id = a_ds_id->u_32_value();
+    task.nfs_fh_len = fh_len;
+    if (fh_encoding_valid && fh_len > 0) {
+        std::memcpy(task.nfs_fh, fh + 1, fh_len);
+    }
+    validation_error = rondb_gc_task_validate(&task, fh_encoding_valid);
+    insert_op = tx->getNdbOperation(task_tbl);
+    delete_op = tx->getNdbOperation(legacy_tbl);
+    if (insert_op == nullptr || delete_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    insert_op->insertTuple();
+    insert_op->equal(RONDB_GCT_COL_KIND,
+                     (Uint32)MDS_GC_TASK_LEGACY_DS_UNLINK);
+    (void)rondb_equal_u64(insert_op, RONDB_GCT_COL_ID, gc_seq);
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_FILEID,
+                              a_fileid->u_64_value());
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_GENERATION, 0);
+    insert_op->setValue(
+        RONDB_GCT_COL_STATE,
+        (Uint32)(validation_error == RONDB_GC_TASK_VALID
+                     ? MDS_GC_TASK_PENDING : MDS_GC_TASK_QUARANTINED));
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_CREATED_NS, now_ns);
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_NOT_BEFORE, now_ns);
+    insert_op->setValue(RONDB_GCT_COL_ATTEMPTS, (Uint32)0);
+    insert_op->setValue(
+        RONDB_GCT_COL_LAST_ERROR,
+        (Uint32)(validation_error == RONDB_GC_TASK_VALID
+                     ? 0 : MDS_ERR_INVAL));
+    insert_op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_LEASE_EPOCH, 0);
+    (void)rondb_set_value_u64(insert_op, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    insert_op->setValue(RONDB_GCT_COL_DS_ID, a_ds_id->u_32_value());
+    insert_op->setValue(
+        RONDB_GCT_COL_NFS_FH_LEN,
+        validation_error == RONDB_GC_TASK_VALID ? fh_len : 0U);
+    insert_op->setValue(
+        RONDB_GCT_COL_NFS_FH,
+        validation_error == RONDB_GC_TASK_VALID
+            ? fh : (const char *)empty_fh,
+        validation_error == RONDB_GC_TASK_VALID ? fh_len + 1U : 1U);
+    delete_op->deleteTuple();
+    (void)rondb_equal_u64(delete_op, RONDB_GC_COL_SEQ, gc_seq);
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.classification == NdbError::ConstraintViolation) {
+            return rondb_gc_task_delete_legacy_source(state, gc_seq);
+        }
+        return -1;
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    if (validation_error != RONDB_GC_TASK_VALID) {
+        std::fprintf(
+            stderr,
+            "ERROR: quarantined malformed legacy GC row gc_seq=%llu: %s\n",
+            (unsigned long long)gc_seq,
+            rondb_gc_task_validation_name(validation_error));
+    }
+    return 0;
+}
+
+static int rondb_migrate_legacy_gc_queue(rondb_shim_handle *state)
+{
+    static constexpr uint32_t migrate_batch = 256;
+
+    for (;;) {
+        NdbDictionary::Dictionary *dict;
+        const NdbDictionary::Table *tbl;
+        NdbTransaction *tx;
+        NdbScanOperation *scan;
+        NdbRecAttr *a_seq;
+        NdbError err;
+        std::vector<uint64_t> gc_seqs;
+        int next_rc;
+
+        dict = rondb_get_dictionary(state);
+        if (dict == nullptr) { return -1; }
+        tbl = dict->getTable(RONDB_TBL_GC_QUEUE);
+        if (tbl == nullptr) { return -1; }
+        tx = rondb_get_ndb(state)->startTransaction();
+        if (tx == nullptr) { return -1; }
+        scan = tx->getNdbScanOperation(tbl);
+        if (scan == nullptr ||
+            scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
+        a_seq = scan->getValue(RONDB_GC_COL_SEQ, nullptr);
+        if (a_seq == nullptr || tx->execute(NdbTransaction::NoCommit) == -1) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
+        while (gc_seqs.size() < migrate_batch &&
+               (next_rc = scan->nextResult(true)) == 0) {
+            gc_seqs.push_back(a_seq->u_64_value());
+        }
+        if (next_rc != 0 && next_rc != 1) {
+            err = scan->getNdbError();
+            scan->close();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "gc_task_migrate scan");
+        }
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (gc_seqs.empty()) { return 0; }
+        for (uint64_t gc_seq : gc_seqs) {
+            if (rondb_gc_task_migrate_one(state, gc_seq) != 0) {
+                return -1;
+            }
+        }
+    }
+}
+
+int rondb_shim_gc_task_count(void *handle, uint32_t *count)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbScanOperation *scan;
+    NdbRecAttr *a_state;
+    NdbError err;
+    int next_rc;
+    uint32_t task_count = 0;
+
+    if (state == nullptr || count == nullptr) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    scan = tx->getNdbScanOperation(tbl);
+    if (scan == nullptr ||
+        scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    a_state = scan->getValue(RONDB_GCT_COL_STATE, nullptr);
+    if (a_state == nullptr || tx->execute(NdbTransaction::NoCommit) == -1) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    while ((next_rc = scan->nextResult(true)) == 0) {
+        if (a_state->u_8_value() != MDS_GC_TASK_QUARANTINED &&
+            task_count != UINT32_MAX) {
+            task_count++;
+        }
+    }
+    if (next_rc != 1) {
+        err = scan->getNdbError();
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_count scan");
+    }
+    scan->close();
+    rondb_get_ndb(state)->closeTransaction(tx);
+    *count = task_count;
+    return 0;
+}
+
+int rondb_shim_gc_task_stats(void *handle,
+                             struct mds_gc_task_stats *stats)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *table;
+    NdbTransaction *tx;
+    NdbScanOperation *scan;
+    NdbRecAttr *kind_attr;
+    NdbRecAttr *state_attr;
+    NdbRecAttr *created_attr;
+    NdbError err;
+    int next_rc;
+
+    if (state == nullptr || stats == nullptr) {
+        return -1;
+    }
+    std::memset(stats, 0, sizeof(*stats));
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) {
+        return -1;
+    }
+    table = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (table == nullptr) {
+        return -1;
+    }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return -1;
+    }
+    scan = tx->getNdbScanOperation(table);
+    if (scan == nullptr ||
+        scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    kind_attr = scan->getValue(RONDB_GCT_COL_KIND, nullptr);
+    state_attr = scan->getValue(RONDB_GCT_COL_STATE, nullptr);
+    created_attr = scan->getValue(RONDB_GCT_COL_CREATED_NS, nullptr);
+    if (kind_attr == nullptr || state_attr == nullptr ||
+        created_attr == nullptr ||
+        tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_stats scan");
+    }
+    while ((next_rc = scan->nextResult(true)) == 0) {
+        uint8_t task_kind = kind_attr->u_8_value();
+        uint8_t task_state = state_attr->u_8_value();
+        uint64_t created_ns = created_attr->u_64_value();
+
+        if (task_kind != MDS_GC_TASK_FILE_UNLINK) {
+            continue;
+        }
+        if (task_state == MDS_GC_TASK_QUARANTINED) {
+            if (stats->quarantined_file_tasks != UINT32_MAX) {
+                stats->quarantined_file_tasks++;
+            }
+            continue;
+        }
+        if (stats->active_file_tasks != UINT32_MAX) {
+            stats->active_file_tasks++;
+        }
+        if (task_state == MDS_GC_TASK_CLAIMED &&
+            stats->claimed_file_tasks != UINT32_MAX) {
+            stats->claimed_file_tasks++;
+        }
+        if (stats->oldest_file_task_created_ns == 0 ||
+            created_ns < stats->oldest_file_task_created_ns) {
+            stats->oldest_file_task_created_ns = created_ns;
+        }
+    }
+    if (next_rc != 1) {
+        err = scan->getNdbError();
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_stats nextResult");
+    }
+    scan->close();
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
 /* -----------------------------------------------------------------------
  * Phase 1 DDL: catalogue + coordination parity tables
  * ----------------------------------------------------------------------- */
@@ -2953,6 +3855,7 @@ static int rondb_define_sessions_table(NdbDictionary::Dictionary *dict);
 static int rondb_define_session_by_client_table(NdbDictionary::Dictionary *dict);
 static int rondb_define_clients_table(NdbDictionary::Dictionary *dict);
 static int rondb_define_drc_slots_table(NdbDictionary::Dictionary *dict);
+static int rondb_migrate_legacy_gc_queue(rondb_shim_handle *state);
 
 int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
 {
@@ -2982,6 +3885,7 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
     if (rondb_define_quota_rules_table(dict) != 0) { return -1; }
     if (rondb_define_quota_usage_table(dict) != 0) { return -1; }
     if (rondb_define_gc_queue_table(dict) != 0) { return -1; }
+    if (rondb_define_gc_tasks_table(dict) != 0) { return -1; }
     if (rondb_define_prealloc_pool_table(dict) != 0) { return -1; }
     /*
      * On fresh install the v6 layout_state DDL creates the correct
@@ -3054,14 +3958,11 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
             }
         }
         if (schema_version < 7) {
-            /* v6 -> v7: mds_gc_queue gains owner_mds_id.  The queue holds
-             * only transient DS-cleanup work (drained every few seconds),
-             * so drop + recreate with the new column instead of an online
-             * ALTER.  mds_prealloc_pool is created by the DDL pass above. */
-            (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_QUEUE);
-            if (rondb_define_gc_queue_table(dict) != 0) {
-                return -1;
-            }
+            /*
+             * Older releases treated this queue as transient and dropped it
+             * here.  Never repeat that data loss: task migration below
+             * copies every visible legacy row before advancing the version.
+             */
         }
         if (schema_version < 8) {
             /* v7 -> v8: mds_inodes + mds_prealloc_pool gain synth_suid/
@@ -3077,6 +3978,10 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
                     RONDB_PP_COL_SYNTH_SUID, RONDB_PP_COL_SYNTH_SGID) != 0) {
                 return -1;
             }
+        }
+        if (schema_version < 10 &&
+            rondb_migrate_legacy_gc_queue(state) != 0) {
+            return -1;
         }
         /* Force-update the schema version row. */
         {
@@ -3163,6 +4068,7 @@ int rondb_shim_cleanup_metadata(void *handle, const char *schema)
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_BY_FILE);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_BY_CLIENT);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_LAYOUT_STATE);
+    (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_TASKS);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_GC_QUEUE);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_PREALLOC_POOL);
     (void)rondb_drop_table_if_exists(dict, RONDB_TBL_QUOTA_USAGE);
@@ -3551,7 +4457,9 @@ int rondb_shim_inode_setattr_atomic(void *handle, uint64_t fileid,
 int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
                                  uint32_t mask,
                                  const uint8_t *attrs_buf,
-                                 uint32_t attrs_buflen)
+                                 uint32_t attrs_buflen,
+                                 uint64_t *locked_old_size,
+                                 uint64_t *committed_size)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
@@ -3656,6 +4564,7 @@ int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
     merged.create_verf   = a_verf->u_64_value();
     merged.parent_fileid = a_parent->u_64_value();
     row_shard            = a_shard->u_32_value();
+    uint64_t old_size = merged.size;
 
     /* 3. Apply mask -- mirrors catalogue_rondb_ns_setattr's pre-fold
      *    branch list verbatim so callers see identical semantics. */
@@ -3698,6 +4607,12 @@ int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
     }
 
     rondb_get_ndb(state)->closeTransaction(tx);
+    if (locked_old_size != nullptr) {
+        *locked_old_size = old_size;
+    }
+    if (committed_size != nullptr) {
+        *committed_size = merged.size;
+    }
     return 0;
 }
 
@@ -5402,6 +6317,287 @@ static int rondb_txn_append_stripe_pk_deletes(NdbTransaction *tx,
 }
 
 /*
+ * Delete a retained pending file and its claimed FILE_UNLINK task in one NDB
+ * transaction.  The worker calls this only after exact DS-object cleanup.
+ * Every identity-bearing row is re-read under an exclusive lock so a stale
+ * worker cannot delete a replacement inode or another worker's task.
+ */
+int rondb_shim_gc_task_finalize_file(
+    void *handle, uint64_t fileid, uint64_t expected_generation,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch)
+{
+    struct quota_usage {
+        bool found;
+        uint64_t used_bytes;
+        uint64_t used_inodes;
+    };
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *inode_tbl;
+    const NdbDictionary::Table *task_tbl;
+    const NdbDictionary::Table *stripe_hdr_tbl;
+    const NdbDictionary::Table *stripe_ent_tbl;
+    const NdbDictionary::Table *quota_tbl;
+    NdbTransaction *tx;
+    NdbOperation *task_op;
+    NdbOperation *inode_op;
+    NdbOperation *op;
+    NdbRecAttr *a_task_fileid;
+    NdbRecAttr *a_task_generation;
+    NdbRecAttr *a_task_state;
+    NdbRecAttr *a_task_owner_mds;
+    NdbRecAttr *a_task_owner_epoch;
+    NdbRecAttr *a_type;
+    NdbRecAttr *a_nlink;
+    NdbRecAttr *a_generation;
+    NdbRecAttr *a_flags;
+    NdbRecAttr *a_uid;
+    NdbRecAttr *a_gid;
+    NdbRecAttr *a_size;
+    NdbError err;
+    uint32_t stripe_count = 0;
+    uint32_t inode_flags;
+    uint64_t inode_uid;
+    uint64_t inode_gid;
+    uint64_t inode_size;
+    struct quota_usage user_usage = {};
+    struct quota_usage group_usage = {};
+    int rc;
+
+    if (state == nullptr || fileid == 0 || expected_generation == 0) {
+        return -1;
+    }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) {
+        return -1;
+    }
+    inode_tbl = dict->getTable(RONDB_TBL_INODES);
+    task_tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    stripe_hdr_tbl = dict->getTable(RONDB_TBL_STRIPE_MAPS);
+    stripe_ent_tbl = dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
+    quota_tbl = dict->getTable(RONDB_TBL_QUOTA_USAGE);
+    if (inode_tbl == nullptr || task_tbl == nullptr || stripe_hdr_tbl == nullptr ||
+        stripe_ent_tbl == nullptr || quota_tbl == nullptr) {
+        return -1;
+    }
+
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        err = rondb_get_ndb(state)->getNdbError();
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "gc_finalize_file startTx");
+    }
+    auto final_file_error = [&]()
+    {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "gc_finalize_file operation");
+    };
+
+    task_op = tx->getNdbOperation(task_tbl);
+    if (task_op == nullptr) {
+        return final_file_error();
+    }
+    task_op->readTuple(NdbOperation::LM_Exclusive);
+    task_op->equal(RONDB_GCT_COL_KIND, (Uint32)MDS_GC_TASK_FILE_UNLINK);
+    (void)rondb_equal_u64(task_op, RONDB_GCT_COL_ID, fileid);
+    a_task_fileid = task_op->getValue(RONDB_GCT_COL_FILEID, nullptr);
+    a_task_generation = task_op->getValue(RONDB_GCT_COL_GENERATION, nullptr);
+    a_task_state = task_op->getValue(RONDB_GCT_COL_STATE, nullptr);
+    a_task_owner_mds = task_op->getValue(RONDB_GCT_COL_LEASE_MDS, nullptr);
+    a_task_owner_epoch = task_op->getValue(RONDB_GCT_COL_LEASE_EPOCH, nullptr);
+    if (a_task_fileid == nullptr || a_task_generation == nullptr ||
+        a_task_state == nullptr || a_task_owner_mds == nullptr ||
+        a_task_owner_epoch == nullptr) {
+        return final_file_error();
+    }
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626) {
+            return 1;
+        }
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "gc_finalize_file task read");
+    }
+    if (task_op->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 1;
+    }
+    if (a_task_fileid->u_64_value() != fileid ||
+        a_task_generation->u_64_value() != expected_generation ||
+        a_task_state->u_8_value() != MDS_GC_TASK_CLAIMED ||
+        a_task_owner_mds->u_32_value() != owner_mds_id ||
+        a_task_owner_epoch->u_64_value() != owner_boot_epoch) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 2;
+    }
+
+    inode_op = tx->getNdbOperation(inode_tbl);
+    if (inode_op == nullptr) {
+        return final_file_error();
+    }
+    inode_op->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(inode_op, RONDB_INO_COL_FILEID, fileid);
+    a_type = inode_op->getValue(RONDB_INO_COL_TYPE, nullptr);
+    a_nlink = inode_op->getValue(RONDB_INO_COL_NLINK, nullptr);
+    a_generation = inode_op->getValue(RONDB_INO_COL_GENERATION, nullptr);
+    a_flags = inode_op->getValue(RONDB_INO_COL_FLAGS, nullptr);
+    a_uid = inode_op->getValue(RONDB_INO_COL_UID, nullptr);
+    a_gid = inode_op->getValue(RONDB_INO_COL_GID, nullptr);
+    a_size = inode_op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
+    if (a_type == nullptr || a_nlink == nullptr || a_generation == nullptr ||
+        a_flags == nullptr || a_uid == nullptr || a_gid == nullptr ||
+        a_size == nullptr) {
+        return final_file_error();
+    }
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626) {
+            return 1;
+        }
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "gc_finalize_file inode read");
+    }
+    if (inode_op->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 1;
+    }
+    inode_flags = a_flags->u_32_value();
+    inode_uid = a_uid->u_64_value();
+    inode_gid = a_gid->u_64_value();
+    inode_size = a_size->u_64_value();
+    if (a_type->u_8_value() != MDS_FTYPE_REG ||
+        a_nlink->u_32_value() != 0 ||
+        a_generation->u_64_value() != expected_generation ||
+        !(inode_flags & MDS_IFLAG_DELETE_PENDING)) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 2;
+    }
+
+    if (!(inode_flags & MDS_IFLAG_INLINE_STRIPE)) {
+        rc = rondb_txn_read_stripe_entry_count(
+            tx, stripe_hdr_tbl, fileid, &stripe_count, &err);
+        if (rc != 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rc == -2 ? -2 :
+                rondb_report_error(err, "gc_finalize_file stripe read");
+        }
+    }
+
+    auto read_quota_usage = [&](
+        uint8_t usage_type, uint64_t scope_id, struct quota_usage *usage)
+    {
+        NdbRecAttr *a_used_bytes;
+        NdbRecAttr *a_used_inodes;
+        NdbError op_err;
+
+        op = tx->getNdbOperation(quota_tbl);
+        if (op == nullptr) {
+            return -1;
+        }
+        op->readTuple(NdbOperation::LM_Exclusive);
+        op->equal(RONDB_QU_COL_USAGE_TYPE, (Uint32)usage_type);
+        (void)rondb_equal_u64(op, RONDB_QU_COL_SCOPE_ID, scope_id);
+        a_used_bytes = op->getValue(RONDB_QU_COL_USED_BYTES, nullptr);
+        a_used_inodes = op->getValue(RONDB_QU_COL_USED_INODES, nullptr);
+        if (a_used_bytes == nullptr || a_used_inodes == nullptr) {
+            return -1;
+        }
+        if (tx->execute(NdbTransaction::NoCommit) == -1) {
+            err = tx->getNdbError();
+            return rondb_is_temporary(err) ? -2 : -1;
+        }
+        op_err = op->getNdbError();
+        if (op_err.code == 626 ||
+            op_err.classification == NdbError::NoDataFound) {
+            usage->found = false;
+            return 0;
+        }
+        if (op_err.code != 0) {
+            err = op_err;
+            return rondb_is_temporary(err) ? -2 : -1;
+        }
+        usage->found = true;
+        usage->used_bytes = a_used_bytes->u_64_value();
+        usage->used_inodes = a_used_inodes->u_64_value();
+        return 0;
+    };
+
+    rc = read_quota_usage(MDS_QUOTA_USER_USAGE, inode_uid, &user_usage);
+    if (rc == 0) {
+        rc = read_quota_usage(MDS_QUOTA_GROUP_USAGE, inode_gid, &group_usage);
+    }
+    if (rc != 0) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rc == -2 ? -2 :
+            rondb_report_error(err, "gc_finalize_file quota read");
+    }
+
+    if (rondb_txn_append_stripe_pk_deletes(
+            tx, stripe_hdr_tbl, stripe_ent_tbl, fileid, stripe_count) != 0) {
+        return final_file_error();
+    }
+    op = tx->getNdbOperation(inode_tbl);
+    if (op == nullptr) {
+        return final_file_error();
+    }
+    op->deleteTuple();
+    (void)rondb_equal_u64(op, RONDB_INO_COL_FILEID, fileid);
+
+    op = tx->getNdbOperation(task_tbl);
+    if (op == nullptr) {
+        return final_file_error();
+    }
+    op->deleteTuple();
+    op->equal(RONDB_GCT_COL_KIND, (Uint32)MDS_GC_TASK_FILE_UNLINK);
+    (void)rondb_equal_u64(op, RONDB_GCT_COL_ID, fileid);
+
+    auto append_quota_update = [&](
+        uint8_t usage_type, uint64_t scope_id, const struct quota_usage &usage)
+    {
+        uint64_t remaining_bytes;
+        uint64_t remaining_inodes;
+
+        if (!usage.found) {
+            return 0;
+        }
+        remaining_bytes = usage.used_bytes > inode_size
+                        ? usage.used_bytes - inode_size : 0;
+        remaining_inodes = usage.used_inodes > 0
+                         ? usage.used_inodes - 1U : 0;
+        op = tx->getNdbOperation(quota_tbl);
+        if (op == nullptr) {
+            return -1;
+        }
+        op->updateTuple();
+        op->equal(RONDB_QU_COL_USAGE_TYPE, (Uint32)usage_type);
+        (void)rondb_equal_u64(op, RONDB_QU_COL_SCOPE_ID, scope_id);
+        (void)rondb_set_value_u64(
+            op, RONDB_QU_COL_USED_BYTES, remaining_bytes);
+        (void)rondb_set_value_u64(
+            op, RONDB_QU_COL_USED_INODES, remaining_inodes);
+        return 0;
+    };
+
+    if (append_quota_update(
+            MDS_QUOTA_USER_USAGE, inode_uid, user_usage) != 0 ||
+        append_quota_update(
+            MDS_QUOTA_GROUP_USAGE, inode_gid, group_usage) != 0) {
+        return final_file_error();
+    }
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_is_temporary(err) ? -2 :
+            rondb_report_error(err, "gc_finalize_file commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+/*
  * stripe_del -- delete stripe_maps header + stripe_entries rows for fileid.
  *
  * Uses batched PK deletes on (fileid, ordinal) instead of an exclusive
@@ -6652,14 +7848,13 @@ int rondb_shim_ns_create(void *handle,
      * when true the stripe-table writes below are skipped. */
     inline_single =
         rondb_inode_try_inline_stripe(&child_ino, stripe_buf,
-                                      stripe_count, stripe_len);
+                                      stripe_count, 65536U, stripe_len);
     rondb_set_inode_values(op_child, &child_ino, child_shard);
     rondb_set_inode_synth(op_child, ino_tbl, &child_ino);  /* v8: stamp synth */
     rondb_set_inode_inline_stripe(op_child, ino_tbl, &child_ino); /* v9 */
 
     /* 3. Interpreted parent inode update (atomic nlink + change). */
-    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
-        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
+    if (rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
                                         parent_nlink_delta) != 0) {
         goto ns_create_err;
     }
@@ -6784,6 +7979,7 @@ int rondb_shim_ns_create_with_layout(
     const uint8_t *child_inode_buf, uint32_t child_ino_len,
     int32_t parent_nlink_delta,
     const uint8_t *stripe_buf, uint32_t stripe_len, uint32_t stripe_count,
+    uint32_t stripe_unit, uint32_t mirror_count,
     uint64_t layout_clientid, uint32_t layout_iomode,
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,
@@ -6839,6 +8035,10 @@ int rondb_shim_ns_create_with_layout(
         child_inode_buf == nullptr) {
         return -1;
     }
+    if ((stripe_buf != nullptr || stripe_count != 0) &&
+        (stripe_count == 0 || stripe_unit == 0 || mirror_count != 1)) {
+        return -1;
+    }
     if (rondb_encode_varbinary_string(name, 1U,
                                       name_value, sizeof(name_value),
                                       &name_value_len) != 0) {
@@ -6891,16 +8091,15 @@ int rondb_shim_ns_create_with_layout(
      * side tables below when true. */
     inline_single =
         rondb_inode_try_inline_stripe(&child_ino, stripe_buf,
-                                      stripe_count, stripe_len);
+                                      stripe_count, stripe_unit, stripe_len);
     rondb_set_inode_values(op_child, &child_ino, child_shard);
     rondb_set_inode_synth(op_child, ino_tbl, &child_ino);  /* v8: stamp synth */
     rondb_set_inode_inline_stripe(op_child, ino_tbl, &child_ino); /* v9 */
     track(op_child, "child_inode");
 
     /* 3. Atomic parent update. */
-    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
-        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
-                                        parent_nlink_delta) != 0) {
+    if (rondb_interpreted_parent_update(
+            tx, ino_tbl, parent_fileid, parent_nlink_delta) != 0) {
         goto ns_create_wl_err;
     }
 
@@ -6919,8 +8118,10 @@ int rondb_shim_ns_create_with_layout(
                                      child_ino.fileid);
                 op_sm->setValue(RONDB_SM_COL_STRIPE_CNT,
                                 (Uint32)stripe_count);
-                op_sm->setValue(RONDB_SM_COL_STRIPE_UNIT, (Uint32)65536);
-                op_sm->setValue(RONDB_SM_COL_MIRROR_CNT, (Uint32)1);
+                op_sm->setValue(RONDB_SM_COL_STRIPE_UNIT,
+                                (Uint32)stripe_unit);
+                op_sm->setValue(RONDB_SM_COL_MIRROR_CNT,
+                                (Uint32)mirror_count);
                 track(op_sm, "stripe_map");
             }
             /* Variable-length entry walk with bounds checks -- see the
@@ -7093,6 +8294,24 @@ ns_create_wl_err:
     return rondb_report_error(err, "ns_create_wl op");
 }
 
+int rondb_shim_ns_create_wide(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    const uint8_t *child_inode_buf,
+    uint32_t child_ino_len,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const uint8_t *stripe_buf,
+    uint32_t stripe_len)
+{
+    return rondb_shim_ns_create_with_layout(
+        handle, parent_fileid, name, child_inode_buf, child_ino_len,
+        0, stripe_buf, stripe_len, stripe_count, stripe_unit, mirror_count,
+        0, 0, 0, 0, nullptr, 0, nullptr, 0, 0);
+}
+
 /* -----------------------------------------------------------------------
  * Atomic REMOVE (T2 -- single NDB transaction, multi-row)
  *
@@ -7229,9 +8448,8 @@ static int rondb_shim_ns_remove_once(void *handle,
     }
 
     /* 3. Interpreted parent inode update (atomic nlink + change). */
-    if (!(g_relax_dir_change && parent_nlink_delta == 0) &&
-        rondb_interpreted_parent_update(tx, ino_tbl, parent_fileid,
-                                        parent_nlink_delta) != 0) {
+    if (rondb_interpreted_parent_update(
+            tx, ino_tbl, parent_fileid, parent_nlink_delta) != 0) {
         goto ns_remove_err;
     }
 
@@ -9423,6 +10641,522 @@ int rondb_shim_gc_count(void *handle, uint32_t *count, uint32_t self_mds_id)
 }
 
 /* -----------------------------------------------------------------------
+ * Durable GC tasks (mds_gc_tasks: PK=(task_kind, task_id))
+ * ----------------------------------------------------------------------- */
+
+static int rondb_gc_task_encode_fh(const struct mds_gc_task *task,
+                                   uint8_t *encoded, uint32_t encoded_cap,
+                                   uint32_t *encoded_len)
+{
+    if (task == nullptr || encoded == nullptr || encoded_len == nullptr ||
+        task->nfs_fh_len > MDS_NFS_FH_MAX) {
+        return -1;
+    }
+    if (task->nfs_fh_len == 0) {
+        encoded[0] = 0;
+        *encoded_len = 1;
+        return 0;
+    }
+    return rondb_encode_varbinary_value(task->nfs_fh, task->nfs_fh_len, 1U,
+                                        encoded, encoded_cap, encoded_len);
+}
+
+int rondb_shim_gc_task_enqueue(void *handle, const struct mds_gc_task *task)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbError err;
+    uint8_t fh_encoded[MDS_NFS_FH_MAX + 2];
+    uint32_t fh_encoded_len;
+    uint64_t now_ns;
+
+    if (state == nullptr || task == nullptr || task->task_kind == 0 ||
+        task->task_id == 0 || task->fileid == 0 ||
+        rondb_gc_task_encode_fh(task, fh_encoded, sizeof(fh_encoded),
+                                &fh_encoded_len) != 0 ||
+        rondb_now_ns(&now_ns) != 0) {
+        return -1;
+    }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) {
+        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
+                                  "gc_task_enqueue startTx");
+    }
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_enqueue insertOp");
+    }
+    op->insertTuple();
+    op->equal(RONDB_GCT_COL_KIND, (Uint32)task->task_kind);
+    (void)rondb_equal_u64(op, RONDB_GCT_COL_ID, task->task_id);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_FILEID, task->fileid);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_GENERATION,
+                              task->inode_generation);
+    op->setValue(RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_PENDING);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_CREATED_NS,
+                              task->created_ns == 0 ? now_ns :
+                              task->created_ns);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_NOT_BEFORE,
+                              task->not_before_ns == 0 ? now_ns :
+                              task->not_before_ns);
+    op->setValue(RONDB_GCT_COL_ATTEMPTS, (Uint32)task->attempt_count);
+    op->setValue(RONDB_GCT_COL_LAST_ERROR, (Uint32)task->last_error);
+    op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_LEASE_EPOCH, 0);
+    (void)rondb_set_value_u64(op, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    op->setValue(RONDB_GCT_COL_DS_ID, (Uint32)task->ds_id);
+    op->setValue(RONDB_GCT_COL_NFS_FH_LEN, (Uint32)task->nfs_fh_len);
+    op->setValue(RONDB_GCT_COL_NFS_FH, (const char *)fh_encoded,
+                 fh_encoded_len);
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.classification == NdbError::ConstraintViolation) {
+            return 0;
+        }
+        return rondb_report_error(err, "gc_task_enqueue commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+}
+
+static int rondb_gc_task_owner_dead(rondb_shim_handle *state,
+                                    uint32_t owner_mds_id,
+                                    uint64_t owner_boot_epoch,
+                                    uint64_t stale_before_ns)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbRecAttr *a_epoch;
+    NdbRecAttr *a_heartbeat;
+    NdbError err;
+
+    if (owner_mds_id == 0) {
+        return 0;
+    }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_NODE_REGISTRY);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    op = tx->getNdbOperation(tbl);
+    if (op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    op->readTuple(NdbOperation::LM_CommittedRead);
+    op->equal(RONDB_NR_COL_MDS_ID, (Uint32)owner_mds_id);
+    a_epoch = op->getValue(RONDB_NR_COL_BOOT_EPOCH, nullptr);
+    a_heartbeat = op->getValue(RONDB_NR_COL_HEARTBEAT_NS, nullptr);
+    if (a_epoch == nullptr || a_heartbeat == nullptr ||
+        tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626) {
+            return 1;
+        }
+        return -1;
+    }
+    int dead = a_epoch->u_64_value() != owner_boot_epoch ||
+               a_heartbeat->u_64_value() < stale_before_ns;
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return dead;
+}
+
+static int rondb_gc_task_quarantine_malformed(
+    rondb_shim_handle *state, uint8_t task_kind, uint64_t task_id)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *read_op;
+    NdbOperation *update_op;
+    NdbRecAttr *a_fileid;
+    NdbRecAttr *a_generation;
+    NdbRecAttr *a_state;
+    NdbRecAttr *a_ds_id;
+    NdbRecAttr *a_fh_len;
+    NdbRecAttr *a_fh;
+    NdbError err;
+    struct mds_gc_task task;
+    enum rondb_gc_task_validation_error validation_error;
+    const char *fh;
+    uint32_t fh_len;
+    bool fh_encoding_valid;
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    read_op = tx->getNdbOperation(tbl);
+    if (read_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    read_op->readTuple(NdbOperation::LM_Exclusive);
+    read_op->equal(RONDB_GCT_COL_KIND, (Uint32)task_kind);
+    (void)rondb_equal_u64(read_op, RONDB_GCT_COL_ID, task_id);
+    a_fileid = read_op->getValue(RONDB_GCT_COL_FILEID, nullptr);
+    a_generation = read_op->getValue(RONDB_GCT_COL_GENERATION, nullptr);
+    a_state = read_op->getValue(RONDB_GCT_COL_STATE, nullptr);
+    a_ds_id = read_op->getValue(RONDB_GCT_COL_DS_ID, nullptr);
+    a_fh_len = read_op->getValue(RONDB_GCT_COL_NFS_FH_LEN, nullptr);
+    a_fh = read_op->getValue(RONDB_GCT_COL_NFS_FH, nullptr);
+    if (a_fileid == nullptr || a_generation == nullptr ||
+        a_state == nullptr || a_ds_id == nullptr || a_fh_len == nullptr ||
+        a_fh == nullptr || tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return err.code == 626 ? 0 : -1;
+    }
+    if (a_state->u_8_value() == MDS_GC_TASK_QUARANTINED) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 0;
+    }
+    fh_len = a_fh_len->u_32_value();
+    fh = a_fh->aRef();
+    fh_encoding_valid = fh_len <= MDS_NFS_FH_MAX && fh != nullptr &&
+                        (uint32_t)(uint8_t)fh[0] == fh_len;
+    std::memset(&task, 0, sizeof(task));
+    task.task_kind = task_kind;
+    task.task_id = task_id;
+    task.fileid = a_fileid->u_64_value();
+    task.inode_generation = a_generation->u_64_value();
+    task.state = a_state->u_8_value();
+    task.ds_id = a_ds_id->u_32_value();
+    task.nfs_fh_len = fh_len;
+    validation_error = rondb_gc_task_validate(&task, fh_encoding_valid);
+    if (validation_error == RONDB_GC_TASK_VALID) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 0;
+    }
+    update_op = tx->getNdbOperation(tbl);
+    if (update_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    update_op->updateTuple();
+    update_op->equal(RONDB_GCT_COL_KIND, (Uint32)task_kind);
+    (void)rondb_equal_u64(update_op, RONDB_GCT_COL_ID, task_id);
+    update_op->setValue(
+        RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_QUARANTINED);
+    update_op->setValue(RONDB_GCT_COL_LAST_ERROR, (Uint32)MDS_ERR_INVAL);
+    update_op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)0);
+    (void)rondb_set_value_u64(update_op, RONDB_GCT_COL_LEASE_EPOCH, 0);
+    (void)rondb_set_value_u64(update_op, RONDB_GCT_COL_LEASE_EXPIRY, 0);
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(
+            err, "gc_task_quarantine_malformed commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    std::fprintf(
+        stderr, "ERROR: quarantined malformed GC task kind=%u id=%llu: %s\n",
+        (unsigned)task_kind, (unsigned long long)task_id,
+        rondb_gc_task_validation_name(validation_error));
+    return 0;
+}
+
+static int rondb_gc_task_try_claim(rondb_shim_handle *state,
+                                   const struct mds_gc_task *candidate,
+                                   bool owner_dead, uint64_t now_ns,
+                                   uint32_t owner_mds_id,
+                                   uint64_t owner_boot_epoch,
+                                   uint64_t lease_ns,
+                                   struct mds_gc_task *claimed)
+{
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbOperation *read_op;
+    NdbOperation *update_op;
+    NdbRecAttr *a_state;
+    NdbRecAttr *a_not_before;
+    NdbRecAttr *a_attempts;
+    NdbRecAttr *a_lease_mds;
+    NdbRecAttr *a_lease_epoch;
+    NdbRecAttr *a_lease_expiry;
+    NdbError err;
+    uint8_t row_state;
+    uint64_t not_before;
+    uint32_t attempts;
+    uint32_t lease_mds;
+    uint64_t lease_epoch;
+    uint64_t lease_expiry;
+    bool eligible;
+
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    read_op = tx->getNdbOperation(tbl);
+    if (read_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    read_op->readTuple(NdbOperation::LM_Exclusive);
+    read_op->equal(RONDB_GCT_COL_KIND, (Uint32)candidate->task_kind);
+    (void)rondb_equal_u64(read_op, RONDB_GCT_COL_ID, candidate->task_id);
+    a_state = read_op->getValue(RONDB_GCT_COL_STATE, nullptr);
+    a_not_before = read_op->getValue(RONDB_GCT_COL_NOT_BEFORE, nullptr);
+    a_attempts = read_op->getValue(RONDB_GCT_COL_ATTEMPTS, nullptr);
+    a_lease_mds = read_op->getValue(RONDB_GCT_COL_LEASE_MDS, nullptr);
+    a_lease_epoch = read_op->getValue(RONDB_GCT_COL_LEASE_EPOCH, nullptr);
+    a_lease_expiry = read_op->getValue(RONDB_GCT_COL_LEASE_EXPIRY, nullptr);
+    if (a_state == nullptr || a_not_before == nullptr || a_attempts == nullptr ||
+        a_lease_mds == nullptr || a_lease_epoch == nullptr ||
+        a_lease_expiry == nullptr ||
+        tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return err.code == 626 ? 1 : -1;
+    }
+    row_state = a_state->u_8_value();
+    not_before = a_not_before->u_64_value();
+    attempts = a_attempts->u_32_value();
+    lease_mds = a_lease_mds->u_32_value();
+    lease_epoch = a_lease_epoch->u_64_value();
+    lease_expiry = a_lease_expiry->u_64_value();
+    eligible = row_state == MDS_GC_TASK_PENDING && not_before <= now_ns;
+    if (row_state == MDS_GC_TASK_CLAIMED) {
+        eligible = lease_expiry <= now_ns ||
+                   (owner_dead && lease_mds == candidate->lease_owner_mds_id &&
+                    lease_epoch == candidate->lease_owner_boot_epoch);
+    }
+    if (!eligible || row_state == MDS_GC_TASK_QUARANTINED) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 1;
+    }
+    update_op = tx->getNdbOperation(tbl);
+    if (update_op == nullptr) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    update_op->updateTuple();
+    update_op->equal(RONDB_GCT_COL_KIND, (Uint32)candidate->task_kind);
+    (void)rondb_equal_u64(update_op, RONDB_GCT_COL_ID, candidate->task_id);
+    update_op->setValue(RONDB_GCT_COL_STATE, (Uint32)MDS_GC_TASK_CLAIMED);
+    update_op->setValue(RONDB_GCT_COL_ATTEMPTS, (Uint32)(attempts + 1U));
+    update_op->setValue(RONDB_GCT_COL_LEASE_MDS, (Uint32)owner_mds_id);
+    (void)rondb_set_value_u64(update_op, RONDB_GCT_COL_LEASE_EPOCH,
+                              owner_boot_epoch);
+    (void)rondb_set_value_u64(update_op, RONDB_GCT_COL_LEASE_EXPIRY,
+                              now_ns + lease_ns);
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    *claimed = *candidate;
+    claimed->state = MDS_GC_TASK_CLAIMED;
+    claimed->attempt_count = attempts + 1U;
+    if (row_state == MDS_GC_TASK_CLAIMED) {
+        claimed->claim_flags |= MDS_GC_TASK_CLAIM_F_TAKEOVER;
+    }
+    claimed->lease_owner_mds_id = owner_mds_id;
+    claimed->lease_owner_boot_epoch = owner_boot_epoch;
+    claimed->lease_expiry_ns = now_ns + lease_ns;
+    return 0;
+}
+
+int rondb_shim_gc_task_claim_batch(
+    void *handle, struct mds_gc_task *tasks, uint32_t cap, uint32_t *n_out,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms,
+    uint32_t stale_owner_ms)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *tbl;
+    NdbTransaction *tx;
+    NdbScanOperation *scan;
+    NdbRecAttr *a_kind;
+    NdbRecAttr *a_id;
+    NdbRecAttr *a_fileid;
+    NdbRecAttr *a_generation;
+    NdbRecAttr *a_state;
+    NdbRecAttr *a_created;
+    NdbRecAttr *a_not_before;
+    NdbRecAttr *a_attempts;
+    NdbRecAttr *a_last_error;
+    NdbRecAttr *a_lease_mds;
+    NdbRecAttr *a_lease_epoch;
+    NdbRecAttr *a_lease_expiry;
+    NdbRecAttr *a_ds_id;
+    NdbRecAttr *a_fh_len;
+    NdbRecAttr *a_fh;
+    NdbError err;
+    std::vector<struct mds_gc_task> candidates;
+    std::vector<struct rondb_malformed_gc_task> malformed;
+    uint64_t now_ns;
+    uint64_t stale_before_ns;
+    uint64_t lease_ns;
+    int next_rc;
+
+    if (n_out != nullptr) { *n_out = 0; }
+    if (state == nullptr || tasks == nullptr || cap == 0 || n_out == nullptr ||
+        lease_ms == 0 || rondb_now_ns(&now_ns) != 0) {
+        return -1;
+    }
+    stale_before_ns = now_ns > (uint64_t)stale_owner_ms * 1000000ULL
+                    ? now_ns - (uint64_t)stale_owner_ms * 1000000ULL : 0;
+    lease_ns = (uint64_t)lease_ms * 1000000ULL;
+    if (UINT64_MAX - now_ns < lease_ns) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    tbl = dict->getTable(RONDB_TBL_GC_TASKS);
+    if (tbl == nullptr) { return -1; }
+    tx = rondb_get_ndb(state)->startTransaction();
+    if (tx == nullptr) { return -1; }
+    scan = tx->getNdbScanOperation(tbl);
+    if (scan == nullptr || scan->readTuples(NdbOperation::LM_CommittedRead) != 0) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return -1;
+    }
+    a_kind = scan->getValue(RONDB_GCT_COL_KIND, nullptr);
+    a_id = scan->getValue(RONDB_GCT_COL_ID, nullptr);
+    a_fileid = scan->getValue(RONDB_GCT_COL_FILEID, nullptr);
+    a_generation = scan->getValue(RONDB_GCT_COL_GENERATION, nullptr);
+    a_state = scan->getValue(RONDB_GCT_COL_STATE, nullptr);
+    a_created = scan->getValue(RONDB_GCT_COL_CREATED_NS, nullptr);
+    a_not_before = scan->getValue(RONDB_GCT_COL_NOT_BEFORE, nullptr);
+    a_attempts = scan->getValue(RONDB_GCT_COL_ATTEMPTS, nullptr);
+    a_last_error = scan->getValue(RONDB_GCT_COL_LAST_ERROR, nullptr);
+    a_lease_mds = scan->getValue(RONDB_GCT_COL_LEASE_MDS, nullptr);
+    a_lease_epoch = scan->getValue(RONDB_GCT_COL_LEASE_EPOCH, nullptr);
+    a_lease_expiry = scan->getValue(RONDB_GCT_COL_LEASE_EXPIRY, nullptr);
+    a_ds_id = scan->getValue(RONDB_GCT_COL_DS_ID, nullptr);
+    a_fh_len = scan->getValue(RONDB_GCT_COL_NFS_FH_LEN, nullptr);
+    a_fh = scan->getValue(RONDB_GCT_COL_NFS_FH, nullptr);
+    if (a_kind == nullptr || a_id == nullptr || a_fileid == nullptr ||
+        a_generation == nullptr || a_state == nullptr || a_created == nullptr ||
+        a_not_before == nullptr || a_attempts == nullptr ||
+        a_last_error == nullptr || a_lease_mds == nullptr ||
+        a_lease_epoch == nullptr || a_lease_expiry == nullptr ||
+        a_ds_id == nullptr || a_fh_len == nullptr || a_fh == nullptr ||
+        tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_claim scan");
+    }
+    while ((next_rc = scan->nextResult(true)) == 0) {
+        struct mds_gc_task task;
+        struct rondb_malformed_gc_task bad_task;
+        enum rondb_gc_task_validation_error validation_error;
+        const char *fh;
+        uint32_t fh_len;
+        bool fh_encoding_valid;
+
+        if (a_state->u_8_value() == MDS_GC_TASK_QUARANTINED) {
+            continue;
+        }
+        std::memset(&task, 0, sizeof(task));
+        task.task_kind = a_kind->u_8_value();
+        task.task_id = a_id->u_64_value();
+        task.fileid = a_fileid->u_64_value();
+        task.inode_generation = a_generation->u_64_value();
+        task.state = a_state->u_8_value();
+        task.created_ns = a_created->u_64_value();
+        task.not_before_ns = a_not_before->u_64_value();
+        task.attempt_count = a_attempts->u_32_value();
+        task.last_error = (int32_t)a_last_error->u_32_value();
+        task.lease_owner_mds_id = a_lease_mds->u_32_value();
+        task.lease_owner_boot_epoch = a_lease_epoch->u_64_value();
+        task.lease_expiry_ns = a_lease_expiry->u_64_value();
+        task.ds_id = a_ds_id->u_32_value();
+        fh_len = a_fh_len->u_32_value();
+        fh = a_fh->aRef();
+        fh_encoding_valid = fh_len <= MDS_NFS_FH_MAX && fh != nullptr &&
+                            (uint32_t)(uint8_t)fh[0] == fh_len;
+        task.nfs_fh_len = fh_len;
+        if (fh_encoding_valid && fh_len > 0) {
+            std::memcpy(task.nfs_fh, fh + 1, fh_len);
+        }
+        validation_error = rondb_gc_task_validate(&task, fh_encoding_valid);
+        if (validation_error != RONDB_GC_TASK_VALID) {
+            bad_task.task_kind = task.task_kind;
+            bad_task.task_id = task.task_id;
+            bad_task.reason = validation_error;
+            malformed.push_back(bad_task);
+            continue;
+        }
+        if (task.state == MDS_GC_TASK_PENDING &&
+            task.not_before_ns > now_ns) {
+            continue;
+        }
+        candidates.push_back(task);
+    }
+    if (next_rc != 1) {
+        err = scan->getNdbError();
+        scan->close();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return rondb_report_error(err, "gc_task_claim nextResult");
+    }
+    scan->close();
+    rondb_get_ndb(state)->closeTransaction(tx);
+    for (const struct rondb_malformed_gc_task &bad_task : malformed) {
+        if (rondb_gc_task_quarantine_malformed(
+                state, bad_task.task_kind, bad_task.task_id) != 0) {
+            std::fprintf(
+                stderr,
+                "ERROR: failed to quarantine malformed GC task "
+                "kind=%u id=%llu: %s\n",
+                (unsigned)bad_task.task_kind,
+                (unsigned long long)bad_task.task_id,
+                rondb_gc_task_validation_name(bad_task.reason));
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const struct mds_gc_task &left,
+                 const struct mds_gc_task &right) {
+                  if (left.task_kind != right.task_kind) {
+                      return left.task_kind < right.task_kind;
+                  }
+                  if (left.created_ns != right.created_ns) {
+                      return left.created_ns < right.created_ns;
+                  }
+                  return left.task_id < right.task_id;
+              });
+    for (const struct mds_gc_task &candidate : candidates) {
+        bool dead = false;
+        int rc;
+
+        if (*n_out >= cap) { break; }
+        if (candidate.state == MDS_GC_TASK_CLAIMED &&
+            candidate.lease_expiry_ns > now_ns) {
+            rc = rondb_gc_task_owner_dead(
+                state, candidate.lease_owner_mds_id,
+                candidate.lease_owner_boot_epoch, stale_before_ns);
+            if (rc < 0) { return -1; }
+            dead = rc != 0;
+            if (!dead) { continue; }
+        }
+        rc = rondb_gc_task_try_claim(
+            state, &candidate, dead, now_ns, owner_mds_id,
+            owner_boot_epoch, lease_ns, &tasks[*n_out]);
+        if (rc < 0) { return -1; }
+        if (rc == 0) { (*n_out)++; }
+    }
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * DS prealloc pool (mds_prealloc_pool: PK=fileid)
  * ----------------------------------------------------------------------- */
 
@@ -10051,7 +11785,6 @@ static int rondb_shim_layout_state_put_once(
     }
     rondb_get_ndb(state)->closeTransaction(tx);
     return 0;
-
 layout_put_once_err:
     err = tx->getNdbError();
     rondb_get_ndb(state)->closeTransaction(tx);

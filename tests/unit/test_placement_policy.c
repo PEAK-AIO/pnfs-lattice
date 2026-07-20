@@ -152,6 +152,46 @@ static void test_multi_stripe_falls_back_to_rr(void)
     passed++;
 }
 
+static void test_effective_geometry_contract(void)
+{
+    struct mds_ds_info ds[2];
+    struct mds_ds_map_entry entries[3];
+    uint32_t stripe_count = 3;
+    uint32_t entry_count = 0;
+    bool saw_zero = false;
+    bool saw_one = false;
+
+    fprintf(stdout, "  effective_geometry_contract:      ");
+    mk_ds(&ds[0], 0, DS_ONLINE, 1000, 0);
+    mk_ds(&ds[1], 1, DS_ONLINE, 1000, 0);
+    memset(entries, 0, sizeof(entries));
+
+    ASSERT_EQ(placement_select2(ds, 2, &stripe_count, 1, 65536,
+                                entries), MDS_OK);
+    ASSERT_EQ(stripe_count, 2);
+    ASSERT_EQ(placement_geometry_entry_count(3, stripe_count, 1,
+                                             &entry_count), MDS_OK);
+    ASSERT_EQ(entry_count, 2);
+    for (uint32_t entry_index = 0; entry_index < entry_count;
+         entry_index++) {
+        if (entries[entry_index].ds_id == 0) {
+            saw_zero = true;
+        }
+        if (entries[entry_index].ds_id == 1) {
+            saw_one = true;
+        }
+    }
+    ASSERT_TRUE(saw_zero);
+    ASSERT_TRUE(saw_one);
+    ASSERT_EQ(placement_geometry_entry_count(2, 3, 1, &entry_count),
+              MDS_ERR_INVAL);
+    ASSERT_EQ(placement_geometry_entry_count(2, 2, 0, &entry_count),
+              MDS_ERR_INVAL);
+
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
 static void test_invalid_args(void)
 {
     fprintf(stdout, "  invalid_args:                     ");
@@ -375,6 +415,7 @@ int main(void)
     test_wrr_offline_excluded();
     test_no_online_returns_nospc();
     test_multi_stripe_falls_back_to_rr();
+    test_effective_geometry_contract();
     test_invalid_args();
     test_filter_preferred_returns_only_preferred();
     test_filter_preferred_falls_back_when_none();
