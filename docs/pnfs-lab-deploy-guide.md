@@ -115,6 +115,7 @@ client state — only a reboot recovers a wedged client.
 | Symptom | Cause / fix |
 |---|---|
 | `pnfs-mds did not open port 2049 ... (diagnostics above)` | Read the printed journal: `rondb_shim_connect() failed` → RonDB not up (check `ndb_mgm -e show`); `status=127` + `not found` from ldd → missing runtime lib (re-run `multi-mds`, it ships libs). First start can take ~2 min. |
+| `layout_get_sid exec failed: code=4350 ... Transaction already aborted` in the MDS log, and/or data files that stat as 0 bytes | The `ndb_index_stat` system tables are missing, so index-backed lookups abort their transaction.  Metadata (and 0-byte mdtest) keep working, which hides it.  The `rondb` phase now creates them; on a cluster deployed before that, run `<rondb>/bin/ndb_index_stat --sys-create-if-not-exist -c <mgmd-ip>:1186` and then restart pnfs-mds (the index cache is per-connection).  Verify with a real write, not a 0-byte mdtest: `dd if=/dev/urandom of=/mnt/pnfs/t bs=1M count=16 conv=fsync` then check `stat -c %s /mnt/pnfs/t` is non-zero. |
 | `ndb_mgm -e show` shows `not connected` | Data node down: `journalctl -u rondb-ndbmtd`. Error 2308 = incompatible old data (use `rondb-reinit`). Error 2805 = missing `/var/lib/rondb/data` directory. |
 | `ndb_mgm` shows a stale topology | mgmd serves a cached config: stop `rondb-mgmd`, remove `ndb_<id>_config.bin.1` from the mgm dir, start again. |
 | `exportfs: duplicated export entries` | Pre-existing manual entry in `/etc/exports`; the `ds` phase now comments it out automatically (backup at `/etc/exports.pnfs-lab.bak`). |
