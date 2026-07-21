@@ -219,14 +219,18 @@ message(STATUS "libntirpc: ${NTIRPC_LIB}")
 
 # gRPC + protobuf -- inter-MDS communication (optional until implemented)
 # grpc_service.c is currently stubbed; require when Phase 7 lands.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GRPC QUIET grpc)
-pkg_check_modules(PROTOBUF QUIET protobuf)
-if(GRPC_FOUND AND PROTOBUF_FOUND)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(GRPC QUIET grpc)
+    pkg_check_modules(PROTOBUF QUIET protobuf)
+endif()
+if(PkgConfig_FOUND AND GRPC_FOUND AND PROTOBUF_FOUND)
     add_compile_definitions(HAVE_GRPC=1)
     message(STATUS "gRPC found -- inter-MDS gRPC service enabled")
 else()
-    message(WARNING "gRPC/protobuf not found -- inter-MDS gRPC service disabled (stubs only)")
+    message(WARNING
+        "pkg-config or gRPC/protobuf not found -- inter-MDS gRPC service "
+        "disabled (stubs only)")
 endif()
 
 
@@ -244,9 +248,12 @@ endif()
 
 # libbpf -- eBPF replication monitoring (optional)
 if(ENABLE_EBPF)
-    pkg_check_modules(LIBBPF libbpf)
-    if(NOT LIBBPF_FOUND)
-        message(WARNING "libbpf not found -- eBPF monitoring disabled")
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBBPF libbpf)
+    endif()
+    if(NOT PkgConfig_FOUND OR NOT LIBBPF_FOUND)
+        message(WARNING
+            "pkg-config or libbpf not found -- eBPF monitoring disabled")
         set(ENABLE_EBPF OFF)
     endif()
 endif()

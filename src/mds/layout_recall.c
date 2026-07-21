@@ -1385,24 +1385,12 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
     byte_range_dispatch_cb_each(lr, holders, holder_count, cb_status);
 
     /*
-     * Authoritative revoke -- delete all conflicting holder rows now.
-     *
-     * Using revoke_transient=true (same as layout_recall_revoke_all_for_unlink)
-     * so that layout rows are cleaned up at LAYOUTGET time rather than
-     * waiting for the holder to send a voluntary LAYOUTRETURN.
-     *
-     * Without immediate revocation, rows accumulate in mds_layout_by_file
-     * during sustained workloads (e.g. 1M-file mdtest).  After hours of
-     * runtime the table grows large enough that NDB execute() scans become
-     * slow; once all worker threads are blocked in slow NDB scans, no
-     * thread is free to process incoming RPCs -- permanent deadlock.
-     *
-     * Clients that later send LAYOUTRETURN get NFS4ERR_BAD_STATEID (row
-     * already deleted).  Linux nfs4_layoutreturn_done() clears local
-     * layout state on BAD_STATEID and does not escalate -- safe terminal.
-     * RFC 5661 S20.4.2.1 option (b): server revokes at grant time.
+     * Keep a successfully recalled layout, and transient callback
+     * outcomes, until the holder sends LAYOUTRETURN.  A missing
+     * backchannel or callback transport failure remains terminal and
+     * is revoked by byte_range_revoke_holders().
      */
-    byte_range_revoke_holders(lr, holders, holder_count, cb_status, true);
+    byte_range_revoke_holders(lr, holders, holder_count, cb_status, false);
 
     if (recalled_out != NULL) {
         *recalled_out = holder_count;

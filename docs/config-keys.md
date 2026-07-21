@@ -39,6 +39,7 @@ are logged as `WARN:` and the default is kept.
 ## Workload / tuning
 - `workload_profile` — `default|hpc|ai_training|genomics|media`.
 - `worker_threads` — COMPOUND dispatch thread count.  Default: 16.
+- `hpc_pending_recovery_scan` — bool; startup namespace sweep that repairs `MDS_IFLAG_HPC_CREATE_PENDING` rows left by pre-atomic wide-create releases.  Full catalogue walk from the root — enable once after upgrading from an affected release.  Lazy lookup-time recovery is always active regardless.  Default: **false**.
 - `stripe_unit_bytes` — default stripe unit.  Default: 65536.
 - `default_stripe_count` / `default_mirror_count` — geometry for new files.  Default: 1 / 1.
 - `lease_time_sec` / `grace_period_sec` — NFSv4 lease + grace.
@@ -61,6 +62,26 @@ are logged as `WARN:` and the default is kept.
 - `ds_weight.<id>` — per-DS WRR weight (any uint32).  Default: 0 (unset ⇒ free-bytes fallback).
 - `ds_capacity_poll_ms` — statvfs() sweep interval (0..86400000).  Default: 60000.  0 disables.
 - `ds_prepare_queue_depth` (0..65536), `ds_prepare_workers` (0..64).
+- `ds_gc_workers` — durable GC worker threads (1..32).  Default: 4.
+- `ds_gc_batch_size` — durable task claim batch size (1..4096).  Default: 256.
+## Asynchronous final-file REMOVE
+- `remove_async` — opt in to acknowledge a final regular-file REMOVE after its
+  durable delete-pending transaction commits, before DS unlink work completes.
+  Default: **false**. It activates only with a GC worker, durable shared open
+  state, and cross-MDS cache invalidation; it is incompatible with
+  `transient_state_cache=true`.
+- `remove_async_high_watermark` — active file-unlink task count at which new
+  final removes fall back to synchronous DS cleanup (1..1000000). Default: 4096.
+- `remove_async_low_watermark` — count at or below which asynchronous removes
+  resume after backpressure (0..1000000). Default: 2048. When `remove_async`
+  is enabled, it must be strictly lower than the high watermark.
+
+The request path reads a coordinator-refreshed atomic queue snapshot and never
+scans RonDB. A successfully handed-off async remove increments the snapshot
+immediately. Existing durable opens defer physical cleanup; new opens against a
+delete-pending inode fail stale. Prometheus exposes `pnfs_mds_gc_pending`,
+claimed and oldest-age gauges, retry/failure/open-blocking totals, deferred
+quota gauges, and the asynchronous REMOVE fallback/backpressure state.
 ## Placement
 - `placement_policy` — `rr|wrr|weighted_rr|capacity`.  Default: rr.
 - `placement_policy_enabled` — master switch.  Default: false.

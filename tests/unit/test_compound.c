@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "pnfs_mds.h"
@@ -20,10 +22,17 @@
 #include "compound.h"
 #include "open_state.h"
 #include "proxy_io.h"
+#include "layout_cache.h"
 #include "ds_prealloc.h"
+#include "commit_queue.h"
+#include "quota.h"
 #include "test_helpers.h"
 #include "mds_shard.h"
 #include "subtree_map.h"
+
+extern enum nfs4_status op_layoutcommit(struct compound_data *cd,
+					const struct nfs4_op *op,
+					struct nfs4_result *res);
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -373,6 +382,16 @@ static struct nfs4_op mk_setattr(uint32_t mask, uint32_t mode)
 	op.arg.setattr.attrs.mode = mode;
 	return op;
 }
+static struct nfs4_op mk_layoutcommit(uint64_t last_write_offset)
+{
+	struct nfs4_op op;
+
+	memset(&op, 0, sizeof(op));
+	op.opnum = OP_LAYOUTCOMMIT;
+	op.arg.layoutcommit.new_offset = true;
+	op.arg.layoutcommit.last_write_offset = last_write_offset;
+	return op;
+}
 
 static struct nfs4_op mk_readdir(uint64_t cookie)
 {
@@ -632,6 +651,214 @@ static void test_layoutget_ds_pending_patched_ready_clears_pending(void)
 		ASSERT_TRUE((inode.flags & MDS_IFLAG_DS_PENDING) != 0);
 	}
 
+	close_test_db(db, path);
+}
+/* ----------------------------------------------------------------------- */
+/* test_layoutget_stale_cached_fh_fails_closed -- a layout-cache hit is    */
+/* trusted and served without re-verification; after the entry is          */
+/* invalidated (the LAYOUTERROR self-heal step), verify-on-serve must      */
+/* fail closed rather than emit the stale nonzero persisted DS FH.         */
+/* ----------------------------------------------------------------------- */
+
+static void test_layoutget_stale_cached_fh_fails_closed(void)
+{
+	struct mds_catalogue *db;
+	struct mds_proxy_ctx *proxy;
+	struct layout_cache *lcache = NULL;
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	struct mds_cat_txn *txn = NULL;
+	struct mds_ds_map_entry stale_entry;
+	struct mds_ds_map_entry *persisted_entries = NULL;
+	struct mds_inode inode;
+	uint32_t stripe_count = 0;
+	uint32_t stripe_unit = 0;
+	uint32_t mirror_count = 0;
+	uint64_t fileid;
+	uint32_t n;
+	bool has_layout = true;
+	char *path;
+
+	db = open_test_db(&path);
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	seed_generic_ds(db, 1, "10.0.0.1:/ds1");
+
+	ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "stale_cached_fh",
+				   0644, &inode), MDS_OK);
+	fileid = inode.fileid;
+	memset(&stale_entry, 0, sizeof(stale_entry));
+	stale_entry.ds_id = 1;
+	stale_entry.nfs_fh_len = 4;
+	memcpy(stale_entry.nfs_fh, "old!", stale_entry.nfs_fh_len);
+	ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+	ASSERT_EQ(mds_cat_stripe_map_put(db, txn, fileid, 1, 65536, 1,
+					 &stale_entry), MDS_OK);
+	ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+	ASSERT_EQ(layout_cache_init(1, &lcache), 0);
+	if (lcache != NULL) {
+		ASSERT_EQ(layout_cache_put(lcache, fileid, 1, 65536, 1,
+					   &stale_entry), 0);
+	}
+
+	/* A layout-cache hit is trusted and served without re-verifying
+	 * every DS FH -- that is the point of the Phase D cache.  DS 1 is
+	 * deliberately unmounted, but the first LAYOUTGET must still
+	 * succeed from the cached entry. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.lcache = lcache;
+	cd.clientid = 1234;
+	cd.cfg_serve_layouts = true;
+	cd.skip_transient_ndb = true;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fileid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_RW);
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+
+	/* A client that hits the stale handle reports LAYOUTERROR and
+	 * op_layouterror invalidates the cache entry.  Simulate that
+	 * self-heal step; the next LAYOUTGET then takes the catalogue
+	 * path, where verify-on-serve must fail closed rather than emit
+	 * the deliberately stale, nonzero persisted handle. */
+	layout_cache_invalidate(lcache, fileid);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.lcache = lcache;
+	cd.clientid = 1234;
+	cd.cfg_serve_layouts = true;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fileid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_RW);
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_DELAY);
+	ASSERT_EQ(mds_coord_layout_scan_for_file(db, fileid, &has_layout), MDS_OK);
+	ASSERT_EQ(has_layout, false);
+	ASSERT_EQ(mds_cat_ns_getattr(db, fileid, &inode), MDS_OK);
+	ASSERT_TRUE((inode.flags & MDS_IFLAG_DS_PENDING) != 0);
+	if (lcache != NULL) {
+		ASSERT_NE(layout_cache_get(lcache, fileid, NULL, NULL, NULL,
+					   &persisted_entries), 0);
+		ASSERT_TRUE(persisted_entries == NULL);
+	}
+	ASSERT_EQ(mds_cat_stripe_map_get(db, fileid, &stripe_count,
+					 &stripe_unit, &mirror_count,
+					 &persisted_entries), MDS_OK);
+	ASSERT_EQ(stripe_count, (uint32_t)1);
+	ASSERT_EQ(stripe_unit, (uint32_t)65536);
+	ASSERT_EQ(mirror_count, (uint32_t)1);
+	ASSERT_EQ(persisted_entries[0].nfs_fh_len, stale_entry.nfs_fh_len);
+	ASSERT_EQ(memcmp(persisted_entries[0].nfs_fh, stale_entry.nfs_fh,
+			 stale_entry.nfs_fh_len), 0);
+
+	free(persisted_entries);
+	layout_cache_destroy(lcache);
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+}
+/* ----------------------------------------------------------------------- */
+/* Stale LAYOUTCOMMIT snapshots must use the locked, durable size for both */
+/* quota accounting and the new-size response.                              */
+/* ----------------------------------------------------------------------- */
+
+static void test_layoutcommit_stale_size_uses_authoritative_result(void)
+{
+	struct mds_catalogue *db;
+	struct commit_queue *commit_queue = NULL;
+	struct mds_quota_ctx *quota = NULL;
+	struct compound_data large_commit_cd;
+	struct compound_data small_commit_cd;
+	struct mds_inode inode;
+	struct mds_inode stale_inode;
+	struct mds_quota_usage usage;
+	struct nfs4_op large_commit;
+	struct nfs4_op small_commit;
+	struct nfs4_result large_result;
+	struct nfs4_result small_result;
+	char *path;
+
+	db = open_test_db(&path);
+	ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "layoutcommit_size",
+				   0644, &inode), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_getattr(db, inode.fileid, &stale_inode), MDS_OK);
+	ASSERT_EQ(mds_quota_ctx_create(db, &quota), MDS_OK);
+	ASSERT_EQ(commit_queue_create(db, NULL, 0, 0, 0, 0, 0, 0,
+				      &commit_queue), 0);
+
+	/*
+	 * Both contexts observe size zero before either mutation. Serialize
+	 * the 200-byte commit first, then the stale 100-byte commit to model
+	 * the row-lock order of concurrent LAYOUTCOMMIT requests.
+	 */
+	compound_init(&large_commit_cd);
+	large_commit_cd.cat = db;
+	large_commit_cd.cq = commit_queue;
+	large_commit_cd.quota = quota;
+	large_commit_cd.current_fh.fileid = inode.fileid;
+	large_commit_cd.current_fh_set = true;
+	large_commit_cd.current_inode = stale_inode;
+	large_commit_cd.current_inode_valid = true;
+	large_commit_cd.skip_transient_ndb = true;
+
+	compound_init(&small_commit_cd);
+	small_commit_cd.cat = db;
+	small_commit_cd.cq = commit_queue;
+	small_commit_cd.quota = quota;
+	small_commit_cd.current_fh.fileid = inode.fileid;
+	small_commit_cd.current_fh_set = true;
+	small_commit_cd.current_inode = stale_inode;
+	small_commit_cd.current_inode_valid = true;
+	small_commit_cd.skip_transient_ndb = true;
+
+	large_commit = mk_layoutcommit(199);
+	memset(&large_result, 0, sizeof(large_result));
+	ASSERT_EQ(op_layoutcommit(&large_commit_cd, &large_commit,
+				  &large_result), NFS4_OK);
+	ASSERT_TRUE(large_result.res.layoutcommit.new_size);
+	ASSERT_EQ(large_result.res.layoutcommit.new_size_value, (uint64_t)200);
+
+	small_commit = mk_layoutcommit(99);
+	memset(&small_result, 0, sizeof(small_result));
+	ASSERT_EQ(op_layoutcommit(&small_commit_cd, &small_commit,
+				  &small_result), NFS4_OK);
+	ASSERT_TRUE(small_result.res.layoutcommit.new_size);
+	ASSERT_EQ(small_result.res.layoutcommit.new_size_value, (uint64_t)200);
+
+	ASSERT_EQ(mds_cat_ns_getattr(db, inode.fileid, &inode), MDS_OK);
+	ASSERT_EQ(inode.size, (uint64_t)200);
+	/*
+	 * Community builds use the no-op quota module, whose documented
+	 * contract returns a NULL context and persists no usage rows. The
+	 * enabled module follows this same compound path and must account the
+	 * transaction-authoritative 200-byte growth exactly once.
+	 */
+	if (quota != NULL) {
+		ASSERT_EQ(mds_cat_quota_usage_get(db, MDS_QUOTA_USER_USAGE,
+						  inode.uid, &usage), MDS_OK);
+		ASSERT_EQ(usage.used_bytes, (uint64_t)200);
+		ASSERT_EQ(mds_cat_quota_usage_get(db, MDS_QUOTA_GROUP_USAGE,
+						  inode.gid, &usage), MDS_OK);
+		ASSERT_EQ(usage.used_bytes, (uint64_t)200);
+	} else {
+		ASSERT_EQ(mds_cat_quota_usage_get(db, MDS_QUOTA_USER_USAGE,
+						  inode.uid, &usage),
+			  MDS_ERR_NOTFOUND);
+		ASSERT_EQ(mds_cat_quota_usage_get(db, MDS_QUOTA_GROUP_USAGE,
+						  inode.gid, &usage),
+			  MDS_ERR_NOTFOUND);
+	}
+
+	commit_queue_destroy(commit_queue);
+	mds_quota_ctx_destroy(quota);
 	close_test_db(db, path);
 }
 
@@ -2231,6 +2458,74 @@ static void test_gc_on_remove(void)
 
 	close_test_db(db, path);
 }
+/* ----------------------------------------------------------------------- */
+/* test_remove_fences_ds_file_with_transient_state -- a client that keeps */
+/* a DS file open must be fenced before transient-mode REMOVE replies.     */
+/* ----------------------------------------------------------------------- */
+
+static void test_remove_fences_ds_file_with_transient_state(void)
+{
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	struct mds_catalogue *db;
+	struct mds_proxy_ctx *proxy;
+	struct mds_cat_txn *txn = NULL;
+	struct mds_inode inode;
+	struct mds_ds_map_entry entry;
+	struct stat file_stat;
+	char *path;
+	char *ds_path;
+	char ds_file_path[MDS_MAX_PATH];
+	int held_fd;
+	uint32_t n;
+
+	db = open_test_db(&path);
+	ds_path = make_ds_tmpdir();
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+
+	ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "transient_fence",
+				   0644, &inode), MDS_OK);
+	memset(&entry, 0, sizeof(entry));
+	entry.ds_id = 1;
+	ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+	ASSERT_EQ(mds_cat_stripe_map_put(db, txn, inode.fileid, 1, 65536,
+					 1, &entry), MDS_OK);
+	ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+	ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, inode.fileid, 0, 0),
+		  MDS_OK);
+
+	snprintf(ds_file_path, sizeof(ds_file_path), "%s/data/%llu_0_0",
+		 ds_path, (unsigned long long)inode.fileid);
+	held_fd = open(ds_file_path, O_RDONLY);
+	ASSERT_TRUE(held_fd >= 0);
+
+	/*
+	 * This is a non-cooperating layout holder: it keeps the DS file
+	 * descriptor open and contributes no persisted layout-state row.
+	 * transient_state_cache skips recall enumeration, not fencing.
+	 */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.skip_transient_ndb = true;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_remove("transient_fence");
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(fstat(held_fd, &file_stat), 0);
+	ASSERT_EQ(file_stat.st_uid, (uid_t)1);
+	ASSERT_EQ(file_stat.st_gid, (gid_t)1);
+
+	close(held_fd);
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+	rm_ds_tmpdir(ds_path);
+}
 
 /* -----------------------------------------------------------------------
  * test_proxy_read_write_compound -- proxy READ/WRITE through compound
@@ -2252,6 +2547,129 @@ static void rm_ds_tmpdir(char *p)
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", p);
 	(void)system(cmd);
 	free(p);
+}
+/* ----------------------------------------------------------------------- */
+/* test_proxy_read_without_layouts -- serve_layouts=false must fall back to
+ * a logical-size-aware proxy read instead of ending at the first hole. */
+/* ----------------------------------------------------------------------- */
+
+static void test_proxy_read_without_layouts(void)
+{
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	struct mds_catalogue *db;
+	struct mds_proxy_ctx *proxy;
+	struct mds_cat_txn *txn = NULL;
+	struct mds_inode inode;
+	struct mds_ds_map_entry entries[2];
+	char *path, *ds0_path, *ds1_path;
+	const uint32_t stripe_unit = 16;
+	const uint64_t data_offset = (uint64_t)stripe_unit * 3;
+	const char *payload = "later";
+	const uint32_t payload_len = (uint32_t)strlen(payload);
+	const uint64_t logical_size = data_offset + payload_len;
+	uint32_t bytes;
+	uint32_t n;
+	uint64_t index;
+
+	db = open_test_db(&path);
+	ds0_path = make_ds_tmpdir();
+	ds1_path = make_ds_tmpdir();
+
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds0_path), MDS_OK);
+	ASSERT_EQ(mds_proxy_mount_set(proxy, 2, ds1_path), MDS_OK);
+	seed_generic_ds(db, 2, "10.0.0.2:/ds2");
+
+	ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "proxy_holes", 0644,
+				   &inode), MDS_OK);
+	inode.size = logical_size;
+	inode.space_used = logical_size;
+	memset(entries, 0, sizeof(entries));
+	entries[0].ds_id = 1;
+	entries[1].ds_id = 2;
+	ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+	ASSERT_EQ(mds_cat_inode_put(db, txn, &inode), MDS_OK);
+	ASSERT_EQ(mds_cat_stripe_map_put(db, txn, inode.fileid, 2,
+					 stripe_unit, 1, entries), MDS_OK);
+	ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+	ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, inode.fileid, 0, 0), MDS_OK);
+	ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 2, inode.fileid, 1, 0), MDS_OK);
+	ASSERT_EQ(mds_proxy_write(proxy, db, inode.fileid, data_offset,
+				  payload, payload_len, &bytes), MDS_OK);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.cfg_serve_layouts = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(inode.fileid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_READ);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4ERR_LAYOUTUNAVAILABLE);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.cfg_serve_layouts = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(inode.fileid);
+	ops[2] = mk_read_op_ex(NULL, 0, (uint32_t)logical_size);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.read.data_len, (uint32_t)logical_size);
+	ASSERT_TRUE(res[2].res.read.eof);
+	for (index = 0; index < data_offset; index++) {
+		ASSERT_EQ(res[2].res.read.data[index], (uint8_t)0);
+	}
+	ASSERT_EQ(memcmp(res[2].res.read.data + data_offset, payload,
+			 payload_len), 0);
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.cfg_serve_layouts = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(inode.fileid);
+	memset(&ops[2], 0, sizeof(ops[2]));
+	ops[2].opnum = OP_READ_PLUS;
+	ops[2].arg.read_plus.offset = 0;
+	ops[2].arg.read_plus.count = (uint32_t)logical_size;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.read_plus.seg_count, (uint32_t)1);
+	ASSERT_EQ(res[2].res.read_plus.segs[0].content_type, NFS4_CONTENT_HOLE);
+	ASSERT_EQ(res[2].res.read_plus.segs[0].u.hole.length, data_offset);
+	ASSERT_TRUE(!res[2].res.read_plus.eof);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.cfg_serve_layouts = false;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(inode.fileid);
+	memset(&ops[2], 0, sizeof(ops[2]));
+	ops[2].opnum = OP_READ_PLUS;
+	ops[2].arg.read_plus.offset = data_offset;
+	ops[2].arg.read_plus.count = payload_len;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.read_plus.seg_count, (uint32_t)1);
+	ASSERT_EQ(res[2].res.read_plus.segs[0].content_type, NFS4_CONTENT_DATA);
+	ASSERT_EQ(res[2].res.read_plus.segs[0].u.data.data_len, payload_len);
+	ASSERT_TRUE(res[2].res.read_plus.eof);
+	ASSERT_EQ(memcmp(res[2].res.read_plus.segs[0].u.data.data, payload,
+			 payload_len), 0);
+
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+	rm_ds_tmpdir(ds0_path);
+	rm_ds_tmpdir(ds1_path);
 }
 
 static void test_proxy_read_write_compound(void)
@@ -2324,6 +2742,103 @@ static void test_proxy_read_write_compound(void)
 	mds_proxy_ctx_destroy(proxy);
 	close_test_db(db, path);
 	rm_ds_tmpdir(ds_path);
+}
+/* ----------------------------------------------------------------------- */
+/* test_inline_promotion_stripes_and_mirrors -- promoted inline payloads   */
+/* remain sparse at logical offsets and are copied to every mirror.        */
+/* ----------------------------------------------------------------------- */
+
+static void test_inline_promotion_stripes_and_mirrors(void)
+{
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	struct mds_catalogue *db;
+	struct mds_proxy_ctx *proxy;
+	struct mds_inode inode;
+	struct mds_ds_map_entry *entries = NULL;
+	const char payload[] = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
+	const uint32_t stripe_unit = 16;
+	const uint32_t payload_len = sizeof(payload) - 1;
+	char *path;
+	char *ds_paths[4] = { NULL, NULL, NULL, NULL };
+	uint64_t fileid;
+	uint32_t stripe_count = 0;
+	uint32_t persisted_stripe_unit = 0;
+	uint32_t mirror_count = 0;
+	uint32_t n;
+
+	db = open_test_db(&path);
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	for (uint32_t ds_index = 0; ds_index < 4; ds_index++) {
+		ds_paths[ds_index] = make_ds_tmpdir();
+		ASSERT_EQ(mds_proxy_mount_set(proxy, ds_index + 1,
+					      ds_paths[ds_index]), MDS_OK);
+		if (ds_index > 0) {
+			seed_generic_ds(db, ds_index + 1, "10.0.0.2:/ds");
+		}
+	}
+
+	fileid = create_legacy_inline_file(db, "promoted_2x2", payload);
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.proxy = proxy;
+	cd.cfg_placement_policy_enabled = true;
+	cd.cfg_placement_policy = PLACEMENT_RR;
+	cd.cfg_default_stripe_count = 2;
+	cd.cfg_default_mirror_count = 2;
+	cd.cfg_stripe_unit = stripe_unit;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fileid);
+	ops[2] = mk_read_op_ex(NULL, 0, payload_len);
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.read.data_len, payload_len);
+	ASSERT_EQ(memcmp(res[2].res.read.data, payload, payload_len), 0);
+
+	ASSERT_EQ(mds_cat_ns_getattr(db, fileid, &inode), MDS_OK);
+	ASSERT_EQ(inode.flags & (MDS_IFLAG_INLINE | MDS_IFLAG_PROMOTING), 0u);
+	ASSERT_EQ(mds_cat_stripe_map_get(
+		db, fileid, &stripe_count, &persisted_stripe_unit,
+		&mirror_count, &entries), MDS_OK);
+	ASSERT_EQ(stripe_count, (uint32_t)2);
+	ASSERT_EQ(persisted_stripe_unit, stripe_unit);
+	ASSERT_EQ(mirror_count, (uint32_t)2);
+
+	for (uint32_t payload_offset = 0;
+	     payload_offset < payload_len;) {
+		uint32_t stripe = (payload_offset / stripe_unit) % stripe_count;
+		uint32_t segment_len = stripe_unit -
+			(payload_offset % stripe_unit);
+
+		if (segment_len > payload_len - payload_offset) {
+			segment_len = payload_len - payload_offset;
+		}
+		for (uint32_t mirror = 0; mirror < mirror_count; mirror++) {
+			uint8_t read_buffer[16];
+			uint32_t bytes_read = 0;
+			bool eof = false;
+			uint32_t entry_index = stripe * mirror_count + mirror;
+
+			ASSERT_EQ(mds_proxy_read_direct(
+				proxy, entries[entry_index].ds_id, fileid,
+				stripe, mirror, payload_offset, read_buffer,
+				segment_len, &bytes_read, &eof), MDS_OK);
+			ASSERT_EQ(bytes_read, segment_len);
+			ASSERT_EQ(memcmp(read_buffer, payload + payload_offset,
+					 segment_len), 0);
+		}
+		payload_offset += segment_len;
+	}
+
+	free(entries);
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+	for (uint32_t ds_index = 0; ds_index < 4; ds_index++) {
+		rm_ds_tmpdir(ds_paths[ds_index]);
+	}
 }
 
 /* -----------------------------------------------------------------------
@@ -4898,13 +5413,18 @@ int main(void)
 	RUN_TEST(test_putfh_invalid);
 	RUN_TEST(test_layoutget);
 	RUN_TEST(test_layoutget_maxcount_toosmall_revokes_layout_state);
+	RUN_TEST(test_layoutget_stale_cached_fh_fails_closed);
+	RUN_TEST(test_layoutcommit_stale_size_uses_authoritative_result);
 	RUN_TEST(test_layoutget_ds_pending_without_proxy_unavailable);
 	RUN_TEST(test_layoutget_ds_pending_patched_ready_clears_pending);
 	RUN_TEST(test_layoutreturn);
 	RUN_TEST(test_openattr_create_remove);
 	RUN_TEST(test_openattr_read_write);
 	RUN_TEST(test_gc_on_remove);
+	RUN_TEST(test_remove_fences_ds_file_with_transient_state);
+	RUN_TEST(test_proxy_read_without_layouts);
 	RUN_TEST(test_proxy_read_write_compound);
+	RUN_TEST(test_inline_promotion_stripes_and_mirrors);
 	RUN_TEST(test_read_bad_seqid);
 	RUN_TEST(test_inline_read_bad_stateid_does_not_promote);
 	RUN_TEST(test_inline_write_bad_stateid_does_not_promote);

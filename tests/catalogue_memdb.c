@@ -26,23 +26,27 @@
 #include "mds_coordination.h"
 #include "open_state.h"
 #include "catalogue_internal.h"
+#include "quota.h"
+#include "test_helpers.h"
 
 /* -----------------------------------------------------------------------
  * Storage limits (generous for unit tests)
  * ----------------------------------------------------------------------- */
 
 #define MEMDB_MAX_INODES    4096
-#define MEMDB_MAX_REMOVE_PENDING 256
 #define MEMDB_MAX_DIRENTS   4096
 #define MEMDB_MAX_INLINE    256
 #define MEMDB_MAX_XATTRS    1024
 #define MEMDB_MAX_STRIPE    256
 #define MEMDB_MAX_DS        64
 #define MEMDB_MAX_GC        256
+#define MEMDB_MAX_GC_TASKS  256
 #define MEMDB_MAX_JOURNAL   64
 #define MEMDB_MAX_LAYOUTS   256
+#define MEMDB_MAX_OPENS     256
 #define MEMDB_MAX_RECOVERY  64
 #define MEMDB_MAX_PROVISION 64
+#define MEMDB_MAX_QUOTA_USAGE 256
 
 /* -----------------------------------------------------------------------
  * In-memory data structures
@@ -54,6 +58,10 @@ struct memdb_dirent {
     uint64_t child_fileid;
     uint8_t  child_type;
     int      used;
+};
+struct memdb_open {
+    struct mds_coord_open_row row;
+    int                       used;
 };
 
 struct memdb_inline {
@@ -90,10 +98,9 @@ struct memdb_gc {
     struct mds_gc_entry entry;
     int used;
 };
-
-struct memdb_remove_pending {
-    struct mds_remove_pending_entry entry;
-    int used;
+struct memdb_gc_task {
+    struct mds_gc_task task;
+    int                used;
 };
 
 struct memdb_layout {
@@ -123,6 +130,12 @@ struct memdb_provision {
     uint64_t epoch;
     int      used;
 };
+struct memdb_quota_usage {
+    uint8_t                usage_type;
+    uint64_t               scope_id;
+    struct mds_quota_usage usage;
+    int                    used;
+};
 
 struct memdb {
     /* Namespace */
@@ -137,8 +150,6 @@ struct memdb {
 
     /* Xattrs */
     struct memdb_xattr   xattrs[MEMDB_MAX_XATTRS];
-    struct memdb_remove_pending remove_pending[MEMDB_MAX_REMOVE_PENDING];
-    uint64_t remove_seq_next;
 
     /* Stripe maps */
     struct memdb_stripe  stripes[MEMDB_MAX_STRIPE];
@@ -149,9 +160,12 @@ struct memdb {
 
     /* DS provisioning */
     struct memdb_provision provisions[MEMDB_MAX_PROVISION];
+    /* Quota usage */
+    struct memdb_quota_usage quota_usage[MEMDB_MAX_QUOTA_USAGE];
 
     /* GC queue */
     struct memdb_gc      gc_queue[MEMDB_MAX_GC];
+    struct memdb_gc_task gc_tasks[MEMDB_MAX_GC_TASKS];
     uint64_t             gc_seq_next;
 
     /* Journal */
@@ -160,9 +174,20 @@ struct memdb {
 
     /* Layout state */
     struct memdb_layout  layouts[MEMDB_MAX_LAYOUTS];
+    /* Durable shared open state */
+    struct memdb_open    opens[MEMDB_MAX_OPENS];
 
     /* Client recovery */
     struct memdb_recovery recoveries[MEMDB_MAX_RECOVERY];
+    /* One-shot fault controls used only by unit tests. */
+    enum mds_status next_final_unlink_status;
+    struct {
+        bool armed;
+        uint64_t parent_fileid;
+        char name[MDS_MAX_NAME + 1];
+        uint64_t fileid;
+        uint64_t generation;
+    } unlink_after_open_put;
 
     pthread_mutex_t      lock;
 };
@@ -186,6 +211,20 @@ static int memdb_alloc_inode_slot(struct memdb *m)
     for (uint32_t i = 0; i < MEMDB_MAX_INODES; i++) {
         if (!m->inode_used[i]) {
             return (int)i;
+        }
+    }
+    return -1;
+}
+static int memdb_find_quota_usage(
+    const struct memdb *memdb,
+    uint8_t usage_type,
+    uint64_t scope_id)
+{
+    for (uint32_t index = 0; index < MEMDB_MAX_QUOTA_USAGE; index++) {
+        if (memdb->quota_usage[index].used &&
+            memdb->quota_usage[index].usage_type == usage_type &&
+            memdb->quota_usage[index].scope_id == scope_id) {
+            return (int)index;
         }
     }
     return -1;
@@ -220,6 +259,12 @@ static int memdb_alloc_dirent_slot(struct memdb *m)
 /* -----------------------------------------------------------------------
  * Authority ops implementation
  * ----------------------------------------------------------------------- */
+static enum mds_status mem_ns_setattr_locked(
+    struct memdb *memdb,
+    uint64_t fileid,
+    const struct mds_inode *attrs,
+    uint32_t mask,
+    struct mds_size_extend_result *size_result);
 
 static enum mds_status mem_alloc_fileid(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t *fileid)
@@ -230,6 +275,47 @@ static enum mds_status mem_alloc_fileid(struct mds_catalogue *cat,
     *fileid = m->next_fileid++;
     pthread_mutex_unlock(&m->lock);
     return MDS_OK;
+}
+
+static enum mds_status mem_ns_setattr(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t fileid,
+    const struct mds_inode *attrs, uint32_t mask)
+{
+    struct memdb *memdb;
+    enum mds_status status;
+
+    (void)txn;
+    if (attrs == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    status = mem_ns_setattr_locked(memdb, fileid, attrs, mask, NULL);
+    pthread_mutex_unlock(&memdb->lock);
+    return status;
+}
+
+static enum mds_status mem_ns_setattr_size_extend(
+    struct mds_catalogue *cat,
+    struct mds_cat_txn *txn,
+    uint64_t fileid,
+    const struct mds_inode *attrs,
+    uint32_t mask,
+    struct mds_size_extend_result *result)
+{
+    struct memdb *memdb;
+    enum mds_status status;
+
+    (void)txn;
+    if (attrs == NULL || result == NULL ||
+        !(mask & MDS_ATTR_SIZE_EXTEND)) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    status = mem_ns_setattr_locked(memdb, fileid, attrs, mask, result);
+    pthread_mutex_unlock(&memdb->lock);
+    return status;
 }
 
 static enum mds_status mem_inode_put(struct mds_catalogue *cat,
@@ -282,27 +368,38 @@ static enum mds_status mem_ns_getattr(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
-static enum mds_status mem_ns_setattr(struct mds_catalogue *cat,
-    struct mds_cat_txn *txn, uint64_t fileid,
-    const struct mds_inode *attrs, uint32_t mask)
+static enum mds_status mem_ns_setattr_locked(
+    struct memdb *memdb,
+    uint64_t fileid,
+    const struct mds_inode *attrs,
+    uint32_t mask,
+    struct mds_size_extend_result *size_result)
 {
-    (void)txn;
-    struct memdb *m = cat->backend_private;
-    pthread_mutex_lock(&m->lock);
-    int idx = memdb_find_inode(m, fileid);
-    if (idx < 0) {
-        pthread_mutex_unlock(&m->lock);
+    int inode_index;
+    struct mds_inode *inode;
+
+    inode_index = memdb_find_inode(memdb, fileid);
+    if (inode_index < 0) {
         return MDS_ERR_NOTFOUND;
     }
-    struct mds_inode *i = &m->inodes[idx];
-    if (mask & MDS_ATTR_MODE)  i->mode = attrs->mode;
-    if (mask & MDS_ATTR_UID)   i->uid = attrs->uid;
-    if (mask & MDS_ATTR_GID)   i->gid = attrs->gid;
-    if (mask & MDS_ATTR_SIZE)  i->size = attrs->size;
-    if (mask & MDS_ATTR_FLAGS) i->flags = attrs->flags;
-    i->change++;
-    clock_gettime(CLOCK_REALTIME, &i->ctime);
-    pthread_mutex_unlock(&m->lock);
+    inode = &memdb->inodes[inode_index];
+
+    if (size_result != NULL) {
+        size_result->locked_old_size = inode->size;
+    }
+    if (mask & MDS_ATTR_MODE)  inode->mode = attrs->mode;
+    if (mask & MDS_ATTR_UID)   inode->uid = attrs->uid;
+    if (mask & MDS_ATTR_GID)   inode->gid = attrs->gid;
+    if (mask & MDS_ATTR_SIZE)  inode->size = attrs->size;
+    if (mask & MDS_ATTR_SIZE_EXTEND && attrs->size > inode->size) {
+        inode->size = attrs->size;
+    }
+    if (mask & MDS_ATTR_FLAGS) inode->flags = attrs->flags;
+    inode->change++;
+    clock_gettime(CLOCK_REALTIME, &inode->ctime);
+    if (size_result != NULL) {
+        size_result->committed_size = inode->size;
+    }
     return MDS_OK;
 }
 
@@ -327,36 +424,6 @@ static enum mds_status mem_dirent_put(struct mds_catalogue *cat,
     snprintf(m->dirents[idx].name, sizeof(m->dirents[idx].name), "%s", name);
     m->dirents[idx].child_fileid = child_fileid;
     m->dirents[idx].child_type = child_type;
-    pthread_mutex_unlock(&m->lock);
-    return MDS_OK;
-}
-
-/* Insert-only: MDS_ERR_EXISTS on name collision (HPC wide-create path). */
-static enum mds_status mem_dirent_insert(struct mds_catalogue *cat,
-    struct mds_cat_txn *txn, uint64_t parent,
-    const char *name, uint64_t child_fileid, uint8_t child_type)
-{
-    (void)txn;
-    struct memdb *m = cat->backend_private;
-    pthread_mutex_lock(&m->lock);
-
-    if (memdb_find_dirent(m, parent, name) >= 0) {
-        pthread_mutex_unlock(&m->lock);
-        return MDS_ERR_EXISTS;
-    }
-    {
-        int idx = memdb_alloc_dirent_slot(m);
-        if (idx < 0) {
-            pthread_mutex_unlock(&m->lock);
-            return MDS_ERR_NOSPC;
-        }
-        m->dirents[idx].used = 1;
-        m->dirents[idx].parent = parent;
-        snprintf(m->dirents[idx].name, sizeof(m->dirents[idx].name),
-                 "%s", name);
-        m->dirents[idx].child_fileid = child_fileid;
-        m->dirents[idx].child_type = child_type;
-    }
     pthread_mutex_unlock(&m->lock);
     return MDS_OK;
 }
@@ -446,6 +513,112 @@ static enum mds_status mem_ns_create(struct mds_catalogue *cat,
     *out = child;
     return MDS_OK;
 }
+static enum mds_status mem_ns_create_wide(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    const char *name,
+    const struct mds_inode *child,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const struct mds_ds_map_entry *entries)
+{
+    struct memdb *memdb;
+    struct mds_ds_map_entry *copied_entries;
+    struct timespec now;
+    uint64_t entry_count;
+    int child_index;
+    int dirent_index;
+    int parent_index;
+    int stripe_index;
+
+    if (cat == NULL || name == NULL || child == NULL || entries == NULL ||
+        child->fileid == 0 || child->parent_fileid != parent_fileid ||
+        child->type != MDS_FTYPE_REG || stripe_count == 0 ||
+        stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS ||
+        (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+        return MDS_ERR_INVAL;
+    }
+
+    entry_count = (uint64_t)stripe_count * mirror_count;
+    if (entry_count > UINT32_MAX) {
+        return MDS_ERR_INVAL;
+    }
+
+    copied_entries = calloc((size_t)entry_count, sizeof(*copied_entries));
+    if (copied_entries == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    memcpy(copied_entries, entries,
+           (size_t)entry_count * sizeof(*copied_entries));
+
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        free(copied_entries);
+        return MDS_ERR_IO;
+    }
+
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    parent_index = memdb_find_inode(memdb, parent_fileid);
+    if (parent_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOTFOUND;
+    }
+    if (memdb->inodes[parent_index].type != MDS_FTYPE_DIR) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOTDIR;
+    }
+    if (memdb_find_dirent(memdb, parent_fileid, name) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_EXISTS;
+    }
+    if (memdb_find_inode(memdb, child->fileid) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_EXISTS;
+    }
+
+    child_index = memdb_alloc_inode_slot(memdb);
+    dirent_index = memdb_alloc_dirent_slot(memdb);
+    stripe_index = -1;
+    for (uint32_t stripe_slot = 0; stripe_slot < MEMDB_MAX_STRIPE;
+         stripe_slot++) {
+        if (!memdb->stripes[stripe_slot].used) {
+            stripe_index = (int)stripe_slot;
+            break;
+        }
+    }
+    if (child_index < 0 || dirent_index < 0 || stripe_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOSPC;
+    }
+
+    memdb->inodes[child_index] = *child;
+    memdb->inode_used[child_index] = true;
+    memdb->dirents[dirent_index].used = true;
+    memdb->dirents[dirent_index].parent = parent_fileid;
+    (void)snprintf(memdb->dirents[dirent_index].name,
+                   sizeof(memdb->dirents[dirent_index].name), "%s", name);
+    memdb->dirents[dirent_index].child_fileid = child->fileid;
+    memdb->dirents[dirent_index].child_type = (uint8_t)child->type;
+    memdb->stripes[stripe_index].used = true;
+    memdb->stripes[stripe_index].fileid = child->fileid;
+    memdb->stripes[stripe_index].stripe_count = stripe_count;
+    memdb->stripes[stripe_index].stripe_unit = stripe_unit;
+    memdb->stripes[stripe_index].mirror_count = mirror_count;
+    memdb->stripes[stripe_index].entries = copied_entries;
+    memdb->stripes[stripe_index].entries_cap = (uint32_t)entry_count;
+    memdb->inodes[parent_index].mtime = now;
+    memdb->inodes[parent_index].ctime = now;
+    memdb->inodes[parent_index].change++;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
 
 static enum mds_status mem_ns_remove(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent, const char *name)
@@ -504,252 +677,6 @@ static enum mds_status mem_ns_remove(struct mds_catalogue *cat,
         }
         pthread_mutex_unlock(&m->lock);
     }
-    return MDS_OK;
-}
-
-static enum mds_status mem_remove_pending_enqueue(struct mds_catalogue *cat,
-    struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
-    uint64_t child_fileid, uint64_t child_generation, uint64_t *seq_out)
-{
-    (void)txn;
-    struct memdb *m = cat->backend_private;
-    struct timespec ts;
-    uint64_t now_ns = 0;
-
-    if (name == NULL || name[0] == '\0' || seq_out == NULL) {
-        return MDS_ERR_INVAL;
-    }
-    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
-        now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
-                 (uint64_t)ts.tv_nsec;
-    }
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (!m->remove_pending[i].used) {
-            struct mds_remove_pending_entry *e =
-                &m->remove_pending[i].entry;
-
-            m->remove_pending[i].used = 1;
-            memset(e, 0, sizeof(*e));
-            e->remove_seq = m->remove_seq_next++;
-            e->dir_fileid = dir_fileid;
-            e->child_fileid = child_fileid;
-            e->child_generation = child_generation;
-            e->enqueued_ns = now_ns;
-            snprintf(e->name, sizeof(e->name), "%s", name);
-            *seq_out = e->remove_seq;
-            pthread_mutex_unlock(&m->lock);
-            return MDS_OK;
-        }
-    }
-    pthread_mutex_unlock(&m->lock);
-    return MDS_ERR_NOSPC;
-}
-
-static enum mds_status mem_remove_pending_enqueue_unlink(
-    struct mds_catalogue *cat, struct mds_cat_txn *txn,
-    uint64_t dir_fileid, const char *name, uint64_t child_fileid,
-    uint64_t child_generation, uint64_t *seq_out)
-{
-    uint64_t cur_fid = 0;
-    uint8_t cur_type = 0;
-    struct mds_inode ino;
-    enum mds_status st;
-
-    st = mds_cat_dirent_get(cat, dir_fileid, name, &cur_fid, &cur_type);
-    if (st != MDS_OK || cur_fid != child_fileid) {
-        return MDS_ERR_STALE;
-    }
-    memset(&ino, 0, sizeof(ino));
-    st = mds_cat_ns_getattr(cat, child_fileid, &ino);
-    if (st != MDS_OK || ino.generation != child_generation) {
-        free(ino.ds_map);
-        return MDS_ERR_STALE;
-    }
-    ino.flags |= MDS_IFLAG_DELETE_PENDING;
-    st = mds_cat_inode_put(cat, NULL, &ino);
-    free(ino.ds_map);
-    if (st != MDS_OK) {
-        return st;
-    }
-    st = mem_dirent_del(cat, NULL, dir_fileid, name);
-    if (st != MDS_OK) {
-        return st;
-    }
-    return mem_remove_pending_enqueue(cat, txn, dir_fileid, name,
-                                      child_fileid, child_generation,
-                                      seq_out);
-}
-
-static enum mds_status mem_remove_pending_peek_batch(struct mds_catalogue *cat,
-    uint64_t now_ns, struct mds_remove_pending_entry *entries,
-    uint32_t cap, uint32_t *n_out)
-{
-    struct memdb *m = cat->backend_private;
-    uint32_t n = 0;
-
-    if (n_out != NULL) {
-        *n_out = 0;
-    }
-    if (entries == NULL || cap == 0 || n_out == NULL) {
-        return MDS_ERR_INVAL;
-    }
-
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING && n < cap; i++) {
-        if (!m->remove_pending[i].used) {
-            continue;
-        }
-        if (m->remove_pending[i].entry.claim_mds_id != 0 &&
-            m->remove_pending[i].entry.claim_expires_ns >= now_ns) {
-            continue;
-        }
-        entries[n++] = m->remove_pending[i].entry;
-    }
-    pthread_mutex_unlock(&m->lock);
-
-    for (uint32_t i = 1; i < n; i++) {
-        struct mds_remove_pending_entry tmp = entries[i];
-        uint32_t j = i;
-        while (j > 0 && entries[j - 1].remove_seq > tmp.remove_seq) {
-            entries[j] = entries[j - 1];
-            j--;
-        }
-        entries[j] = tmp;
-    }
-    *n_out = n;
-    return MDS_OK;
-}
-
-static enum mds_status mem_remove_pending_claim(struct mds_catalogue *cat,
-    uint64_t remove_seq, uint32_t mds_id, uint64_t boot_epoch,
-    uint64_t now_ns, uint64_t claim_ttl_ns)
-{
-    struct memdb *m = cat->backend_private;
-
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (!m->remove_pending[i].used ||
-            m->remove_pending[i].entry.remove_seq != remove_seq) {
-            continue;
-        }
-        if (m->remove_pending[i].entry.claim_mds_id != 0 &&
-            m->remove_pending[i].entry.claim_expires_ns >= now_ns) {
-            pthread_mutex_unlock(&m->lock);
-            return MDS_ERR_NOTFOUND;
-        }
-        m->remove_pending[i].entry.claim_mds_id = mds_id;
-        m->remove_pending[i].entry.claim_boot = boot_epoch;
-        m->remove_pending[i].entry.claim_expires_ns = now_ns + claim_ttl_ns;
-        pthread_mutex_unlock(&m->lock);
-        return MDS_OK;
-    }
-    pthread_mutex_unlock(&m->lock);
-    return MDS_ERR_NOTFOUND;
-}
-
-static enum mds_status mem_remove_pending_complete(struct mds_catalogue *cat,
-    uint64_t remove_seq)
-{
-    struct memdb *m = cat->backend_private;
-
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (m->remove_pending[i].used &&
-            m->remove_pending[i].entry.remove_seq == remove_seq) {
-            m->remove_pending[i].used = 0;
-            memset(&m->remove_pending[i].entry, 0,
-                   sizeof(m->remove_pending[i].entry));
-            pthread_mutex_unlock(&m->lock);
-            return MDS_OK;
-        }
-    }
-    pthread_mutex_unlock(&m->lock);
-    return MDS_OK;
-}
-
-static enum mds_status mem_remove_pending_bump_retry(struct mds_catalogue *cat,
-    uint64_t remove_seq)
-{
-    struct memdb *m = cat->backend_private;
-
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (m->remove_pending[i].used &&
-            m->remove_pending[i].entry.remove_seq == remove_seq) {
-            m->remove_pending[i].entry.retries++;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&m->lock);
-    return MDS_OK;
-}
-
-static enum mds_status mem_remove_pending_count(struct mds_catalogue *cat,
-    uint32_t *count)
-{
-    struct memdb *m = cat->backend_private;
-    uint32_t n = 0;
-
-    if (count == NULL) {
-        return MDS_ERR_INVAL;
-    }
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (m->remove_pending[i].used) {
-            n++;
-        }
-    }
-    pthread_mutex_unlock(&m->lock);
-    *count = n;
-    return MDS_OK;
-}
-
-static enum mds_status mem_remove_pending_scan_all(struct mds_catalogue *cat,
-    mds_cat_remove_pending_scan_cb cb, void *ctx)
-{
-    struct memdb *m = cat->backend_private;
-    struct mds_remove_pending_entry snap[MEMDB_MAX_REMOVE_PENDING];
-    uint32_t n = 0;
-
-    if (cb == NULL) {
-        return MDS_ERR_INVAL;
-    }
-    pthread_mutex_lock(&m->lock);
-    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
-        if (m->remove_pending[i].used) {
-            snap[n++] = m->remove_pending[i].entry;
-        }
-    }
-    pthread_mutex_unlock(&m->lock);
-
-    for (uint32_t i = 0; i < n; i++) {
-        if (cb(&snap[i], ctx) != 0) {
-            break;
-        }
-    }
-    return MDS_OK;
-}
-
-
-static enum mds_status mem_ns_parent_touch(struct mds_catalogue *cat,
-    struct mds_cat_txn *txn, uint64_t fileid,
-    uint64_t change_delta, struct timespec stamp)
-{
-    (void)txn;
-    struct memdb *m = cat->backend_private;
-
-    if (change_delta == 0) {
-        return MDS_ERR_INVAL;
-    }
-    pthread_mutex_lock(&m->lock);
-    int idx = memdb_find_inode(m, fileid);
-    if (idx >= 0) {
-        m->inodes[idx].change += change_delta;
-        m->inodes[idx].mtime = stamp;
-        m->inodes[idx].ctime = stamp;
-    }
-    pthread_mutex_unlock(&m->lock);
     return MDS_OK;
 }
 
@@ -1318,26 +1245,621 @@ static enum mds_status mem_ds_list(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+/* Durable GC tasks */
+static uint64_t mem_gc_task_now_ns(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+static int mem_gc_task_find(struct memdb *m, uint8_t task_kind,
+                            uint64_t task_id)
+{
+    for (uint32_t i = 0; i < MEMDB_MAX_GC_TASKS; i++) {
+        if (m->gc_tasks[i].used &&
+            m->gc_tasks[i].task.task_kind == task_kind &&
+            m->gc_tasks[i].task.task_id == task_id) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+static enum mds_status mem_ns_remove_final_file(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    const char *name,
+    uint64_t expected_fileid,
+    uint64_t expected_generation,
+    struct mds_final_unlink_result *result)
+{
+    struct memdb *memdb = cat->backend_private;
+    struct timespec now;
+    uint64_t now_ns;
+    int dirent_index;
+    int child_index;
+    int parent_index;
+    int free_task_index = -1;
+    enum mds_status injected_status;
+
+    if (name == NULL || expected_fileid == 0 || expected_generation == 0 ||
+        result == NULL || clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return MDS_ERR_INVAL;
+    }
+    now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+
+    pthread_mutex_lock(&memdb->lock);
+    injected_status = memdb->next_final_unlink_status;
+    memdb->next_final_unlink_status = MDS_OK;
+    if (injected_status != MDS_OK) {
+        pthread_mutex_unlock(&memdb->lock);
+        return injected_status;
+    }
+    dirent_index = memdb_find_dirent(memdb, parent_fileid, name);
+    if (dirent_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    if (memdb->dirents[dirent_index].child_fileid != expected_fileid ||
+        memdb->dirents[dirent_index].child_type != MDS_FTYPE_REG) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+    child_index = memdb_find_inode(memdb, expected_fileid);
+    if (child_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    if (memdb->inodes[child_index].type != MDS_FTYPE_REG ||
+        memdb->inodes[child_index].generation != expected_generation ||
+        memdb->inodes[child_index].nlink != 1 ||
+        (memdb->inodes[child_index].flags & MDS_IFLAG_DELETE_PENDING) != 0 ||
+        memdb->inodes[child_index].change == UINT64_MAX) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+    parent_index = memdb_find_inode(memdb, parent_fileid);
+    if (parent_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    if (memdb->inodes[parent_index].change == UINT64_MAX) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_IO;
+    }
+    if (mem_gc_task_find(memdb, MDS_GC_TASK_FILE_UNLINK,
+                         expected_fileid) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+    for (uint32_t task_slot = 0; task_slot < MEMDB_MAX_GC_TASKS;
+         task_slot++) {
+        if (!memdb->gc_tasks[task_slot].used) {
+            free_task_index = (int)task_slot;
+            break;
+        }
+    }
+    if (free_task_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOSPC;
+    }
+
+    result->parent_change_before = memdb->inodes[parent_index].change;
+    result->parent_change_after = result->parent_change_before + 1U;
+    memdb->dirents[dirent_index].used = 0;
+    memdb->inodes[child_index].nlink = 0;
+    memdb->inodes[child_index].flags |= MDS_IFLAG_DELETE_PENDING;
+    memdb->inodes[child_index].ctime = now;
+    memdb->inodes[child_index].change++;
+    memdb->inodes[parent_index].mtime = now;
+    memdb->inodes[parent_index].ctime = now;
+    memdb->inodes[parent_index].change = result->parent_change_after;
+    memset(&memdb->gc_tasks[free_task_index].task, 0,
+           sizeof(memdb->gc_tasks[free_task_index].task));
+    memdb->gc_tasks[free_task_index].task.task_kind =
+        MDS_GC_TASK_FILE_UNLINK;
+    memdb->gc_tasks[free_task_index].task.state = MDS_GC_TASK_PENDING;
+    memdb->gc_tasks[free_task_index].task.task_id = expected_fileid;
+    memdb->gc_tasks[free_task_index].task.fileid = expected_fileid;
+    memdb->gc_tasks[free_task_index].task.inode_generation =
+        expected_generation;
+    memdb->gc_tasks[free_task_index].task.created_ns = now_ns;
+    memdb->gc_tasks[free_task_index].task.not_before_ns = now_ns;
+    memdb->gc_tasks[free_task_index].used = 1;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
+
+static bool mem_gc_task_before(const struct mds_gc_task *left,
+                               const struct mds_gc_task *right)
+{
+    if (left->task_kind != right->task_kind) {
+        return left->task_kind < right->task_kind;
+    }
+    if (left->created_ns != right->created_ns) {
+        return left->created_ns < right->created_ns;
+    }
+    return left->task_id < right->task_id;
+}
+
+static bool mem_gc_task_valid(const struct mds_gc_task *task)
+{
+    if (task->task_kind != MDS_GC_TASK_FILE_UNLINK &&
+        task->task_kind != MDS_GC_TASK_LEGACY_DS_UNLINK) {
+        return false;
+    }
+    if (task->task_id == 0 || task->fileid == 0) {
+        return false;
+    }
+    if (task->state != MDS_GC_TASK_PENDING &&
+        task->state != MDS_GC_TASK_CLAIMED &&
+        task->state != MDS_GC_TASK_QUARANTINED) {
+        return false;
+    }
+    if (task->task_kind == MDS_GC_TASK_FILE_UNLINK) {
+        return task->task_id == task->fileid &&
+               task->inode_generation != 0 &&
+               task->ds_id == 0 && task->nfs_fh_len == 0;
+    }
+    return task->inode_generation == 0 &&
+           task->nfs_fh_len > 0 &&
+           task->nfs_fh_len <= MDS_NFS_FH_MAX;
+}
+
+static enum mds_status mem_gc_task_enqueue(
+    struct mds_catalogue *cat, struct mds_cat_txn *txn,
+    const struct mds_gc_task *task)
+{
+    struct memdb *m = cat->backend_private;
+    uint64_t now_ns;
+
+    (void)txn;
+    if (task == NULL || task->task_kind == 0 || task->task_id == 0 ||
+        task->fileid == 0 || task->nfs_fh_len > MDS_NFS_FH_MAX) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
+    if (mem_gc_task_find(m, task->task_kind, task->task_id) >= 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_OK;
+    }
+    for (uint32_t i = 0; i < MEMDB_MAX_GC_TASKS; i++) {
+        if (!m->gc_tasks[i].used) {
+            now_ns = mem_gc_task_now_ns();
+            m->gc_tasks[i].task = *task;
+            m->gc_tasks[i].task.state = MDS_GC_TASK_PENDING;
+            m->gc_tasks[i].task.created_ns =
+                task->created_ns == 0 ? now_ns : task->created_ns;
+            m->gc_tasks[i].task.not_before_ns =
+                task->not_before_ns == 0 ? now_ns : task->not_before_ns;
+            m->gc_tasks[i].task.lease_owner_mds_id = 0;
+            m->gc_tasks[i].task.lease_owner_boot_epoch = 0;
+            m->gc_tasks[i].task.lease_expiry_ns = 0;
+            m->gc_tasks[i].used = 1;
+            pthread_mutex_unlock(&m->lock);
+            return MDS_OK;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_ERR_NOSPC;
+}
+
+static enum mds_status mem_gc_task_stats(
+    struct mds_catalogue *cat, struct mds_gc_task_stats *stats)
+{
+    struct memdb *memdb = cat->backend_private;
+
+    if (stats == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memset(stats, 0, sizeof(*stats));
+    pthread_mutex_lock(&memdb->lock);
+    for (uint32_t index = 0; index < MEMDB_MAX_GC_TASKS; index++) {
+        const struct mds_gc_task *task = &memdb->gc_tasks[index].task;
+
+        if (!memdb->gc_tasks[index].used ||
+            task->task_kind != MDS_GC_TASK_FILE_UNLINK) {
+            continue;
+        }
+        if (task->state == MDS_GC_TASK_QUARANTINED) {
+            stats->quarantined_file_tasks++;
+            continue;
+        }
+        stats->active_file_tasks++;
+        if (task->state == MDS_GC_TASK_CLAIMED) {
+            stats->claimed_file_tasks++;
+        }
+        if (stats->oldest_file_task_created_ns == 0 ||
+            task->created_ns < stats->oldest_file_task_created_ns) {
+            stats->oldest_file_task_created_ns = task->created_ns;
+        }
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_gc_task_claim_batch(
+    struct mds_catalogue *cat, struct mds_gc_task *tasks, uint32_t cap,
+    uint32_t *n_out, uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+    uint32_t lease_ms, uint32_t stale_owner_ms)
+{
+    struct memdb *m = cat->backend_private;
+    uint64_t now_ns;
+    uint64_t lease_ns;
+
+    (void)stale_owner_ms;
+    if (tasks == NULL || n_out == NULL || cap == 0 || lease_ms == 0) {
+        return MDS_ERR_INVAL;
+    }
+    *n_out = 0;
+    now_ns = mem_gc_task_now_ns();
+    lease_ns = (uint64_t)lease_ms * 1000000ULL;
+    pthread_mutex_lock(&m->lock);
+    while (*n_out < cap) {
+        int best = -1;
+        for (uint32_t i = 0; i < MEMDB_MAX_GC_TASKS; i++) {
+            struct mds_gc_task *task = &m->gc_tasks[i].task;
+            bool eligible;
+
+            if (!m->gc_tasks[i].used ||
+                task->state == MDS_GC_TASK_QUARANTINED) {
+                continue;
+            }
+            if (!mem_gc_task_valid(task)) {
+                task->state = MDS_GC_TASK_QUARANTINED;
+                task->last_error = MDS_ERR_INVAL;
+                task->lease_owner_mds_id = 0;
+                task->lease_owner_boot_epoch = 0;
+                task->lease_expiry_ns = 0;
+                continue;
+            }
+            eligible = (task->state == MDS_GC_TASK_PENDING &&
+                        task->not_before_ns <= now_ns) ||
+                       (task->state == MDS_GC_TASK_CLAIMED &&
+                        task->lease_expiry_ns <= now_ns);
+            if (!eligible) {
+                continue;
+            }
+            if (best < 0 ||
+                mem_gc_task_before(task, &m->gc_tasks[best].task)) {
+                best = (int)i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        bool takeover =
+            m->gc_tasks[best].task.state == MDS_GC_TASK_CLAIMED;
+        m->gc_tasks[best].task.state = MDS_GC_TASK_CLAIMED;
+        m->gc_tasks[best].task.attempt_count++;
+        m->gc_tasks[best].task.lease_owner_mds_id = owner_mds_id;
+        m->gc_tasks[best].task.lease_owner_boot_epoch = owner_boot_epoch;
+        m->gc_tasks[best].task.lease_expiry_ns = now_ns + lease_ns;
+        tasks[*n_out] = m->gc_tasks[best].task;
+        tasks[*n_out].claim_flags = takeover
+            ? MDS_GC_TASK_CLAIM_F_TAKEOVER : 0;
+        (*n_out)++;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_gc_task_renew(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, uint32_t lease_ms)
+{
+    struct memdb *m = cat->backend_private;
+    int index;
+
+    if (lease_ms == 0) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
+    index = mem_gc_task_find(m, task_kind, task_id);
+    if (index < 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    struct mds_gc_task *task = &m->gc_tasks[index].task;
+    if (task->state != MDS_GC_TASK_CLAIMED ||
+        task->lease_owner_mds_id != owner_mds_id ||
+        task->lease_owner_boot_epoch != owner_boot_epoch) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_STALE;
+    }
+    task->lease_expiry_ns = mem_gc_task_now_ns() +
+                            (uint64_t)lease_ms * 1000000ULL;
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_gc_task_reschedule(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error,
+    uint32_t retry_ms)
+{
+    struct memdb *m = cat->backend_private;
+    int index;
+
+    pthread_mutex_lock(&m->lock);
+    index = mem_gc_task_find(m, task_kind, task_id);
+    if (index < 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    struct mds_gc_task *task = &m->gc_tasks[index].task;
+    if (task->state != MDS_GC_TASK_CLAIMED ||
+        task->lease_owner_mds_id != owner_mds_id ||
+        task->lease_owner_boot_epoch != owner_boot_epoch) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_STALE;
+    }
+    task->state = MDS_GC_TASK_PENDING;
+    task->last_error = last_error;
+    task->not_before_ns = mem_gc_task_now_ns() +
+                          (uint64_t)retry_ms * 1000000ULL;
+    task->lease_owner_mds_id = 0;
+    task->lease_owner_boot_epoch = 0;
+    task->lease_expiry_ns = 0;
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_gc_task_complete(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch)
+{
+    struct memdb *m = cat->backend_private;
+    int index;
+
+    pthread_mutex_lock(&m->lock);
+    index = mem_gc_task_find(m, task_kind, task_id);
+    if (index < 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    const struct mds_gc_task *task = &m->gc_tasks[index].task;
+    if (task->state != MDS_GC_TASK_CLAIMED ||
+        task->lease_owner_mds_id != owner_mds_id ||
+        task->lease_owner_boot_epoch != owner_boot_epoch) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_STALE;
+    }
+    if (task_kind == MDS_GC_TASK_LEGACY_DS_UNLINK) {
+        for (uint32_t i = 0; i < MEMDB_MAX_GC; i++) {
+            if (m->gc_queue[i].used &&
+                m->gc_queue[i].entry.gc_seq == task_id) {
+                m->gc_queue[i].used = 0;
+                break;
+            }
+        }
+    }
+    m->gc_tasks[index].used = 0;
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
 /* GC queue */
 static enum mds_status mem_gc_enqueue(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t fileid,
     uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len)
 {
-    (void)txn;
     struct memdb *m = cat->backend_private;
+    struct mds_gc_task task;
+    uint32_t gc_slot = MEMDB_MAX_GC;
+    uint32_t task_slot = MEMDB_MAX_GC_TASKS;
+    uint64_t now_ns;
+
+    (void)txn;
+
+    if (fh_len > MDS_NFS_FH_MAX || (fh_len > 0 && nfs_fh == NULL)) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
     for (uint32_t i = 0; i < MEMDB_MAX_GC; i++) {
         if (!m->gc_queue[i].used) {
-            m->gc_queue[i].used = 1;
-            m->gc_queue[i].entry.gc_seq = m->gc_seq_next++;
-            m->gc_queue[i].entry.fileid = fileid;
-            m->gc_queue[i].entry.ds_id = ds_id;
-            m->gc_queue[i].entry.nfs_fh_len = fh_len;
-            if (fh_len > 0 && nfs_fh != NULL)
-                memcpy(m->gc_queue[i].entry.nfs_fh, nfs_fh, fh_len);
-            return MDS_OK;
+            gc_slot = i;
+            break;
         }
     }
-    return MDS_ERR_NOSPC;
+    for (uint32_t i = 0; i < MEMDB_MAX_GC_TASKS; i++) {
+        if (!m->gc_tasks[i].used) {
+            task_slot = i;
+            break;
+        }
+    }
+    if (gc_slot == MEMDB_MAX_GC || task_slot == MEMDB_MAX_GC_TASKS) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOSPC;
+    }
+    now_ns = mem_gc_task_now_ns();
+    memset(&task, 0, sizeof(task));
+    task.task_kind = MDS_GC_TASK_LEGACY_DS_UNLINK;
+    task.task_id = m->gc_seq_next;
+    task.fileid = fileid;
+    task.state = MDS_GC_TASK_PENDING;
+    task.ds_id = ds_id;
+    task.nfs_fh_len = fh_len;
+    task.created_ns = now_ns;
+    task.not_before_ns = now_ns;
+    if (fh_len > 0) {
+        memcpy(task.nfs_fh, nfs_fh, fh_len);
+    }
+    m->gc_queue[gc_slot].entry.gc_seq = task.task_id;
+    m->gc_queue[gc_slot].entry.fileid = fileid;
+    m->gc_queue[gc_slot].entry.ds_id = ds_id;
+    m->gc_queue[gc_slot].entry.nfs_fh_len = fh_len;
+    if (fh_len > 0) {
+        memcpy(m->gc_queue[gc_slot].entry.nfs_fh, nfs_fh, fh_len);
+    }
+    m->gc_queue[gc_slot].used = 1;
+    m->gc_tasks[task_slot].task = task;
+    m->gc_tasks[task_slot].used = 1;
+    m->gc_seq_next++;
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+static enum mds_status mem_dirent_insert(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t parent,
+    const char *name, uint64_t child_fileid, uint8_t child_type)
+{
+    struct memdb *memdb;
+    int dirent_index;
+
+    (void)txn;
+    if (cat == NULL || name == NULL) {
+        return MDS_ERR_INVAL;
+    }
+
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    if (memdb_find_dirent(memdb, parent, name) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_EXISTS;
+    }
+
+    dirent_index = memdb_alloc_dirent_slot(memdb);
+    if (dirent_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOSPC;
+    }
+
+    memdb->dirents[dirent_index].used = 1;
+    memdb->dirents[dirent_index].parent = parent;
+    snprintf(memdb->dirents[dirent_index].name,
+             sizeof(memdb->dirents[dirent_index].name), "%s", name);
+    memdb->dirents[dirent_index].child_fileid = child_fileid;
+    memdb->dirents[dirent_index].child_type = child_type;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
+static enum mds_status mem_gc_task_quarantine(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    uint32_t owner_mds_id, uint64_t owner_boot_epoch, int32_t last_error)
+{
+    struct memdb *memdb = cat->backend_private;
+    struct mds_gc_task *task;
+    int task_index;
+
+    pthread_mutex_lock(&memdb->lock);
+    task_index = mem_gc_task_find(memdb, task_kind, task_id);
+    if (task_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    task = &memdb->gc_tasks[task_index].task;
+    if (task->state != MDS_GC_TASK_CLAIMED ||
+        task->lease_owner_mds_id != owner_mds_id ||
+        task->lease_owner_boot_epoch != owner_boot_epoch) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+    task->state = MDS_GC_TASK_QUARANTINED;
+    task->last_error = last_error;
+    task->lease_owner_mds_id = 0;
+    task->lease_owner_boot_epoch = 0;
+    task->lease_expiry_ns = 0;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
+
+static void mem_gc_task_release_quota_usage(
+    struct memdb *memdb, const struct mds_inode *inode)
+{
+    const uint8_t usage_types[] = {
+        MDS_QUOTA_USER_USAGE,
+        MDS_QUOTA_GROUP_USAGE,
+    };
+    const uint64_t scope_ids[] = {
+        inode->uid,
+        inode->gid,
+    };
+
+    for (uint32_t index = 0; index < 2; index++) {
+        int usage_index = memdb_find_quota_usage(
+            memdb, usage_types[index], scope_ids[index]);
+
+        if (usage_index < 0) {
+            continue;
+        }
+        if (memdb->quota_usage[usage_index].usage.used_bytes > inode->size) {
+            memdb->quota_usage[usage_index].usage.used_bytes -= inode->size;
+        } else {
+            memdb->quota_usage[usage_index].usage.used_bytes = 0;
+        }
+        if (memdb->quota_usage[usage_index].usage.used_inodes > 0) {
+            memdb->quota_usage[usage_index].usage.used_inodes--;
+        }
+    }
+}
+
+static void mem_gc_task_delete_stripe_metadata(
+    struct memdb *memdb, const struct mds_inode *inode)
+{
+    if (inode->flags & MDS_IFLAG_INLINE_STRIPE) {
+        return;
+    }
+    for (uint32_t index = 0; index < MEMDB_MAX_STRIPE; index++) {
+        if (memdb->stripes[index].used &&
+            memdb->stripes[index].fileid == inode->fileid) {
+            free(memdb->stripes[index].entries);
+            memdb->stripes[index].entries = NULL;
+            memdb->stripes[index].entries_cap = 0;
+            memdb->stripes[index].used = 0;
+            return;
+        }
+    }
+}
+
+static enum mds_status mem_gc_task_finalize_file(
+    struct mds_catalogue *cat, uint64_t fileid,
+    uint64_t expected_generation, uint32_t owner_mds_id,
+    uint64_t owner_boot_epoch)
+{
+    struct memdb *memdb = cat->backend_private;
+    const struct mds_gc_task *task;
+    const struct mds_inode *inode;
+    int task_index;
+    int inode_index;
+
+    pthread_mutex_lock(&memdb->lock);
+    task_index = mem_gc_task_find(
+        memdb, MDS_GC_TASK_FILE_UNLINK, fileid);
+    if (task_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    task = &memdb->gc_tasks[task_index].task;
+    if (task->state != MDS_GC_TASK_CLAIMED ||
+        task->lease_owner_mds_id != owner_mds_id ||
+        task->lease_owner_boot_epoch != owner_boot_epoch) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+    inode_index = memdb_find_inode(memdb, fileid);
+    if (inode_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    inode = &memdb->inodes[inode_index];
+    if (inode->type != MDS_FTYPE_REG ||
+        inode->generation != expected_generation ||
+        inode->generation != task->inode_generation ||
+        inode->nlink != 0 ||
+        !(inode->flags & MDS_IFLAG_DELETE_PENDING)) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_STALE;
+    }
+
+    mem_gc_task_delete_stripe_metadata(memdb, inode);
+    mem_gc_task_release_quota_usage(memdb, inode);
+    memdb->inode_used[inode_index] = 0;
+    memdb->gc_tasks[task_index].used = 0;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
 }
 
 static enum mds_status mem_gc_peek(struct mds_catalogue *cat,
@@ -1817,7 +2339,7 @@ static enum mds_status mem_link_anchor_del(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t anchor_id)
 { (void)cat;(void)txn;(void)anchor_id; return MDS_OK; }
 
-/* Quota -- simple stubs for now */
+/* Quota rules remain stubs; usage supports accounting tests. */
 static enum mds_status mem_quota_rule_get(struct mds_catalogue *cat,
     uint8_t scope_type, uint64_t scope_id, struct mds_quota_rule *rule)
 { (void)cat;(void)scope_type;(void)scope_id;(void)rule; return MDS_ERR_NOTFOUND; }
@@ -1827,11 +2349,53 @@ static enum mds_status mem_quota_rule_put(struct mds_catalogue *cat,
 { (void)cat;(void)txn;(void)scope_type;(void)scope_id;(void)rule; return MDS_OK; }
 static enum mds_status mem_quota_usage_get(struct mds_catalogue *cat,
     uint8_t usage_type, uint64_t scope_id, struct mds_quota_usage *usage)
-{ (void)cat;(void)usage_type;(void)scope_id;(void)usage; return MDS_ERR_NOTFOUND; }
+{
+    struct memdb *memdb;
+    int usage_index;
+
+    if (cat == NULL || usage == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    usage_index = memdb_find_quota_usage(memdb, usage_type, scope_id);
+    if (usage_index >= 0) {
+        *usage = memdb->quota_usage[usage_index].usage;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return usage_index >= 0 ? MDS_OK : MDS_ERR_NOTFOUND;
+}
 static enum mds_status mem_quota_usage_put(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint8_t usage_type, uint64_t scope_id,
     const struct mds_quota_usage *usage)
-{ (void)cat;(void)txn;(void)usage_type;(void)scope_id;(void)usage; return MDS_OK; }
+{
+    struct memdb *memdb;
+    int usage_index;
+
+    (void)txn;
+    if (cat == NULL || usage == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    usage_index = memdb_find_quota_usage(memdb, usage_type, scope_id);
+    if (usage_index < 0) {
+        for (uint32_t index = 0; index < MEMDB_MAX_QUOTA_USAGE; index++) {
+            if (!memdb->quota_usage[index].used) {
+                usage_index = (int)index;
+                memdb->quota_usage[index].used = true;
+                memdb->quota_usage[index].usage_type = usage_type;
+                memdb->quota_usage[index].scope_id = scope_id;
+                break;
+            }
+        }
+    }
+    if (usage_index >= 0) {
+        memdb->quota_usage[usage_index].usage = *usage;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return usage_index >= 0 ? MDS_OK : MDS_ERR_NOSPC;
+}
 
 /* Coord stubs for operations not used in basic tests.
  * Each stub matches its vtable signature exactly to avoid
@@ -1905,17 +2469,142 @@ static enum mds_status mem_recovery_list(struct mds_catalogue *c, uint32_t mid,
     }
     return MDS_OK;
 }
-/* Shared-attr stubs */
-static enum mds_status mem_open_put(struct mds_catalogue *c, const struct mds_coord_open_row *r)
-{ (void)c;(void)r; return MDS_ERR_NOSUPPORT; }
-static enum mds_status mem_open_get(struct mds_catalogue *c, const uint8_t o[12], struct mds_coord_open_row *r)
-{ (void)c;(void)o;(void)r; return MDS_ERR_NOTFOUND; }
-static enum mds_status mem_open_del(struct mds_catalogue *c, const uint8_t o[12])
-{ (void)c;(void)o; return MDS_OK; }
-static enum mds_status mem_open_scan_file(struct mds_catalogue *c, uint64_t f, mds_coord_open_scan_cb cb, void *ctx)
-{ (void)c;(void)f;(void)cb;(void)ctx; return MDS_OK; }
-static enum mds_status mem_open_scan_client(struct mds_catalogue *c, uint64_t cid, mds_coord_open_scan_cb cb, void *ctx)
-{ (void)c;(void)cid;(void)cb;(void)ctx; return MDS_OK; }
+static int mem_open_find(
+    const struct memdb *memdb, const uint8_t stateid_other[12])
+{
+    for (uint32_t index = 0; index < MEMDB_MAX_OPENS; index++) {
+        if (memdb->opens[index].used &&
+            memcmp(memdb->opens[index].row.stateid_other, stateid_other,
+                   sizeof(memdb->opens[index].row.stateid_other)) == 0) {
+            return (int)index;
+        }
+    }
+    return -1;
+}
+
+static enum mds_status mem_open_put(
+    struct mds_catalogue *cat, const struct mds_coord_open_row *row)
+{
+    struct memdb *memdb = cat->backend_private;
+    struct mds_final_unlink_result unlink_result;
+    uint64_t unlink_parent_fileid = 0;
+    uint64_t unlink_fileid = 0;
+    uint64_t unlink_generation = 0;
+    char unlink_name[MDS_MAX_NAME + 1] = {0};
+    bool run_unlink = false;
+    int open_index;
+
+    if (row == NULL || row->open_owner_len > sizeof(row->open_owner)) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&memdb->lock);
+    open_index = mem_open_find(memdb, row->stateid_other);
+    if (open_index < 0) {
+        for (uint32_t index = 0; index < MEMDB_MAX_OPENS; index++) {
+            if (!memdb->opens[index].used) {
+                open_index = (int)index;
+                break;
+            }
+        }
+    }
+    if (open_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        return MDS_ERR_NOSPC;
+    }
+    memdb->opens[open_index].row = *row;
+    memdb->opens[open_index].used = 1;
+    if (memdb->unlink_after_open_put.armed) {
+        run_unlink = true;
+        unlink_parent_fileid =
+            memdb->unlink_after_open_put.parent_fileid;
+        unlink_fileid = memdb->unlink_after_open_put.fileid;
+        unlink_generation = memdb->unlink_after_open_put.generation;
+        memcpy(unlink_name, memdb->unlink_after_open_put.name,
+               sizeof(unlink_name));
+        memdb->unlink_after_open_put.armed = false;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    if (run_unlink &&
+        mem_ns_remove_final_file(
+            cat, unlink_parent_fileid, unlink_name, unlink_fileid,
+            unlink_generation, &unlink_result) != MDS_OK) {
+        return MDS_ERR_IO;
+    }
+    return MDS_OK;
+}
+
+static enum mds_status mem_open_get(
+    struct mds_catalogue *cat, const uint8_t stateid_other[12],
+    struct mds_coord_open_row *row)
+{
+    struct memdb *memdb = cat->backend_private;
+    int open_index;
+
+    if (row == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&memdb->lock);
+    open_index = mem_open_find(memdb, stateid_other);
+    if (open_index >= 0) {
+        *row = memdb->opens[open_index].row;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return open_index >= 0 ? MDS_OK : MDS_ERR_NOTFOUND;
+}
+
+static enum mds_status mem_open_del(
+    struct mds_catalogue *cat, const uint8_t stateid_other[12])
+{
+    struct memdb *memdb = cat->backend_private;
+    int open_index;
+
+    pthread_mutex_lock(&memdb->lock);
+    open_index = mem_open_find(memdb, stateid_other);
+    if (open_index >= 0) {
+        memdb->opens[open_index].used = 0;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return open_index >= 0 ? MDS_OK : MDS_ERR_NOTFOUND;
+}
+
+static enum mds_status mem_open_scan(
+    struct mds_catalogue *cat, uint64_t id, bool by_file,
+    mds_coord_open_scan_cb callback, void *ctx)
+{
+    struct memdb *memdb = cat->backend_private;
+
+    if (callback == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&memdb->lock);
+    for (uint32_t index = 0; index < MEMDB_MAX_OPENS; index++) {
+        const struct mds_coord_open_row *row = &memdb->opens[index].row;
+
+        if (!memdb->opens[index].used ||
+            (by_file ? row->fileid : row->clientid) != id) {
+            continue;
+        }
+        if (callback(row, ctx) != 0) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_open_scan_file(
+    struct mds_catalogue *cat, uint64_t fileid,
+    mds_coord_open_scan_cb callback, void *ctx)
+{
+    return mem_open_scan(cat, fileid, true, callback, ctx);
+}
+
+static enum mds_status mem_open_scan_client(
+    struct mds_catalogue *cat, uint64_t clientid,
+    mds_coord_open_scan_cb callback, void *ctx)
+{
+    return mem_open_scan(cat, clientid, false, callback, ctx);
+}
 static enum mds_status mem_lock_put(struct mds_catalogue *c, const struct mds_coord_lock_row *r)
 { (void)c;(void)r; return MDS_OK; }
 static enum mds_status mem_lock_del(struct mds_catalogue *c, uint64_t f, uint64_t l)
@@ -2004,21 +2693,15 @@ static const struct mds_catalogue_ops memdb_lifecycle_ops = {
 
 static const struct mds_authority_ops memdb_auth_ops = {
     .ns_create       = mem_ns_create,
+    .ns_create_wide  = mem_ns_create_wide,
     .ns_remove       = mem_ns_remove,
-    .ns_parent_touch       = mem_ns_parent_touch,
+    .ns_remove_final_file = mem_ns_remove_final_file,
     .ns_rename       = mem_ns_rename,
-    .remove_pending_enqueue    = mem_remove_pending_enqueue,
-    .remove_pending_enqueue_unlink = mem_remove_pending_enqueue_unlink,
-    .remove_pending_peek_batch = mem_remove_pending_peek_batch,
-    .remove_pending_claim      = mem_remove_pending_claim,
-    .remove_pending_complete   = mem_remove_pending_complete,
-    .remove_pending_bump_retry = mem_remove_pending_bump_retry,
-    .remove_pending_count      = mem_remove_pending_count,
-    .remove_pending_scan_all   = mem_remove_pending_scan_all,
     .ns_link         = mem_ns_link,
     .ns_lookup       = mem_ns_lookup,
     .ns_getattr      = mem_ns_getattr,
     .ns_setattr      = mem_ns_setattr,
+    .ns_setattr_size_extend = mem_ns_setattr_size_extend,
     .ns_readdir      = mem_ns_readdir,
     .ns_readdir_plus_from = mem_ns_readdir_plus_from,
     .dirent_name_for_child = mem_dirent_name_for_child,
@@ -2027,7 +2710,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .inode_put       = mem_inode_put,
     .inode_del       = mem_inode_del,
     .dirent_put      = mem_dirent_put,
-    .dirent_insert   = mem_dirent_insert,
+    .dirent_insert    = mem_dirent_insert,
     .dirent_del      = mem_dirent_del,
     .inline_get      = mem_inline_get,
     .inline_put      = mem_inline_put,
@@ -2056,6 +2739,14 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .gc_peek         = mem_gc_peek,
     .gc_dequeue      = mem_gc_dequeue,
     .gc_count        = mem_gc_count,
+    .gc_task_stats   = mem_gc_task_stats,
+    .gc_task_enqueue = mem_gc_task_enqueue,
+    .gc_task_claim_batch = mem_gc_task_claim_batch,
+    .gc_task_renew = mem_gc_task_renew,
+    .gc_task_reschedule = mem_gc_task_reschedule,
+    .gc_task_complete = mem_gc_task_complete,
+    .gc_task_quarantine = mem_gc_task_quarantine,
+    .gc_task_finalize_file = mem_gc_task_finalize_file,
     .shard_fileid_get = mem_shard_fileid_get,
     .shard_fileid_put = mem_shard_fileid_put,
     .shard_fileid_del = mem_shard_fileid_del,
@@ -2137,7 +2828,6 @@ struct mds_catalogue *catalogue_memdb_open(void)
     m->inodes[0].generation = 1;
     m->inode_used[0] = 1;
     m->next_fileid = MDS_FILEID_ROOT + 1;
-    m->remove_seq_next = 1;
     m->gc_seq_next = 1;
 
     cat->backend = MDS_BACKEND_RONDB;  /* Pretend to be RonDB. */
@@ -2147,4 +2837,80 @@ struct mds_catalogue *catalogue_memdb_open(void)
     cat->backend_private = m;
 
     return cat;
+}
+
+void catalogue_memdb_fail_next_final_unlink(
+    struct mds_catalogue *cat, enum mds_status status)
+{
+    struct memdb *memdb;
+
+    if (cat == NULL) {
+        return;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    memdb->next_final_unlink_status = status;
+    pthread_mutex_unlock(&memdb->lock);
+}
+
+void catalogue_memdb_unlink_after_next_open_put(
+    struct mds_catalogue *cat, uint64_t parent_fileid, const char *name,
+    uint64_t fileid, uint64_t generation)
+{
+    struct memdb *memdb;
+
+    if (cat == NULL || name == NULL) {
+        return;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    memdb->unlink_after_open_put.armed = true;
+    memdb->unlink_after_open_put.parent_fileid = parent_fileid;
+    snprintf(memdb->unlink_after_open_put.name,
+             sizeof(memdb->unlink_after_open_put.name), "%s", name);
+    memdb->unlink_after_open_put.fileid = fileid;
+    memdb->unlink_after_open_put.generation = generation;
+    pthread_mutex_unlock(&memdb->lock);
+}
+
+enum mds_status catalogue_memdb_inject_raw_gc_task(
+    struct mds_catalogue *cat, const struct mds_gc_task *task)
+{
+    struct memdb *memdb;
+
+    if (cat == NULL || task == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    for (uint32_t index = 0; index < MEMDB_MAX_GC_TASKS; index++) {
+        if (!memdb->gc_tasks[index].used) {
+            memdb->gc_tasks[index].task = *task;
+            memdb->gc_tasks[index].used = 1;
+            pthread_mutex_unlock(&memdb->lock);
+            return MDS_OK;
+        }
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_ERR_NOSPC;
+}
+
+enum mds_status catalogue_memdb_get_gc_task(
+    struct mds_catalogue *cat, uint8_t task_kind, uint64_t task_id,
+    struct mds_gc_task *task)
+{
+    struct memdb *memdb;
+    int task_index;
+
+    if (cat == NULL || task == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    task_index = mem_gc_task_find(memdb, task_kind, task_id);
+    if (task_index >= 0) {
+        *task = memdb->gc_tasks[task_index].task;
+    }
+    pthread_mutex_unlock(&memdb->lock);
+    return task_index >= 0 ? MDS_OK : MDS_ERR_NOTFOUND;
 }

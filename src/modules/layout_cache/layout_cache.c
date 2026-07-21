@@ -36,7 +36,7 @@ static uint32_t bucket_of(uint64_t fid)
     return (uint32_t)(h & SHARD_HASH_MASK);
 }
 
-typedef struct lce {
+struct lce {
     uint64_t                  fileid;
     uint32_t                  stripe_count;
     uint32_t                  stripe_unit;
@@ -45,12 +45,12 @@ typedef struct lce {
     struct lce               *hash_next; /* chained hash collision list */
     struct lce               *lru_prev;  /* doubly-linked LRU; MRU end = after sentinel */
     struct lce               *lru_next;
-} lce_t;
+};
 
-typedef struct {
+struct shard {
     pthread_mutex_t  mu;
-    lce_t           *buckets[SHARD_HASH_BUCKETS];
-    lce_t            lru_sentinel;  /* sentinel.next -> MRU; sentinel.prev -> LRU */
+    struct lce      *buckets[SHARD_HASH_BUCKETS];
+    struct lce       lru_sentinel;  /* sentinel.next -> MRU; sentinel.prev -> LRU */
     uint32_t         capacity;
     uint32_t         count;
     uint64_t         hits;
@@ -58,22 +58,22 @@ typedef struct {
     uint64_t         puts;
     uint64_t         evictions;
     uint64_t         invalidations;
-} shard_t;
+};
 
 struct layout_cache {
-    shard_t shards[LAYOUT_CACHE_SHARDS];
+    struct shard shards[LAYOUT_CACHE_SHARDS];
 };
 
 /* ---- LRU helpers ---- */
 
-static void lru_unlink(lce_t *e)
+static void lru_unlink(struct lce *e)
 {
     e->lru_prev->lru_next = e->lru_next;
     e->lru_next->lru_prev = e->lru_prev;
 }
 
 /* Insert e immediately after pos (makes e the new MRU when pos = sentinel). */
-static void lru_insert_after(lce_t *pos, lce_t *e)
+static void lru_insert_after(struct lce *pos, struct lce *e)
 {
     e->lru_next          = pos->lru_next;
     e->lru_prev          = pos;
@@ -81,24 +81,24 @@ static void lru_insert_after(lce_t *pos, lce_t *e)
     pos->lru_next        = e;
 }
 
-static void lru_promote(shard_t *sh, lce_t *e)
+static void lru_promote(struct shard *sh, struct lce *e)
 {
     lru_unlink(e);
     lru_insert_after(&sh->lru_sentinel, e);
 }
 
 /* Returns the LRU tail, or NULL if the list is empty. */
-static lce_t *lru_tail(shard_t *sh)
+static struct lce *lru_tail(struct shard *sh)
 {
-    lce_t *tail = sh->lru_sentinel.lru_prev;
+    struct lce *tail = sh->lru_sentinel.lru_prev;
     return (tail == &sh->lru_sentinel) ? NULL : tail;
 }
 
 /* ---- hash helpers ---- */
 
-static lce_t *hash_find(shard_t *sh, uint64_t fileid)
+static struct lce *hash_find(struct shard *sh, uint64_t fileid)
 {
-    lce_t *e = sh->buckets[bucket_of(fileid)];
+    struct lce *e = sh->buckets[bucket_of(fileid)];
     for (; e != NULL; e = e->hash_next) {
         if (e->fileid == fileid) {
             return e;
@@ -107,9 +107,9 @@ static lce_t *hash_find(shard_t *sh, uint64_t fileid)
     return NULL;
 }
 
-static void hash_remove(shard_t *sh, lce_t *e)
+static void hash_remove(struct shard *sh, struct lce *e)
 {
-    lce_t **p = &sh->buckets[bucket_of(e->fileid)];
+    struct lce **p = &sh->buckets[bucket_of(e->fileid)];
     while (*p != NULL && *p != e) {
         p = &(*p)->hash_next;
     }
@@ -119,7 +119,7 @@ static void hash_remove(shard_t *sh, lce_t *e)
     e->hash_next = NULL;
 }
 
-static void hash_insert(shard_t *sh, lce_t *e)
+static void hash_insert(struct shard *sh, struct lce *e)
 {
     uint32_t b = bucket_of(e->fileid);
     e->hash_next   = sh->buckets[b];
@@ -128,9 +128,9 @@ static void hash_insert(shard_t *sh, lce_t *e)
 
 /* ---- shard helpers ---- */
 
-static void shard_evict_lru(shard_t *sh)
+static void shard_evict_lru(struct shard *sh)
 {
-    lce_t *v = lru_tail(sh);
+    struct lce *v = lru_tail(sh);
     if (v == NULL) {
         return;
     }
@@ -142,7 +142,7 @@ static void shard_evict_lru(shard_t *sh)
     sh->evictions++;
 }
 
-static void shard_free_entry(shard_t *sh, lce_t *e)
+static void shard_free_entry(struct shard *sh, struct lce *e)
 {
     lru_unlink(e);
     hash_remove(sh, e);
@@ -174,7 +174,7 @@ int layout_cache_init(uint32_t max_entries, struct layout_cache **out)
     }
 
     for (i = 0; i < LAYOUT_CACHE_SHARDS; i++) {
-        shard_t *sh = &lc->shards[i];
+        struct shard *sh = &lc->shards[i];
         if (pthread_mutex_init(&sh->mu, NULL) != 0) {
             uint32_t j;
             for (j = 0; j < i; j++) {
@@ -199,10 +199,10 @@ void layout_cache_destroy(struct layout_cache *lc)
         return;
     }
     for (i = 0; i < LAYOUT_CACHE_SHARDS; i++) {
-        shard_t *sh = &lc->shards[i];
-        lce_t *e = sh->lru_sentinel.lru_next;
+        struct shard *sh = &lc->shards[i];
+        struct lce *e = sh->lru_sentinel.lru_next;
         while (e != &sh->lru_sentinel) {
-            lce_t *next = e->lru_next;
+            struct lce *next = e->lru_next;
             free(e->entries);
             free(e);
             e = next;
@@ -217,8 +217,8 @@ int layout_cache_get(struct layout_cache *lc, uint64_t fileid,
                      uint32_t *mirror_count,
                      struct mds_ds_map_entry **entries)
 {
-    shard_t *sh;
-    lce_t *e;
+    struct shard *sh;
+    struct lce *e;
     size_t entry_bytes;
     struct mds_ds_map_entry *copy;
 
@@ -264,12 +264,14 @@ int layout_cache_put(struct layout_cache *lc, uint64_t fileid,
                      uint32_t mirror_count,
                      const struct mds_ds_map_entry *entries)
 {
-    shard_t *sh;
-    lce_t *e;
+    struct shard *sh;
+    struct lce *e;
     size_t entry_bytes;
     struct mds_ds_map_entry *copy;
 
-    if (lc == NULL || entries == NULL || stripe_count == 0 || mirror_count == 0) {
+    if (lc == NULL || entries == NULL || stripe_count == 0 ||
+        stripe_count > MDS_MAX_STRIPES || mirror_count == 0 ||
+        mirror_count > MDS_MAX_MIRRORS) {
         return -1;
     }
 
@@ -324,8 +326,8 @@ int layout_cache_put(struct layout_cache *lc, uint64_t fileid,
 
 void layout_cache_invalidate(struct layout_cache *lc, uint64_t fileid)
 {
-    shard_t *sh;
-    lce_t *e;
+    struct shard *sh;
+    struct lce *e;
 
     if (lc == NULL) {
         return;
@@ -347,7 +349,7 @@ void layout_cache_clear(struct layout_cache *lc)
         return;
     }
     for (i = 0; i < LAYOUT_CACHE_SHARDS; i++) {
-        shard_t *sh = &lc->shards[i];
+        struct shard *sh = &lc->shards[i];
         pthread_mutex_lock(&sh->mu);
         while (sh->count > 0) {
             shard_evict_lru(sh);
@@ -368,7 +370,7 @@ void layout_cache_stats_get(const struct layout_cache *lc,
         return;
     }
     for (i = 0; i < LAYOUT_CACHE_SHARDS; i++) {
-        shard_t *sh = (shard_t *)&lc->shards[i];
+        struct shard *sh = (struct shard *)&lc->shards[i];
         pthread_mutex_lock(&sh->mu);
         out->hits          += sh->hits;
         out->misses        += sh->misses;

@@ -336,6 +336,90 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         return -1;
     }
     base += extra;
+    /* Append asynchronous final-unlink GC observability. */
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# HELP pnfs_mds_gc_claimed "
+            "File-unlink tasks currently leased by a GC worker.\n"
+        "# TYPE pnfs_mds_gc_claimed gauge\n"
+        "pnfs_mds_gc_claimed %lu\n"
+        "# HELP pnfs_mds_gc_oldest_age_seconds "
+            "Age of the oldest active file-unlink task.\n"
+        "# TYPE pnfs_mds_gc_oldest_age_seconds gauge\n"
+        "pnfs_mds_gc_oldest_age_seconds %lu\n"
+        "# HELP pnfs_mds_gc_claimed_total "
+            "Successful file-unlink task claims.\n"
+        "# TYPE pnfs_mds_gc_claimed_total counter\n"
+        "pnfs_mds_gc_claimed_total %lu\n"
+        "# HELP pnfs_mds_gc_retries_total "
+            "File-unlink task claims after a prior attempt.\n"
+        "# TYPE pnfs_mds_gc_retries_total counter\n"
+        "pnfs_mds_gc_retries_total %lu\n"
+        "# HELP pnfs_mds_gc_open_blocked_total "
+            "Cleanup retries blocked by durable open state.\n"
+        "# TYPE pnfs_mds_gc_open_blocked_total counter\n"
+        "pnfs_mds_gc_open_blocked_total %lu\n"
+        "# HELP pnfs_mds_gc_unavailable_ds_total "
+            "DS cleanup calls that need retry.\n"
+        "# TYPE pnfs_mds_gc_unavailable_ds_total counter\n"
+        "pnfs_mds_gc_unavailable_ds_total %lu\n"
+        "# HELP pnfs_mds_gc_dead_owner_takeovers_total "
+            "Task claims that took over an existing lease.\n"
+        "# TYPE pnfs_mds_gc_dead_owner_takeovers_total counter\n"
+        "pnfs_mds_gc_dead_owner_takeovers_total %lu\n"
+        "# HELP pnfs_mds_gc_permanent_failures_total "
+            "File-unlink tasks moved to quarantine.\n"
+        "# TYPE pnfs_mds_gc_permanent_failures_total counter\n"
+        "pnfs_mds_gc_permanent_failures_total %lu\n"
+        "# HELP pnfs_mds_gc_completed_total "
+            "Completed GC cleanup tasks.\n"
+        "# TYPE pnfs_mds_gc_completed_total counter\n"
+        "pnfs_mds_gc_completed_total %lu\n"
+        "# HELP pnfs_mds_gc_deferred_quota_bytes "
+            "Quota bytes awaiting asynchronous release.\n"
+        "# TYPE pnfs_mds_gc_deferred_quota_bytes gauge\n"
+        "pnfs_mds_gc_deferred_quota_bytes %lu\n"
+        "# HELP pnfs_mds_gc_deferred_quota_inodes "
+            "Quota inodes awaiting asynchronous release.\n"
+        "# TYPE pnfs_mds_gc_deferred_quota_inodes gauge\n"
+        "pnfs_mds_gc_deferred_quota_inodes %lu\n"
+        "# HELP pnfs_mds_remove_async_sync_fallback_total "
+            "Final unlinks routed to synchronous cleanup by backlog pressure.\n"
+        "# TYPE pnfs_mds_remove_async_sync_fallback_total counter\n"
+        "pnfs_mds_remove_async_sync_fallback_total %lu\n"
+        "# HELP pnfs_mds_remove_async_backpressure_active "
+            "Whether asynchronous REMOVE is currently backpressured.\n"
+        "# TYPE pnfs_mds_remove_async_backpressure_active gauge\n"
+        "pnfs_mds_remove_async_backpressure_active %lu\n",
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_claimed),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_oldest_age_seconds),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_claimed_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_retries_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_open_blocked_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_unavailable_ds_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_dead_owner_takeovers_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_permanent_failures_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_completed_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_deferred_quota_bytes),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->gc_deferred_quota_inodes),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->remove_async_sync_fallback_total),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->remove_async_backpressure_active));
+    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+        return -1;
+    }
+    base += extra;
 
     /* Append DS-prepare counters. */
     extra = snprintf(buf + base, cap - (size_t)base,

@@ -188,7 +188,6 @@ static void test_recall_revoke_no_session(void)
                                  ds_ids, 1);
     ASSERT_EQ(mst, MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
-
     /*
      * Call layout_recall_for_ds.  No session for clientid=100,
      * so cb will fail and the layout should be revoked.
@@ -1326,16 +1325,11 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 17: Final-unlink recall forcibly revokes layout-state rows even
- * for callback statuses that ordinary byte-range conflict recall treats
- * as transient.  This prevents the P04_unlink_held deadlock where the
- * holder answers the CB by sending LAYOUTRETURN after the namespace
- * entry has already been removed; Linux then sees STALE on PUTFH and
- * enters migration recovery instead of completing the return.
+ * Test 17: Final-unlink recall skips callbacks and force-revokes every
+ * layout-state row.  This prevents a worker-pool deadlock when holders
+ * answer a callback with LAYOUTRETURN during namespace removal.
  * ----------------------------------------------------------------------- */
-
-static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
-                                             uint64_t fileid,
+static void test_unlink_revoke_forces_revoke(uint64_t fileid,
                                              uint32_t ds_id,
                                              uint8_t state_seed,
                                              const char *label)
@@ -1346,8 +1340,7 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
     struct session_table *st = NULL;
     struct mds_cat_txn *txn = NULL;
     struct nfs4_stateid sid;
-    struct mock_cb_server_args mock;
-    pthread_t tid;
+    struct pollfd callback_poll;
     char *path = make_temp_db_path();
     uint64_t clientid;
     uint32_t seqid;
@@ -1390,17 +1383,14 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
               MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    memset(&mock, 0, sizeof(mock));
-    mock.fd = sv[1];
-    mock.reply_status = reply_status;
-    ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
     ASSERT_EQ(layout_recall_revoke_all_for_unlink(lr, fileid, &recalled), 0);
-    pthread_join(tid, NULL);
 
     ASSERT_EQ(recalled, 1);
-    ASSERT_EQ(mock.received, 1);
-    ASSERT_EQ(mock.layoutrecall_count, 1);
+    memset(&callback_poll, 0, sizeof(callback_poll));
+    callback_poll.fd = sv[1];
+    callback_poll.events = POLLIN;
+    ASSERT_EQ(poll(&callback_poll, 1, 0), 0);
 
     {
         bool has_layout = false;
@@ -1444,14 +1434,8 @@ int main(void)
     test_byte_range_recall_skip_revoke_on_delay();
     test_byte_range_recall_revokes_on_terminal_status();
     test_byte_range_recall_revokes_on_nomatching_layout();
-    test_unlink_revoke_forces_revoke(0, 1000, 15, 0xF2,
-                                     "test_unlink_revoke_forces_revoke_on_ok");
-    test_unlink_revoke_forces_revoke((uint32_t)NFS4ERR_RECALLCONFLICT,
-                                     1001, 16, 0xF3,
-                                     "test_unlink_revoke_forces_revoke_on_recallconflict");
-    test_unlink_revoke_forces_revoke((uint32_t)NFS4ERR_DELAY,
-                                     1002, 17, 0xF4,
-                                     "test_unlink_revoke_forces_revoke_on_delay");
+    test_unlink_revoke_forces_revoke(
+        1000, 15, 0xF2, "test_unlink_revoke_forces_revoke");
 
     printf("\n%d passed, %d failed\n", pass_count, fail_count);
     return fail_count > 0 ? 1 : 0;

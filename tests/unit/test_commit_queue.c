@@ -12,10 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <errno.h>
 
 #include "commit_queue.h"
+#include "layout_types.h"
 #include "mds_catalogue.h"
+#include "mds_coordination.h"
+#include "test_helpers.h"
 
 /* ----------------------------------------------------------------------- */
 
@@ -112,6 +116,69 @@ static void test_cq_set_ds_cache_null(void)
 {
     commit_queue_set_ds_cache(NULL, NULL);  /* must not crash */
 }
+struct layout_index_count {
+    uint32_t count;
+};
+
+static int count_layout_index(uint64_t clientid, uint64_t fileid, void *ctx)
+{
+    struct layout_index_count *count = ctx;
+
+    (void)clientid;
+    (void)fileid;
+    count->count++;
+    return 0;
+}
+
+/*
+ * A CREATE backend owns the prealloc pop.  The CQ must not persist the
+ * caller's preview as a layout DS ID when the resulting inode has no
+ * stripe map; the following LAYOUTGET must take its ordinary path.
+ */
+static void test_cq_create_rejects_speculative_layout_placement(void)
+{
+    struct mds_catalogue *cat;
+    struct commit_queue *cq = NULL;
+    struct commit_op op;
+    struct mds_inode inode;
+    struct layout_index_count index_count;
+    uint32_t preview_ds_id = 99;
+
+    cat = open_test_catalogue();
+    assert(cat != NULL);
+    assert(commit_queue_create(cat, NULL, 0, 0, 0, 0, 0, 0, &cq) == 0);
+    assert(cq != NULL);
+
+    memset(&op, 0, sizeof(op));
+    op.type = COMMIT_OP_CREATE;
+    op.args.create.parent_fileid = MDS_FILEID_ROOT;
+    (void)snprintf(op.args.create.name, sizeof(op.args.create.name),
+                   "%s", "no-placement");
+    op.args.create.type = MDS_FTYPE_REG;
+    op.args.create.mode = 0644;
+    op.args.create.prealloc =
+        (struct ds_prealloc_ctx *)(void *)&op;
+    op.args.create.out = &inode;
+    op.args.create.layout_pregrant = true;
+    op.args.create.layout_clientid = 123;
+    op.args.create.layout_iomode = LAYOUTIOMODE4_RW;
+    op.args.create.layout_length = 65536;
+    op.args.create.layout_stateid.seqid = 1;
+    op.args.create.layout_ds_ids = &preview_ds_id;
+    op.args.create.layout_ds_count = 1;
+
+    assert(commit_queue_submit(cq, &op) == MDS_OK);
+    assert(!op.args.create.layout_pregrant_ok);
+
+    memset(&index_count, 0, sizeof(index_count));
+    assert(mds_coord_ds_layout_idx_scan(cat, preview_ds_id,
+                                        count_layout_index,
+                                        &index_count) == MDS_OK);
+    assert(index_count.count == 0);
+
+    commit_queue_destroy(cq);
+    mds_catalogue_close(cat);
+}
 
 /* -----------------------------------------------------------------------
  * test_cq_lifecycle_with_catalogue -- create + destroy with real catalogue
@@ -160,6 +227,7 @@ int main(void)
     RUN_TEST(test_cq_get_repl_null);
     RUN_TEST(test_cq_get_repl_mode_null);
     RUN_TEST(test_cq_set_ds_cache_null);
+    RUN_TEST(test_cq_create_rejects_speculative_layout_placement);
     RUN_TEST(test_cq_lifecycle_with_catalogue);
 
     fprintf(stdout, "\n  %d/%d tests passed\n",

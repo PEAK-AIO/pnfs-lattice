@@ -130,6 +130,25 @@ enum mds_status placement_select_ex2(enum mds_placement_policy policy,
                                      uint32_t mirror_count,
                                      uint32_t stripe_unit,
                                      struct mds_ds_map_entry *entries);
+/**
+ * Validate requested and effective stripe geometry and calculate the
+ * effective stripe-map entry count.
+ *
+ * Placement callers allocate for the requested geometry, then must persist
+ * and iterate only the returned effective geometry.  This helper keeps that
+ * contract uniform across synchronous placement consumers.
+ *
+ * @param requested_stripe_count Requested stripe count before placement.
+ * @param effective_stripe_count Actual stripe count selected by placement.
+ * @param mirror_count           Mirrors per stripe.
+ * @param entry_count            Receives effective_stripe_count * mirror_count.
+ * @return MDS_OK or MDS_ERR_INVAL for invalid or inconsistent geometry.
+ */
+enum mds_status placement_geometry_entry_count(
+    uint32_t requested_stripe_count,
+    uint32_t effective_stripe_count,
+    uint32_t mirror_count,
+    uint32_t *entry_count);
 
 /**
  * Select a replacement DS for a degraded mirror slot.

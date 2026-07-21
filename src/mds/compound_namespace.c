@@ -14,11 +14,9 @@
 
 #include "pnfs_mds.h"
 #include "compound.h"
-#include "remove_manifest.h"
 #include "compound_internal.h"
 #include "mds_catalogue.h"
 #include "delegation.h"
-#include "open_state.h"
 #include "hpc_shared.h"
 
 #include "subtree_map.h"
@@ -37,9 +35,11 @@
 #include "dirent_cache.h"
 #include "inode_cache.h"
 #include "ds_cache.h"
+#include "ds_gc.h"
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* Mark Q5: recall layouts on truncate / unlink */
+#include "mds_metrics.h"
 
 #define ACCESS4_READ    0x00000001
 #define ACCESS4_LOOKUP  0x00000002
@@ -374,7 +374,6 @@ enum nfs4_status op_savefh(struct compound_data *cd,
 	enum nfs4_status nst;
 
 	(void)op;
-	(void)res;
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -1751,7 +1750,17 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		(st == MDS_OK &&
 		 rm_inode.type == MDS_FTYPE_REG &&
 		 rm_inode.nlink == 1);
+	bool rm_async_final_unlink =
+		(rm_final_data_unlink && cd->cfg_remove_async);
+	if (rm_async_final_unlink && cd->gc != NULL &&
+	    ds_gc_should_backpressure(cd->gc)) {
+		rm_async_final_unlink = false;
+		atomic_fetch_add_explicit(
+			&g_branch_metrics.remove_async_sync_fallback_total, 1,
+			memory_order_relaxed);
+	}
 	uint64_t rm_fileid = (st == MDS_OK) ? rm_inode.fileid : 0;
+	struct mds_final_unlink_result rm_final_result = {0};
 	struct mds_ds_map_entry *rm_sm_entries = NULL;
 	uint32_t rm_sm_sc = 0;
 	uint32_t rm_sm_su = 0;
@@ -1767,7 +1776,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 	 * cat_stripe_map_get, get NOTFOUND (inline files have no stripe
 	 * rows), and skip enqueue -> the DS file would leak.
 	 */
-	if (rm_final_data_unlink && rm_fileid != 0 &&
+	if (!rm_async_final_unlink && rm_final_data_unlink && rm_fileid != 0 &&
 	    (rm_inode.flags & MDS_IFLAG_INLINE_STRIPE)) {
 		rm_sm_entries = calloc(1, sizeof(*rm_sm_entries));
 		if (rm_sm_entries != NULL) {
@@ -1830,19 +1839,40 @@ enum nfs4_status op_remove(struct compound_data *cd,
 			}
 		}
 
-		/*
-		 * Prefetch the stripe map once so cat_remove_known() gets
-		 * the stripe count and the post-remove GC enqueue below can
-		 * reuse the entries.  No DS-side fence on the REMOVE path:
-		 * the namespace remove commits and the ds_gc reaper unlinks
-		 * the backing objects, and that unlink is what revokes any
-		 * straggler I/O (deferred-unlink model).
-		 * Layouts were already recalled above.
-		 */
-		if (cd->cat != NULL && rm_sm_entries == NULL) {
-			(void)mds_cat_stripe_map_get(cd->cat, rm_fileid,
+		/* RFC 8435 §14: fence DS backing files so a non-
+		 * cooperating client cannot continue I/O after the
+		 * layout is revoked and the inode is about to be
+		 * deleted.  Best-effort: do not fail the remove. */
+		if (!rm_async_final_unlink &&
+		    cd->proxy != NULL && cd->cat != NULL) {
+			bool have_sm = false;
+
+			/*
+			 * Inline single-stripe (v9): rm_sm_entries was already
+			 * built from the inode above.  Otherwise read the
+			 * stripe map (multi-stripe / legacy side-table files).
+			 */
+			if (rm_sm_entries != NULL) {
+				have_sm = true;
+			} else if (mds_cat_stripe_map_get(cd->cat, rm_fileid,
 					&rm_sm_sc, &rm_sm_su, &rm_sm_mc,
-					&rm_sm_entries);
+					&rm_sm_entries) == MDS_OK &&
+			    rm_sm_entries != NULL) {
+				have_sm = true;
+			}
+
+			if (have_sm && rm_sm_entries != NULL) {
+				uint32_t ftot = rm_sm_sc * rm_sm_mc;
+
+				for (uint32_t fi = 0; fi < ftot; fi++) {
+					(void)mds_proxy_fence_ds_file(
+						cd->proxy,
+						rm_sm_entries[fi].ds_id,
+						rm_fileid,
+						fi / rm_sm_mc,
+						fi % rm_sm_mc);
+				}
+			}
 		}
 
 		/*
@@ -1856,73 +1886,19 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		}
 	}
 
-
-	/*
-	 * Async-REMOVE fast path (ported; delete-at-ack).  Eligible:
-	 * final unlink of a regular file whose parent change_info can be
-	 * served from the parent_touch aggregator, and no live writer
-	 * holds the file open (delete-at-ack must never destroy stripe
-	 * data under an active open; such removes keep the synchronous
-	 * path).  The recall /
-	 * delegation teardown above already ran.  The submit commits ONE
-	 * durable transaction (manifest row + dirent DELETE + inode
-	 * DELETE_PENDING flag), so the name is gone on EVERY MDS before
-	 * the client is acked; the drainer finalizes the inode, DS
-	 * objects and quota off the request thread.  Any failure falls
-	 * through to the synchronous path below.
-	 */
-	if (cd->rmf != NULL && st == MDS_OK && rm_final_data_unlink &&
-	    rm_fileid != 0 && cd->ot != NULL &&
-	    open_state_file_has_writers(cd->ot, rm_fileid) == 0 &&
-	    compound_parent_defer_ok(cd) &&
-	    parent_touch_prepare(cd->pt, cd->current_fh.fileid,
-				 rm_change_before) == 0) {
-		if (remove_manifest_submit(cd->rmf,
-					   cd->current_fh.fileid,
-					   op->arg.remove.name,
-					   rm_fileid,
-					   rm_inode.generation,
-					   true) == 0) {
-			struct timespec rm_async_now;
-			uint64_t rm_async_before = 0;
-			uint64_t rm_async_after = 0;
-
-			clock_gettime(CLOCK_REALTIME, &rm_async_now);
-			if (parent_touch_commit_prepared(cd->pt,
-					cd->current_fh.fileid,
-					rm_async_now,
-					&rm_async_before,
-					&rm_async_after) == 0) {
-				res->res.change_info.before =
-					rm_async_before;
-				res->res.change_info.after =
-					rm_async_after;
-			} else {
-				res->res.change_info.before =
-					rm_change_before;
-				res->res.change_info.after =
-					rm_change_before + 1;
-			}
-			compound_dirent_invalidate(cd,
-						   cd->current_fh.fileid,
-						   op->arg.remove.name);
-			compound_inode_invalidate(cd, cd->current_fh.fileid);
-			/* Ack txn mutated the child inode (DELETE_PENDING):
-			 * drop any cached copy. */
-			compound_inode_invalidate(cd, rm_fileid);
-			free(rm_sm_entries);
-			return NFS4_OK;
-		}
-		parent_touch_abort_prepared(cd->pt, cd->current_fh.fileid);
+	if (st == MDS_OK && rm_async_final_unlink) {
+		st = mds_cat_ns_remove_final_file(
+			cd->cat, cd->current_fh.fileid, op->arg.remove.name,
+			rm_inode.fileid, rm_inode.generation, &rm_final_result);
+	} else {
+		st = (st == MDS_OK)
+			? cat_remove_known(cd, cd->current_fh.fileid,
+					   op->arg.remove.name, &rm_inode,
+					   rm_sm_sc)
+			: cat_remove(cd, cd->current_fh.fileid,
+				     op->arg.remove.name);
 	}
-
-	st = (st == MDS_OK)
-		? cat_remove_known(cd, cd->current_fh.fileid,
-				   op->arg.remove.name, &rm_inode,
-				   rm_sm_sc)
-		: cat_remove(cd, cd->current_fh.fileid,
-			     op->arg.remove.name);
-	if (st == MDS_OK && rm_quota) {
+	if (st == MDS_OK && rm_quota && !rm_async_final_unlink) {
 		quota_submit_adjust(cd, rm_inode.uid, rm_inode.gid,
 				    -(int64_t)rm_inode.size, -1);
 	}
@@ -1948,13 +1924,27 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		if (rm_fileid != 0) {
 			compound_inode_invalidate(cd, rm_fileid);
 		}
-		struct mds_inode parent_post;
-		/* Invalidate BEFORE post-mutation re-read. */
 		compound_inode_invalidate(cd, cd->current_fh.fileid);
-		if (cat_getattr(cd, cd->current_fh.fileid,
-				   &parent_post) == MDS_OK) {
-			res->res.change_info.after = parent_post.change;
-			res->res.change_info.before = rm_change_before;
+		if (rm_async_final_unlink) {
+			ds_gc_note_file_unlink(cd->gc, rm_inode.size);
+			res->res.change_info.before =
+				rm_final_result.parent_change_before;
+			res->res.change_info.after =
+				rm_final_result.parent_change_after;
+			layout_cache_invalidate(cd->lcache, rm_fileid);
+			layout_commit_aggregator_drop(cd->lcommit_agg, rm_fileid);
+			cluster_cache_invalidator_enqueue(
+				cd->cache_invalidator, cd->current_fh.fileid,
+				op->arg.remove.name, rm_fileid);
+		} else {
+			struct mds_inode parent_post;
+
+			/* Invalidate BEFORE post-mutation re-read. */
+			if (cat_getattr(cd, cd->current_fh.fileid,
+					&parent_post) == MDS_OK) {
+				res->res.change_info.after = parent_post.change;
+				res->res.change_info.before = rm_change_before;
+			}
 		}
 
 		/* Final unlink of a regular file: schedule DS-side
@@ -1962,7 +1952,8 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		 * failures here do not affect the client-visible
 		 * remove status; the next pass picks up any rows
 		 * we miss. */
-		if (rm_final_data_unlink && rm_fileid != 0) {
+		if (rm_final_data_unlink && !rm_async_final_unlink &&
+		    rm_fileid != 0) {
 			enqueue_gc_for_final_unlink(cd, rm_fileid,
 						    rm_sm_entries,
 						    rm_sm_sc, rm_sm_mc);
@@ -1970,6 +1961,9 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		}
 	}
 	free(rm_sm_entries);
+	if (rm_async_final_unlink && st == MDS_ERR_STALE) {
+		return NFS4ERR_DELAY;
+	}
 	return mds_status_to_nfs4(st);
 }
 

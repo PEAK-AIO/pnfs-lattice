@@ -7,8 +7,6 @@ add_library(pnfs_mds_core STATIC
     compound_access.c
     compound_session.c
     compound_namespace.c
-    parent_touch.c
-    remove_manifest.c
     compound_data_io.c
     compound_layout.c
     compound_nfsv42.c

@@ -1000,27 +1000,41 @@ static bool layout_synth_inline_stripe(const struct mds_inode *inode,
  * if absent and returns its current knfsd handle, which changes when
  * the file was re-created.  Refresh every stripe's handle before the
  * layout is cached or emitted; when any changed, rewrite the stripe
- * map so the new handles are durable.  Best-effort and gated on a
- * proxy: on ensure failure the entry is left as-is and the downstream
- * layout_entries_ready_for_grant check turns it into NFS4ERR_DELAY
- * (client backs off) rather than a busy-loop.
+ * map so the new handles are durable.  A failed ensure or rewrite
+ * fails closed: callers revoke the provisional layout instead of
+ * emitting a stale nonzero handle.  Without a proxy, leave synthetic
+ * test and proxy-free deployments unchanged.
  */
-static void layout_refresh_wide_stripe_fhs(struct compound_data *cd,
-					   uint64_t fileid,
-					   struct mds_ds_map_entry *entries,
-					   uint32_t stripe_count,
-					   uint32_t stripe_unit,
-					   uint32_t mirror_count)
+enum layout_fh_refresh_result {
+	LAYOUT_FH_REFRESH_UNCHANGED,
+	LAYOUT_FH_REFRESH_PERSISTED,
+	LAYOUT_FH_REFRESH_FAILED,
+};
+
+static enum layout_fh_refresh_result layout_refresh_wide_stripe_fhs(
+	struct compound_data *cd, uint64_t fileid,
+	struct mds_ds_map_entry *entries, uint32_t stripe_count,
+	uint32_t stripe_unit, uint32_t mirror_count)
 {
 	uint32_t total;
 	uint32_t i;
 	bool changed = false;
+	uint64_t total_entries;
 
-	if (cd == NULL || cd->proxy == NULL || entries == NULL ||
-	    stripe_count == 0 || mirror_count == 0) {
-		return;
+	if (cd == NULL || entries == NULL || stripe_count == 0 ||
+	    stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+	    mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS) {
+		return LAYOUT_FH_REFRESH_FAILED;
 	}
-	total = stripe_count * mirror_count;
+	if (cd->proxy == NULL) {
+		return LAYOUT_FH_REFRESH_UNCHANGED;
+	}
+
+	total_entries = (uint64_t)stripe_count * mirror_count;
+	if (total_entries > UINT32_MAX) {
+		return LAYOUT_FH_REFRESH_FAILED;
+	}
+	total = (uint32_t)total_entries;
 	for (i = 0; i < total; i++) {
 		uint8_t fh[MDS_NFS_FH_MAX];
 		uint32_t fh_len = sizeof(fh);
@@ -1032,7 +1046,7 @@ static void layout_refresh_wide_stripe_fhs(struct compound_data *cd,
 
 		if (st != MDS_OK || fh_len == 0 ||
 		    fh_len > sizeof(entries[i].nfs_fh)) {
-			continue;
+			return LAYOUT_FH_REFRESH_FAILED;
 		}
 		if (fh_len != entries[i].nfs_fh_len ||
 		    memcmp(fh, entries[i].nfs_fh, fh_len) != 0) {
@@ -1041,11 +1055,16 @@ static void layout_refresh_wide_stripe_fhs(struct compound_data *cd,
 			changed = true;
 		}
 	}
-	if (changed && cd->cat != NULL) {
-		(void)mds_cat_stripe_map_put(cd->cat, NULL, fileid,
-					     stripe_count, stripe_unit,
-					     mirror_count, entries);
+	if (!changed) {
+		return LAYOUT_FH_REFRESH_UNCHANGED;
 	}
+	if (cd->cat == NULL ||
+	    mds_cat_stripe_map_put(cd->cat, NULL, fileid,
+				   stripe_count, stripe_unit,
+				   mirror_count, entries) != MDS_OK) {
+		return LAYOUT_FH_REFRESH_FAILED;
+	}
+	return LAYOUT_FH_REFRESH_PERSISTED;
 }
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
@@ -2169,32 +2188,55 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 fill_layoutget_result:
-	/* Phase D of docs/hpc-nto1-plan.md -- populate the HPC layout
-	 * cache once per LAYOUTGET that produced a fresh stripe map.
-	 * Skipped when the path was a cache hit (the entry is already
-	 * present and this would be a redundant copy).  All branches
-	 * that reach this label have entries[] verified FH-ready by
-	 * their own (per-branch) layout_entries_ready_for_grant
-	 * checks, so the cached snapshot is always servable. */
-	/* Verify-on-serve: re-ensure DS backing files + refresh their
-	 * handles before caching/emitting, so LAYOUTGET only hands out
-	 * handles for files that exist.  Required for single-stripe too:
-	 * enterprise prealloc recover_pool can restore slots whose DS
-	 * files were wiped, leaving nfs_fh_len>0 but ENOENT on the DS.
-	 * Cache hits already carry verified entries; skip them. */
-	if (!layout_cache_was_hit && entries != NULL &&
-	    stripe_count > 0 && mirror_count > 0) {
-		layout_refresh_wide_stripe_fhs(cd, cd->current_fh.fileid,
-					       entries, stripe_count,
-					       stripe_unit, mirror_count);
-	}
-	if (cd->lcache != NULL &&
-	    !layout_cache_was_hit && entries != NULL &&
-	    stripe_count > 0 && mirror_count > 0) {
-		(void)layout_cache_put(cd->lcache,
-				       cd->current_fh.fileid,
-				       stripe_count, stripe_unit,
-				       mirror_count, entries);
+	/* Verify-on-serve for entries that did NOT come from the layout
+	 * cache: re-ensure every DS backing file and refresh its handle
+	 * before caching or emitting.  A failed ensure or stripe-map
+	 * rewrite fails closed -- revoke the provisional grant and return
+	 * NFS4ERR_DELAY rather than emitting a stale nonzero handle.
+	 *
+	 * Layout-cache hits are trusted without re-verification: entries
+	 * only enter the cache after a verified serve, and re-ensuring
+	 * every (stripe, mirror) FH on each hit would cost stripe_count *
+	 * mirror_count serial DS round trips per LAYOUTGET -- exactly the
+	 * work the Phase D cache exists to avoid.  A handle that goes
+	 * stale behind a cached entry is recovered via LAYOUTERROR:
+	 * op_layouterror invalidates the cache entry, so the next
+	 * LAYOUTGET misses and takes this verify path. */
+	if (!layout_cache_was_hit) {
+		enum layout_fh_refresh_result refresh_result;
+
+		refresh_result = layout_refresh_wide_stripe_fhs(
+			cd, cd->current_fh.fileid, entries, stripe_count,
+			stripe_unit, mirror_count);
+		if (refresh_result == LAYOUT_FH_REFRESH_FAILED ||
+		    !layout_entries_ready_for_grant(
+			cd, entries, stripe_count * mirror_count)) {
+			enum nfs4_status revoke_status;
+
+			if (cd->lcache != NULL) {
+				layout_cache_invalidate(
+					cd->lcache, cd->current_fh.fileid);
+			}
+			MDS_TIME_CAT_OP(MDS_CATOP_LAYOUT_REVOKE_GRANT,
+				revoke_status = layout_revoke_unready_grant(
+					cd, &r->stateid, entries,
+					stripe_count * mirror_count));
+			free(entries);
+			return revoke_status;
+		}
+		if (clear_ds_pending_on_success) {
+			layout_clear_ds_pending(cd, cd->current_fh.fileid);
+		}
+		if (cd->lcache != NULL) {
+			if (refresh_result == LAYOUT_FH_REFRESH_PERSISTED) {
+				layout_cache_invalidate(
+					cd->lcache, cd->current_fh.fileid);
+			}
+			(void)layout_cache_put(cd->lcache,
+					       cd->current_fh.fileid,
+					       stripe_count, stripe_unit,
+					       mirror_count, entries);
+		}
 	}
 	/* Fill result.
 	 *
@@ -3135,7 +3177,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			uint32_t merged_mask = 0;
 			bool size_grew = false;
 			uint64_t new_size = lc_inode.size;
-			uint64_t old_size = lc_inode.size;
+			struct mds_size_extend_result size_result;
 
 			if (a->new_offset) {
 				if (a->last_write_offset == UINT64_MAX) {
@@ -3144,7 +3186,19 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				new_size = a->last_write_offset + 1;
 
 				if (new_size > lc_inode.size) {
+					/*
+					 * Enforce the byte quota BEFORE the
+					 * durable grow.  The delta from the
+					 * request snapshot is a conservative
+					 * estimate (a concurrent commit may
+					 * already have grown the row), but a
+					 * caller over quota must be rejected
+					 * here; accounting below then charges
+					 * only the exact locked-to-committed
+					 * growth.
+					 */
 					enum nfs4_status lc_nst;
+
 					lc_nst = quota_check_bytes(
 						cd, lc_inode.uid,
 						lc_inode.gid,
@@ -3191,9 +3245,16 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			}
 
 			if (merged_mask != 0) {
-				st = cat_setattr(cd,
-					cd->current_fh.fileid,
-					&lc_inode, merged_mask);
+				if (size_grew) {
+					st = cat_setattr_size_extend(
+						cd, cd->current_fh.fileid,
+						&lc_inode, merged_mask,
+						&size_result);
+				} else {
+					st = cat_setattr(cd,
+						cd->current_fh.fileid,
+						&lc_inode, merged_mask);
+				}
 				if (st != MDS_OK) {
 					if (size_grew) {
 						return NFS4ERR_IO;
@@ -3203,14 +3264,26 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 					compound_inode_invalidate(cd,
 						cd->current_fh.fileid);
 					if (size_grew) {
-						quota_submit_adjust(cd,
-							lc_inode.uid,
-							lc_inode.gid,
-							(int64_t)(new_size -
-								old_size),
-							0);
+						/*
+						 * The request snapshot may be
+						 * stale. Account only the
+						 * exact growth accepted while
+						 * the catalogue row was locked,
+						 * and return that durable size.
+						 */
+						if (size_result.committed_size >
+						    size_result.locked_old_size) {
+							quota_submit_adjust(cd,
+								lc_inode.uid,
+								lc_inode.gid,
+								(int64_t)(
+								 size_result.committed_size -
+								 size_result.locked_old_size),
+								0);
+						}
 						r->new_size = true;
-						r->new_size_value = new_size;
+						r->new_size_value =
+							size_result.committed_size;
 					}
 				}
 			}

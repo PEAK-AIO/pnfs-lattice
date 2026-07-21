@@ -25,6 +25,7 @@
 #include "pnfs_mds.h"
 #include "test_helpers.h"
 #include "compound.h"
+#include "mds_coordination.h"
 #include "session.h"
 #include "open_state.h"
 
@@ -620,6 +621,208 @@ static void test_api_reopen_same_owner_bumps_seqid(void)
 
 	open_state_table_destroy(ot);
 }
+static void test_api_durable_open_scan_and_rollback(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct open_state_table *ot = NULL;
+    struct open_state_open_token token;
+    struct nfs4_open_state found;
+    struct nfs4_stateid created_stateid;
+    struct nfs4_stateid initial_stateid;
+    struct nfs4_stateid upgraded_stateid;
+    static const uint8_t owner[] = "durable-owner";
+
+    ASSERT_NE(cat, NULL);
+    ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+    open_state_table_set_cat(ot, cat, 1);
+    ASSERT_TRUE(open_state_table_has_durable_shared_state(ot));
+
+    ASSERT_EQ(open_state_open_with_token(
+                  ot, 100, owner, sizeof(owner) - 1, 42,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  &created_stateid, &token),
+              0);
+    ASSERT_TRUE(token.created);
+    ASSERT_EQ(open_state_file_has_opens(ot, 42), 1);
+    ASSERT_EQ(open_state_rollback_open(ot, 100, &created_stateid, &token),
+              0);
+    ASSERT_EQ(open_state_file_has_opens(ot, 42), 0);
+    ASSERT_EQ(open_state_find(ot, &created_stateid, &found), -1);
+
+    ASSERT_EQ(open_state_open(
+                  ot, 100, owner, sizeof(owner) - 1, 42,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  &initial_stateid),
+              0);
+    ASSERT_EQ(open_state_open_with_token(
+                  ot, 100, owner, sizeof(owner) - 1, 42,
+                  OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_WRITE,
+                  &upgraded_stateid, &token),
+              0);
+    ASSERT_NE(token.created, true);
+    ASSERT_EQ(open_state_rollback_open(ot, 100, &upgraded_stateid, &token),
+              0);
+    ASSERT_EQ(open_state_find(ot, &initial_stateid, &found), 0);
+    ASSERT_EQ(found.stateid.seqid, initial_stateid.seqid);
+    ASSERT_EQ(found.share_access, OPEN4_SHARE_ACCESS_READ);
+    ASSERT_EQ(found.share_deny, OPEN4_SHARE_DENY_NONE);
+
+    open_state_table_destroy(ot);
+    mds_catalogue_close(cat);
+}
+
+static void test_api_open_race_rollback_after_final_unlink(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct open_state_table *ot = NULL;
+    struct open_state_open_token token;
+    struct mds_final_unlink_result unlink_result;
+    struct mds_inode inode;
+    struct nfs4_stateid stateid;
+
+    ASSERT_NE(cat, NULL);
+    ASSERT_EQ(test_create_file(
+                  cat, MDS_FILEID_ROOT, "raced-open", 0644, &inode),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+    open_state_table_set_cat(ot, cat, 1);
+    ASSERT_EQ(open_state_open_with_token(
+                  ot, 200, NULL, 0, inode.fileid, OPEN4_SHARE_ACCESS_READ,
+                  OPEN4_SHARE_DENY_NONE, &stateid, &token),
+              0);
+    ASSERT_TRUE(token.created);
+    ASSERT_EQ(mds_cat_ns_remove_final_file(
+                  cat, MDS_FILEID_ROOT, "raced-open", inode.fileid,
+                  inode.generation, &unlink_result),
+              MDS_OK);
+    ASSERT_EQ(open_state_rollback_open(ot, 200, &stateid, &token), 0);
+    ASSERT_EQ(open_state_file_has_opens(ot, inode.fileid), 0);
+
+    open_state_table_destroy(ot);
+    mds_catalogue_close(cat);
+}
+
+static void test_compound_open_pending_inode_is_stale(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct open_state_table *ot = NULL;
+    struct compound_data cd;
+    struct mds_final_unlink_result unlink_result;
+    struct mds_inode inode;
+    struct nfs4_op ops[2];
+    struct nfs4_result results[2] = {0};
+    uint32_t result_count;
+
+    ASSERT_NE(cat, NULL);
+    ASSERT_EQ(test_create_file(
+                  cat, MDS_FILEID_ROOT, "pending-open", 0644, &inode),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_ns_remove_final_file(
+                  cat, MDS_FILEID_ROOT, "pending-open", inode.fileid,
+                  inode.generation, &unlink_result),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+    open_state_table_set_cat(ot, cat, 1);
+
+    compound_init(&cd);
+    cd.cat = cat;
+    cd.ot = ot;
+    cd.cfg_remove_async = true;
+    ops[0] = mk_putfh(inode.fileid);
+    ops[1] = mk_open_fh(OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE);
+    result_count = compound_process(&cd, ops, results, 2);
+    ASSERT_EQ(result_count, 2);
+    ASSERT_EQ(results[1].status, NFS4ERR_STALE);
+    ASSERT_EQ(open_state_file_has_opens(ot, inode.fileid), 0);
+
+    open_state_table_destroy(ot);
+    mds_catalogue_close(cat);
+}
+
+static int count_durable_open(
+    const struct mds_coord_open_row *row, void *ctx)
+{
+    uint32_t *count = ctx;
+
+    (void)row;
+    (*count)++;
+    return 0;
+}
+
+static void test_compound_open_does_not_advertise_preserve_unlinked(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct open_state_table *ot = NULL;
+    struct compound_data cd;
+    struct mds_inode inode;
+    struct nfs4_op ops[2];
+    struct nfs4_result results[2] = {0};
+    uint32_t result_count;
+
+    ASSERT_NE(cat, NULL);
+    ASSERT_EQ(test_create_file(
+                  cat, MDS_FILEID_ROOT, "no-preserve", 0644, &inode),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+    open_state_table_set_cat(ot, cat, 1);
+
+    compound_init(&cd);
+    cd.cat = cat;
+    cd.ot = ot;
+    cd.cfg_remove_async = true;
+    ops[0] = mk_putfh(inode.fileid);
+    ops[1] = mk_open_fh(OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE);
+    result_count = compound_process(&cd, ops, results, 2);
+    ASSERT_EQ(result_count, 2);
+    ASSERT_EQ(results[1].status, NFS4_OK);
+    ASSERT_EQ(results[1].res.open.preserve_unlinked, false);
+
+    open_state_table_destroy(ot);
+    mds_catalogue_close(cat);
+}
+
+static void test_compound_durable_open_race_rolls_back_when_async_off(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct open_state_table *ot = NULL;
+    struct compound_data cd;
+    struct mds_inode inode;
+    struct mds_inode retained;
+    struct nfs4_op ops[2];
+    struct nfs4_result results[2] = {0};
+    uint32_t durable_count = 0;
+    uint32_t result_count;
+
+    ASSERT_NE(cat, NULL);
+    ASSERT_EQ(test_create_file(
+                  cat, MDS_FILEID_ROOT, "mixed-config-race", 0644, &inode),
+              MDS_OK);
+    ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+    open_state_table_set_cat(ot, cat, 1);
+    catalogue_memdb_unlink_after_next_open_put(
+        cat, MDS_FILEID_ROOT, "mixed-config-race", inode.fileid,
+        inode.generation);
+
+    compound_init(&cd);
+    cd.cat = cat;
+    cd.ot = ot;
+    cd.cfg_remove_async = false;
+    ops[0] = mk_putfh(inode.fileid);
+    ops[1] = mk_open_fh(OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE);
+    result_count = compound_process(&cd, ops, results, 2);
+    ASSERT_EQ(result_count, 2);
+    ASSERT_EQ(results[1].status, NFS4ERR_STALE);
+    ASSERT_EQ(open_state_file_has_opens(ot, inode.fileid), 0);
+    ASSERT_EQ(mds_coord_open_scan_file(
+                  cat, inode.fileid, count_durable_open, &durable_count),
+              MDS_OK);
+    ASSERT_EQ(durable_count, 0);
+    ASSERT_EQ(mds_cat_ns_getattr(cat, inode.fileid, &retained), MDS_OK);
+    ASSERT_TRUE((retained.flags & MDS_IFLAG_DELETE_PENDING) != 0);
+
+    open_state_table_destroy(ot);
+    mds_catalogue_close(cat);
+}
 
 /* -----------------------------------------------------------------------
  * Part 2: Compound integration tests
@@ -632,7 +835,7 @@ static void test_compound_open_create_close(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[6];
-	struct nfs4_result res[6];
+	struct nfs4_result res[6] = {0};
 	uint32_t n;
 	char *path;
 
@@ -694,7 +897,7 @@ static void test_compound_open_existing(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[6];
-	struct nfs4_result res[6];
+	struct nfs4_result res[6] = {0};
 	uint32_t n;
 	char *path;
 
@@ -750,7 +953,7 @@ static void test_compound_open_noent(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[4];
-	struct nfs4_result res[4];
+	struct nfs4_result res[4] = {0};
 	uint32_t n;
 	char *path;
 
@@ -784,7 +987,7 @@ static void test_compound_open_guarded_exist(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[4];
-	struct nfs4_result res[4];
+	struct nfs4_result res[4] = {0};
 	uint32_t n;
 	char *path;
 
@@ -863,7 +1066,7 @@ static void test_compound_share_conflict(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[4];
-	struct nfs4_result res[4];
+	struct nfs4_result res[4] = {0};
 	uint32_t n;
 	char *path;
 	static const uint8_t owner_a[] = { 'A', 'A', 'A', 'A' };
@@ -918,7 +1121,7 @@ static void test_compound_open_claim_fh(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[6];
-	struct nfs4_result res[6];
+	struct nfs4_result res[6] = {0};
 	uint64_t file_fid;
 	uint32_t n;
 	char *path;
@@ -975,7 +1178,7 @@ static void test_compound_close_bad_stateid(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[3];
-	struct nfs4_result res[3];
+	struct nfs4_result res[3] = {0};
 	struct nfs4_stateid bogus;
 	uint32_t n;
 	char *path;
@@ -1010,7 +1213,7 @@ static void test_compound_reopen_after_close(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[4];
-	struct nfs4_result res[4];
+	struct nfs4_result res[4] = {0};
 	uint32_t n;
 	char *path;
 
@@ -1071,7 +1274,7 @@ static void test_compound_open_directory(void)
 	struct open_state_table *ot = NULL;
 	struct compound_data cd;
 	struct nfs4_op ops[4];
-	struct nfs4_result res[4];
+	struct nfs4_result res[4] = {0};
 	uint32_t n;
 	char *path;
 
@@ -1131,9 +1334,14 @@ int main(void)
 	RUN_TEST(test_api_close_wrong_owner);
 	RUN_TEST(test_api_different_open_owners);
 	RUN_TEST(test_api_reopen_same_owner_bumps_seqid);
+	RUN_TEST(test_api_durable_open_scan_and_rollback);
+	RUN_TEST(test_api_open_race_rollback_after_final_unlink);
 
 	/* Part 2: Compound integration tests */
 	RUN_TEST(test_compound_open_create_close);
+	RUN_TEST(test_compound_open_pending_inode_is_stale);
+	RUN_TEST(test_compound_open_does_not_advertise_preserve_unlinked);
+	RUN_TEST(test_compound_durable_open_race_rolls_back_when_async_off);
 	RUN_TEST(test_compound_open_existing);
 	RUN_TEST(test_compound_open_noent);
 	RUN_TEST(test_compound_open_guarded_exist);

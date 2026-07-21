@@ -126,18 +126,16 @@ int commit_queue_create(struct mds_catalogue *cat,
  * Borrowed-pointer lifetime contract
  * ---------------------------------
  * commit_op fields documented as `Borrowed; valid during submit.`
- * (today: commit_op_create.layout_ds_ids,
- * commit_op_layout_put.ds_ids, commit_op_layout_del.ds_ids in
- * include/commit_queue.h) need only outlive the call to
- * commit_queue_submit().  Because dispatch is synchronous and the
+ * (today: commit_op_layout_put.ds_ids and
+ * commit_op_layout_del.ds_ids in include/commit_queue.h) need only outlive
+ * the call to commit_queue_submit().  Because dispatch is synchronous and the
  * vtable backends that store the array deep-copy before returning
  * (see tests/catalogue_memdb.c::mem_layout_grant; the RonDB shim
  * re-encodes via the row writer), callers may borrow stack-locals
- * or transient buffers -- see e.g. layout_recall.c::revoke_layout
- * and compound_data_io.c::op_open's pre_create_ds_id path.  If
- * commit_queue_submit is ever made asynchronous the contract has
- * to flip to copy-on-submit; track every callsite that takes the
- * address of a stack variable when making that change.
+ * or transient buffers -- see e.g. layout_recall.c::revoke_layout.
+ * If commit_queue_submit is ever made asynchronous the contract has to
+ * flip to copy-on-submit; track every callsite that takes the address of a
+ * stack variable when making that change.
  */
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum mds_status commit_queue_submit(struct commit_queue *cq,
@@ -177,15 +175,69 @@ enum mds_status commit_queue_submit(struct commit_queue *cq,
 			if (a->skip_transient_ndb) {
 				a->layout_pregrant_ok = true;
 			} else {
+				struct mds_ds_map_entry *stripe_entries = NULL;
+				uint32_t stripe_count = 0;
+				uint32_t stripe_unit = 0;
+				uint32_t mirror_count = 0;
+				uint32_t layout_ds_id = 0;
 				enum mds_status lg_st;
+				/*
+				 * The create backend owns the prealloc pop.
+				 * Read the committed map instead of accepting
+				 * a caller's speculative pre-pop placement.
+				 * If it is unavailable, leave the pregrant
+				 * unset so the following LAYOUTGET takes its
+				 * normal path rather than granting a stale DS.
+				 */
+				bool have_ds = false;
 
-				lg_st = mds_coord_layout_grant(
-					cat, NULL,
-					a->layout_clientid, a->out->fileid,
-					a->layout_iomode, a->layout_offset,
-					a->layout_length, &a->layout_stateid,
-					a->layout_ds_ids,
-					a->layout_ds_count);
+				lg_st = mds_cat_stripe_map_get(
+					cat, a->out->fileid, &stripe_count,
+					&stripe_unit, &mirror_count,
+					&stripe_entries);
+				if (lg_st == MDS_OK &&
+				    stripe_count == 1 &&
+				    mirror_count == 1 &&
+				    stripe_entries != NULL) {
+					layout_ds_id = stripe_entries[0].ds_id;
+					have_ds = true;
+				} else if (lg_st == MDS_ERR_NOTFOUND) {
+					/*
+					 * v9 inline single-stripe files carry
+					 * their one DS entry on the inode and
+					 * have no stripe-map row.  ns_create's
+					 * out-param is built before the shim's
+					 * inline conversion, so re-read the
+					 * authoritative inode -- same fallback
+					 * as proxy_stripe_map_get.
+					 */
+					struct mds_inode created;
+
+					if (mds_cat_ns_getattr(
+						cat, a->out->fileid,
+						&created) == MDS_OK &&
+					    (created.flags &
+					     MDS_IFLAG_INLINE_STRIPE) != 0 &&
+					    created.inline_fh_len > 0) {
+						layout_ds_id =
+							created.inline_ds_id;
+						have_ds = true;
+					}
+				}
+				if (have_ds) {
+					lg_st = mds_coord_layout_grant(
+						cat, NULL,
+						a->layout_clientid,
+						a->out->fileid,
+						a->layout_iomode,
+						a->layout_offset,
+						a->layout_length,
+						&a->layout_stateid,
+						&layout_ds_id, 1);
+				} else if (lg_st == MDS_OK) {
+					lg_st = MDS_ERR_NOTFOUND;
+				}
+				free(stripe_entries);
 				a->layout_pregrant_ok = (lg_st == MDS_OK);
 			}
 		}

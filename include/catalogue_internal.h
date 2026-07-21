@@ -61,6 +61,12 @@ struct mds_authority_ops {
         const char *name, enum mds_file_type type,
         uint32_t mode, uint64_t uid, uint64_t gid,
         struct ds_prealloc_ctx *prealloc, struct mds_inode *out);
+    enum mds_status (*ns_create_wide)(struct mds_catalogue *cat,
+        uint64_t parent, const char *name,
+        const struct mds_inode *child,
+        uint32_t stripe_count, uint32_t stripe_unit,
+        uint32_t mirror_count,
+        const struct mds_ds_map_entry *entries);
     enum mds_status (*ns_remove)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name);
@@ -69,46 +75,15 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name, const struct mds_inode *child,
         uint32_t stripe_count);
-    /* parent_touch flush target: one interpreted update on the parent
-     * inode row (change += delta, mtime/ctime = stamp).  Missing parent
-     * row is MDS_OK.  Optional slot: NULL => NOSUPPORT and the feature
-     * auto-disables at startup. */
-    enum mds_status (*ns_parent_touch)(struct mds_catalogue *cat,
-        struct mds_cat_txn *txn, uint64_t fileid,
-        uint64_t change_delta, struct timespec stamp);
-    /* Async-REMOVE delete manifest (schema v18, mds.conf
-     * `remove_async`).  Optional slots: a backend without the
-     * mds_remove_pending table leaves them NULL and the dispatcher
-     * returns MDS_ERR_NOSUPPORT, which keeps op_remove on the legacy
-     * synchronous path. */
-    enum mds_status (*remove_pending_enqueue)(struct mds_catalogue *cat,
-        struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
-        uint64_t child_fileid, uint64_t child_generation,
-        uint64_t *seq_out);
-    /* PHASE-R TEST: unlink-at-ack variant — manifest insert plus a guarded
-     * dirent delete and inode DELETE_PENDING flag in ONE committed txn.
-     * MDS_ERR_STALE on guard mismatch (caller falls back to sync).  Optional. */
-    enum mds_status (*remove_pending_enqueue_unlink)(struct mds_catalogue *cat,
-        struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
-        uint64_t child_fileid, uint64_t child_generation,
-        uint64_t *seq_out);
-    enum mds_status (*remove_pending_peek_batch)(struct mds_catalogue *cat,
-        uint64_t now_ns,
-        struct mds_remove_pending_entry *entries,
-        uint32_t cap, uint32_t *n_out);
-    enum mds_status (*remove_pending_claim)(struct mds_catalogue *cat,
-        uint64_t remove_seq, uint32_t mds_id, uint64_t boot_epoch,
-        uint64_t now_ns, uint64_t claim_ttl_ns);
-    enum mds_status (*remove_pending_complete)(struct mds_catalogue *cat,
-        uint64_t remove_seq);
-    enum mds_status (*remove_pending_bump_retry)(struct mds_catalogue *cat,
-        uint64_t remove_seq);
-    enum mds_status (*remove_pending_count)(struct mds_catalogue *cat,
-        uint32_t *count);
-    enum mds_status (*remove_pending_scan_all)(struct mds_catalogue *cat,
-        mds_cat_remove_pending_scan_cb cb, void *ctx);
-
-
+    /**
+     * Optional atomic final regular-file unlink. This cannot be assembled
+     * from public logical transactions because RonDB needs one physical NDB
+     * transaction for dirent, inode, parent, and GC-task mutations.
+     */
+    enum mds_status (*ns_remove_final_file)(struct mds_catalogue *cat,
+        uint64_t parent, const char *name, uint64_t expected_fileid,
+        uint64_t expected_generation,
+        struct mds_final_unlink_result *result);
     enum mds_status (*ns_rename)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t src_parent,
         const char *src_name, uint64_t dst_parent,
@@ -124,6 +99,10 @@ struct mds_authority_ops {
     enum mds_status (*ns_setattr)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t fileid,
         const struct mds_inode *attrs, uint32_t mask);
+    enum mds_status (*ns_setattr_size_extend)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t fileid,
+        const struct mds_inode *attrs, uint32_t mask,
+        struct mds_size_extend_result *result);
     enum mds_status (*ns_readdir)(struct mds_catalogue *cat,
         uint64_t parent, const char *start_after,
         uint32_t max_entries,
@@ -280,6 +259,30 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t gc_seq);
     enum mds_status (*gc_count)(struct mds_catalogue *cat,
         uint32_t *count);
+    /* Lease-based durable GC tasks. */
+    enum mds_status (*gc_task_stats)(struct mds_catalogue *cat,
+        struct mds_gc_task_stats *stats);
+    enum mds_status (*gc_task_enqueue)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, const struct mds_gc_task *task);
+    enum mds_status (*gc_task_claim_batch)(struct mds_catalogue *cat,
+        struct mds_gc_task *tasks, uint32_t cap, uint32_t *n_out,
+        uint32_t owner_mds_id, uint64_t owner_boot_epoch,
+        uint32_t lease_ms, uint32_t stale_owner_ms);
+    enum mds_status (*gc_task_renew)(struct mds_catalogue *cat,
+        uint8_t task_kind, uint64_t task_id, uint32_t owner_mds_id,
+        uint64_t owner_boot_epoch, uint32_t lease_ms);
+    enum mds_status (*gc_task_reschedule)(struct mds_catalogue *cat,
+        uint8_t task_kind, uint64_t task_id, uint32_t owner_mds_id,
+        uint64_t owner_boot_epoch, int32_t last_error, uint32_t retry_ms);
+    enum mds_status (*gc_task_complete)(struct mds_catalogue *cat,
+        uint8_t task_kind, uint64_t task_id, uint32_t owner_mds_id,
+        uint64_t owner_boot_epoch);
+    enum mds_status (*gc_task_quarantine)(struct mds_catalogue *cat,
+        uint8_t task_kind, uint64_t task_id, uint32_t owner_mds_id,
+        uint64_t owner_boot_epoch, int32_t last_error);
+    enum mds_status (*gc_task_finalize_file)(struct mds_catalogue *cat,
+        uint64_t fileid, uint64_t expected_generation,
+        uint32_t owner_mds_id, uint64_t owner_boot_epoch);
 
     /**
      * Optional batched peek.

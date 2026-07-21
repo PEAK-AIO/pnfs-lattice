@@ -8,6 +8,7 @@
  */
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -17,6 +18,7 @@
 #include "mds_catalogue.h"
 #include "ds_prealloc.h"        /* ds_prealloc_batch + struct */
 #include "hpc_shared.h"
+#include "migration.h"
 
 /* Recognise a "true-like" value byte string per the documented set:
  * "1", "true", "yes", "on" (case-insensitive).  Empty value clears.
@@ -183,54 +185,241 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
     return MDS_OK;
 }
 
+static bool hpc_pending_map_is_complete(
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const struct mds_ds_map_entry *entries)
+{
+    uint64_t entry_count;
+
+    if (stripe_count == 0 || stripe_count > MDS_MAX_STRIPES ||
+        stripe_unit == 0 || mirror_count == 0 ||
+        mirror_count > MDS_MAX_MIRRORS || entries == NULL) {
+        return false;
+    }
+    entry_count = (uint64_t)stripe_count * mirror_count;
+    for (uint64_t entry_index = 0; entry_index < entry_count;
+         entry_index++) {
+        if (entries[entry_index].nfs_fh_len == 0 ||
+            entries[entry_index].nfs_fh_len > MDS_NFS_FH_MAX) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void hpc_enqueue_cleanup_entries(
+    struct mds_catalogue *cat,
+    uint64_t fileid,
+    const struct mds_ds_map_entry *entries,
+    uint64_t entry_count)
+{
+    if (cat == NULL || entries == NULL) {
+        return;
+    }
+    for (uint64_t entry_index = 0; entry_index < entry_count;
+         entry_index++) {
+        if (entries[entry_index].nfs_fh_len == 0 ||
+            entries[entry_index].nfs_fh_len > MDS_NFS_FH_MAX) {
+            continue;
+        }
+        (void)mds_cat_gc_enqueue(
+            cat, NULL, fileid, entries[entry_index].ds_id,
+            entries[entry_index].nfs_fh,
+            entries[entry_index].nfs_fh_len);
+    }
+}
+
+/*
+ * Reap grace for incomplete legacy PENDING rows, in seconds.  During a
+ * rolling upgrade a peer MDS still running the pre-atomic release
+ * commits the inode + dirent before the stripe map; reaping such a row
+ * mid-create would delete the in-flight file and let the old node's
+ * failure rollback remove a same-name successor by name.  Recovery
+ * therefore only hides (never reaps) incomplete rows younger than this
+ * window.  Wide-create FH capture takes minutes at worst, so 300 s
+ * comfortably covers it.  Complete maps are promoted regardless of age.
+ */
+#define HPC_PENDING_REAP_GRACE_SEC_DEFAULT 300U
+static uint32_t g_pending_reap_grace_sec =
+    HPC_PENDING_REAP_GRACE_SEC_DEFAULT;
+
+void hpc_shared_test_set_pending_reap_grace(uint32_t grace_sec)
+{
+    g_pending_reap_grace_sec = grace_sec;
+}
+
+enum mds_status hpc_shared_recover_pending(
+    struct compound_data *cd,
+    struct mds_inode *inode)
+{
+    struct mds_ds_map_entry *entries = NULL;
+    struct mds_inode visible_inode;
+    uint32_t stripe_count = 0;
+    uint32_t stripe_unit = 0;
+    uint32_t mirror_count = 0;
+    uint64_t entry_count;
+    char name[MDS_MAX_NAME + 1];
+    enum mds_status st;
+
+    if (cd == NULL || cd->cat == NULL || inode == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if ((inode->flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0) {
+        return MDS_OK;
+    }
+
+    st = mds_cat_stripe_map_get(
+        cd->cat, inode->fileid, &stripe_count, &stripe_unit, &mirror_count,
+        &entries);
+    if (st == MDS_OK && hpc_pending_map_is_complete(
+            stripe_count, stripe_unit, mirror_count, entries)) {
+        visible_inode = *inode;
+        visible_inode.flags &= ~MDS_IFLAG_HPC_CREATE_PENDING;
+        st = mds_cat_ns_setattr(
+            cd->cat, NULL, inode->fileid, &visible_inode, MDS_ATTR_FLAGS);
+        free(entries);
+        if (st != MDS_OK) {
+            return st;
+        }
+        *inode = visible_inode;
+        compound_inode_invalidate(cd, inode->fileid);
+        return MDS_OK;
+    }
+    if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+        free(entries);
+        return st;
+    }
+
+    /*
+     * Rolling-upgrade guard: hide (do not reap) an incomplete row
+     * younger than the grace window -- it may be an in-flight create
+     * on a not-yet-upgraded peer.  This matches the legacy runtime
+     * filter; the row becomes reapable once it ages past the window
+     * or visible once its creator commits the map and clears the flag.
+     */
+    if (g_pending_reap_grace_sec > 0) {
+        struct timespec now;
+
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0 ||
+            now.tv_sec < inode->ctime.tv_sec ||
+            (uint64_t)(now.tv_sec - inode->ctime.tv_sec) <
+                g_pending_reap_grace_sec) {
+            free(entries);
+            return MDS_ERR_NOTFOUND;
+        }
+    }
+
+    entry_count = 0;
+    if (stripe_count > 0 && stripe_count <= MDS_MAX_STRIPES &&
+        mirror_count > 0 && mirror_count <= MDS_MAX_MIRRORS) {
+        entry_count = (uint64_t)stripe_count * mirror_count;
+    }
+    hpc_enqueue_cleanup_entries(cd->cat, inode->fileid, entries, entry_count);
+    free(entries);
+    st = mds_cat_ns_dirent_name_for_child(
+        cd->cat, inode->parent_fileid, inode->fileid, name, sizeof(name));
+    if (st == MDS_OK) {
+        st = mds_cat_ns_remove_known(
+            cd->cat, NULL, inode->parent_fileid, name, inode, stripe_count);
+        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+            return st;
+        }
+        (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
+        compound_dirent_invalidate(cd, inode->parent_fileid, name);
+    } else if (st == MDS_ERR_NOTFOUND) {
+        if (stripe_count > 0) {
+            (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
+        }
+        st = mds_cat_inode_del(cd->cat, NULL, inode->fileid);
+        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+            return st;
+        }
+    } else {
+        return st;
+    }
+    compound_inode_invalidate(cd, inode->fileid);
+    return MDS_ERR_NOTFOUND;
+}
+
+struct hpc_pending_scan_ctx {
+    struct compound_data compound;
+    struct hpc_pending_recovery_stats stats;
+    enum mds_status status;
+};
+
+static int hpc_recover_pending_scan_cb(
+    const struct mig_inode_chunk *chunk,
+    void *arg)
+{
+    struct hpc_pending_scan_ctx *ctx = arg;
+    struct mds_inode inode;
+
+    if ((chunk->inode.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0) {
+        return 0;
+    }
+    inode = chunk->inode;
+    ctx->status = hpc_shared_recover_pending(&ctx->compound, &inode);
+    if (ctx->status == MDS_OK) {
+        ctx->stats.promoted++;
+        return 0;
+    }
+    if (ctx->status == MDS_ERR_NOTFOUND) {
+        /* Reaped, or hidden by the rolling-upgrade reap grace; either
+         * way the row is no longer client-visible. */
+        ctx->stats.reaped++;
+        ctx->status = MDS_OK;
+        return 0;
+    }
+    return 1;
+}
+
+enum mds_status hpc_shared_recover_pending_scan(
+    struct mds_catalogue *cat,
+    struct hpc_pending_recovery_stats *stats)
+{
+    struct hpc_pending_scan_ctx ctx;
+    enum mds_status st;
+
+    if (cat == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.compound.cat = cat;
+    st = mds_cat_subtree_iter(
+        cat, MDS_FILEID_ROOT, hpc_recover_pending_scan_cb, &ctx);
+    /* A callback-initiated stop may surface through the iterator's
+     * return value; the recovery status is the authoritative cause. */
+    if (ctx.status != MDS_OK) {
+        return ctx.status;
+    }
+    if (st != MDS_OK) {
+        return st;
+    }
+    if (stats != NULL) {
+        *stats = ctx.stats;
+    }
+    return MDS_OK;
+}
+
 /* -----------------------------------------------------------------------
- * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md -- wide HPC create.
+ * Wide HPC create.
  *
- * Implementation notes:
- *  - We bypass mds_cat_ns_create here because that path is wired to
- *    the single-DS prealloc-pop machinery (it expects a non-NULL
- *    prealloc ctx for REG files and persists a 1-DS stripe map as
- *    a side effect).  Passing prealloc=NULL behaves backend-
- *    specifically and would either fail outright or skip the inode
- *    initialisation we need.  Going through the lower-level
- *    primitives (alloc_fileid + inode_put + dirent_put) gives us full
- *    control: the inode is created with the HPC_SHARED flag already
- *    set, no spurious 1-DS stripe map ever exists, and the wide
- *    stripe map is a single mds_cat_stripe_map_put after FH capture.
- *
- *  - Two failure modes need explicit cleanup:
- *      (a) ds_prealloc_batch failure -- ds_prealloc_batch's internal
- *          rollback already enqueued GC for any DS-side state it
- *          partially produced.  We only need to remove the inode +
- *          dirent we created in step 2.
- *      (b) mds_cat_stripe_map_put failure -- ds_prealloc_batch
- *          succeeded so we own real DS files; we GC-enqueue every
- *          slot before removing the inode + dirent.  Without this
- *          the DS files leak forever.
- *
- *  - The catalogue's two-phase txn (begin / commit) groups the
- *    inode + dirent + parent touch atomically.  The wide stripe map
- *    is a separate write because it can fail independently and we
- *    want the cleanup path to run only on the second write.
+ * DS object creation precedes the catalogue transaction because the DS
+ * handles are part of the committed stripe map.  No namespace row is made
+ * visible until mds_cat_ns_create_wide commits inode, dirent, parent update,
+ * and the complete map together.
  * ----------------------------------------------------------------------- */
 
-/**
- * Step 2: allocate fileid + insert inode (with HPC_SHARED flag) +
- * insert parent dirent + touch parent, all in one catalogue write
- * transaction.  Returns the freshly-built inode and its fileid.
- *
- * Caller's responsibility: on subsequent step failure, call
- * mds_cat_ns_remove(parent_fileid, name) to undo this step.
- */
-static enum mds_status hpc_create_inode_and_dirent(
+static enum mds_status hpc_prepare_wide_inode(
     struct mds_catalogue *cat,
     uint64_t parent_fileid,
-    const char *name,
     uint32_t mode,
-    uint64_t uid, uint64_t gid,
+    uint64_t uid,
+    uint64_t gid,
     struct mds_inode *out_inode)
 {
-    struct mds_cat_txn *txn = NULL;
     struct mds_inode child;
     uint64_t child_fid = 0;
     struct timespec now;
@@ -241,12 +430,9 @@ static enum mds_status hpc_create_inode_and_dirent(
         return (st == MDS_OK) ? MDS_ERR_NOMEM : st;
     }
 
-    st = mds_cat_txn_begin(cat, MDS_CAT_TXN_WRITE, &txn);
-    if (st != MDS_OK) {
-        return st;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return MDS_ERR_IO;
     }
-
-    clock_gettime(CLOCK_REALTIME, &now);
     memset(&child, 0, sizeof(child));
     child.fileid = child_fid;
     child.type = MDS_FTYPE_REG;
@@ -260,87 +446,29 @@ static enum mds_status hpc_create_inode_and_dirent(
     child.change = 1;
     child.generation = 1;
     child.parent_fileid = parent_fileid;
-    /* Phase 3: HPC-Shared wide CREATE is a multi-row operation
-     * (inode + dirent + parent in this txn, then stripe map in a
-     * follow-up write).  We persist the inode with the
-     * MDS_IFLAG_HPC_CREATE_PENDING flag set so that, if the MDS
-     * crashes after the inode commit but before the stripe map
-     * commit, the read path filters the orphan file from clients
-     * (compound_inode_get / compound_lookup_local_child both check
-     * the flag and return MDS_ERR_NOTFOUND).  The flag is cleared by
-     * the caller after mds_cat_stripe_map_put returns MDS_OK. */
-    child.flags = MDS_IFLAG_HPC_SHARED | MDS_IFLAG_HPC_CREATE_PENDING;
-
-    st = mds_cat_inode_put(cat, txn, &child);
-    if (st != MDS_OK) {
-        mds_cat_txn_abort(txn);
-        return st;
-    }
-
-    /* Insert-only: OPEN4_CREATE(UNCHECKED) on an existing name must
-     * surface MDS_ERR_EXISTS so op_open falls through to the
-     * open-existing path.  The old dirent_put (writeTuple) silently
-     * REPLACED the dirent: every opener of a shared HPC file minted
-     * a private inode, all earlier openers' DS data was orphaned, and
-     * N-to-1 workloads (ior-hard) read back holes/short files. */
-    st = mds_cat_dirent_insert(cat, txn, parent_fileid, name,
-                               child_fid, (uint8_t)MDS_FTYPE_REG);
-    if (st != MDS_OK) {
-        mds_cat_txn_abort(txn);
-        /* RonDB catalogue writes are self-contained (txn is not a
-         * real transaction), so the inode row from mds_cat_inode_put
-         * above is already durable -- delete it or it leaks.  The
-         * fileid is fresh and unreferenced (no dirent), so this
-         * cannot race a reader. */
-        (void)mds_cat_inode_del(cat, NULL, child_fid);
-        return st;
-    }
-
-    /* Best-effort parent touch.  A failure here is not fatal -- the
-     * inode + dirent are already in the txn and will commit; the
-     * parent stays at its current change counter, which matches the
-     * test_helpers.h convention for direct catalogue writes. */
-    {
-        struct mds_inode parent_inode;
-        if (mds_cat_ns_getattr(cat, parent_fileid,
-                               &parent_inode) == MDS_OK) {
-            parent_inode.mtime = now;
-            parent_inode.ctime = now;
-            parent_inode.change++;
-            (void)mds_cat_inode_put(cat, txn, &parent_inode);
-        }
-    }
-
-    st = mds_cat_txn_commit(txn);
-    if (st != MDS_OK) {
-        return MDS_ERR_IO;
-    }
+    child.flags = MDS_IFLAG_HPC_SHARED;
 
     *out_inode = child;
     return MDS_OK;
 }
 
-/* GC-enqueue every captured slot of a wide pre-warm batch.  Used by
- * the wide-create rollback path after persistence (step 4) failed but
- * the DS files at @p entries are already on disk.  Best-effort: a
- * failing enqueue does not abort the rollback. */
+/* GC-enqueue every captured slot of a failed wide pre-warm batch.
+ * Best-effort: a failing enqueue does not change the create result. */
 static void hpc_create_gc_enqueue_entries(
     struct mds_catalogue *cat, uint64_t fileid,
     const struct ds_prealloc_batch_result *batch)
 {
-    if (cat == NULL || batch == NULL || batch->entries == NULL) {
+    uint64_t entry_count;
+
+    if (batch == NULL) {
         return;
     }
-    uint32_t total = batch->stripe_count * batch->mirror_count;
-    for (uint32_t i = 0; i < total; i++) {
-        if (batch->entries[i].nfs_fh_len == 0) {
-            continue;
-        }
-        (void)mds_cat_gc_enqueue(cat, NULL, fileid,
-                                 batch->entries[i].ds_id,
-                                 batch->entries[i].nfs_fh,
-                                 batch->entries[i].nfs_fh_len);
+    entry_count = (uint64_t)batch->stripe_count * batch->mirror_count;
+    if (entry_count > (uint64_t)MDS_MAX_STRIPES * MDS_MAX_MIRRORS) {
+        return;
     }
+    hpc_enqueue_cleanup_entries(
+        cat, fileid, batch->entries, entry_count);
 }
 
 enum mds_status hpc_shared_create_wide_layout(
@@ -361,7 +489,9 @@ enum mds_status hpc_shared_create_wide_layout(
     struct mds_inode       *out)
 {
     struct mds_inode child;
-    enum mds_status  st;
+    struct ds_prealloc_batch_request request;
+    struct ds_prealloc_batch_result batch;
+    enum mds_status st;
 
     if (cat == NULL || prealloc == NULL || name == NULL || out == NULL) {
         return MDS_ERR_INVAL;
@@ -384,89 +514,38 @@ enum mds_status hpc_shared_create_wide_layout(
         stripe_unit = 65536;
     }
 
-    /* Step 2: create inode + dirent in one catalogue txn.  Inode
-     * carries MDS_IFLAG_HPC_SHARED from the start -- no follow-up
-     * setattr needed. */
-    st = hpc_create_inode_and_dirent(cat, parent_fileid, name,
-                                     mode, uid, gid, &child);
+    st = hpc_prepare_wide_inode(cat, parent_fileid, mode, uid, gid, &child);
+    if (st != MDS_OK) {
+        return st;
+    }
+    memset(&request, 0, sizeof(request));
+    request.stripe_count = stripe_count;
+    request.mirror_count = mirror_count;
+    request.stripe_unit = stripe_unit;
+    request.required_mode = DS_MODE_GENERIC;
+    request.required_transport = required_transport != 0
+        ? required_transport : DS_TRANSPORT_TCP;
+    request.preferred_transport = preferred_transport;
+    request.preferred_caps = preferred_caps;
+    request.strict_unique_ds = strict_unique_ds;
+    request.fileid_hint = child.fileid;
+
+    st = ds_prealloc_batch(prealloc, &request, &batch);
     if (st != MDS_OK) {
         return st;
     }
 
-    /* Step 3: capture FHs in parallel, using the freshly-allocated
-     * fileid so the returned entries[] line up with the catalogue
-     * inode the previous step persisted. */
-    struct ds_prealloc_batch_request req;
-    struct ds_prealloc_batch_result   batch;
-    memset(&req, 0, sizeof(req));
-    req.stripe_count        = stripe_count;
-    req.mirror_count        = mirror_count;
-    req.stripe_unit         = stripe_unit;
-    req.required_mode       = DS_MODE_GENERIC;
-    req.required_transport  = (required_transport != 0)
-                              ? required_transport : DS_TRANSPORT_TCP;
-    req.preferred_transport = preferred_transport;
-    req.preferred_caps      = preferred_caps;
-    req.strict_unique_ds    = strict_unique_ds;
-    req.fileid_hint         = child.fileid;
-
-    st = ds_prealloc_batch(prealloc, &req, &batch);
+    st = mds_cat_ns_create_wide(
+        cat, parent_fileid, name, &child, batch.stripe_count,
+        batch.stripe_unit, batch.mirror_count, batch.entries);
     if (st != MDS_OK) {
-        /* Step 3 failure: ds_prealloc_batch already GC-enqueued any
-         * partial DS-side state.  We only need to remove the inode +
-         * dirent we created in step 2. */
-        (void)mds_cat_ns_remove(cat, NULL, parent_fileid, name);
-        return st;
-    }
-
-    /* Step 4: persist the wide stripe map. */
-    st = mds_cat_stripe_map_put(cat, NULL, child.fileid,
-                                batch.stripe_count, batch.stripe_unit,
-                                batch.mirror_count, batch.entries);
-    if (st != MDS_OK) {
-        /* Step 4 failure: we own real DS files (FH capture
-         * succeeded).  GC-enqueue every slot before removing the
-         * inode + dirent so the worker reclaims DS bytes on its
-         * next pass.  The PENDING flag on the inode keeps it
-         * filtered from clients until mds_cat_ns_remove succeeds. */
         hpc_create_gc_enqueue_entries(cat, child.fileid, &batch);
         ds_prealloc_batch_result_destroy(&batch);
-        (void)mds_cat_ns_remove(cat, NULL, parent_fileid, name);
-        return MDS_ERR_IO;
+        return st;
     }
 
-    /* Step 5 (Phase 3 of the QA plan): clear MDS_IFLAG_HPC_CREATE_PENDING
-     * now that the stripe map is durable.  This is the commit point
-     * that makes the file visible to NFS clients.
-     *
-     * If the clear fails, the inode remains in PENDING state but the
-     * stripe map has already been persisted -- we cannot leave that
-     * combination behind, so we fall back to the same rollback as a
-     * step 4 failure: delete the stripe map row, GC-enqueue every
-     * captured DS FH, and remove the inode + dirent.  Returning IO
-     * matches step 4's semantics so the client retries cleanly. */
-    {
-        struct mds_inode clear_attrs = child;
-        clear_attrs.flags &= ~MDS_IFLAG_HPC_CREATE_PENDING;
-        st = mds_cat_ns_setattr(cat, NULL, child.fileid, &clear_attrs,
-                                MDS_ATTR_FLAGS);
-        if (st != MDS_OK) {
-            (void)mds_cat_stripe_map_del(cat, NULL, child.fileid);
-            hpc_create_gc_enqueue_entries(cat, child.fileid, &batch);
-            ds_prealloc_batch_result_destroy(&batch);
-            (void)mds_cat_ns_remove(cat, NULL, parent_fileid, name);
-            return MDS_ERR_IO;
-        }
-        child.flags = clear_attrs.flags;
-    }
-
-    /* Success: surface the geometry on the returned inode for
-     * caller convenience.  Note that the catalogue's persisted
-     * inode does not carry stripe_count / stripe_unit / mirror_count
-     * (those live in the stripe_map row), so we set them locally
-     * for the caller to consult during the same compound. */
     child.stripe_count = batch.stripe_count;
-    child.stripe_unit  = batch.stripe_unit;
+    child.stripe_unit = batch.stripe_unit;
     child.mirror_count = batch.mirror_count;
 
     ds_prealloc_batch_result_destroy(&batch);

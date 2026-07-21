@@ -16,7 +16,7 @@
 #include "rondb_schema.h"
 
 /* -----------------------------------------------------------------------
- * Inode serialisation (137 bytes)
+ * Inode serialisation
  * ----------------------------------------------------------------------- */
 
 int rondb_inode_serialize(const struct mds_inode *inode,

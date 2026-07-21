@@ -91,10 +91,21 @@ struct mds_branch_metrics {
     _Atomic uint64_t prealloc_pops_fh_missing;/**< Ring hit but FH not captured. */
     _Atomic uint64_t prealloc_refill_entries; /**< Entries added by refill thread. */
     _Atomic uint64_t prealloc_refill_batches; /**< Refill batch invocations. */
-    _Atomic uint64_t gc_pending;              /**< GC-queue rows owned by this
-                                                  *  MDS still awaiting DS
-                                                  *  unlink (gauge; refreshed by
-                                                  *  the ds_gc coordinator). */
+    _Atomic uint64_t gc_pending;              /**< Active durable file-unlink
+                                                  *  tasks (coordinator gauge). */
+    _Atomic uint64_t gc_claimed;              /**< Claimed file tasks gauge. */
+    _Atomic uint64_t gc_oldest_age_seconds;   /**< Oldest active task age. */
+    _Atomic uint64_t gc_claimed_total;        /**< Successful task claims. */
+    _Atomic uint64_t gc_retries_total;        /**< Claims after a prior try. */
+    _Atomic uint64_t gc_open_blocked_total;   /**< Reschedules due to opens. */
+    _Atomic uint64_t gc_unavailable_ds_total; /**< DS cleanup retry events. */
+    _Atomic uint64_t gc_dead_owner_takeovers_total;
+    _Atomic uint64_t gc_permanent_failures_total;
+    _Atomic uint64_t gc_completed_total;
+    _Atomic uint64_t gc_deferred_quota_bytes;
+    _Atomic uint64_t gc_deferred_quota_inodes;
+    _Atomic uint64_t remove_async_sync_fallback_total;
+    _Atomic uint64_t remove_async_backpressure_active;
     _Atomic uint64_t layoutget_sync_fallback; /**< LAYOUTGET took sync FH path. */
     _Atomic uint64_t layoutget_delay_count;   /**< LAYOUTGET returned NFS4ERR_DELAY
                                                   *  (reserved; used once

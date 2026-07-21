@@ -146,8 +146,8 @@ int ds_prealloc_ensure(const struct ds_prealloc_ctx *ctx,
  * @brief Peek at the next pre-computed placement without consuming it.
  *
  * Non-destructive: the entry remains in the pool for the subsequent pop.
- * Used by the Phase 3 fused CREATE+LAYOUTGET to capture the DS ID
- * before the pop happens inside ns_create.
+ * This is an advisory preview only; CREATE paths must derive persisted
+ * placement and layout grants from the entry they actually pop.
  *
  * @param ctx          Pool context.
  * @param[out] entry   Receives the placement (ds_id populated).

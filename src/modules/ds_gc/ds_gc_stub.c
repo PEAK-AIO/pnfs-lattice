@@ -36,6 +36,20 @@ int ds_gc_start(struct mds_catalogue *cat,
     return 0;
 }
 
+int ds_gc_start_ex_with_identity(struct mds_catalogue *cat,
+                                 struct mds_proxy_ctx *proxy,
+                                 uint32_t poll_ms,
+                                 uint32_t workers,
+                                 uint32_t batch_size,
+                                 uint32_t mds_id,
+                                 uint64_t boot_epoch,
+                                 struct ds_gc **out)
+{
+    (void)mds_id;
+    (void)boot_epoch;
+    return ds_gc_start_ex(cat, proxy, poll_ms, workers, batch_size, out);
+}
+
 int ds_gc_start_ex(struct mds_catalogue *cat,
                    struct mds_proxy_ctx *proxy,
                    uint32_t poll_ms,

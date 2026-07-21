@@ -114,6 +114,61 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
                                                   void *out, uint32_t out_cap,
                                                   uint32_t *out_len);
 
+/**
+ * Recover a legacy HPC wide-create inode carrying
+ * MDS_IFLAG_HPC_CREATE_PENDING.
+ *
+ * A complete captured stripe map makes the inode visible.  An incomplete
+ * legacy row is removed and its captured DS objects are enqueued for cleanup.
+ *
+ * @param cd     Compound context containing the catalogue and caches.
+ * @param inode  Legacy pending inode; updated if recovery makes it visible.
+ * @return MDS_OK when @p inode is visible, MDS_ERR_NOTFOUND when removed, or
+ *         a catalogue error.
+ *
+ * Ownership: caller retains @p inode.
+ * Thread safety: the namespace mutation is serialized by the catalogue.
+ */
+enum mds_status hpc_shared_recover_pending(
+    struct compound_data *cd,
+    struct mds_inode *inode);
+
+/**
+ * Summary of a legacy pending-wide-create recovery scan.
+ */
+struct hpc_pending_recovery_stats {
+    uint64_t promoted;
+    uint64_t reaped;
+};
+
+/**
+ * Sweep the namespace rooted at MDS_FILEID_ROOT for legacy pending rows.
+ *
+ * This is intended for daemon startup before requests are served. Normal
+ * lookup paths also invoke hpc_shared_recover_pending(), so a row created
+ * by an older release after the sweep is still repaired lazily.
+ *
+ * @param cat    Open catalogue.
+ * @param stats  Optional recovery counters.
+ * @return MDS_OK or the first catalogue error encountered during the scan.
+ */
+enum mds_status hpc_shared_recover_pending_scan(
+    struct mds_catalogue *cat,
+    struct hpc_pending_recovery_stats *stats);
+
+/**
+ * Override the incomplete-row reap grace window (seconds).
+ *
+ * Recovery hides -- but does not reap -- an incomplete legacy pending
+ * row younger than the grace window, so a rolling upgrade cannot reap
+ * an in-flight create still being written by a pre-atomic peer MDS.
+ * Production keeps the built-in default; tests that fabricate fresh
+ * legacy rows set 0 for immediate reaping.
+ *
+ * @param grace_sec  New window in seconds (0 = reap immediately).
+ */
+void hpc_shared_test_set_pending_reap_grace(uint32_t grace_sec);
+
 /* -----------------------------------------------------------------------
  * Phase C / Steps 4 + 5 of docs/hpc-nto1-plan.md -- wide HPC create.
  *
@@ -122,22 +177,15 @@ enum mds_status hpc_shared_xattr_synthesize_value(struct compound_data *cd,
  * child inode.  Sequencing:
  *
  *   1. Allocate a new fileid via mds_cat_alloc_fileid().
- *   2. In one catalogue write transaction:
- *      * Insert the child inode (HPC_SHARED flag set).
- *      * Insert the parent dirent.
- *      * Touch the parent (mtime / change).
- *   3. ds_prealloc_batch(fileid_hint = child fileid) captures DS file
+ *   2. ds_prealloc_batch(fileid_hint = child fileid) captures DS file
  *      handles in parallel for stripe_count * mirror_count slots.
- *   4. mds_cat_stripe_map_put() persists the wide stripe map.
+ *   3. mds_cat_ns_create_wide() atomically inserts the child inode, parent
+ *      dirent, exact stripe map, and parent change/timestamp update.
  *
  * Failure handling:
- *   * Steps 1--2 failure: the catalogue stays clean (txn abort).
- *   * Step 3 failure: ds_prealloc_batch's internal rollback already
- *     GC-enqueued any DS-side state it created; the inode + dirent
- *     are removed via mds_cat_ns_remove() so the catalogue stays
- *     consistent.
- *   * Step 4 failure: any FH-captured DS file is GC-enqueued
- *     here, then the inode + dirent are removed.
+ *   * Steps 1--2 failure: no namespace metadata was written.
+ *   * Step 3 failure: any captured DS files are GC-enqueued; the failed
+ *     catalogue transaction leaves no inode, dirent, or stripe-map row.
  *
  * Strict per master plan S5 "all-or-nothing": a successful return
  * means the file exists with a complete wide stripe map; any error

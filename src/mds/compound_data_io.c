@@ -234,6 +234,8 @@ enum nfs4_status op_open(struct compound_data *cd,
 	enum mds_status st;
 	uint64_t target_fid;
 	int rc;
+	struct open_state_open_token open_token;
+	bool pending_inode_gate;
 	bool just_created = false;
 	/*
 	 * Phase-latency instrumentation (mds_branch_metrics
@@ -255,6 +257,8 @@ enum nfs4_status op_open(struct compound_data *cd,
 	if (cd->ot == NULL) {
 		return NFS4ERR_NOTSUPP;
 }
+	pending_inode_gate = cd->cfg_remove_async ||
+		open_state_table_has_durable_shared_state(cd->ot);
 
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
@@ -458,27 +462,6 @@ enum nfs4_status op_open(struct compound_data *cd,
 				}
 			}
 
-			/*
-			 * Capture DS ID before create consumes prealloc.
-			 * Skipped for the HPC wide path -- that path bypasses
-			 * the per-DS prealloc rings entirely (it issues a
-			 * synchronous batch placement) and the
-			 * stripe_cached LAYOUTGET fast-path is irrelevant
-			 * because the wide stripe map is already persisted
-			 * by the helper before op_open returns.
-			 */
-			uint32_t pre_create_ds_id = 0;
-			uint32_t pre_create_stripe_unit = 0;
-			bool pre_create_have_ds = false;
-			if (!hpc_wide_path && cd->prealloc != NULL) {
-				struct mds_ds_map_entry peek_e;
-				if (ds_prealloc_peek(cd->prealloc,
-						     &peek_e,
-						     &pre_create_stripe_unit) == 0) {
-					pre_create_ds_id = peek_e.ds_id;
-					pre_create_have_ds = true;
-				}
-			}
 
 			/* Create the file. */
 			clock_gettime(CLOCK_MONOTONIC, &t_mark);
@@ -544,16 +527,6 @@ enum nfs4_status op_open(struct compound_data *cd,
 							cop.args.create.layout_length = lg->length;
 							cop.args.create.skip_transient_ndb =
 								cd->skip_transient_ndb;
-							if (pre_create_have_ds) {
-								/* Borrow the stack-local pre_create_ds_id
-								 * for the synchronous commit_queue_submit
-								 * below -- see the lifetime contract
-								 * comment on commit_queue_submit().
-								 * ds_id 0 is a valid DS (0-based). */
-								cop.args.create.layout_ds_ids =
-									&pre_create_ds_id;
-								cop.args.create.layout_ds_count = 1;
-							}
 							make_layout_stateid(cd->mds_id,
 							&cop.args.create.layout_stateid);
 							break;
@@ -670,18 +643,24 @@ enum nfs4_status op_open(struct compound_data *cd,
 					 * lifetime.
 					 */
 					if (st == MDS_OK &&
+					    pre_entry.ds_id != 0 &&
 					    pre_entry.nfs_fh_len > 0 &&
 					    pre_entry.nfs_fh_len <=
 						sizeof(cd->stripe_cached_nfs_fh)) {
-						/* ds_id 0 is valid; readiness is
-						 * the captured FH from the pop. */
 						cd->stripe_cached = true;
 						cd->stripe_cached_fileid =
 							inode.fileid;
 						cd->stripe_cached_ds_id =
 							pre_entry.ds_id;
+						/* Matches the unit the fused
+						 * create persisted: the popped
+						 * prealloc entry carries the
+						 * config stripe unit; 65536 is
+						 * the shared fallback. */
 						cd->stripe_cached_stripe_unit =
-							pre_create_stripe_unit;
+							(cd->cfg_stripe_unit > 0)
+							? cd->cfg_stripe_unit
+							: 65536U;
 						cd->stripe_cached_nfs_fh_len =
 							pre_entry.nfs_fh_len;
 						memcpy(cd->stripe_cached_nfs_fh,
@@ -722,11 +701,10 @@ enum nfs4_status op_open(struct compound_data *cd,
 					cd->current_fh.fileid,
 					a->name, &inode);
 				if (st == MDS_ERR_NOTFOUND) {
-					/* The winning creator exists (our
-					 * insert hit its dirent) but is
-					 * still HPC_CREATE_PENDING, which
-					 * the lookup filters.  Ask the
-					 * client to retry rather than
+					/* A concurrent creator may not have
+					 * committed yet, or legacy recovery
+					 * may have reaped an incomplete row.
+					 * Ask the client to retry rather than
 					 * returning NOENT for a CREATE. */
 					return NFS4ERR_DELAY;
 				}
@@ -799,18 +777,6 @@ enum nfs4_status op_open(struct compound_data *cd,
 			atomic_fetch_add(
 				&g_branch_metrics.open_create_ds_prepare_count, 1);
 
-			/* Stash stripe info for LAYOUTGET fast path.
-			 * The DS ID was captured before create consumed
-			 * the prealloc entry (see pre_create_have_ds above).
-			 * ds_id 0 is a valid placement. */
-			if (pre_create_have_ds &&
-			    (inode.flags & MDS_IFLAG_DS_PENDING)) {
-				cd->stripe_cached = true;
-				cd->stripe_cached_fileid = inode.fileid;
-				cd->stripe_cached_ds_id = pre_create_ds_id;
-				cd->stripe_cached_stripe_unit =
-					pre_create_stripe_unit;
-			}
 
 			/* Invalidate dirent cache for the new entry. */
 			compound_dirent_invalidate(cd,
@@ -909,6 +875,24 @@ open_existing:
 	if (grace_is_active() && a->claim != CLAIM_PREVIOUS) {
 		return NFS4ERR_GRACE;
 }
+	/*
+	 * A pending inode is deliberately retained for OPENs that predate the
+	 * final unlink.  New opens must never attach to it.  Every node with
+	 * durable shared state bypasses request and global caches here so an old
+	 * cached inode cannot grant an OPEN after DELETE_PENDING has committed.
+	 */
+	if (pending_inode_gate) {
+		st = mds_cat_ns_getattr(cd->cat, target_fid, &inode);
+		if (st == MDS_ERR_NOTFOUND) {
+			return NFS4ERR_STALE;
+		}
+		if (st != MDS_OK) {
+			return NFS4ERR_DELAY;
+		}
+	}
+	if (inode.flags & MDS_IFLAG_DELETE_PENDING) {
+		return NFS4ERR_STALE;
+	}
 
 
 	/*
@@ -976,11 +960,17 @@ open_existing:
 	if (time_create) {
 		clock_gettime(CLOCK_MONOTONIC, &t_mark);
 	}
-	rc = open_state_open(cd->ot, cd->clientid,
-			     a->open_owner, a->open_owner_len,
-			     target_fid,
-			     a->share_access, a->share_deny,
-			     &r->stateid);
+	if (pending_inode_gate) {
+		rc = open_state_open_with_token(
+			cd->ot, cd->clientid, a->open_owner, a->open_owner_len,
+			target_fid, a->share_access, a->share_deny, &r->stateid,
+			&open_token);
+	} else {
+		rc = open_state_open(cd->ot, cd->clientid,
+				     a->open_owner, a->open_owner_len,
+				     target_fid, a->share_access, a->share_deny,
+				     &r->stateid);
+	}
 	/*
 	 * RFC 8881 §8.4.3 courtesy-client support: if the OPEN hit a
 	 * share conflict, check whether the conflicting open state
@@ -992,13 +982,21 @@ open_existing:
 	if (rc == -1 && cd->st != NULL) {
 		if (open_state_revoke_expired_for_file(
 			cd->ot, cd->st, target_fid) > 0) {
-			rc = open_state_open(cd->ot, cd->clientid,
-					     a->open_owner,
-					     a->open_owner_len,
-					     target_fid,
-					     a->share_access,
-					     a->share_deny,
-					     &r->stateid);
+			if (pending_inode_gate) {
+				rc = open_state_open_with_token(
+					cd->ot, cd->clientid, a->open_owner,
+					a->open_owner_len, target_fid,
+					a->share_access, a->share_deny,
+					&r->stateid, &open_token);
+			} else {
+				rc = open_state_open(cd->ot, cd->clientid,
+						     a->open_owner,
+						     a->open_owner_len,
+						     target_fid,
+						     a->share_access,
+						     a->share_deny,
+						     &r->stateid);
+			}
 		}
 	}
 	if (time_create) {
@@ -1013,7 +1011,32 @@ open_existing:
 	case 0:  break;
 	case -1: return NFS4ERR_SHARE_DENIED;
 	case -2: return NFS4ERR_RESOURCE;
+	case -4: return NFS4ERR_DELAY;
 	default: return NFS4ERR_SERVERFAULT;
+	}
+
+	/*
+	 * The first pending check and open-state write are not one catalogue
+	 * transaction.  Re-read the retained inode after the durable state
+	 * write; if REMOVE committed in between, undo only this request's
+	 * newly-created or upgraded state before returning STALE.
+	 */
+	if (pending_inode_gate) {
+		st = mds_cat_ns_getattr(cd->cat, target_fid, &inode);
+		if (st != MDS_OK ||
+		    (inode.flags & MDS_IFLAG_DELETE_PENDING) != 0) {
+			if (open_state_rollback_open(
+				cd->ot, cd->clientid, &r->stateid,
+				&open_token) != 0) {
+				return NFS4ERR_DELAY;
+			}
+			if (st == MDS_ERR_NOTFOUND ||
+			    (st == MDS_OK &&
+			     (inode.flags & MDS_IFLAG_DELETE_PENDING) != 0)) {
+				return NFS4ERR_STALE;
+			}
+			return NFS4ERR_DELAY;
+		}
 	}
 
 	/*
@@ -1226,6 +1249,7 @@ deleg_grant_done:
 
 	/* Populate result and update current_fh. */
 	r->inode = inode;
+	r->preserve_unlinked = false;
 	cd->current_fh.fileid = target_fid;
 	/* FH-encoded subtree ownership (suggested by Gaurav Gangalwar's
 	 * code review): every claim path on op_open ends up with `inode`
@@ -1336,6 +1360,7 @@ enum nfs4_status op_close(struct compound_data *cd,
 	switch (rc) {
 	case 0:  break;
 	case -4: return NFS4ERR_OLD_STATEID;
+	case -5: return NFS4ERR_DELAY;
 	default: return NFS4ERR_BAD_STATEID;
 	}
 
@@ -1710,6 +1735,9 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	uint32_t stripe_count = 1;
 	uint32_t mirror_count = 1;
 	uint32_t stripe_unit = 65536;
+	uint32_t requested_stripe_count;
+	uint32_t requested_entry_count;
+	uint32_t effective_entry_count;
 	enum mds_status st;
 	enum nfs4_status nst = NFS4ERR_IO;
 
@@ -1731,6 +1759,13 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	}
 	if (cd->cfg_stripe_unit > 0) {
 		stripe_unit = cd->cfg_stripe_unit;
+	}
+	requested_stripe_count = stripe_count;
+	st = placement_geometry_entry_count(
+		requested_stripe_count, requested_stripe_count, mirror_count,
+		&requested_entry_count);
+	if (st != MDS_OK) {
+		return NFS4ERR_INVAL;
 	}
 
 	if (cd->proxy == NULL) {
@@ -1788,21 +1823,33 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	}
 
 	/* NOLINTNEXTLINE(bugprone-implicit-widening-of-multiplication-result) */
-	entries = calloc(stripe_count * mirror_count, sizeof(*entries));
+	entries = calloc(requested_entry_count, sizeof(*entries));
 	if (entries == NULL) {
 		free(ds_list);
 		nst = NFS4ERR_RESOURCE;
 		goto out_clear;
 	}
-
-	st = placement_select(ds_list, ds_count,
-			      stripe_count, mirror_count,
-			      stripe_unit, entries);
+	if (cd->cfg_placement_policy_enabled) {
+		st = placement_select_ex2(
+			cd->cfg_placement_policy, ds_list, ds_count, &stripe_count,
+			mirror_count, stripe_unit, entries);
+	} else {
+		st = placement_select2(ds_list, ds_count, &stripe_count,
+				       mirror_count, stripe_unit, entries);
+	}
 	free(ds_list);
 	ds_list = NULL;
 	if (st != MDS_OK) {
 		free(entries);
 		nst = NFS4ERR_NOSPC;
+		goto out_clear;
+	}
+	st = placement_geometry_entry_count(
+		requested_stripe_count, stripe_count, mirror_count,
+		&effective_entry_count);
+	if (st != MDS_OK) {
+		free(entries);
+		nst = NFS4ERR_IO;
 		goto out_clear;
 	}
 
@@ -1813,38 +1860,58 @@ promote_inline_to_ds(struct compound_data *cd, struct mds_inode *inode)
 	 * below, catalogue still records the file as inline with its data
 	 * intact.  The DS files become orphans, cleaned by gc-scan.
 	 */
-	{
-		uint32_t s, m;
-		for (s = 0; s < stripe_count; s++) {
-			for (m = 0; m < mirror_count; m++) {
-				uint32_t idx = s * mirror_count + m;
-				st = mds_proxy_ensure_ds_file(
-					cd->proxy,
-					entries[idx].ds_id,
-					cd->current_fh.fileid, s, m);
+	for (uint32_t entry_index = 0;
+	     entry_index < effective_entry_count;
+	     entry_index++) {
+		uint32_t stripe = entry_index / mirror_count;
+		uint32_t mirror = entry_index % mirror_count;
+
+		st = mds_proxy_ensure_ds_file(
+			cd->proxy, entries[entry_index].ds_id,
+			cd->current_fh.fileid, stripe, mirror);
+		if (st != MDS_OK) {
+			free(entries);
+			nst = NFS4ERR_IO;
+			goto out_clear;
+		}
+	}
+
+	if (ilen > 0) {
+		/*
+		 * Write each logical stripe-unit segment to every mirror.
+		 * Use the direct path -- the stripe map does not exist in
+		 * the catalogue yet (created in Phase 4 below).
+		 *
+		 * DS files use sparse logical offsets, matching proxy I/O:
+		 * a stripe receives each of its units at the unit's file
+		 * offset, rather than densely packed by stripe position.
+		 */
+		uint32_t payload_offset = 0;
+
+		while (payload_offset < ilen) {
+			uint32_t stripe = (payload_offset / stripe_unit) %
+				stripe_count;
+			uint32_t segment_len = stripe_unit -
+				(payload_offset % stripe_unit);
+
+			if (segment_len > ilen - payload_offset) {
+				segment_len = ilen - payload_offset;
+			}
+			for (uint32_t mirror = 0; mirror < mirror_count; mirror++) {
+				uint32_t entry_index = stripe * mirror_count + mirror;
+
+				st = mds_proxy_write_direct(
+					cd->proxy, entries[entry_index].ds_id,
+					cd->current_fh.fileid, stripe, mirror,
+					payload_offset, ibuf + payload_offset,
+					segment_len);
 				if (st != MDS_OK) {
 					free(entries);
 					nst = NFS4ERR_IO;
 					goto out_clear;
 				}
 			}
-		}
-	}
-
-	if (ilen > 0) {
-		/*
-		 * Write inline payload to the first mirror of stripe 0.
-		 * Use the direct path -- the stripe map does not exist
-		 * in catalogue yet (created in Phase 4 below).
-		 */
-		st = mds_proxy_write_direct(cd->proxy,
-					    entries[0].ds_id,
-					    cd->current_fh.fileid,
-					    0, 0, 0, ibuf, ilen);
-		if (st != MDS_OK) {
-			free(entries);
-			nst = NFS4ERR_IO;
-			goto out_clear;
+			payload_offset += segment_len;
 		}
 	}
 
@@ -2066,17 +2133,23 @@ proxy_read:
 	{
 		uint32_t count = a->count;
 		enum mds_status st;
+		struct mds_inode proxy_inode;
 
 		if (count > MDS_XATTR_VAL_MAX) {
 			count = MDS_XATTR_VAL_MAX;
-}
+		}
+		st = cat_getattr(cd, cd->current_fh.fileid, &proxy_inode);
+		if (st != MDS_OK) {
+			return mds_status_to_nfs4(st);
+		}
 
 		st = mds_proxy_read(cd->proxy, cd->cat, cd->current_fh.fileid,
+				    proxy_inode.size,
 				    a->offset, count,
 				    r->data, &r->data_len, &r->eof);
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);
-}
+		}
 	}
 
 	return NFS4_OK;

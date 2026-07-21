@@ -148,6 +148,8 @@ struct rpc_server {
     bool hide_referral_junctions;
     bool posix_dac;
     bool referral_strict;
+    bool remove_async;
+    struct ds_gc              *gc;
     enum nfs_auth_mode min_auth;
     struct mds_proxy_ctx            *proxy;
     struct health_monitor           *hm;
@@ -156,9 +158,8 @@ struct rpc_server {
     struct ds_prealloc_ctx           *prealloc;
     struct ds_prepare_ctx           *ds_prepare;
     struct ds_cache                 *ds_cache;
+    struct cluster_cache_invalidator *cache_invalidator;
     struct inode_cache              *icache;
-    struct parent_touch *pt;
-    struct remove_manifest *rmf;
     struct dirent_cache             *dcache;
     /* Phase D of docs/hpc-nto1-plan.md -- HPC-Shared layout cache. */
     struct layout_cache             *lcache;
@@ -1150,9 +1151,9 @@ wrongsec:
         cd.prealloc = srv->prealloc;
         cd.ds_prepare = srv->ds_prepare;
         cd.ds_cache = srv->ds_cache;
+        cd.gc = srv->gc;
+        cd.cache_invalidator = srv->cache_invalidator;
         cd.icache = srv->icache;
-        cd.pt = srv->pt;
-        cd.rmf = srv->rmf;
         cd.dcache = srv->dcache;
         cd.lcache = srv->lcache;
         cd.lcommit_agg = srv->lcommit_agg;
@@ -1194,6 +1195,7 @@ wrongsec:
 	cd.cfg_hide_referral_junctions = srv->hide_referral_junctions;
 	cd.cfg_posix_dac = srv->posix_dac;
 	cd.cfg_referral_strict = srv->referral_strict;
+	cd.cfg_remove_async = srv->remove_async;
         cd.auth_flavor = cred_flavor;
         cd.cred_uid = cred_uid;
         cd.cred_gid = cred_gid;
@@ -1916,9 +1918,8 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->prealloc = cfg->prealloc;
     srv->ds_prepare = cfg->ds_prepare;
     srv->ds_cache = cfg->ds_cache;
+    srv->cache_invalidator = cfg->cache_invalidator;
     srv->icache = cfg->icache;
-    srv->pt = cfg->pt;
-    srv->rmf = cfg->rmf;
     srv->dcache = cfg->dcache;
     srv->lcache = cfg->lcache;
     srv->lcommit_agg = cfg->lcommit_agg;
@@ -1932,6 +1933,8 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->hide_referral_junctions = cfg->hide_referral_junctions;
     srv->posix_dac = cfg->posix_dac;
     srv->referral_strict = cfg->referral_strict;
+    srv->remove_async = cfg->remove_async;
+    srv->gc = cfg->gc;
     srv->min_auth = cfg->min_auth;
     srv->gss_tbl = cfg->gss_tbl;
     srv->tp = cfg->tp;
@@ -1983,7 +1986,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(cfg->port ? cfg->port : RPC_DEFAULT_PORT);
+    addr.sin_port = htons(cfg->port);
     if (cfg->bind_addr != NULL) {
         if (inet_pton(AF_INET, cfg->bind_addr, &addr.sin_addr) != 1) {
             goto fail;

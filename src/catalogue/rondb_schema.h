@@ -58,7 +58,10 @@
  *     LAYOUTGET / unlink-fence / GC serve it from the single inode read
  *     (no cat_stripe_map_get) and create/remove write/delete no stripe
  *     rows.  Nullable/dynamic (online ALTER); pre-v9 rows read back with
- *     the flag clear and fall back to the side tables. */
+ *     the flag clear and fall back to the side tables.
+ * v10: mds_gc_tasks adds durable lease-based cleanup tasks.  The legacy
+ *      mds_gc_queue is copied into legacy task rows before new code drains
+ *      it; no pending cleanup is dropped during this cutover. */
 #define RONDB_SCHEMA_VERSION  10
 
 /* -----------------------------------------------------------------------
@@ -84,22 +87,7 @@
 #define RONDB_TBL_QUOTA_RULES     "mds_quota_rules"
 #define RONDB_TBL_QUOTA_USAGE     "mds_quota_usage"
 #define RONDB_TBL_GC_QUEUE        "mds_gc_queue"
-
-/* Async-REMOVE delete manifest (schema v10, ported). */
-#define RONDB_TBL_REMOVE_PENDING  "mds_remove_pending"
-#define RONDB_RP_COL_SEQ             "remove_seq"
-#define RONDB_RP_COL_DIR_FILEID      "dir_fileid"
-#define RONDB_RP_COL_NAME            "entry_name"
-#define RONDB_RP_COL_CHILD_FILEID    "child_fileid"
-#define RONDB_RP_COL_CHILD_GEN       "child_generation"
-#define RONDB_RP_COL_ENQUEUED_NS     "enqueued_ns"
-#define RONDB_RP_COL_CLAIM_MDS       "claim_mds_id"
-#define RONDB_RP_COL_CLAIM_BOOT      "claim_boot"
-#define RONDB_RP_COL_CLAIM_EXPIRES   "claim_expires_ns"
-#define RONDB_RP_COL_RETRIES         "retries"
-#define RONDB_IX_RP_SEQ           "ix_remove_pending_seq"
-#define RONDB_IX_RP_DIR           "ix_remove_pending_dir"
-#define RONDB_UP_PEEK_EXAMINE_SLACK 4U
+#define RONDB_TBL_GC_TASKS        "mds_gc_tasks"
 #define RONDB_TBL_LAYOUT_STATE    "mds_layout_state"
 #define RONDB_TBL_LAYOUT_BY_CLIENT "mds_layout_by_client"
 #define RONDB_TBL_LAYOUT_BY_FILE  "mds_layout_by_file"
@@ -121,7 +109,7 @@
 #define RONDB_TBL_SESSION_BY_CLIENT "mds_session_by_client"
 #define RONDB_TBL_CLIENTS         "mds_clients"
 #define RONDB_TBL_DRC_SLOTS       "mds_drc_slots"
-#define RONDB_TABLE_COUNT  35
+#define RONDB_TABLE_COUNT  36
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_meta
@@ -371,6 +359,31 @@
  * rows.  Created with logging off (rebuilt in memory on node restart).
  */
 #define RONDB_IX_GC_SEQ           "ix_gc_queue_seq"
+
+/* -----------------------------------------------------------------------
+ * Column names -- mds_gc_tasks
+ *
+ * Composite PK=(task_kind, task_id).  task_id is the fileid for a final
+ * file unlink and the former gc_seq for a migrated legacy DS task.
+ * created_ns orders claims only; identity never depends on wall time.
+ * ----------------------------------------------------------------------- */
+
+#define RONDB_GCT_COL_KIND         "task_kind"
+#define RONDB_GCT_COL_ID           "task_id"
+#define RONDB_GCT_COL_FILEID       "fileid"
+#define RONDB_GCT_COL_GENERATION   "inode_generation"
+#define RONDB_GCT_COL_STATE        "task_state"
+#define RONDB_GCT_COL_CREATED_NS   "created_ns"
+#define RONDB_GCT_COL_NOT_BEFORE   "not_before_ns"
+#define RONDB_GCT_COL_ATTEMPTS     "attempt_count"
+#define RONDB_GCT_COL_LAST_ERROR   "last_error"
+#define RONDB_GCT_COL_LEASE_MDS    "lease_owner_mds_id"
+#define RONDB_GCT_COL_LEASE_EPOCH  "lease_owner_boot_epoch"
+#define RONDB_GCT_COL_LEASE_EXPIRY "lease_expiry_ns"
+#define RONDB_GCT_COL_DS_ID        "legacy_ds_id"
+#define RONDB_GCT_COL_NFS_FH_LEN   "legacy_nfs_fh_len"
+#define RONDB_GCT_COL_NFS_FH       "legacy_nfs_fh"
+#define RONDB_IX_GC_TASK_ORDER     "ix_gc_tasks_order"
 
 /* -----------------------------------------------------------------------
  * Column names -- mds_prealloc_pool

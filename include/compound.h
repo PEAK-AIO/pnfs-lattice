@@ -38,8 +38,6 @@ struct copy_offload_table;
 struct mds_quota_ctx;
 struct ds_prealloc_ctx;
 struct commit_queue;
-struct parent_touch;
-struct remove_manifest;
 struct ds_health_monitor;
 struct io_tracker;
 struct mds_shard_map;
@@ -1117,6 +1115,9 @@ struct nfs4_res_open {
 	uint32_t            none_reason;     /* WND4_*, NONE_EXT only */
 	bool                none_will_push;  /* WND4_CONTENTION tail */
 	bool                none_will_signal;/* WND4_RESOURCE tail */
+	/* OPEN4_RESULT_PRESERVE_UNLINKED is valid only when async REMOVE's
+	 * durable open-state and pending-inode guarantees are active. */
+	bool                preserve_unlinked;
 };
 
 struct nfs4_res_close {
@@ -1517,6 +1518,8 @@ struct nfs4_res_layoutcommit {
 
 struct ds_prepare_ctx;
 struct ds_cache;
+struct cluster_cache_invalidator;
+struct ds_gc;
 
 /* Tagged union of operation results. */
 struct nfs4_result {
@@ -1606,12 +1609,11 @@ struct compound_data {
 	struct ds_health_monitor *ds_hm; /* NULL = LAYOUTERROR ignored */
 	struct io_tracker        *io_tracker; /* NULL = tiering I/O tracking disabled */
 	struct mds_quota_ctx     *quota;    /* NULL = quota enforcement disabled */
+	struct cluster_cache_invalidator *cache_invalidator;
 	struct ds_prealloc_ctx   *prealloc; /* NULL = inline mode (single-MDS) */
 	struct ds_prepare_ctx    *ds_prepare; /* NULL = generic DS async prepare disabled */
 	struct ds_cache          *ds_cache;   /* NULL = fall back to catalogue reads */
 	struct inode_cache       *icache;     /* NULL = no cross-compound caching */
-	struct parent_touch      *pt;         /* deferred parent-attr aggregator (may be NULL) */
-	struct remove_manifest   *rmf;        /* async-REMOVE manifest (may be NULL) */
 	struct dirent_cache      *dcache;     /* NULL = no dirent/negative caching */
 	/* Phase D of docs/hpc-nto1-plan.md — per-inode stripe-map cache.
 	 * Populated and consumed only for inodes with MDS_IFLAG_HPC_SHARED;
@@ -1799,6 +1801,10 @@ struct layout_recall     *lr;
 	 * owned by another MDS return NFS4ERR_MOVED (compound.c dispatch
 	 * gate) instead of being served from the shared catalogue. */
 	bool                      cfg_referral_strict;
+
+	/* Default-off final-unlink delete-at-ack path. */
+	bool                      cfg_remove_async;
+	struct ds_gc             *gc;
 
 	/* RFC 8881 §16.2.4 — current stateid tracking.
 	 *

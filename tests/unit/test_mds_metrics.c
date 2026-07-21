@@ -39,6 +39,35 @@ static void test_metrics_reset(void)
     passed++;
 }
 
+static void test_async_remove_metrics(void)
+{
+    static char buf[256 * 1024];
+    struct mds_metrics_snapshot snapshot;
+
+    fprintf(stdout, "  test_async_remove_metrics:         ");
+    memset(&snapshot, 0, sizeof(snapshot));
+    atomic_store(&g_branch_metrics.gc_pending, 12);
+    atomic_store(&g_branch_metrics.gc_claimed, 3);
+    atomic_store(&g_branch_metrics.gc_oldest_age_seconds, 7);
+    atomic_store(&g_branch_metrics.gc_retries_total, 4);
+    atomic_store(&g_branch_metrics.gc_open_blocked_total, 5);
+    atomic_store(&g_branch_metrics.gc_deferred_quota_bytes, 1024);
+    atomic_store(&g_branch_metrics.remove_async_backpressure_active, 1);
+    ASSERT_TRUE(mds_metrics_prometheus_v2(
+                    &snapshot, &g_branch_metrics, buf, sizeof(buf)) > 0);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_gc_pending 12") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_gc_claimed 3") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_gc_retries_total 4") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_gc_open_blocked_total 5") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_gc_deferred_quota_bytes 1024") != NULL);
+    ASSERT_TRUE(strstr(
+                    buf, "pnfs_mds_remove_async_backpressure_active 1") !=
+                NULL);
+
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
 static void test_metrics_increment(void)
 {
     fprintf(stdout, "  test_metrics_increment:            ");
@@ -103,6 +132,7 @@ int main(void)
     test_metrics_increment();
     test_metrics_prometheus();
     test_metrics_prometheus_truncation();
+    test_async_remove_metrics();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

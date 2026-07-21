@@ -118,8 +118,41 @@ mpirun --allow-run-as-root -np 8 \
 ```
 
 Expected: ~130 ops/s (single), ~1,900 ops/s (8 tasks) for file creation.
+## 6. Benchmark synchronous REMOVE
 
-## 6. Lab / Cluster Deployment (`scripts/pnfs-lab`)
+`bench_remove_sync` is a manual benchmark for the corrected synchronous
+final-unlink path.  It measures `SEQUENCE + PUTFH + REMOVE`, including
+transient-mode DS fencing, after pre-seeding benchmark-owned namespace and
+DS objects.  It reports serial throughput plus mean, p50, p95, p99, and
+maximum REMOVE latency.
+
+```bash
+cmake --build build --target bench_remove_sync
+./build/tests/bench_remove_sync 200
+```
+
+The default memdb run is a safe in-process regression baseline, not a
+production result.  It creates a private temporary DS directory and removes
+only its known backing objects; it never performs recursive cleanup.
+
+For a RonDB result, use a dedicated benchmark schema with an empty GC queue
+and a dedicated local DS mount whose `data/` directory is empty.  Do not point
+this command at a live production schema or shared DS mount.  The benchmark
+refuses a non-empty queue or DS directory and verifies queued rows belong to
+its own file IDs before removing them.
+
+```bash
+cmake --build build-rondb --target bench_remove_sync
+./build-rondb/tests/bench_remove_sync 1000 \
+    --rondb /etc/pnfs-mds/bench-rondb.conf \
+    --ds-mount /mnt/bench-ds
+```
+
+The RonDB mode exercises the real metadata backend and local DS fence path,
+but not front-channel RPC or client-network latency.  Use mdtest on a
+deployed MDS for end-to-end client workload measurements.
+
+## 7. Lab / Cluster Deployment (`scripts/pnfs-lab`)
 
 For multi-node bring-up over SSH, use the canonical lab orchestrator:
 
