@@ -842,6 +842,35 @@ enum mds_status catalogue_rondb_dirent_put(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
+enum mds_status catalogue_rondb_dirent_insert(struct mds_catalogue *cat,
+					      struct mds_cat_txn *txn,
+					      uint64_t parent,
+					      const char *name,
+					      uint64_t child_fileid,
+					      uint8_t child_type)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	(void)txn; /* RonDB writes are self-contained. */
+	if (h == NULL || name == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_dirent_insert(h, parent, name,
+				      child_fileid, child_type);
+	if (rc == 1) {
+		return MDS_ERR_EXISTS;
+	}
+	if (rc == -2) {
+		return MDS_ERR_DELAY;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+	catalog_stat_inc(&cat->stats.authority_writes);
+	return MDS_OK;
+}
+
 enum mds_status catalogue_rondb_dirent_del(struct mds_catalogue *cat,
 					   struct mds_cat_txn *txn,
 					   uint64_t parent,
@@ -3583,6 +3612,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.inode_put         = catalogue_rondb_inode_put,
 	.inode_del         = catalogue_rondb_inode_del,
 	.dirent_put        = catalogue_rondb_dirent_put,
+	.dirent_insert     = catalogue_rondb_dirent_insert,
 	.dirent_del        = catalogue_rondb_dirent_del,
 	.inline_get        = catalogue_rondb_inline_get,
 	.inline_put        = catalogue_rondb_inline_put,
@@ -3674,6 +3704,7 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.inode_put         = catalogue_rondb_inode_put,
 	.inode_del         = catalogue_rondb_inode_del,
 	.dirent_put        = catalogue_rondb_dirent_put,
+	.dirent_insert     = catalogue_rondb_dirent_insert,
 	.dirent_del        = catalogue_rondb_dirent_del,
 	.inline_get        = catalogue_rondb_inline_get,
 	.inline_put        = catalogue_rondb_inline_put,
