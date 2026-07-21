@@ -3513,6 +3513,15 @@ int rondb_shim_inode_put(void *handle, uint64_t fileid,
     op->writeTuple();
     (void)rondb_equal_u64(op, RONDB_INO_COL_FILEID, fileid);
     rondb_set_inode_values(op, &ino, shard);
+    /* writeTuple() is an upsert: columns left unset are reset to their
+     * default.  rondb_set_inode_values writes neither the v8 synth-owner
+     * nor the v9 inline-stripe columns, so persist them here from the
+     * fully deserialized inode -- otherwise this put would strip the
+     * inline single-stripe DS map (INLINE_STRIPE flag kept, ds_id/fh
+     * zeroed) and the synthetic DS owner off any inode that carries
+     * them, matching the ns_create write set. */
+    rondb_set_inode_synth(op, tbl, &ino);
+    rondb_set_inode_inline_stripe(op, tbl, &ino);
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
