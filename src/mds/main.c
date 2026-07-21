@@ -48,6 +48,8 @@
 #include "ds_cache.h"
 #include "ds_capacity.h"
 #include "inode_cache.h"
+#include "parent_touch.h"
+#include "remove_manifest.h"
 #include "dirent_cache.h"
 #include "layout_cache.h"
 #include "layout_commit_aggregator.h"
@@ -229,6 +231,45 @@ static void failover_on_partner_loss(
 
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
+/* -----------------------------------------------------------------------
+ * parent_touch flush callback (deferred parent-dir attr aggregator,
+ * ported).  Persists the accumulated change delta + flush-time
+ * mtime/ctime stamp as ONE interpreted NDB update via
+ * mds_cat_ns_parent_touch, then invalidates the cached inode.
+ * Returns 0 on success (a vanished parent row counts as success),
+ * -1 on persistence failure (the aggregator restores the delta and
+ * retries on the next tick).
+ * ----------------------------------------------------------------------- */
+struct pt_flush_ctx {
+	struct mds_catalogue *cat;
+	struct inode_cache   *icache;  /* may be NULL */
+};
+
+static struct pt_flush_ctx s_pt_flush_ctx;
+static struct parent_touch *s_pt;
+static struct remove_manifest *s_rmf;
+
+static int pt_flush_cb(uint64_t fileid, uint64_t change_delta,
+		       struct timespec stamp, void *cookie)
+{
+	struct pt_flush_ctx *ctx = cookie;
+	enum mds_status st;
+
+	if (ctx == NULL || ctx->cat == NULL) {
+		return -1;
+	}
+	st = mds_cat_ns_parent_touch(ctx->cat, fileid, change_delta,
+				     stamp);
+	if (st != MDS_OK) {
+		return -1;
+	}
+	if (ctx->icache != NULL) {
+		inode_cache_invalidate(ctx->icache, fileid);
+	}
+	return 0;
+}
+
+
 int main(int argc, char *argv[])
 {
 	struct mds_config cfg;
@@ -416,6 +457,15 @@ int main(int argc, char *argv[])
 					"RonDB schema not ready "
 					"after %d attempts",
 					bootstrap_max_retries);
+				if (s_rmf != NULL) {
+					remove_manifest_destroy(s_rmf);
+					s_rmf = NULL;
+				}
+if (s_pt != NULL) {
+					(void)parent_touch_flush_all_dirty(s_pt);
+					parent_touch_destroy(s_pt);
+					s_pt = NULL;
+				}
 				mds_catalogue_close(cat);
 				return EXIT_FAILURE;
 			}
@@ -1504,6 +1554,48 @@ int main(int argc, char *argv[])
 			}
 			rpc_cfg.icache = icache;
 
+			/* parent_touch deferred parent-dir attr aggregator (ported).
+			 * Gated on the config key AND a backend capability probe; init /
+			 * start failure is non-fatal: rpc_cfg.pt stays NULL and every
+			 * mutation keeps the synchronous in-transaction parent update. */
+			rpc_cfg.pt = NULL;
+			if (cfg.parent_touch_deferred) {
+				if (!mds_cat_ns_parent_touch_supported(cat)) {
+					(void)fprintf(stderr,
+						"WARN: parent_touch_deferred=true but the "
+						"catalogue backend does not implement "
+						"ns_parent_touch; feature disabled\n");
+				} else if (parent_touch_init(cfg.parent_touch_max_dirs,
+							     cfg.parent_touch_flush_ms,
+							     &s_pt) != 0) {
+					(void)fprintf(stderr,
+						"WARN: parent_touch_init failed; keeping "
+						"synchronous parent updates\n");
+					s_pt = NULL;
+				} else {
+					s_pt_flush_ctx.cat = cat;
+					s_pt_flush_ctx.icache = icache;
+					parent_touch_set_flush_fn(s_pt, pt_flush_cb,
+								  &s_pt_flush_ctx);
+					if (parent_touch_start(s_pt) != 0) {
+						(void)fprintf(stderr,
+							"WARN: parent_touch_start failed; "
+							"tearing down aggregator\n");
+						parent_touch_destroy(s_pt);
+						s_pt = NULL;
+					} else {
+						(void)fprintf(stderr,
+							"INFO: parent_touch deferred "
+							"aggregator active (dirs=%u, "
+							"flush=%ums)\n",
+							(unsigned)cfg.parent_touch_max_dirs,
+							(unsigned)cfg.parent_touch_flush_ms);
+					}
+				}
+				rpc_cfg.pt = s_pt;
+			}
+
+
 			/* Pre-warm cache with root inode -- eliminates
 			 * 1 NDB RT from every PUTROOTFH compound. */
 			if (icache != NULL && cat != NULL) {
@@ -1684,6 +1776,61 @@ int main(int argc, char *argv[])
 						"failed");
 				}
 			}
+		}
+
+
+
+
+		/* Async-REMOVE delete manifest (ported; delete-at-ack is the
+		 * ONLY mode in this port: the ack transaction removes the
+		 * dirent and flags the inode, so name hiding is
+		 * DB-authoritative on every MDS via RonDB synchronous
+		 * replication).  Gated on the config key AND an active
+		 * parent_touch aggregator (REMOVE change_info is served from
+		 * it).  The startup load completes before the RPC listeners
+		 * serve. */
+		rpc_cfg.rmf = NULL;
+		if (cfg.remove_async && cat != NULL) {
+			if (s_pt == NULL) {
+				(void)fprintf(stderr,
+					"WARN: remove_async=true requires an "
+					"active parent_touch aggregator "
+					"(parent_touch_deferred=true); "
+					"keeping the synchronous REMOVE "
+					"path\n");
+			} else if (remove_manifest_init(cat, rpc_cfg.proxy,
+					rpc_cfg.lcache, rpc_cfg.lcommit_agg,
+					rpc_cfg.quota, cfg.self.id,
+					rondb_boot_epoch, 65536U,
+					cfg.remove_async_workers,
+					cfg.remove_async_batch,
+					cfg.remove_async_poll_ms,
+					(uint64_t)cfg.remove_async_claim_ttl_ms
+						* 1000000ULL,
+					&s_rmf) != 0) {
+				(void)fprintf(stderr,
+					"WARN: remove_manifest_init failed; "
+					"keeping the synchronous REMOVE "
+					"path\n");
+				s_rmf = NULL;
+			} else if (remove_manifest_load(s_rmf) != 0 ||
+				   remove_manifest_start(s_rmf) != 0) {
+				(void)fprintf(stderr,
+					"WARN: remove_manifest load/start "
+					"failed; keeping the synchronous "
+					"REMOVE path\n");
+				remove_manifest_destroy(s_rmf);
+				s_rmf = NULL;
+			} else {
+				(void)fprintf(stderr,
+					"INFO: async-REMOVE delete manifest "
+					"active (delete-at-ack; workers=%u, "
+					"batch=%u); name hiding is "
+					"DB-authoritative on every MDS\n",
+					(unsigned)cfg.remove_async_workers,
+					(unsigned)cfg.remove_async_batch);
+			}
+			rpc_cfg.rmf = s_rmf;
 		}
 
 		if (rpc_server_create(&rpc_cfg, &rpc_srv[0]) != 0) {
@@ -1953,6 +2100,22 @@ cleanup:
 		(void)layout_commit_aggregator_flush_all_dirty(lcommit_agg);
 		layout_commit_aggregator_destroy(lcommit_agg);
 		lcommit_agg = NULL;
+	}
+	/* Stop the ported async-REMOVE / parent_touch machinery while
+	 * the catalogue is still open: the drainer joins its workers
+	 * and shutdown-flushes remaining tombstones, the aggregator
+	 * persists pending parent deltas.  Without this teardown the
+	 * threads ran into exit() and deadlocked against catalogue/NDB
+	 * teardown until systemd escalated to SIGKILL after 90 s
+	 * (stop-sigterm timeout on every armed stop). */
+	if (s_rmf != NULL) {
+		remove_manifest_destroy(s_rmf);
+		s_rmf = NULL;
+	}
+	if (s_pt != NULL) {
+		(void)parent_touch_flush_all_dirty(s_pt);
+		parent_touch_destroy(s_pt);
+		s_pt = NULL;
 	}
 	if (cat != NULL) {
 		mds_catalogue_close(cat);

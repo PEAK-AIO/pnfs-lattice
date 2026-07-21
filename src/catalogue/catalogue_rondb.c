@@ -1640,8 +1640,8 @@ enum mds_status catalogue_rondb_stripe_map_del(
 	 * header and deletes exactly stripe_count rows, returning
 	 * immediately when no header exists.  Passing MDS_MAX_STRIPES
 	 * here queued 1024 blind PK deletes per call (~4 ms each, per
-	 * removed file, from ds_gc), which dominated catalogue time
-	 * under mass delete.
+	 * removed file, from both ds_gc and the remove drainer), which
+	 * dominated catalogue time under mass delete.
 	 */
 	for (int attempt = 0; attempt < 3; attempt++) {
 		rc = rondb_shim_stripe_del(h, fileid, 0);
@@ -2798,6 +2798,212 @@ static enum mds_status rondb_auth_ns_remove_known(
 					       stripe_count);
 }
 
+
+/* parent_touch flush: one interpreted update on the parent inode row
+ * (change += delta, mtime/ctime = stamp).  rc==1 (row gone: the
+ * directory was already removed) counts as success so the aggregator
+ * drops the delta; failures return IO and the aggregator retries on
+ * its next tick. */
+static enum mds_status catalogue_rondb_remove_pending_enqueue(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t dir_fileid, const char *name,
+	uint64_t child_fileid, uint64_t child_generation,
+	uint64_t *seq_out)
+{
+	void *h = rondb_handle(cat);
+	uint64_t seq = 0;
+	uint64_t now_ns = 0;
+	struct timespec ts;
+	int rc;
+
+	(void)txn;
+	if (h == NULL || name == NULL || seq_out == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_seq_alloc(h, &seq);
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+		now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+			 (uint64_t)ts.tv_nsec;
+	}
+
+	rc = rondb_shim_remove_pending_enqueue(h, seq, dir_fileid, name,
+					       child_fileid,
+					       child_generation, now_ns);
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+	*seq_out = seq;
+	return MDS_OK;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_enqueue_unlink(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t dir_fileid, const char *name,
+	uint64_t child_fileid, uint64_t child_generation,
+	uint64_t *seq_out)
+{
+	void *h = rondb_handle(cat);
+	uint64_t seq = 0;
+	uint64_t now_ns = 0;
+	struct timespec ts;
+	int rc;
+
+	(void)txn;
+	if (h == NULL || name == NULL || seq_out == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_seq_alloc(h, &seq);
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+		now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+			 (uint64_t)ts.tv_nsec;
+	}
+
+	rc = rondb_shim_remove_pending_enqueue_unlink(h, seq, dir_fileid,
+						      name,
+					       child_fileid,
+					       child_generation, now_ns);
+	if (rc == 1) {
+		return MDS_ERR_STALE; /* guard mismatch: sync fallback */
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+	*seq_out = seq;
+	return MDS_OK;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_peek_batch(
+	struct mds_catalogue *cat, uint64_t now_ns,
+	struct mds_remove_pending_entry *entries,
+	uint32_t cap, uint32_t *n_out)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (n_out != NULL) {
+		*n_out = 0;
+	}
+	if (h == NULL || entries == NULL || cap == 0 || n_out == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_peek_batch(h, now_ns, entries,
+						  cap, n_out);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_claim(
+	struct mds_catalogue *cat, uint64_t remove_seq,
+	uint32_t mds_id, uint64_t boot_epoch,
+	uint64_t now_ns, uint64_t claim_ttl_ns)
+{
+	void *h = rondb_handle(cat);
+	uint64_t expires_ns;
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	expires_ns = now_ns + claim_ttl_ns;
+
+	rc = rondb_shim_remove_pending_claim(h, remove_seq, mds_id,
+					     boot_epoch, now_ns, expires_ns);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_complete(
+	struct mds_catalogue *cat, uint64_t remove_seq)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_complete(h, remove_seq);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_bump_retry(
+	struct mds_catalogue *cat, uint64_t remove_seq)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_bump_retry(h, remove_seq);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_count(
+	struct mds_catalogue *cat, uint32_t *count)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL || count == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_remove_pending_count(h, count);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status catalogue_rondb_remove_pending_scan_all(
+	struct mds_catalogue *cat,
+	mds_cat_remove_pending_scan_cb cb, void *ctx)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	if (h == NULL || cb == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	/* The shim callback signature matches the dispatch callback
+	 * byte-for-byte (const entry pointer + ctx), so pass through. */
+	rc = rondb_shim_remove_pending_scan_all(h, cb, ctx);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+static enum mds_status rondb_auth_ns_parent_touch(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t fileid, uint64_t change_delta, struct timespec stamp)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	(void)txn;
+	if (h == NULL || change_delta == 0) {
+		return MDS_ERR_INVAL;
+	}
+	rc = rondb_shim_ns_parent_touch(h, fileid, change_delta,
+					(int64_t)stamp.tv_sec,
+					(uint32_t)stamp.tv_nsec);
+	if (rc == 1 || rc == 0) {
+		return MDS_OK;
+	}
+	return MDS_ERR_IO;
+}
+
 static enum mds_status rondb_auth_ns_rename(
 	struct mds_catalogue *cat, struct mds_cat_txn *txn,
 	uint64_t src_parent, const char *src_name,
@@ -3383,7 +3589,16 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
+	.ns_parent_touch         = rondb_auth_ns_parent_touch,
 	.ns_rename         = rondb_auth_ns_rename,
+	.remove_pending_enqueue    = catalogue_rondb_remove_pending_enqueue,
+	.remove_pending_enqueue_unlink = catalogue_rondb_remove_pending_enqueue_unlink,
+	.remove_pending_peek_batch = catalogue_rondb_remove_pending_peek_batch,
+	.remove_pending_claim      = catalogue_rondb_remove_pending_claim,
+	.remove_pending_complete   = catalogue_rondb_remove_pending_complete,
+	.remove_pending_bump_retry = catalogue_rondb_remove_pending_bump_retry,
+	.remove_pending_count      = catalogue_rondb_remove_pending_count,
+	.remove_pending_scan_all   = catalogue_rondb_remove_pending_scan_all,
 	.ns_link           = rondb_auth_ns_link,
 	.ns_lookup         = catalogue_rondb_ns_lookup,
 	.ns_getattr        = catalogue_rondb_ns_getattr,
@@ -3522,6 +3737,15 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
 	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
 	.prealloc_pool_scan   = catalogue_rondb_prealloc_pool_scan,
+	.ns_parent_touch         = rondb_auth_ns_parent_touch,
+	.remove_pending_enqueue    = catalogue_rondb_remove_pending_enqueue,
+	.remove_pending_enqueue_unlink = catalogue_rondb_remove_pending_enqueue_unlink,
+	.remove_pending_peek_batch = catalogue_rondb_remove_pending_peek_batch,
+	.remove_pending_claim      = catalogue_rondb_remove_pending_claim,
+	.remove_pending_complete   = catalogue_rondb_remove_pending_complete,
+	.remove_pending_bump_retry = catalogue_rondb_remove_pending_bump_retry,
+	.remove_pending_count      = catalogue_rondb_remove_pending_count,
+	.remove_pending_scan_all   = catalogue_rondb_remove_pending_scan_all,
 };
 
 static enum mds_status catalogue_rondb_recovery_list(

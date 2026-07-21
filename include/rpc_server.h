@@ -36,6 +36,8 @@ struct ds_cache;
 struct copy_offload_table;
 struct rename_2pc_transport;
 struct inode_cache;
+struct parent_touch;
+struct remove_manifest;
 struct dirent_cache;
 struct layout_cache;
 struct layout_commit_aggregator;
@@ -151,6 +153,8 @@ struct rpc_server_config {
     struct threadpool *tp; /**< Worker pool for COMPOUND dispatch (NULL = inline). */
     struct mds_shard_map *shard_map; /**< Shard routing map (NULL = no routing). */
     struct inode_cache *icache; /**< Global inode LRU cache (NULL = no caching). */
+    struct parent_touch *pt; /**< Deferred parent-attr aggregator (NULL = off). */
+    struct remove_manifest *rmf; /**< Async-REMOVE manifest (NULL = off). */
     struct dirent_cache *dcache; /**< Global dirent+negative LRU cache (NULL = no caching). */
     /* Phase D of docs/hpc-nto1-plan.md -- per-inode stripe-map cache,
      * exclusively for HPC-Shared inodes.  NULL = no caching (every

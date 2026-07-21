@@ -32,6 +32,7 @@
  * ----------------------------------------------------------------------- */
 
 #define MEMDB_MAX_INODES    4096
+#define MEMDB_MAX_REMOVE_PENDING 256
 #define MEMDB_MAX_DIRENTS   4096
 #define MEMDB_MAX_INLINE    256
 #define MEMDB_MAX_XATTRS    1024
@@ -90,6 +91,11 @@ struct memdb_gc {
     int used;
 };
 
+struct memdb_remove_pending {
+    struct mds_remove_pending_entry entry;
+    int used;
+};
+
 struct memdb_layout {
     uint64_t clientid;
     uint64_t fileid;
@@ -131,6 +137,8 @@ struct memdb {
 
     /* Xattrs */
     struct memdb_xattr   xattrs[MEMDB_MAX_XATTRS];
+    struct memdb_remove_pending remove_pending[MEMDB_MAX_REMOVE_PENDING];
+    uint64_t remove_seq_next;
 
     /* Stripe maps */
     struct memdb_stripe  stripes[MEMDB_MAX_STRIPE];
@@ -323,6 +331,36 @@ static enum mds_status mem_dirent_put(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+/* Insert-only: MDS_ERR_EXISTS on name collision (HPC wide-create path). */
+static enum mds_status mem_dirent_insert(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t parent,
+    const char *name, uint64_t child_fileid, uint8_t child_type)
+{
+    (void)txn;
+    struct memdb *m = cat->backend_private;
+    pthread_mutex_lock(&m->lock);
+
+    if (memdb_find_dirent(m, parent, name) >= 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_EXISTS;
+    }
+    {
+        int idx = memdb_alloc_dirent_slot(m);
+        if (idx < 0) {
+            pthread_mutex_unlock(&m->lock);
+            return MDS_ERR_NOSPC;
+        }
+        m->dirents[idx].used = 1;
+        m->dirents[idx].parent = parent;
+        snprintf(m->dirents[idx].name, sizeof(m->dirents[idx].name),
+                 "%s", name);
+        m->dirents[idx].child_fileid = child_fileid;
+        m->dirents[idx].child_type = child_type;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
 static enum mds_status mem_dirent_del(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent, const char *name)
 {
@@ -466,6 +504,252 @@ static enum mds_status mem_ns_remove(struct mds_catalogue *cat,
         }
         pthread_mutex_unlock(&m->lock);
     }
+    return MDS_OK;
+}
+
+static enum mds_status mem_remove_pending_enqueue(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t dir_fileid, const char *name,
+    uint64_t child_fileid, uint64_t child_generation, uint64_t *seq_out)
+{
+    (void)txn;
+    struct memdb *m = cat->backend_private;
+    struct timespec ts;
+    uint64_t now_ns = 0;
+
+    if (name == NULL || name[0] == '\0' || seq_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        now_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
+                 (uint64_t)ts.tv_nsec;
+    }
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (!m->remove_pending[i].used) {
+            struct mds_remove_pending_entry *e =
+                &m->remove_pending[i].entry;
+
+            m->remove_pending[i].used = 1;
+            memset(e, 0, sizeof(*e));
+            e->remove_seq = m->remove_seq_next++;
+            e->dir_fileid = dir_fileid;
+            e->child_fileid = child_fileid;
+            e->child_generation = child_generation;
+            e->enqueued_ns = now_ns;
+            snprintf(e->name, sizeof(e->name), "%s", name);
+            *seq_out = e->remove_seq;
+            pthread_mutex_unlock(&m->lock);
+            return MDS_OK;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_ERR_NOSPC;
+}
+
+static enum mds_status mem_remove_pending_enqueue_unlink(
+    struct mds_catalogue *cat, struct mds_cat_txn *txn,
+    uint64_t dir_fileid, const char *name, uint64_t child_fileid,
+    uint64_t child_generation, uint64_t *seq_out)
+{
+    uint64_t cur_fid = 0;
+    uint8_t cur_type = 0;
+    struct mds_inode ino;
+    enum mds_status st;
+
+    st = mds_cat_dirent_get(cat, dir_fileid, name, &cur_fid, &cur_type);
+    if (st != MDS_OK || cur_fid != child_fileid) {
+        return MDS_ERR_STALE;
+    }
+    memset(&ino, 0, sizeof(ino));
+    st = mds_cat_ns_getattr(cat, child_fileid, &ino);
+    if (st != MDS_OK || ino.generation != child_generation) {
+        free(ino.ds_map);
+        return MDS_ERR_STALE;
+    }
+    ino.flags |= MDS_IFLAG_DELETE_PENDING;
+    st = mds_cat_inode_put(cat, NULL, &ino);
+    free(ino.ds_map);
+    if (st != MDS_OK) {
+        return st;
+    }
+    st = mem_dirent_del(cat, NULL, dir_fileid, name);
+    if (st != MDS_OK) {
+        return st;
+    }
+    return mem_remove_pending_enqueue(cat, txn, dir_fileid, name,
+                                      child_fileid, child_generation,
+                                      seq_out);
+}
+
+static enum mds_status mem_remove_pending_peek_batch(struct mds_catalogue *cat,
+    uint64_t now_ns, struct mds_remove_pending_entry *entries,
+    uint32_t cap, uint32_t *n_out)
+{
+    struct memdb *m = cat->backend_private;
+    uint32_t n = 0;
+
+    if (n_out != NULL) {
+        *n_out = 0;
+    }
+    if (entries == NULL || cap == 0 || n_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING && n < cap; i++) {
+        if (!m->remove_pending[i].used) {
+            continue;
+        }
+        if (m->remove_pending[i].entry.claim_mds_id != 0 &&
+            m->remove_pending[i].entry.claim_expires_ns >= now_ns) {
+            continue;
+        }
+        entries[n++] = m->remove_pending[i].entry;
+    }
+    pthread_mutex_unlock(&m->lock);
+
+    for (uint32_t i = 1; i < n; i++) {
+        struct mds_remove_pending_entry tmp = entries[i];
+        uint32_t j = i;
+        while (j > 0 && entries[j - 1].remove_seq > tmp.remove_seq) {
+            entries[j] = entries[j - 1];
+            j--;
+        }
+        entries[j] = tmp;
+    }
+    *n_out = n;
+    return MDS_OK;
+}
+
+static enum mds_status mem_remove_pending_claim(struct mds_catalogue *cat,
+    uint64_t remove_seq, uint32_t mds_id, uint64_t boot_epoch,
+    uint64_t now_ns, uint64_t claim_ttl_ns)
+{
+    struct memdb *m = cat->backend_private;
+
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (!m->remove_pending[i].used ||
+            m->remove_pending[i].entry.remove_seq != remove_seq) {
+            continue;
+        }
+        if (m->remove_pending[i].entry.claim_mds_id != 0 &&
+            m->remove_pending[i].entry.claim_expires_ns >= now_ns) {
+            pthread_mutex_unlock(&m->lock);
+            return MDS_ERR_NOTFOUND;
+        }
+        m->remove_pending[i].entry.claim_mds_id = mds_id;
+        m->remove_pending[i].entry.claim_boot = boot_epoch;
+        m->remove_pending[i].entry.claim_expires_ns = now_ns + claim_ttl_ns;
+        pthread_mutex_unlock(&m->lock);
+        return MDS_OK;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_ERR_NOTFOUND;
+}
+
+static enum mds_status mem_remove_pending_complete(struct mds_catalogue *cat,
+    uint64_t remove_seq)
+{
+    struct memdb *m = cat->backend_private;
+
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (m->remove_pending[i].used &&
+            m->remove_pending[i].entry.remove_seq == remove_seq) {
+            m->remove_pending[i].used = 0;
+            memset(&m->remove_pending[i].entry, 0,
+                   sizeof(m->remove_pending[i].entry));
+            pthread_mutex_unlock(&m->lock);
+            return MDS_OK;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_remove_pending_bump_retry(struct mds_catalogue *cat,
+    uint64_t remove_seq)
+{
+    struct memdb *m = cat->backend_private;
+
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (m->remove_pending[i].used &&
+            m->remove_pending[i].entry.remove_seq == remove_seq) {
+            m->remove_pending[i].entry.retries++;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
+static enum mds_status mem_remove_pending_count(struct mds_catalogue *cat,
+    uint32_t *count)
+{
+    struct memdb *m = cat->backend_private;
+    uint32_t n = 0;
+
+    if (count == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (m->remove_pending[i].used) {
+            n++;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+    *count = n;
+    return MDS_OK;
+}
+
+static enum mds_status mem_remove_pending_scan_all(struct mds_catalogue *cat,
+    mds_cat_remove_pending_scan_cb cb, void *ctx)
+{
+    struct memdb *m = cat->backend_private;
+    struct mds_remove_pending_entry snap[MEMDB_MAX_REMOVE_PENDING];
+    uint32_t n = 0;
+
+    if (cb == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
+    for (uint32_t i = 0; i < MEMDB_MAX_REMOVE_PENDING; i++) {
+        if (m->remove_pending[i].used) {
+            snap[n++] = m->remove_pending[i].entry;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+
+    for (uint32_t i = 0; i < n; i++) {
+        if (cb(&snap[i], ctx) != 0) {
+            break;
+        }
+    }
+    return MDS_OK;
+}
+
+
+static enum mds_status mem_ns_parent_touch(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t fileid,
+    uint64_t change_delta, struct timespec stamp)
+{
+    (void)txn;
+    struct memdb *m = cat->backend_private;
+
+    if (change_delta == 0) {
+        return MDS_ERR_INVAL;
+    }
+    pthread_mutex_lock(&m->lock);
+    int idx = memdb_find_inode(m, fileid);
+    if (idx >= 0) {
+        m->inodes[idx].change += change_delta;
+        m->inodes[idx].mtime = stamp;
+        m->inodes[idx].ctime = stamp;
+    }
+    pthread_mutex_unlock(&m->lock);
     return MDS_OK;
 }
 
@@ -1721,7 +2005,16 @@ static const struct mds_catalogue_ops memdb_lifecycle_ops = {
 static const struct mds_authority_ops memdb_auth_ops = {
     .ns_create       = mem_ns_create,
     .ns_remove       = mem_ns_remove,
+    .ns_parent_touch       = mem_ns_parent_touch,
     .ns_rename       = mem_ns_rename,
+    .remove_pending_enqueue    = mem_remove_pending_enqueue,
+    .remove_pending_enqueue_unlink = mem_remove_pending_enqueue_unlink,
+    .remove_pending_peek_batch = mem_remove_pending_peek_batch,
+    .remove_pending_claim      = mem_remove_pending_claim,
+    .remove_pending_complete   = mem_remove_pending_complete,
+    .remove_pending_bump_retry = mem_remove_pending_bump_retry,
+    .remove_pending_count      = mem_remove_pending_count,
+    .remove_pending_scan_all   = mem_remove_pending_scan_all,
     .ns_link         = mem_ns_link,
     .ns_lookup       = mem_ns_lookup,
     .ns_getattr      = mem_ns_getattr,
@@ -1734,6 +2027,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .inode_put       = mem_inode_put,
     .inode_del       = mem_inode_del,
     .dirent_put      = mem_dirent_put,
+    .dirent_insert   = mem_dirent_insert,
     .dirent_del      = mem_dirent_del,
     .inline_get      = mem_inline_get,
     .inline_put      = mem_inline_put,
@@ -1843,6 +2137,7 @@ struct mds_catalogue *catalogue_memdb_open(void)
     m->inodes[0].generation = 1;
     m->inode_used[0] = 1;
     m->next_fileid = MDS_FILEID_ROOT + 1;
+    m->remove_seq_next = 1;
     m->gc_seq_next = 1;
 
     cat->backend = MDS_BACKEND_RONDB;  /* Pretend to be RonDB. */

@@ -177,6 +177,19 @@ struct mds_branch_metrics {
     _Atomic uint64_t io_advise_total;
     _Atomic uint64_t io_advise_willneed;
     _Atomic uint64_t io_advise_dontneed;
+
+    /* Async-REMOVE delete manifest (ported). */
+    _Atomic uint64_t remove_async_acked;
+    _Atomic uint64_t remove_async_ack_unlinked;
+    _Atomic uint64_t remove_async_sync_fallback;
+    _Atomic uint64_t remove_async_manifest_insert_fail;
+    _Atomic uint64_t remove_async_drained_ok;
+    _Atomic uint64_t remove_async_drain_mismatch;
+    _Atomic uint64_t remove_async_drain_fail;
+    _Atomic uint64_t remove_async_force_drain;
+    _Atomic uint64_t remove_async_tombstone_hit;
+    _Atomic uint64_t remove_async_tombstone_scrubbed;
+    _Atomic uint64_t remove_async_depth;
 };
 
 extern struct mds_branch_metrics g_branch_metrics;

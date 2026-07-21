@@ -451,6 +451,9 @@ apply_profile() {
             ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_SINGLE_RONDB_FREE_API_SLOTS}"
             ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_SINGLE_MDS_WORKER_THREADS}"
             ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_SINGLE_MDS_PREALLOC_POOL_SIZE}"
+            # Single MDS: no peer can take over its layout state, so
+            # persisting open/layout state to NDB buys nothing and costs
+            # a round-trip per operation.  Keep it in memory.
             ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_SINGLE_TRANSIENT_STATE_CACHE:-true}"
             ;;
         multi-mds)
@@ -467,7 +470,16 @@ apply_profile() {
             ACTIVE_RONDB_FREE_API_SLOTS="${LAB_PROFILE_MULTI_RONDB_FREE_API_SLOTS}"
             ACTIVE_MDS_WORKER_THREADS="${LAB_PROFILE_MULTI_MDS_WORKER_THREADS}"
             ACTIVE_MDS_PREALLOC_POOL_SIZE="${LAB_PROFILE_MULTI_MDS_PREALLOC_POOL_SIZE}"
-            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE:-true}"
+            # Multi-MDS: open/layout state must outlive the MDS that
+            # granted it, otherwise a failover peer cannot reconstruct
+            # what clients still hold.  transient_state_cache=true keeps
+            # that state in one process's memory only, so it defaults to
+            # false here despite the extra NDB round-trip.
+            #
+            # Persistent state means mass-delete scans hit NDB, which is
+            # what LAB_RONDB_TRANSACTION_MEMORY (2G by default) sizes
+            # for; do not lower it on this profile.
+            ACTIVE_TRANSIENT_STATE_CACHE="${LAB_PROFILE_MULTI_TRANSIENT_STATE_CACHE:-false}"
             ;;
         *)
             fail "Unknown profile: ${PROFILE}"
@@ -1179,6 +1191,51 @@ EOF
     done
 }
 
+# Create the ndb_index_stat system tables.
+#
+# Without them, index statistics are unavailable and index-backed
+# lookups (layout_get_sid on ix_layout_state_stateid) fail with NDB
+# 4243/4350 "Transaction already aborted".  The MDS keeps serving
+# metadata, so a 0-byte mdtest run looks healthy while every real data
+# write lands a 0-byte file -- an easy failure to ship unnoticed.
+#
+# Idempotent (--sys-create-if-not-exist) and required again after any
+# --initial start, which drops the system tables along with the data.
+rondb_create_index_stat() {
+    local connect="${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT}"
+
+    [ "${DRY_RUN}" -eq 0 ] || return 0
+    log "  [rondb] creating ndb_index_stat system tables"
+    if ! capture_remote_cmd "${LAB_RONDB_MGM_HOST}" \
+        "${LAB_REMOTE_RONDB_LINK}/bin/ndb_index_stat \
+            --sys-create-if-not-exist -c ${connect}" >/dev/null 2>&1; then
+        log "  [rondb] WARNING: ndb_index_stat --sys-create-if-not-exist failed;"
+        log "          expect 'layout_get_sid exec failed code=4350' and 0-byte"
+        log "          data writes until it is run manually against ${connect}"
+    fi
+}
+
+# Wait until every configured data node reports a Nodegroup (i.e. is
+# started, not merely connected).  Index-stat creation and the first
+# MDS start both need a live cluster.
+rondb_wait_started() {
+    local attempt=0
+    local started=0
+
+    [ "${DRY_RUN}" -eq 0 ] || return 0
+    while [ "${attempt}" -lt 60 ]; do
+        started="$(capture_remote_cmd "${LAB_RONDB_MGM_HOST}" \
+            "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm -e show 2>/dev/null | grep -c 'Nodegroup:'" \
+            2>/dev/null || echo 0)"
+        [ "${started}" = "${#ACTIVE_RONDB_DATA_IPS[@]}" ] && break
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    [ "${started}" = "${#ACTIVE_RONDB_DATA_IPS[@]}" ] || \
+        fail "RonDB data nodes did not all start (${started}/${#ACTIVE_RONDB_DATA_IPS[@]})"
+    log "  [rondb] all ${started} data node(s) started"
+}
+
 phase_rondb() {
     local host
     local idx
@@ -1266,8 +1323,10 @@ EOF
 )"
     done
 
+    rondb_wait_started
+    rondb_create_index_stat
+
     if [ "${DRY_RUN}" -eq 0 ]; then
-        sleep 5
         capture_remote_cmd "${LAB_RONDB_MGM_HOST}" \
             "${LAB_REMOTE_RONDB_LINK}/bin/ndb_mgm \
                 --ndb-connectstring=${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT} \
@@ -1510,6 +1569,10 @@ find '${LAB_RONDB_DATA_DIR}/mgm' -mindepth 1 -delete"
             fail "RonDB data nodes did not all start (${started}/${#ACTIVE_RONDB_DATA_IPS[@]})"
         log "  [rondb] all ${started} data node(s) started"
     fi
+
+    # --initial dropped the ndb_index_stat system tables along with the
+    # data; recreate them before the MDS reconnects.
+    rondb_create_index_stat
 
     log "  [mds] start pnfs-mds (first start recreates the schema; allow ~2min)"
     for host in "${ACTIVE_MDS_HOSTS[@]}"; do

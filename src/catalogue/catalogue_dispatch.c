@@ -233,6 +233,27 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
         cat->auth_ops->ns_remove(cat, txn, parent_fileid, name));
 }
 
+enum mds_status mds_cat_ns_parent_touch(struct mds_catalogue *cat,
+                                        uint64_t fileid,
+                                        uint64_t change_delta,
+                                        struct timespec stamp)
+{
+    if (cat == NULL || cat->auth_ops == NULL || change_delta == 0) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->ns_parent_touch == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->ns_parent_touch(cat, NULL, fileid,
+                                          change_delta, stamp);
+}
+
+bool mds_cat_ns_parent_touch_supported(const struct mds_catalogue *cat)
+{
+    return cat != NULL && cat->auth_ops != NULL &&
+           cat->auth_ops->ns_parent_touch != NULL;
+}
+
 enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
                                   struct mds_cat_txn *txn,
                                   uint64_t src_parent,
@@ -2003,4 +2024,171 @@ enum mds_status mds_coord_slot_get(struct mds_catalogue *cat,
         return MDS_ERR_NOSUPPORT;
     }
     return cat->coord_ops->slot_get(cat, session_id, slot_id, row);
+}
+
+/* -----------------------------------------------------------------------
+ * Authority ops dispatch — Async-REMOVE delete manifest (schema v18)
+ *
+ * All slots optional: NULL slots return MDS_ERR_NOSUPPORT so the
+ * remove_manifest module refuses to arm and op_remove keeps its
+ * legacy synchronous behaviour on backends without the table.
+ * ----------------------------------------------------------------------- */
+
+enum mds_status mds_cat_remove_pending_enqueue(struct mds_catalogue *cat,
+                                               struct mds_cat_txn *txn,
+                                               uint64_t dir_fileid,
+                                               const char *name,
+                                               uint64_t child_fileid,
+                                               uint64_t child_generation,
+                                               uint64_t *seq_out)
+{
+    if (name == NULL || name[0] == '\0' || seq_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    *seq_out = 0;
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_enqueue == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_enqueue(cat, txn, dir_fileid,
+                                                 name, child_fileid,
+                                                 child_generation,
+                                                 seq_out);
+}
+
+enum mds_status mds_cat_remove_pending_enqueue_unlink(struct mds_catalogue *cat,
+                                               struct mds_cat_txn *txn,
+                                               uint64_t dir_fileid,
+                                               const char *name,
+                                               uint64_t child_fileid,
+                                               uint64_t child_generation,
+                                               uint64_t *seq_out)
+{
+    if (name == NULL || name[0] == '\0' || seq_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    *seq_out = 0;
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_enqueue_unlink == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_enqueue_unlink(cat, txn, dir_fileid,
+                                                 name, child_fileid,
+                                                 child_generation,
+                                                 seq_out);
+}
+
+enum mds_status mds_cat_remove_pending_peek_batch(
+    struct mds_catalogue *cat, uint64_t now_ns,
+    struct mds_remove_pending_entry *entries,
+    uint32_t cap, uint32_t *n_out)
+{
+    if (n_out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    *n_out = 0;
+    if (cat == NULL || cat->auth_ops == NULL ||
+        entries == NULL || cap == 0) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_peek_batch == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_peek_batch(cat, now_ns,
+                                                    entries, cap, n_out);
+}
+
+enum mds_status mds_cat_remove_pending_claim(
+    struct mds_catalogue *cat, uint64_t remove_seq,
+    uint32_t mds_id, uint64_t boot_epoch,
+    uint64_t now_ns, uint64_t claim_ttl_ns)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_claim == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_claim(cat, remove_seq, mds_id,
+                                               boot_epoch, now_ns,
+                                               claim_ttl_ns);
+}
+
+enum mds_status mds_cat_remove_pending_complete(struct mds_catalogue *cat,
+                                                uint64_t remove_seq)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_complete == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_complete(cat, remove_seq);
+}
+
+enum mds_status mds_cat_remove_pending_bump_retry(struct mds_catalogue *cat,
+                                                  uint64_t remove_seq)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_bump_retry == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_bump_retry(cat, remove_seq);
+}
+
+enum mds_status mds_cat_remove_pending_count(struct mds_catalogue *cat,
+                                             uint32_t *count)
+{
+    if (cat == NULL || cat->auth_ops == NULL || count == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_count == NULL) {
+        *count = 0;
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_count(cat, count);
+}
+
+enum mds_status mds_cat_remove_pending_scan_all(
+    struct mds_catalogue *cat,
+    mds_cat_remove_pending_scan_cb cb, void *ctx)
+{
+    if (cat == NULL || cat->auth_ops == NULL || cb == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->remove_pending_scan_all == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->remove_pending_scan_all(cat, cb, ctx);
+}
+
+/* ns_remove info variants: NOT ported (the delete-at-ack drain always
+ * finalizes via the inode inference).  Kept as NOSUPPORT dispatchers so
+ * the shared remove-manifest executor code compiles unchanged. */
+enum mds_status mds_cat_ns_remove_info_flags(struct mds_catalogue *cat,
+		struct mds_cat_txn *txn, uint64_t parent_fileid,
+		const char *name, struct mds_ns_remove_info *out,
+		uint32_t ns_flags)
+{
+	(void)cat; (void)txn; (void)parent_fileid; (void)name;
+	(void)out; (void)ns_flags;
+	return MDS_ERR_NOSUPPORT;
+}
+
+enum mds_status mds_cat_ns_remove_info_verified_flags(
+		struct mds_catalogue *cat, struct mds_cat_txn *txn,
+		uint64_t parent_fileid, const char *name,
+		uint64_t expected_child_fid, uint64_t expected_generation,
+		struct mds_ns_remove_info *out, uint32_t ns_flags)
+{
+	(void)cat; (void)txn; (void)parent_fileid; (void)name;
+	(void)expected_child_fid; (void)expected_generation;
+	(void)out; (void)ns_flags;
+	return MDS_ERR_NOSUPPORT;
 }

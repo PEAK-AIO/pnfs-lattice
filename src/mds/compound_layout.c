@@ -942,6 +942,51 @@ static enum nfs4_status layout_revoke_unready_grant(
 }
 
 /*
+ * Synthesize a single-entry stripe map from a v9 INLINE_STRIPE inode.
+ *
+ * Side-table stripe_map_get returns NOTFOUND for these files by design
+ * (the entry lives on the inode).  DS ids are 0-based, so ds_id == 0 is
+ * a valid placement -- readiness is INLINE_STRIPE + a captured FH.
+ * Caller frees *entries with free().
+ */
+static bool layout_synth_inline_stripe(const struct mds_inode *inode,
+				       uint32_t *stripe_count,
+				       uint32_t *stripe_unit,
+				       uint32_t *mirror_count,
+				       struct mds_ds_map_entry **entries)
+{
+	struct mds_ds_map_entry *e;
+	uint32_t fhl;
+
+	if (inode == NULL || entries == NULL || stripe_count == NULL ||
+	    stripe_unit == NULL || mirror_count == NULL) {
+		return false;
+	}
+	if ((inode->flags & MDS_IFLAG_INLINE_STRIPE) == 0 ||
+	    (inode->flags & MDS_IFLAG_DS_PENDING) != 0 ||
+	    inode->inline_fh_len == 0) {
+		return false;
+	}
+
+	e = calloc(1, sizeof(*e));
+	if (e == NULL) {
+		return false;
+	}
+	fhl = inode->inline_fh_len;
+	if (fhl > MDS_NFS_FH_MAX) {
+		fhl = MDS_NFS_FH_MAX;
+	}
+	e[0].ds_id = inode->inline_ds_id;
+	e[0].nfs_fh_len = fhl;
+	memcpy(e[0].nfs_fh, inode->inline_fh, fhl);
+	*stripe_count = 1;
+	*mirror_count = 1;
+	*stripe_unit = inode->stripe_unit > 0 ? inode->stripe_unit : 65536;
+	*entries = e;
+	return true;
+}
+
+/*
  * Verify-on-serve for wide (multi-stripe) HPC-Shared files.
  *
  * The DS filehandle for each stripe is captured once at create time
@@ -1466,24 +1511,22 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * it, and reaches the same fill_layoutget_result grant-fill as the
 	 * HPC cache hit.  DS_PENDING and FH-less inodes are excluded so the
 	 * legacy ds_prepare / FH-capture flow still handles them.
+	 *
+	 * DS ids are 0-based (main.c registers ds_id = di).  Do NOT treat
+	 * inline_ds_id == 0 as "unset": that mis-diagnoses every file
+	 * placed on the first DS and was the root cause of silent
+	 * zero-reads (~1/N of creates under RR).
 	 */
 	if ((inode.flags & MDS_IFLAG_INLINE_STRIPE) &&
 	    !(inode.flags & MDS_IFLAG_DS_PENDING) &&
 	    inode.inline_fh_len > 0) {
 		struct nfs4_stateid layout_sid;
-		uint32_t fhl = inode.inline_fh_len;
 
-		if (fhl > MDS_NFS_FH_MAX) { fhl = MDS_NFS_FH_MAX; }
-		entries = calloc(1, sizeof(*entries));
-		if (entries == NULL) {
+		if (!layout_synth_inline_stripe(&inode, &stripe_count,
+						&stripe_unit, &mirror_count,
+						&entries)) {
 			return NFS4ERR_SERVERFAULT;
 		}
-		entries[0].ds_id = inode.inline_ds_id;
-		entries[0].nfs_fh_len = fhl;
-		memcpy(entries[0].nfs_fh, inode.inline_fh, fhl);
-		stripe_count = 1;
-		mirror_count = 1;
-		stripe_unit = inode.stripe_unit > 0 ? inode.stripe_unit : 65536;
 
 		if (pregrant_consumed) {
 			layout_sid = pregrant_sid;
@@ -1521,10 +1564,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		 */
 		/* Fast path: check if this file's stripe was just created
 		 * in the same compound (stashed by op_open CREATE).
-		 * Eliminates 2 NDB reads from LAYOUTGET for new files. */
+		 * Eliminates 2 NDB reads from LAYOUTGET for new files.
+		 * Validity is stripe_cached itself -- ds_id 0 is a real DS. */
 		if (cd->stripe_cached &&
-		    cd->stripe_cached_fileid == cd->current_fh.fileid &&
-		    cd->stripe_cached_ds_id != 0) {
+		    cd->stripe_cached_fileid == cd->current_fh.fileid) {
 			struct nfs4_stateid fast_sid;
 
 			stripe_count = 1;
@@ -1706,6 +1749,50 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 						     &mirror_count, &entries);
 		}
 		if (st == MDS_ERR_NOTFOUND) {
+			/*
+			 * v9 INLINE_STRIPE files have no side-table rows;
+			 * synthesize the map from the inode (same as
+			 * proxy_stripe_map_get).  Must run before the
+			 * non-empty-file refusal below.
+			 */
+			if (layout_synth_inline_stripe(&inode, &stripe_count,
+						       &stripe_unit,
+						       &mirror_count,
+						       &entries)) {
+				st = MDS_OK;
+			}
+		}
+		if (st == MDS_ERR_NOTFOUND) {
+			/*
+			 * A file that already holds data must never be
+			 * re-placed.  The fallback below chooses a DS by
+			 * placement policy -- not by where the bytes
+			 * actually live -- and then persists that choice as
+			 * the file's stripe map.  Doing that for a non-empty
+			 * file strands the existing data on the original DS
+			 * and every subsequent read is served from a DS that
+			 * has no backing file, i.e. it returns zeros, with
+			 * the correct size, permanently and silently.
+			 *
+			 * "No stripe map" is only legitimate for a file that
+			 * has no data yet (the first LAYOUTGET after CREATE).
+			 * For anything else it means the map lookup failed.
+			 * Fail loudly instead of silently relocating the file.
+			 */
+			if (inode.size > 0) {
+				MDS_LOG_ERROR(LOG_COMP_MDS,
+					"LAYOUTGET fileid=%llu: stripe map "
+					"missing for a non-empty file "
+					"(size=%llu flags=0x%x inline_fh_len=%u "
+					"inline_ds_id=%u) -- refusing placement "
+					"fallback that would strand its data",
+					(unsigned long long)cd->current_fh.fileid,
+					(unsigned long long)inode.size,
+					(unsigned)inode.flags,
+					(unsigned)inode.inline_fh_len,
+					(unsigned)inode.inline_ds_id);
+				return NFS4ERR_IO;
+			}
 			MDS_LOG_DEBUG(LOG_COMP_MDS,
 				"LAYOUTGET fileid=%llu: no stripe map, "
 				"entering placement fallback",
@@ -1927,7 +2014,27 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		st = cat_stripe_map_get(cd, cd->current_fh.fileid,
 					&stripe_count, &stripe_unit,
 					&mirror_count, &entries);
+		if (st == MDS_ERR_NOTFOUND &&
+		    layout_synth_inline_stripe(&inode, &stripe_count,
+					       &stripe_unit, &mirror_count,
+					       &entries)) {
+			st = MDS_OK;
+		}
 		if (st == MDS_ERR_NOTFOUND) {
+			if (inode.size > 0) {
+				MDS_LOG_ERROR(LOG_COMP_MDS,
+					"LAYOUTGET fileid=%llu: stripe map "
+					"missing for a non-empty file "
+					"(size=%llu flags=0x%x inline_fh_len=%u "
+					"inline_ds_id=%u) -- refusing placement "
+					"fallback that would strand its data",
+					(unsigned long long)cd->current_fh.fileid,
+					(unsigned long long)inode.size,
+					(unsigned)inode.flags,
+					(unsigned)inode.inline_fh_len,
+					(unsigned)inode.inline_ds_id);
+				return NFS4ERR_IO;
+			}
 			/* Need placement -- read DS registry. */
 			st = cat_ds_list(cd, &ds_list, &ds_count);
 			if (st != MDS_OK || ds_count == 0) {

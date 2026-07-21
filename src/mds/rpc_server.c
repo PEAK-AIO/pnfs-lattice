@@ -157,6 +157,8 @@ struct rpc_server {
     struct ds_prepare_ctx           *ds_prepare;
     struct ds_cache                 *ds_cache;
     struct inode_cache              *icache;
+    struct parent_touch *pt;
+    struct remove_manifest *rmf;
     struct dirent_cache             *dcache;
     /* Phase D of docs/hpc-nto1-plan.md -- HPC-Shared layout cache. */
     struct layout_cache             *lcache;
@@ -1149,6 +1151,8 @@ wrongsec:
         cd.ds_prepare = srv->ds_prepare;
         cd.ds_cache = srv->ds_cache;
         cd.icache = srv->icache;
+        cd.pt = srv->pt;
+        cd.rmf = srv->rmf;
         cd.dcache = srv->dcache;
         cd.lcache = srv->lcache;
         cd.lcommit_agg = srv->lcommit_agg;
@@ -1913,6 +1917,8 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->ds_prepare = cfg->ds_prepare;
     srv->ds_cache = cfg->ds_cache;
     srv->icache = cfg->icache;
+    srv->pt = cfg->pt;
+    srv->rmf = cfg->rmf;
     srv->dcache = cfg->dcache;
     srv->lcache = cfg->lcache;
     srv->lcommit_agg = cfg->lcommit_agg;

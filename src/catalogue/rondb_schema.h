@@ -59,7 +59,7 @@
  *     (no cat_stripe_map_get) and create/remove write/delete no stripe
  *     rows.  Nullable/dynamic (online ALTER); pre-v9 rows read back with
  *     the flag clear and fall back to the side tables. */
-#define RONDB_SCHEMA_VERSION  9
+#define RONDB_SCHEMA_VERSION  10
 
 /* -----------------------------------------------------------------------
  * Table names
@@ -84,6 +84,22 @@
 #define RONDB_TBL_QUOTA_RULES     "mds_quota_rules"
 #define RONDB_TBL_QUOTA_USAGE     "mds_quota_usage"
 #define RONDB_TBL_GC_QUEUE        "mds_gc_queue"
+
+/* Async-REMOVE delete manifest (schema v10, ported). */
+#define RONDB_TBL_REMOVE_PENDING  "mds_remove_pending"
+#define RONDB_RP_COL_SEQ             "remove_seq"
+#define RONDB_RP_COL_DIR_FILEID      "dir_fileid"
+#define RONDB_RP_COL_NAME            "entry_name"
+#define RONDB_RP_COL_CHILD_FILEID    "child_fileid"
+#define RONDB_RP_COL_CHILD_GEN       "child_generation"
+#define RONDB_RP_COL_ENQUEUED_NS     "enqueued_ns"
+#define RONDB_RP_COL_CLAIM_MDS       "claim_mds_id"
+#define RONDB_RP_COL_CLAIM_BOOT      "claim_boot"
+#define RONDB_RP_COL_CLAIM_EXPIRES   "claim_expires_ns"
+#define RONDB_RP_COL_RETRIES         "retries"
+#define RONDB_IX_RP_SEQ           "ix_remove_pending_seq"
+#define RONDB_IX_RP_DIR           "ix_remove_pending_dir"
+#define RONDB_UP_PEEK_EXAMINE_SLACK 4U
 #define RONDB_TBL_LAYOUT_STATE    "mds_layout_state"
 #define RONDB_TBL_LAYOUT_BY_CLIENT "mds_layout_by_client"
 #define RONDB_TBL_LAYOUT_BY_FILE  "mds_layout_by_file"

@@ -12,6 +12,7 @@
 #define COMPOUND_INTERNAL_H
 
 #include "compound.h"
+#include "parent_touch.h"
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
 #include "mds_shard.h"
@@ -595,14 +596,78 @@ cat_root_global_cat(const struct compound_data *cd)
 
 /* -- Namespace --------------------------------------------------------- */
 
+
+/* -- parent_touch integration (ported) ---------------------------------- */
+
+/**
+ * Overlay the parent_touch aggregator's authoritative logical view
+ * (change counter + monotonic timestamps) onto a directory inode that
+ * was just read.  Absolute and idempotent.  No-op for files, when the
+ * feature is off, or when the directory has no live bucket.
+ */
+static inline void
+compound_parent_touch_overlay(struct compound_data *cd, uint64_t fid,
+			      struct mds_inode *ino)
+{
+	if (cd->pt != NULL && ino != NULL &&
+	    ino->type == MDS_FTYPE_DIR) {
+		(void)parent_touch_overlay(cd->pt, fid, ino);
+	}
+}
+
+/**
+ * parent_touch deferral gate: true when this MDS may defer the
+ * parent-directory attr bump for a mutation under cd->current_fh.
+ * Requires the aggregator, the direct catalogue path (no commit
+ * queue), and a single-writer proof: single-MDS deployment, or
+ * subtree ownership of the parent by this node.
+ */
+static inline bool
+compound_parent_defer_ok(const struct compound_data *cd)
+{
+	if (cd->pt == NULL || cd->cq != NULL) {
+		return false;
+	}
+	if (cd->cfg != NULL && cd->cfg->cluster_size <= 1) {
+		return true;
+	}
+	return cd->current_fh.owner_mds_id != 0 &&
+	       cd->current_fh.owner_mds_id == cd->mds_id;
+}
+
+/**
+ * A SYNCHRONOUS in-transaction parent update committed: fold the
+ * persisted +1 into the aggregator's logical view so the
+ * logical = persisted + pending invariant holds.
+ */
+static inline void
+compound_parent_sync_bumped(struct compound_data *cd,
+			    uint64_t parent_fileid)
+{
+	if (cd->pt != NULL) {
+		struct timespec pt_now;
+
+		clock_gettime(CLOCK_REALTIME, &pt_now);
+		parent_touch_note_sync_bump(cd->pt, parent_fileid, pt_now);
+	}
+}
+
 static inline enum mds_status
 cat_getattr(struct compound_data *cd, uint64_t fid,
 	    struct mds_inode *out)
 {
+	enum mds_status pt_st;
+
 	if (cd->cat == NULL) {
 		return MDS_ERR_INVAL;
 	}
-	return mds_cat_ns_getattr(cd->cat, fid, out);
+	pt_st = mds_cat_ns_getattr(cd->cat, fid, out);
+	if (pt_st == MDS_OK) {
+		/* parent_touch: post-mutation parent reads must observe
+		 * the authoritative logical view. */
+		compound_parent_touch_overlay(cd, fid, out);
+	}
+	return pt_st;
 }
 
 static inline enum mds_status
