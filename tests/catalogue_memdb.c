@@ -331,6 +331,36 @@ static enum mds_status mem_dirent_put(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+/* Insert-only: MDS_ERR_EXISTS on name collision (HPC wide-create path). */
+static enum mds_status mem_dirent_insert(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t parent,
+    const char *name, uint64_t child_fileid, uint8_t child_type)
+{
+    (void)txn;
+    struct memdb *m = cat->backend_private;
+    pthread_mutex_lock(&m->lock);
+
+    if (memdb_find_dirent(m, parent, name) >= 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_EXISTS;
+    }
+    {
+        int idx = memdb_alloc_dirent_slot(m);
+        if (idx < 0) {
+            pthread_mutex_unlock(&m->lock);
+            return MDS_ERR_NOSPC;
+        }
+        m->dirents[idx].used = 1;
+        m->dirents[idx].parent = parent;
+        snprintf(m->dirents[idx].name, sizeof(m->dirents[idx].name),
+                 "%s", name);
+        m->dirents[idx].child_fileid = child_fileid;
+        m->dirents[idx].child_type = child_type;
+    }
+    pthread_mutex_unlock(&m->lock);
+    return MDS_OK;
+}
+
 static enum mds_status mem_dirent_del(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent, const char *name)
 {
@@ -1997,6 +2027,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .inode_put       = mem_inode_put,
     .inode_del       = mem_inode_del,
     .dirent_put      = mem_dirent_put,
+    .dirent_insert   = mem_dirent_insert,
     .dirent_del      = mem_dirent_del,
     .inline_get      = mem_inline_get,
     .inline_put      = mem_inline_put,

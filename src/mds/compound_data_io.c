@@ -469,12 +469,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 			 */
 			uint32_t pre_create_ds_id = 0;
 			uint32_t pre_create_stripe_unit = 0;
+			bool pre_create_have_ds = false;
 			if (!hpc_wide_path && cd->prealloc != NULL) {
 				struct mds_ds_map_entry peek_e;
 				if (ds_prealloc_peek(cd->prealloc,
 						     &peek_e,
 						     &pre_create_stripe_unit) == 0) {
 					pre_create_ds_id = peek_e.ds_id;
+					pre_create_have_ds = true;
 				}
 			}
 
@@ -542,11 +544,12 @@ enum nfs4_status op_open(struct compound_data *cd,
 							cop.args.create.layout_length = lg->length;
 							cop.args.create.skip_transient_ndb =
 								cd->skip_transient_ndb;
-							if (pre_create_ds_id != 0) {
+							if (pre_create_have_ds) {
 								/* Borrow the stack-local pre_create_ds_id
 								 * for the synchronous commit_queue_submit
 								 * below -- see the lifetime contract
-								 * comment on commit_queue_submit(). */
+								 * comment on commit_queue_submit().
+								 * ds_id 0 is a valid DS (0-based). */
 								cop.args.create.layout_ds_ids =
 									&pre_create_ds_id;
 								cop.args.create.layout_ds_count = 1;
@@ -667,10 +670,11 @@ enum nfs4_status op_open(struct compound_data *cd,
 					 * lifetime.
 					 */
 					if (st == MDS_OK &&
-					    pre_entry.ds_id != 0 &&
 					    pre_entry.nfs_fh_len > 0 &&
 					    pre_entry.nfs_fh_len <=
 						sizeof(cd->stripe_cached_nfs_fh)) {
+						/* ds_id 0 is valid; readiness is
+						 * the captured FH from the pop. */
 						cd->stripe_cached = true;
 						cd->stripe_cached_fileid =
 							inode.fileid;
@@ -797,8 +801,9 @@ enum nfs4_status op_open(struct compound_data *cd,
 
 			/* Stash stripe info for LAYOUTGET fast path.
 			 * The DS ID was captured before create consumed
-			 * the prealloc entry (see pre_create_ds_id above). */
-			if (pre_create_ds_id != 0 &&
+			 * the prealloc entry (see pre_create_have_ds above).
+			 * ds_id 0 is a valid placement. */
+			if (pre_create_have_ds &&
 			    (inode.flags & MDS_IFLAG_DS_PENDING)) {
 				cd->stripe_cached = true;
 				cd->stripe_cached_fileid = inode.fileid;

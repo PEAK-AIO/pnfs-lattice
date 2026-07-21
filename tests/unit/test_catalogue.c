@@ -304,6 +304,49 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 	close_test_cat(cat, path);
 }
 
+/*
+ * Regression: auth_ops->dirent_insert must be wired.  The async-REMOVE
+ * merge (fc6bc2b) dropped the RonDB vtable entries and every HPC
+ * hpc_shared create failed with EINVAL; this test fails the same way
+ * if memdb (or any backend under test) loses the op again.
+ */
+static void test_catalogue_dirent_insert_only(void)
+{
+	struct mds_catalogue *cat;
+	struct mds_inode child;
+	char *path;
+	uint64_t fid = 0;
+	uint8_t typ = 0;
+
+	cat = open_test_cat(&path);
+
+	memset(&child, 0, sizeof(child));
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT, "a",
+				    MDS_FTYPE_REG, 0644, 0, 0, NULL,
+				    &child),
+		  MDS_OK);
+
+	/* Insert-only succeeds for a new name. */
+	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, MDS_FILEID_ROOT, "b",
+					child.fileid, (uint8_t)MDS_FTYPE_REG),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_dirent_get(cat, MDS_FILEID_ROOT, "b", &fid, &typ),
+		  MDS_OK);
+	ASSERT_EQ(fid, child.fileid);
+
+	/* Second insert of the same name must NOT upsert. */
+	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, MDS_FILEID_ROOT, "b",
+					child.fileid + 1,
+					(uint8_t)MDS_FTYPE_REG),
+		  MDS_ERR_EXISTS);
+	fid = 0;
+	ASSERT_EQ(mds_cat_dirent_get(cat, MDS_FILEID_ROOT, "b", &fid, &typ),
+		  MDS_OK);
+	ASSERT_EQ(fid, child.fileid);
+
+	close_test_cat(cat, path);
+}
+
 static void test_catalogue_coordination_dispatch_rejects_null_ds_ids(void)
 {
 	struct mds_catalogue *cat;
@@ -1216,6 +1259,7 @@ int main(void)
 	RUN_TEST(test_catalogue_ns_readdir_plus_start_after);
 	RUN_TEST(test_catalogue_ns_readdir_max_entries);
 	RUN_TEST(test_catalogue_dirent_name_for_child);
+	RUN_TEST(test_catalogue_dirent_insert_only);
 	RUN_TEST(test_catalogue_stripe_map_wide_round_trip);
 	RUN_TEST(test_catalogue_layout_grant_return);
 	RUN_TEST(test_catalogue_layout_iter_file);
