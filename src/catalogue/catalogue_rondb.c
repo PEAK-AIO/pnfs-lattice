@@ -1635,9 +1635,16 @@ enum mds_status catalogue_rondb_stripe_map_del(
 	 * batched PK deletes instead of an exclusive scan.  stripe_map_del
 	 * is idempotent; ds_gc may call it after ns_remove already removed
 	 * the rows in the same transaction as the namespace delete.
+	 *
+	 * max_entries 0 = header-driven: the shim reads the stripe_maps
+	 * header and deletes exactly stripe_count rows, returning
+	 * immediately when no header exists.  Passing MDS_MAX_STRIPES
+	 * here queued 1024 blind PK deletes per call (~4 ms each, per
+	 * removed file, from ds_gc), which dominated catalogue time
+	 * under mass delete.
 	 */
 	for (int attempt = 0; attempt < 3; attempt++) {
-		rc = rondb_shim_stripe_del(h, fileid, MDS_MAX_STRIPES);
+		rc = rondb_shim_stripe_del(h, fileid, 0);
 		if (rc == 0) {
 			break;
 		}
