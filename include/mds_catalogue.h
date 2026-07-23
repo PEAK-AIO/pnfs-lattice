@@ -164,6 +164,36 @@ enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
 				  uint64_t uid, uint64_t gid,
 				  struct ds_prealloc_ctx *prealloc,
 				  struct mds_inode *out);
+/**
+ * Atomically create a preallocated wide regular file.
+ *
+ * Inserts the supplied child inode, its insert-only parent dirent, the exact
+ * stripe-map header and entries, and the parent timestamp/change update in
+ * one backend transaction.  @p child must contain a unique preallocated
+ * fileid and must not carry MDS_IFLAG_HPC_CREATE_PENDING.
+ *
+ * @param cat            Catalogue handle.
+ * @param parent_fileid  Parent directory fileid.
+ * @param name           New child name.
+ * @param child          Fully initialized child inode.
+ * @param stripe_count   Number of logical stripes.
+ * @param stripe_unit    Bytes per logical stripe.
+ * @param mirror_count   Mirrors per logical stripe.
+ * @param entries        Stripe-major DS entries.
+ * @return MDS_OK on success, MDS_ERR_EXISTS on name collision, or an error.
+ *
+ * Ownership: callers retain @p child and @p entries.
+ * Thread safety: backend transaction serializes concurrent namespace changes.
+ */
+enum mds_status mds_cat_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries);
 
 /** Remove a dirent + inode (if nlink drops to 0) + parent touch. */
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
