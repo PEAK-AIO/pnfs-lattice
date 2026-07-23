@@ -614,6 +614,7 @@ static enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
 enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
                                uint64_t fileid,
+                               uint64_t logical_size,
                                uint64_t offset,
                                uint32_t count,
                                void *buf,
@@ -624,6 +625,8 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
     uint32_t stripe_count, stripe_unit, mirror_count;
     enum mds_status st;
     uint32_t total_read = 0;
+    uint32_t bounded_count;
+    uint8_t *out = buf;
 
     if (ctx == NULL || cat == NULL || buf == NULL ||
         bytes_read == NULL || eof == NULL) {
@@ -632,6 +635,18 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
 
     *bytes_read = 0;
     *eof = false;
+    if (offset >= logical_size) {
+        *eof = true;
+        return MDS_OK;
+    }
+
+    bounded_count = count;
+    if ((uint64_t)bounded_count > logical_size - offset) {
+        bounded_count = (uint32_t)(logical_size - offset);
+    }
+    if (bounded_count == 0) {
+        return MDS_OK;
+    }
 
     /* Look up stripe map via catalogue vtable. */
     st = proxy_stripe_map_get(cat, fileid,
@@ -648,7 +663,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
      * the correct DS for each stripe unit in sequence.  Each iteration
      * reads at most one stripe_unit's worth of data.
      */
-    while (total_read < count) {
+    while (total_read < bounded_count) {
         uint32_t stripe_idx;
         uint64_t local_offset;
         uint32_t chunk;
@@ -660,7 +675,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                             &stripe_idx, &local_offset);
 
         /* Clamp to stripe boundary. */
-        chunk = count - total_read;
+        chunk = bounded_count - total_read;
         if (stripe_unit > 0) {
             uint64_t remaining = stripe_unit -
                 ((offset + total_read) % stripe_unit);
@@ -709,7 +724,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                 }
             }
 
-            nr = pread(fd, buf, chunk, (off_t)local_offset);
+            nr = pread(fd, out + total_read, chunk, (off_t)local_offset);
 
             if (nr < 0) {
                 /* Stale fd -- mark dead (still pinned by us) and drop
@@ -729,16 +744,16 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                              fileid, entries[entry_idx].ds_id,
                              stripe_idx, m, O_RDONLY, fd);
 
-            /* Successful read from this mirror. */
-            total_read += (uint32_t)nr;
-            buf = (uint8_t *)buf + nr;
-            read_ok = true;
-
-            /* Short read means EOF on this DS file. */
+            /*
+             * A short successful read is a sparse hole, not logical EOF:
+             * DS files hold only their own stripe units, so a missing
+             * extent must not conceal valid data in later stripes.
+             */
             if ((uint32_t)nr < chunk) {
-                *eof = true;
-                goto done;
+                memset(out + total_read + nr, 0, chunk - (uint32_t)nr);
             }
+            total_read += chunk;
+            read_ok = true;
             break;  /* Success -- move to next stripe. */
         }
 
@@ -755,6 +770,7 @@ enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
 done:
     free(entries);
     *bytes_read = total_read;
+    *eof = (offset + total_read >= logical_size);
     return MDS_OK;
 }
 
@@ -1487,53 +1503,262 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
  * Proxy SEEK
  * ----------------------------------------------------------------------- */
 
+/*
+ * Find the next logical DATA or HOLE byte within one DS stripe unit.
+ *
+ * SEEK_DATA and SEEK_HOLE report filesystem allocation extents, which are
+ * block-granular. A small write can therefore make SEEK_DATA report the
+ * beginning of its allocation block rather than the logical write offset.
+ * The proxy path derives its logical sparse view from DS content: nonzero
+ * bytes are data and zero-filled bytes are holes. This matches
+ * mds_proxy_read(), which zero-fills short DS reads.
+ *
+ * Returns 1 when a matching byte is found, 0 when this range has no match,
+ * or -1 on I/O error.
+ */
+static int proxy_find_content_byte(int fd, uint64_t start, uint64_t end,
+                                   uint32_t what, uint64_t *out_offset)
+{
+    uint8_t buf[4096];
+    uint64_t current = start;
+    bool want_data = (what == 0);
+
+    while (current < end) {
+        size_t count = sizeof(buf);
+        ssize_t bytes_read;
+
+        if (end - current < count) {
+            count = (size_t)(end - current);
+        }
+        bytes_read = pread(fd, buf, count, (off_t)current);
+        if (bytes_read < 0) {
+            return -1;
+        }
+        for (size_t index = 0; index < (size_t)bytes_read; index++) {
+            bool is_data = (buf[index] != 0);
+
+            if (is_data == want_data) {
+                *out_offset = current + index;
+                return 1;
+            }
+        }
+        if ((size_t)bytes_read < count) {
+            if (!want_data) {
+                *out_offset = current + (uint64_t)bytes_read;
+                return 1;
+            }
+            return 0;
+        }
+        current += (uint64_t)bytes_read;
+    }
+
+    return 0;
+}
+
 enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
                                uint64_t fileid,
+                               uint64_t logical_size,
                                uint64_t offset,
                                uint32_t what,
                                uint64_t *out_offset,
                                bool *eof)
 {
-    uint64_t local_offset;
-    int fd;
-    off_t result;
-    int whence;
+    struct mds_ds_map_entry *entries = NULL;
+    uint32_t stripe_count, stripe_unit, mirror_count;
+    enum mds_status st;
+    uint64_t current;
+    uint64_t *next_alloc = NULL;
 
     if (ctx == NULL || cat == NULL || out_offset == NULL || eof == NULL) {
         return MDS_ERR_INVAL;
-}
+    }
 
     *eof = false;
+    *out_offset = 0;
+    if (offset >= logical_size) {
+        *eof = true;
+        return MDS_OK;
+    }
 
-    fd = open_ds_file(ctx, cat, fileid, offset, O_RDONLY, NULL, &local_offset);
-    if (fd < 0) {
-        return MDS_ERR_IO;
-}
-
-    whence = (what == 0) ? SEEK_DATA : SEEK_HOLE;
-    result = lseek(fd, (off_t)local_offset, whence);
-
-    if (result < 0) {
-        if (errno == ENXIO) {
-            /* Beyond end of data / no more holes -- report EOF. */
-            *eof = true;
-            *out_offset = 0;
-            close(fd);
-            return MDS_OK;
-        }
-        close(fd);
+    st = proxy_stripe_map_get(cat, fileid,
+                              &stripe_count, &stripe_unit,
+                              &mirror_count, &entries);
+    if (st != MDS_OK) {
+        return st;
+    }
+    if (stripe_count == 0 || mirror_count == 0) {
+        free(entries);
         return MDS_ERR_IO;
     }
 
-    close(fd);
-
     /*
-     * Translate DS-local offset back to logical offset.  Sparse
-     * addressing makes local == logical, so the delta from the
-     * requested offset is exact for both single- and multi-stripe.
+     * Allocation-aware skip cache (single-mirror layouts only): the
+     * first allocated file offset at or beyond the last probe, per
+     * stripe.  Unallocated ranges are guaranteed to read as zeros, so
+     * SEEK_DATA can prove whole stripe units are holes without reading
+     * them, while proxy_find_content_byte() remains authoritative for
+     * allocated ranges (allocation is block-granular and says nothing
+     * about logical content).  0 means "no information"; UINT64_MAX
+     * means "no allocated data anywhere ahead in this file".  With
+     * mirror_count > 1 content may diverge per mirror, so the per-unit
+     * union scan below stays unconditional and no cache is kept.
+     * Allocation failure only disables the accelerator.
      */
-    *out_offset = offset + ((uint64_t)result - local_offset);
+    if (what == 0 && mirror_count == 1) {
+        next_alloc = calloc(stripe_count, sizeof(*next_alloc));
+    }
+
+    current = offset;
+    while (current < logical_size) {
+        uint32_t stripe_idx;
+        uint64_t local_offset;
+        uint64_t stripe_bytes;
+        uint64_t stripe_end;
+        uint32_t m;
+        bool seek_ok = false;
+
+        compute_stripe_addr(current, stripe_unit, stripe_count,
+                            &stripe_idx, &local_offset);
+        stripe_bytes = (stripe_unit == 0) ? logical_size - current :
+            stripe_unit - (current % stripe_unit);
+        if (stripe_bytes > logical_size - current) {
+            stripe_bytes = logical_size - current;
+        }
+        stripe_end = current + stripe_bytes;
+
+        /* Known-unallocated through this unit: provably all zeros, so
+         * no SEEK_DATA match can exist here.  Skip without syscalls. */
+        if (next_alloc != NULL && next_alloc[stripe_idx] != 0 &&
+            next_alloc[stripe_idx] >= stripe_end) {
+            current = stripe_end;
+            continue;
+        }
+
+        for (m = 0; m < mirror_count; m++) {
+            uint32_t entry_idx = stripe_idx * mirror_count + m;
+            const char *mount;
+            char path[MDS_MAX_PATH];
+            int fd;
+            uint64_t scan_start = local_offset;
+            uint64_t found_offset;
+            int find_result;
+            bool unit_is_zeros = false;
+
+            if (entry_idx >= stripe_count * mirror_count) {
+                continue;
+            }
+            mount = find_mount(ctx, entries[entry_idx].ds_id);
+            if (mount == NULL ||
+                build_ds_path(path, sizeof(path), mount,
+                              fileid, stripe_idx, m) != 0) {
+                continue;
+            }
+            fd = open(path, O_RDONLY);
+            if (fd < 0) {
+                continue;
+            }
+
+            /*
+             * lseek(SEEK_DATA) accelerator.  Block-granular allocation
+             * can only prove where zeros are (unallocated ranges),
+             * never where logical data starts, so the byte scan stays
+             * authoritative for allocated ranges.  ENXIO or a result
+             * at/beyond the unit end proves the rest of the unit reads
+             * as zeros: skip the read entirely.  An in-unit result
+             * lets the scan start at the first allocated byte.  Any
+             * other error (e.g. EINVAL from a filesystem without
+             * SEEK_DATA) falls back to scanning the whole unit.
+             */
+            {
+                off_t alloc_at = lseek(fd, (off_t)local_offset,
+                                       SEEK_DATA);
+                int seek_errno = errno;
+
+                if (alloc_at < 0 && seek_errno == ENXIO) {
+                    unit_is_zeros = true;
+                    if (next_alloc != NULL) {
+                        next_alloc[stripe_idx] = UINT64_MAX;
+                    }
+                } else if (alloc_at >= 0) {
+                    if (next_alloc != NULL) {
+                        next_alloc[stripe_idx] = (uint64_t)alloc_at;
+                    }
+                    if ((uint64_t)alloc_at >= stripe_end) {
+                        unit_is_zeros = true;
+                    } else if ((uint64_t)alloc_at > local_offset) {
+                        if (what != 0) {
+                            /* Leading unallocated bytes read as
+                             * zeros: logical hole at current. */
+                            close(fd);
+                            *out_offset = current;
+                            free(next_alloc);
+                            free(entries);
+                            return MDS_OK;
+                        }
+                        scan_start = (uint64_t)alloc_at;
+                    }
+                }
+            }
+
+            if (unit_is_zeros) {
+                close(fd);
+                if (what != 0) {
+                    /* Whole unit reads as zeros: hole at current. */
+                    *out_offset = current;
+                    free(next_alloc);
+                    free(entries);
+                    return MDS_OK;
+                }
+                seek_ok = true;
+                if (m + 1 < mirror_count) {
+                    continue;
+                }
+                break;
+            }
+
+            find_result = proxy_find_content_byte(fd, scan_start,
+                                                   stripe_end, what,
+                                                   &found_offset);
+            close(fd);
+            if (find_result < 0) {
+                continue;
+            }
+
+            seek_ok = true;
+            if (find_result > 0) {
+                *out_offset = found_offset;
+                free(next_alloc);
+                free(entries);
+                return MDS_OK;
+            }
+            if (m + 1 < mirror_count) {
+                continue;
+            }
+            if (what != 0) {
+                /*
+                 * The stripe has no physical content before its local EOF.
+                 * Its first logical byte is consequently a hole.
+                 */
+                *out_offset = current;
+                free(next_alloc);
+                free(entries);
+                return MDS_OK;
+            }
+            break;
+        }
+
+        if (!seek_ok) {
+            free(next_alloc);
+            free(entries);
+            return MDS_ERR_IO;
+        }
+        current = stripe_end;
+    }
+
+    free(next_alloc);
+    free(entries);
+    *eof = true;
     return MDS_OK;
 }
 
@@ -1551,7 +1776,9 @@ enum mds_status mds_proxy_copy_data(const struct mds_proxy_ctx *ctx,
                                     uint64_t *bytes_copied)
 {
     uint8_t *buf = NULL;
+    struct mds_inode src_inode;
     uint64_t total = 0;
+    uint64_t copy_count;
     enum mds_status st = MDS_OK;
     static const uint32_t chunk = 1024 * 1024; /* 1 MiB */
 
@@ -1560,43 +1787,58 @@ enum mds_status mds_proxy_copy_data(const struct mds_proxy_ctx *ctx,
 }
 
     *bytes_copied = 0;
+    st = mds_cat_ns_getattr(cat, src_fileid, &src_inode);
+    if (st != MDS_OK) {
+        return st;
+    }
+    if (src_offset >= src_inode.size) {
+        return MDS_OK;
+    }
+    copy_count = count;
+    if (copy_count > src_inode.size - src_offset) {
+        copy_count = src_inode.size - src_offset;
+    }
 
     buf = malloc(chunk);
     if (buf == NULL) {
         return MDS_ERR_NOMEM;
-}
+    }
 
-    while (total < count) {
+    while (total < copy_count) {
         uint32_t want = chunk;
         uint32_t nr = 0;
         uint32_t nw = 0;
         bool eof_flag = false;
-
-        if (count - total < want) {
-            want = (uint32_t)(count - total);
-}
+        if (copy_count - total < want) {
+            want = (uint32_t)(copy_count - total);
+        }
 
         st = mds_proxy_read(ctx, cat, src_fileid,
+                            src_inode.size,
                             src_offset + total, want,
                             buf, &nr, &eof_flag);
         if (st != MDS_OK) {
             break;
-}
+        }
         if (nr == 0) {
             break;
-}
+        }
 
         st = mds_proxy_write(ctx, cat, dst_fileid,
                              dst_offset + total,
                              buf, nr, &nw);
         if (st != MDS_OK) {
             break;
-}
+        }
+        if (nw != nr) {
+            st = MDS_ERR_IO;
+            break;
+        }
 
         total += nw;
         if (eof_flag) {
             break;
-}
+        }
     }
 
     free(buf);

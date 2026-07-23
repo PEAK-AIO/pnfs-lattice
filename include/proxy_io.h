@@ -154,17 +154,22 @@ struct mds_catalogue;
  * Looks up the stripe_map for @fileid, computes which stripe holds
  * the requested offset, opens the DS data file, and reads via pread().
  *
- * Single-stripe-unit reads only (offset+count must not span multiple
- * stripes in this implementation).
+ * Reads may span stripe-unit boundaries; the proxy routes each logical
+ * stripe unit to its mapped DS entry.
  *
  * @param ctx         Proxy context with DS mounts registered.
  * @param cat         Catalogue handle (for stripe_map lookup).
  * @param fileid      File to read from.
+ * @param logical_size Authoritative logical inode size.
  * @param offset      Byte offset into the logical file.
  * @param count       Maximum bytes to read.
  * @param buf         Output buffer (must hold @count bytes).
  * @param bytes_read  Receives actual bytes read.
- * @param eof         Receives true if read reached end of DS file.
+ * @param eof         Receives true if read reached logical EOF.
+ *
+ * The proxy clamps the request to @p logical_size.  A short successful DS
+ * read is an in-range sparse hole: the unread part of that stripe unit is
+ * zero-filled and proxying continues through later stripe units.
  * @return MDS_OK on success (including partial/eof reads),
  *         MDS_ERR_NOTFOUND (no stripe_map),
  *         MDS_ERR_IO (DS file open/read failure).
@@ -172,6 +177,7 @@ struct mds_catalogue;
 enum mds_status mds_proxy_read(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
                                uint64_t fileid,
+                               uint64_t logical_size,
                                uint64_t offset,
                                uint32_t count,
                                void *buf,
@@ -404,6 +410,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
 /**
  * Proxy SEEK: find next DATA or HOLE boundary on the DS file.
  *
+ * @param logical_size Authoritative logical inode size.
  * @param what       0 = SEEK_DATA, 1 = SEEK_HOLE.
  * @param out_offset Receives the found offset.
  * @param eof        Receives true if beyond file end.
@@ -412,6 +419,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
 enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
                                uint64_t fileid,
+                               uint64_t logical_size,
                                uint64_t offset,
                                uint32_t what,
                                uint64_t *out_offset,
