@@ -40,6 +40,16 @@ extern "C" {
 #include "mds_coordination.h"
 #include "rondb_schema.h"
 #include "quota.h"         /* struct mds_quota_rule, mds_quota_usage */
+
+static int rondb_equal_u64(NdbOperation *op, const char *column,
+                           uint64_t value);
+static int rondb_set_value_u64(NdbOperation *op, const char *column,
+                               uint64_t value);
+static int rondb_encode_varbinary_string(const char *value,
+                                         uint32_t prefix_len,
+                                         uint8_t *encoded,
+                                         uint32_t encoded_cap,
+                                         uint32_t *encoded_len_out);
 }
 
 namespace {
@@ -7602,6 +7612,7 @@ int rondb_shim_ns_create_with_layout(
     const uint8_t *child_inode_buf, uint32_t child_ino_len,
     int32_t parent_nlink_delta,
     const uint8_t *stripe_buf, uint32_t stripe_len, uint32_t stripe_count,
+    uint32_t stripe_unit, uint32_t mirror_count,
     uint64_t layout_clientid, uint32_t layout_iomode,
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,
@@ -7655,6 +7666,10 @@ int rondb_shim_ns_create_with_layout(
 
     if (state == nullptr || name == nullptr ||
         child_inode_buf == nullptr) {
+        return -1;
+    }
+    if ((stripe_buf != nullptr || stripe_count != 0) &&
+        (stripe_count == 0 || stripe_unit == 0 || mirror_count != 1)) {
         return -1;
     }
     if (rondb_encode_varbinary_string(name, 1U,
@@ -7737,8 +7752,10 @@ int rondb_shim_ns_create_with_layout(
                                      child_ino.fileid);
                 op_sm->setValue(RONDB_SM_COL_STRIPE_CNT,
                                 (Uint32)stripe_count);
-                op_sm->setValue(RONDB_SM_COL_STRIPE_UNIT, (Uint32)65536);
-                op_sm->setValue(RONDB_SM_COL_MIRROR_CNT, (Uint32)1);
+                op_sm->setValue(RONDB_SM_COL_STRIPE_UNIT,
+                                (Uint32)stripe_unit);
+                op_sm->setValue(RONDB_SM_COL_MIRROR_CNT,
+                                (Uint32)mirror_count);
                 track(op_sm, "stripe_map");
             }
             /* Variable-length entry walk with bounds checks -- see the
@@ -7909,6 +7926,24 @@ ns_create_wl_err:
     err = tx->getNdbError();
     rondb_get_ndb(state)->closeTransaction(tx);
     return rondb_report_error(err, "ns_create_wl op");
+}
+
+int rondb_shim_ns_create_wide(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    const uint8_t *child_inode_buf,
+    uint32_t child_ino_len,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const uint8_t *stripe_buf,
+    uint32_t stripe_len)
+{
+    return rondb_shim_ns_create_with_layout(
+        handle, parent_fileid, name, child_inode_buf, child_ino_len,
+        0, stripe_buf, stripe_len, stripe_count, stripe_unit, mirror_count,
+        0, 0, 0, 0, nullptr, 0, nullptr, 0, 0);
 }
 
 /* -----------------------------------------------------------------------

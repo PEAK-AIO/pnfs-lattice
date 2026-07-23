@@ -61,6 +61,12 @@ struct mds_authority_ops {
         const char *name, enum mds_file_type type,
         uint32_t mode, uint64_t uid, uint64_t gid,
         struct ds_prealloc_ctx *prealloc, struct mds_inode *out);
+    enum mds_status (*ns_create_wide)(struct mds_catalogue *cat,
+        uint64_t parent, const char *name,
+        const struct mds_inode *child,
+        uint32_t stripe_count, uint32_t stripe_unit,
+        uint32_t mirror_count,
+        const struct mds_ds_map_entry *entries);
     enum mds_status (*ns_remove)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name);

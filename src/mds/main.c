@@ -60,6 +60,7 @@
 #include "mds_metrics.h"
 #include "mds_op_metrics.h"
 #include "mountd_compat.h"
+#include "hpc_shared.h"
 #ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
 #include "catalog_image.h"
@@ -545,6 +546,31 @@ if (s_pt != NULL) {
 	}
 #endif
 
+	/* Pre-atomic releases could leave a PENDING wide-create inode after
+	 * persisting its namespace rows separately from its stripe map.
+	 * The scan repairs those legacy rows before requests are accepted,
+	 * but walks the entire namespace from the root, so it is opt-in
+	 * (run it once after upgrading from an affected release).  Lazy
+	 * lookup-time recovery is always active regardless, so leaving the
+	 * scan off only defers reclaiming rows nobody looks up.  A scan
+	 * failure is non-fatal for the same reason. */
+	if (cfg.hpc_pending_recovery_scan) {
+		struct hpc_pending_recovery_stats pending_stats;
+
+		rc = hpc_shared_recover_pending_scan(cat, &pending_stats);
+		if (rc != MDS_OK) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"legacy HPC pending recovery scan failed: %d",
+				(int)rc);
+		} else if (pending_stats.promoted != 0 ||
+			   pending_stats.reaped != 0) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"legacy HPC pending recovery: promoted=%llu "
+				"reaped=%llu",
+				(unsigned long long)pending_stats.promoted,
+				(unsigned long long)pending_stats.reaped);
+		}
+	}
 
 	/* Create cluster TLS contexts if configured.
 	 * Server context for the inbound listener; client context
