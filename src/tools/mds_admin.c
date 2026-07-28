@@ -39,6 +39,7 @@
 #include "cluster_membership.h"
 
 #include "admin_util.h"
+#include "admin_companion.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -116,7 +117,15 @@ static void usage(const char *prog)
         "  config show [<key>]       Live INI key=value dump\n"
         "  ds capacity show          Live DS total/used/weight\n"
         "  ds capacity probe-now     Force statvfs sweep now\n"
-        "  ds set-weight <id> <w>    Set runtime WRR weight\n",
+        "  ds set-weight <id> <w>    Set runtime WRR weight\n\n"
+        "  companion list [--json]\n"
+        "  companion status <name> [--json]\n"
+        "  companion start <name>\n"
+        "  companion stop <name>\n"
+        "  companion restart <name>\n"
+        "  companion budget [--json] [--total-api-slots N]\n"
+        "      Companions are declared with companion.<name>.* keys in\n"
+        "      mds.conf; these commands only control declared names.\n",
         prog);
 }
 
@@ -3058,6 +3067,8 @@ int main(int argc, char *argv[])
         rc = dispatch_upgrade(argc, argv);
     } else if (strcmp(group, "config") == 0) {
         rc = dispatch_config(argc, (const char *const *)argv);
+    } else if (strcmp(group, "companion") == 0) {
+        rc = dispatch_companion(argc, (const char *const *)argv);
     }
 
     if (rc < 0) {

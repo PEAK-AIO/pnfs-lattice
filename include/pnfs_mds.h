@@ -609,6 +609,117 @@ enum mds_hpc_xdr_form {
 };
 
 /* -----------------------------------------------------------------------
+ * Companion processes (src/modules/companion).
+ *
+ * A companion is an operator-declared helper program that the daemon
+ * spawns, supervises, and terminates alongside itself.  Declarations
+ * are static: they come only from `companion.<name>.*` keys in
+ * mds.conf, so no admin request can ever name an executable the
+ * operator did not pre-approve.
+ *
+ * Limits are deliberately small and fixed.  struct mds_config is a
+ * stack local in main(), and a bounded declaration array keeps both
+ * the parser and the admin wire encoding allocation-free.
+ * ----------------------------------------------------------------------- */
+
+#define MDS_MAX_COMPANIONS        8    /**< Max declarations per node. */
+#define MDS_COMPANION_NAME_MAX    64   /**< Includes NUL. */
+#define MDS_COMPANION_ARGV_MAX    12   /**< Max args after argv[0]. */
+#define MDS_COMPANION_ARG_MAX     256  /**< Max bytes per arg, incl NUL. */
+/*
+ * Path bound for exec/workdir/log_file.  Deliberately 512 rather than
+ * MDS_MAX_PATH (4096): struct mds_config is a stack local, and three
+ * 4 KiB paths per declaration would cost ~124 KiB of stack for paths
+ * that are operator-authored and never anywhere near that long.  This
+ * matches the existing ds_specs[][512] bound.
+ */
+#define MDS_COMPANION_PATH_MAX    512
+
+/**
+ * Restart policy applied when a supervised child exits.
+ *
+ * ON_FAILURE treats a zero exit status as "work finished" and leaves
+ * the companion stopped; any non-zero status or termination by signal
+ * is a failure and triggers backoff-delayed restart.
+ */
+enum companion_restart_policy {
+    COMPANION_RESTART_NEVER      = 0,
+    COMPANION_RESTART_ON_FAILURE = 1,  /**< Default. */
+    COMPANION_RESTART_ALWAYS     = 2,
+};
+
+/**
+ * Admission behaviour when a spawn would exceed the declared RonDB
+ * `[api]` slot budget.
+ *
+ * ADVISORY (the default) logs a warning and spawns anyway, so a
+ * mis-declared budget cannot silently prevent an operator-requested
+ * program from running.  ENFORCE refuses the spawn with
+ * MDS_ERR_NOSPC.  Budget accounting is advisory in both modes: the
+ * daemon cannot observe how many NDB connections a child truly
+ * opens, and it cannot see peer nodes.
+ */
+enum companion_ndb_admission {
+    COMPANION_NDB_ADVISORY = 0,  /**< Default. */
+    COMPANION_NDB_ENFORCE  = 1,
+};
+
+/**
+ * One companion declaration, fully resolved from mds.conf.
+ *
+ * Immutable after mds_config_load() returns.  The supervisor copies
+ * these records at start, so the config object does not need to
+ * outlive companion_start().
+ */
+struct mds_companion_decl {
+    char     name[MDS_COMPANION_NAME_MAX];
+    /** Absolute path to the executable.  Never PATH-resolved. */
+    char     exec_path[MDS_COMPANION_PATH_MAX];
+    /** Args after argv[0]; argv[0] is always exec_path. */
+    char     argv[MDS_COMPANION_ARGV_MAX][MDS_COMPANION_ARG_MAX];
+    uint32_t argc;                  /**< Populated entries in argv[]. */
+    /** Absolute chdir target for the child.  Empty = "/". */
+    char     workdir[MDS_COMPANION_PATH_MAX];
+    /**
+     * Absolute path receiving the child's stdout+stderr, opened
+     * append+create.  Empty means inherit the daemon's descriptors,
+     * which normally lands in the journal.
+     */
+    char     log_file[MDS_COMPANION_PATH_MAX];
+
+    enum companion_restart_policy restart;
+    uint32_t restart_backoff_ms;     /**< Initial delay. Default 1000. */
+    uint32_t restart_backoff_max_ms; /**< Cap. Default 60000. */
+    /** Restarts allowed per failure burst.  0 = never restart. */
+    uint32_t max_restarts;
+    /** Uptime that clears the restart counter.  Default 60. */
+    uint32_t restart_reset_sec;
+    /** SIGTERM-to-SIGKILL grace on stop.  Default 10000. */
+    uint32_t stop_timeout_ms;
+    /** Delay before the first spawn.  Default 0. */
+    uint32_t start_delay_ms;
+
+    /* Resource fencing.  0 = leave the inherited limit alone. */
+    uint32_t rlimit_as_mb;      /**< RLIMIT_AS in MiB. */
+    uint32_t rlimit_nofile;     /**< RLIMIT_NOFILE. */
+    uint32_t rlimit_cpu_sec;    /**< RLIMIT_CPU in seconds. */
+
+    /**
+     * Wrap the child in a transient systemd scope so cgroup memory
+     * pressure kills only the companion.  Requires memory_max_mb.
+     * Falls back to a direct exec when systemd-run is unavailable.
+     */
+    bool     systemd_scope;
+    uint32_t memory_max_mb;     /**< MemoryMax for the scope. */
+
+    /** Declared RonDB NDB API connections.  Advisory accounting. */
+    uint32_t ndb_conns;
+
+    bool     enabled;    /**< false = declaration ignored entirely. */
+    bool     autostart;  /**< Spawn at daemon start.  Default true. */
+};
+
+/* -----------------------------------------------------------------------
  * Configuration
  * ----------------------------------------------------------------------- */
 
@@ -1109,6 +1220,25 @@ struct mds_config {
     char                log_file[MDS_MAX_PATH];
     int                 log_level_global;
     int                 log_level_by_component[LOG_COMP_COUNT];
+
+    /*
+     * Companion processes (src/modules/companion).  Declared with
+     * `companion.<name>.*` keys; see struct mds_companion_decl above
+     * and docs/companion-processes.md.  companion_enabled is a master
+     * switch that leaves declarations in place but starts nothing.
+     *
+     * The three ndb_* fields feed the advisory RonDB `[api]` slot
+     * budget: ndb_api_slots_total is the cluster-wide slot count the
+     * operator declares (0 = unknown, which disables free-slot
+     * reporting), and ndb_api_slots_reserved carves out headroom for
+     * peer MDS daemons and transient tools that this node cannot see.
+     */
+    bool                companion_enabled;      /**< Default true. */
+    struct mds_companion_decl companions[MDS_MAX_COMPANIONS];
+    uint32_t            companion_count;
+    uint32_t            ndb_api_slots_total;    /**< 0 = undeclared. */
+    uint32_t            ndb_api_slots_reserved; /**< Default 0. */
+    enum companion_ndb_admission companion_ndb_admission;
 };
 /* NOLINTEND(clang-analyzer-optin.performance.Padding) */
 

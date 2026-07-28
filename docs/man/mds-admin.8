@@ -324,6 +324,75 @@ argument, restrict output to that key.  With
 .B \-\-json
 emit an object.  Requires
 .BI \-\-mds-port " 50051" .
+.SS "Companion processes"
+Companions are helper programs declared with
+.I companion.<name>.*
+keys in
+.IR mds.conf (5)
+and supervised by the daemon.  These commands address a companion by
+its declared
+.BR name .
+They cannot supply an executable path, an argument vector, or a
+resource limit, so no admin request can make the daemon run a program
+the operator has not pre-approved.  Adding or changing a companion
+requires editing
+.I mds.conf
+and restarting the daemon.  See
+.B docs/companion-processes.md
+for the full guide.
+.TP
+.B companion list
+List every declared companion with its state, pid, restart count,
+last exit, resident size, and declared NDB connection count.  With
+.B \-\-json
+emit an array.  Prints
+.I No companions declared
+when the node has none.
+.TP
+.B companion status \fI<name>\fR
+Detail for one companion.  With
+.B \-\-json
+emit an object.
+.TP
+.B companion start \fI<name>\fR
+Start a declared companion that is not running.  Clears any
+accumulated restart backoff, so this is also the recovery action for a
+companion left in the
+.B failed
+state.  Fails if the name is not declared, is already running, or is
+declared with
+.IR enabled\ =\ false .
+.TP
+.B companion stop \fI<name>\fR
+Request a stop.  Sends
+.B SIGTERM
+to the child's process group, waits
+.IR stop_timeout_ms ,
+then escalates to
+.BR SIGKILL .
+The restart policy is not applied, so the companion stays stopped.
+Returns as soon as the stop is requested.
+.TP
+.B companion restart \fI<name>\fR
+Stop then start, resetting the restart counter.
+.TP
+.B companion budget \fR[\fB\-\-total-api-slots\fR \fIN\fR]
+Report the advisory RonDB
+.B [api]
+slot budget: declared total, this daemon's connection pool, reserved
+headroom, slots declared and running for companions, and remaining
+free slots.  The free figure is signed \(em an over-committed node
+reports a negative number rather than clamping at zero.
+.B \-\-total-api-slots
+recomputes the free figure against
+.I N
+locally, for what-if analysis only; it does not change the daemon.
+.PP
+The accounting is declared intent, not measurement: the daemon cannot
+verify how many NDB connections a child actually opens, and it has no
+visibility into peer MDS nodes.  Use
+.I ndb_api_slots_reserved
+to hold back headroom for peers and transient tools.
 .SH EXIT STATUS
 .TP
 .B 0

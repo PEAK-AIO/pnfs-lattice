@@ -48,6 +48,7 @@
 #include "rebalance.h"
 #include "tiering.h"
 #include "quota.h"
+#include "companion.h"
 #include "migration.h"
 #include "cluster_membership.h"
 #include "cluster_drain.h"
@@ -190,6 +191,11 @@ struct cluster_server {
 
     /* Tiering worker (set via cluster_transport_server_set_tiering). */
     struct tiering_worker *tiering;
+
+    /* Companion supervisor (set via
+     * cluster_transport_server_set_companion).  Borrowed: main.c owns
+     * the lifetime and stops this server before destroying it. */
+    struct companion_supervisor *companion;
 
     /* Cluster membership (set via cluster_transport_server_set_membership). */
     struct cluster_membership *membership;
@@ -982,6 +988,195 @@ static void handle_tiering_status(const struct cluster_server *srv,
 }
 
 /* -----------------------------------------------------------------------
+ * Companion admin handlers (src/modules/companion)
+ *
+ * The control message names a companion that mds.conf already
+ * declared; the daemon resolves the name to a declaration and never
+ * accepts a path or argument vector over the wire.
+ * ----------------------------------------------------------------------- */
+
+void cluster_transport_server_set_companion(struct cluster_server *srv,
+                                            struct companion_supervisor *sup)
+{
+    if (srv != NULL) {
+        srv->companion = sup;
+    }
+}
+
+/** Encode one companion_status record at @a p (CT_COMPANION_REC_SIZE). */
+static void companion_encode_record(uint8_t *p,
+                                    const struct companion_status *s)
+{
+    uint32_t be32;
+    uint64_t be64;
+    uint32_t off = 0;
+
+    memset(p, 0, CT_COMPANION_REC_SIZE);
+    memcpy(p, s->name, sizeof(s->name));   /* NUL-padded, fixed 64 */
+    off += (uint32_t)sizeof(s->name);
+
+    p[off] = s->state;
+    off += 1;
+
+    be32 = htobe32((uint32_t)s->pid);
+    memcpy(p + off, &be32, 4); off += 4;
+    be32 = htobe32(s->restart_count);
+    memcpy(p + off, &be32, 4); off += 4;
+    be32 = htobe32((uint32_t)s->last_exit_code);
+    memcpy(p + off, &be32, 4); off += 4;
+    be32 = htobe32((uint32_t)s->last_term_signal);
+    memcpy(p + off, &be32, 4); off += 4;
+    be64 = htobe64(s->started_at_unix);
+    memcpy(p + off, &be64, 8); off += 8;
+    be64 = htobe64(s->last_exit_unix);
+    memcpy(p + off, &be64, 8); off += 8;
+    be64 = htobe64(s->rss_kb);
+    memcpy(p + off, &be64, 8); off += 8;
+    be32 = htobe32(s->ndb_conns);
+    memcpy(p + off, &be32, 4);
+}
+
+static void handle_companion_list(const struct cluster_server *srv,
+                                  int conn_fd,
+                                  const uint8_t *payload, uint32_t plen)
+{
+    struct companion_status list[MDS_MAX_COMPANIONS];
+    uint8_t resp[4 + MDS_MAX_COMPANIONS * CT_COMPANION_REC_SIZE];
+    uint32_t n;
+    uint32_t be32;
+
+    (void)payload;
+    (void)plen;
+
+    memset(list, 0, sizeof(list));
+    memset(resp, 0, sizeof(resp));
+
+    /* NULL supervisor (module compiled out, disabled, or nothing
+     * declared) yields an empty list rather than an error, so the CLI
+     * can print "no companions" uniformly. */
+    n = companion_status_all(srv->companion, list, MDS_MAX_COMPANIONS);
+
+    be32 = htobe32(n);
+    memcpy(resp, &be32, 4);
+    for (uint32_t i = 0; i < n; i++) {
+        companion_encode_record(resp + 4 + i * CT_COMPANION_REC_SIZE,
+                                &list[i]);
+    }
+
+    {
+        uint32_t used = 4 + n * CT_COMPANION_REC_SIZE;
+
+        (void)send_header(conn_fd, CT_MSG_COMPANION_LIST_RESP, used);
+        (void)send_all(conn_fd, resp, used);
+    }
+}
+
+static void handle_companion_ctl(const struct cluster_server *srv,
+                                 int conn_fd,
+                                 const uint8_t *payload, uint32_t plen)
+{
+    enum mds_status st = MDS_ERR_INVAL;
+    char name[MDS_COMPANION_NAME_MAX];
+    uint8_t action;
+    uint8_t name_len;
+
+    /* Payload: action(1) + name_len(1) + name(name_len). */
+    if (payload == NULL || plen < 2) {
+        goto respond;
+    }
+    action   = payload[0];
+    name_len = payload[1];
+    if (name_len == 0 || name_len >= sizeof(name) ||
+        (uint32_t)name_len + 2U > plen) {
+        goto respond;
+    }
+    memcpy(name, payload + 2, name_len);
+    name[name_len] = '\0';
+
+    switch (action) {
+    case CT_COMPANION_ACTION_START:
+        st = companion_ctl_start(srv->companion, name);
+        break;
+    case CT_COMPANION_ACTION_STOP:
+        st = companion_ctl_stop(srv->companion, name);
+        break;
+    case CT_COMPANION_ACTION_RESTART:
+        st = companion_ctl_restart(srv->companion, name);
+        break;
+    default:
+        st = MDS_ERR_INVAL;
+        break;
+    }
+
+respond:;
+    int32_t st_be = (int32_t)htobe32((uint32_t)(int32_t)st);
+    (void)send_header(conn_fd, CT_MSG_COMPANION_CTL_RESP, 4);
+    (void)send_all(conn_fd, &st_be, 4);
+}
+
+static void handle_companion_budget(const struct cluster_server *srv,
+                                    int conn_fd,
+                                    const uint8_t *payload, uint32_t plen)
+{
+    struct companion_budget b;
+    uint8_t resp[33];
+    uint32_t be32;
+    uint32_t off = 0;
+
+    (void)payload;
+    (void)plen;
+
+    memset(&b, 0, sizeof(b));
+    memset(resp, 0, sizeof(resp));
+
+    if (companion_budget(srv->companion, &b) != MDS_OK) {
+        /*
+         * No supervisor attached.  Slot pressure is still worth
+         * reporting, so fall back to the live config: the operator
+         * gets the declared total, this daemon's pool, and reserved
+         * headroom with zero companions accounted.
+         */
+        if (srv->cfg != NULL) {
+            b.slots_total    = srv->cfg->ndb_api_slots_total;
+            b.slots_mds      = srv->cfg->ndb_conn_pool_size;
+            b.slots_reserved = srv->cfg->ndb_api_slots_reserved;
+            b.admission      = (uint8_t)srv->cfg->companion_ndb_admission;
+            if (b.slots_total > 0) {
+                int64_t free_slots = (int64_t)b.slots_total -
+                                     (int64_t)b.slots_mds -
+                                     (int64_t)b.slots_reserved;
+
+                if (free_slots < INT32_MIN) {
+                    free_slots = INT32_MIN;
+                }
+                b.slots_free = (int32_t)free_slots;
+            }
+        }
+    }
+
+    be32 = htobe32(b.slots_total);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.slots_mds);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.slots_reserved);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.slots_declared);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.slots_running);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32((uint32_t)b.slots_free);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.companion_count);
+    memcpy(resp + off, &be32, 4); off += 4;
+    be32 = htobe32(b.running_count);
+    memcpy(resp + off, &be32, 4); off += 4;
+    resp[off] = b.admission;
+
+    (void)send_header(conn_fd, CT_MSG_COMPANION_BUDGET_RESP, sizeof(resp));
+    (void)send_all(conn_fd, resp, sizeof(resp));
+}
+
+/* -----------------------------------------------------------------------
  * Split admin handler (Seq 7.1)
  * ----------------------------------------------------------------------- */
 
@@ -1625,6 +1820,18 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
 
         case CT_MSG_TIERING_STATUS_REQ:
             handle_tiering_status(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_COMPANION_LIST_REQ:
+            handle_companion_list(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_COMPANION_CTL_REQ:
+            handle_companion_ctl(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_COMPANION_BUDGET_REQ:
+            handle_companion_budget(srv, conn_fd, payload, payload_len);
             break;
 
         case CT_MSG_QUOTA_SET:
@@ -2902,6 +3109,209 @@ static int ct_client_connect(const char *host, uint16_t port)
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     return fd;
+}
+
+/* -----------------------------------------------------------------------
+ * Companion client requests (mds-admin CLI -> daemon)
+ * ----------------------------------------------------------------------- */
+
+enum mds_status cluster_transport_request_companion_list(
+    const char *mds_host, uint16_t mds_port,
+    struct companion_status **out, uint32_t *count)
+{
+    uint8_t hdr[4];
+    uint8_t *body = NULL;
+    struct companion_status *arr = NULL;
+    uint32_t n = 0;
+    uint8_t resp_type;
+    uint32_t resp_len;
+    int fd;
+
+    if (out == NULL || count == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    *out = NULL;
+    *count = 0;
+
+    fd = ct_client_connect(mds_host, mds_port);
+    if (fd < 0) {
+        return MDS_ERR_IO;
+    }
+
+    if (send_header(fd, CT_MSG_COMPANION_LIST_REQ, 0) != 0 ||
+        recv_header(fd, &resp_type, &resp_len) != 0 ||
+        resp_type != CT_MSG_COMPANION_LIST_RESP || resp_len < 4) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    if (recv_all(fd, hdr, 4) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    {
+        uint32_t be32;
+
+        memcpy(&be32, hdr, 4);
+        n = be32toh(be32);
+    }
+    if (n > MDS_MAX_COMPANIONS ||
+        resp_len < 4 + n * CT_COMPANION_REC_SIZE) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    if (n == 0) {
+        close(fd);
+        return MDS_OK;
+    }
+
+    body = malloc((size_t)n * CT_COMPANION_REC_SIZE);
+    arr = calloc(n, sizeof(*arr));
+    if (body == NULL || arr == NULL) {
+        free(body);
+        free(arr);
+        close(fd);
+        return MDS_ERR_NOMEM;
+    }
+    if (recv_all(fd, body, (size_t)n * CT_COMPANION_REC_SIZE) != 0) {
+        free(body);
+        free(arr);
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    close(fd);
+
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t *p = body + (size_t)i * CT_COMPANION_REC_SIZE;
+        uint32_t off = 0;
+        uint32_t be32;
+        uint64_t be64;
+
+        memcpy(arr[i].name, p, sizeof(arr[i].name));
+        arr[i].name[sizeof(arr[i].name) - 1] = '\0';
+        off += (uint32_t)sizeof(arr[i].name);
+
+        arr[i].state = p[off];
+        off += 1;
+
+        memcpy(&be32, p + off, 4); off += 4;
+        arr[i].pid = (int32_t)be32toh(be32);
+        memcpy(&be32, p + off, 4); off += 4;
+        arr[i].restart_count = be32toh(be32);
+        memcpy(&be32, p + off, 4); off += 4;
+        arr[i].last_exit_code = (int32_t)be32toh(be32);
+        memcpy(&be32, p + off, 4); off += 4;
+        arr[i].last_term_signal = (int32_t)be32toh(be32);
+        memcpy(&be64, p + off, 8); off += 8;
+        arr[i].started_at_unix = be64toh(be64);
+        memcpy(&be64, p + off, 8); off += 8;
+        arr[i].last_exit_unix = be64toh(be64);
+        memcpy(&be64, p + off, 8); off += 8;
+        arr[i].rss_kb = be64toh(be64);
+        memcpy(&be32, p + off, 4);
+        arr[i].ndb_conns = be32toh(be32);
+    }
+
+    free(body);
+    *out = arr;
+    *count = n;
+    return MDS_OK;
+}
+
+enum mds_status cluster_transport_request_companion_ctl(
+    const char *mds_host, uint16_t mds_port,
+    uint8_t action, const char *name)
+{
+    uint8_t payload[2 + MDS_COMPANION_NAME_MAX];
+    size_t nlen;
+    uint8_t resp_type;
+    uint32_t resp_len;
+    int32_t st_be;
+    int fd;
+
+    if (name == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    nlen = strlen(name);
+    if (nlen == 0 || nlen >= MDS_COMPANION_NAME_MAX) {
+        return MDS_ERR_INVAL;
+    }
+
+    fd = ct_client_connect(mds_host, mds_port);
+    if (fd < 0) {
+        return MDS_ERR_IO;
+    }
+
+    payload[0] = action;
+    payload[1] = (uint8_t)nlen;
+    memcpy(payload + 2, name, nlen);
+
+    if (send_header(fd, CT_MSG_COMPANION_CTL_REQ,
+                    (uint32_t)(2 + nlen)) != 0 ||
+        send_all(fd, payload, 2 + nlen) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    if (recv_header(fd, &resp_type, &resp_len) != 0 ||
+        resp_type != CT_MSG_COMPANION_CTL_RESP || resp_len < 4 ||
+        recv_all(fd, &st_be, 4) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+
+    close(fd);
+    return (enum mds_status)(int32_t)be32toh((uint32_t)st_be);
+}
+
+enum mds_status cluster_transport_request_companion_budget(
+    const char *mds_host, uint16_t mds_port,
+    struct companion_budget *out)
+{
+    uint8_t resp[33];
+    uint8_t resp_type;
+    uint32_t resp_len;
+    uint32_t off = 0;
+    uint32_t be32;
+    int fd;
+
+    if (out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    memset(out, 0, sizeof(*out));
+
+    fd = ct_client_connect(mds_host, mds_port);
+    if (fd < 0) {
+        return MDS_ERR_IO;
+    }
+
+    if (send_header(fd, CT_MSG_COMPANION_BUDGET_REQ, 0) != 0 ||
+        recv_header(fd, &resp_type, &resp_len) != 0 ||
+        resp_type != CT_MSG_COMPANION_BUDGET_RESP ||
+        resp_len < sizeof(resp) ||
+        recv_all(fd, resp, sizeof(resp)) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    close(fd);
+
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_total = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_mds = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_reserved = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_declared = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_running = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->slots_free = (int32_t)be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->companion_count = be32toh(be32);
+    memcpy(&be32, resp + off, 4); off += 4;
+    out->running_count = be32toh(be32);
+    out->admission = resp[off];
+
+    return MDS_OK;
 }
 
 /* -----------------------------------------------------------------------

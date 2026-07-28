@@ -781,6 +781,226 @@ directories are never affected.  Tools that enumerate the root
 .BR find ,
 .BR rsync )
 will not descend into the hidden shards.
+.SS "Companion processes"
+Helper programs that the daemon spawns, supervises, and terminates
+alongside itself.  Declarations here are the allowlist: the
+.BR mds-admin (8)
+companion commands carry a declared name only, never a path or
+argument vector.  Adding or changing a companion requires editing this
+file and restarting the daemon \(em there is no reload path.  With no
+declarations present the feature is inert: no supervisor thread is
+created and nothing is spawned.  Programs are executed with
+.BR execv (3)
+against an absolute path, so no shell is involved, PATH is never
+consulted, and each argument is a separate key \(em quoting, word
+splitting, and globbing do not apply.  Structurally invalid
+declarations abort daemon startup.  At most 8 companions per node.
+See
+.B docs/companion-processes.md
+for the operator guide.
+.TP
+.B companion_enabled
+.I bool
+(default
+.BR true ).
+Master switch.
+.B false
+keeps declarations in place and starts nothing.
+.TP
+.B companion.<name>.exec
+.I path
+(required).
+Absolute path to the executable.  A relative path aborts startup.
+.I <name>
+accepts
+.BR A-Z ,
+.BR a-z ,
+.BR 0-9 ,
+.BR - ,
+and
+.BR _ ,
+up to 63 characters; a
+.B .
+is not permitted because it separates the name from the field.
+.TP
+.B companion.<name>.arg[N]
+.I string
+One argument per key,
+.I N
+in 0..11, passed verbatim.  Indexes must be contiguous from 0; a gap
+aborts startup.
+.TP
+.B companion.<name>.workdir
+.I path
+(default
+.BR / ).
+Absolute
+.BR chdir (2)
+target for the child.
+.TP
+.B companion.<name>.log_file
+.I path
+(default: inherit the daemon's descriptors).
+Absolute path receiving the child's stdout and stderr, opened
+append+create with mode 0640.  The daemon neither creates parent
+directories nor rotates this file.
+.TP
+.B companion.<name>.enabled
+.I bool
+(default
+.BR true ).
+A disabled declaration is still reported, as
+.BR disabled ,
+but can never be started.
+.TP
+.B companion.<name>.autostart
+.I bool
+(default
+.BR true ).
+When
+.BR false ,
+the companion is declared but idle until an admin request starts it.
+.TP
+.B companion.<name>.restart
+= never|on-failure|always (default:
+.BR on-failure ).
+.B on-failure
+treats exit status 0 as work finished and leaves the companion
+.BR stopped ;
+any other status, including death by signal, is a failure.
+.TP
+.B companion.<name>.restart_backoff_ms
+.I uint
+(default
+.BR 1000 ,
+range 100..600000).
+First retry delay; doubles after each retry.
+.TP
+.B companion.<name>.restart_backoff_max_ms
+.I uint
+(default
+.BR 60000 ,
+range 100..3600000).
+Backoff ceiling.  A value below the initial backoff is raised to match
+it, with a warning.
+.TP
+.B companion.<name>.max_restarts
+.I uint
+(default
+.BR 5 ,
+range 0..1000).
+Retries allowed per failure burst.
+.B 0
+means never restart.  Once exhausted the companion stays
+.B failed
+until an operator starts it.
+.TP
+.B companion.<name>.restart_reset_sec
+.I uint
+(default
+.BR 60 ,
+range 1..86400).
+Uptime that clears the failure burst counter.
+.TP
+.B companion.<name>.stop_timeout_ms
+.I uint
+(default
+.BR 10000 ,
+range 100..600000).
+Grace period between
+.B SIGTERM
+and
+.BR SIGKILL .
+.TP
+.B companion.<name>.start_delay_ms
+.I uint
+(default
+.BR 0 ,
+range 0..600000).
+Delay before the first spawn at daemon start, for staggering helpers.
+An explicit admin start ignores it.
+.TP
+.B companion.<name>.rlimit_as_mb
+.I uint
+(default 0 = inherit, range 0..1048576).
+.B RLIMIT_AS
+in MiB, applied in the child before exec.
+.TP
+.B companion.<name>.rlimit_nofile
+.I uint
+(default 0 = inherit, range 0..1048576).
+.TP
+.B companion.<name>.rlimit_cpu_sec
+.I uint
+(default 0 = inherit, range 0..31536000).
+Exceeding it kills the child with
+.BR SIGKILL .
+.TP
+.B companion.<name>.systemd_scope
+.I bool
+(default
+.BR false ).
+Run the child inside a transient systemd scope so cgroup memory
+pressure kills only the companion.  Requires
+.IR memory_max_mb .
+If
+.BR systemd-run (1)
+cannot be found the daemon logs a warning and starts the program
+without the scope.
+.TP
+.B companion.<name>.memory_max_mb
+.I uint
+(range 0..1048576).
+.B MemoryMax
+for the scope; required when
+.I systemd_scope
+is
+.BR true .
+.TP
+.B companion.<name>.ndb_conns
+.I uint
+(default
+.BR 0 ,
+range 0..64).
+Declared RonDB API connections, used for slot budgeting.
+.PP
+The following keys drive the advisory
+.B [api]
+slot budget reported by
+.BR "mds-admin companion budget" .
+Two limitations are inherent: the declared
+.I ndb_conns
+is operator intent the daemon cannot verify against a child's real
+connection count, and the view is per node \(em peer MDS daemons and
+their companions are invisible.
+.TP
+.B ndb_api_slots_total
+.I uint
+(default
+.BR 0 ,
+range 0..255).
+Total
+.B [api]
+sections in the RonDB
+.IR config.ini .
+.B 0
+means undeclared, which suppresses free-slot reporting.
+.TP
+.B ndb_api_slots_reserved
+.I uint
+(default
+.BR 0 ,
+range 0..255).
+Slots held back for peer daemons and transient tools.
+.TP
+.B companion_ndb_admission
+= advisory|enforce (default:
+.BR advisory ).
+.B advisory
+warns and spawns anyway, so a mis-declared budget cannot block a
+program the operator asked for.
+.B enforce
+refuses the spawn once the declared total would be exceeded.
 .SS "Logging"
 The daemon routes diagnostics through a leveled, component-aware logger.
 Output defaults to stderr at

@@ -196,6 +196,29 @@ struct rename_2pc_transport {
 #define CT_MSG_DS_CAPACITY_PROBE_REQ  87
 #define CT_MSG_DS_CAPACITY_PROBE_RESP 88
 
+/*
+ * Companion process supervision (src/modules/companion).
+ *
+ * CTL carries an action plus a companion name that must already be
+ * declared in mds.conf -- never a path or command line, so this pair
+ * of messages cannot be used to execute anything the operator has not
+ * pre-approved.  LIST and BUDGET are read-only snapshots.
+ */
+#define CT_MSG_COMPANION_LIST_REQ    89
+#define CT_MSG_COMPANION_LIST_RESP   90
+#define CT_MSG_COMPANION_CTL_REQ     91
+#define CT_MSG_COMPANION_CTL_RESP    92
+#define CT_MSG_COMPANION_BUDGET_REQ  93
+#define CT_MSG_COMPANION_BUDGET_RESP 94
+
+/** Actions accepted by CT_MSG_COMPANION_CTL_REQ. */
+#define CT_COMPANION_ACTION_START    1
+#define CT_COMPANION_ACTION_STOP     2
+#define CT_COMPANION_ACTION_RESTART  3
+
+/** Wire size of one CT_MSG_COMPANION_LIST_RESP record. */
+#define CT_COMPANION_REC_SIZE        109
+
 /** Wire header: [msg_type u8][payload_len u32 BE] = 5 bytes. */
 #define CT_HEADER_SIZE  5
 
@@ -461,6 +484,69 @@ struct tiering_status_info;
 enum mds_status cluster_transport_request_tiering_status(
     const char *mds_host, uint16_t mds_port,
     struct tiering_status_info *info);
+
+/* -----------------------------------------------------------------------
+ * Companion process supervision (src/modules/companion)
+ * ----------------------------------------------------------------------- */
+
+struct companion_supervisor;
+struct companion_status;
+struct companion_budget;
+
+/**
+ * @brief Register the companion supervisor with the transport server.
+ *
+ * Pass NULL to clear the registration.  The server borrows the handle,
+ * so it must be cleared (or the server stopped) before the supervisor
+ * is destroyed.
+ *
+ * @param srv  Cluster transport server.
+ * @param sup  Supervisor handle (may be NULL).
+ */
+void cluster_transport_server_set_companion(struct cluster_server *srv,
+                                            struct companion_supervisor *sup);
+
+/**
+ * @brief List every declared companion on the target daemon.
+ *
+ * Returns a caller-owned array (free with free()).
+ *
+ * @param mds_host     Daemon admin host.
+ * @param mds_port     Daemon admin port.
+ * @param[out] out     Receives the allocated array (NULL when count 0).
+ * @param[out] count   Receives the number of entries.
+ * @return MDS_OK on success.
+ */
+enum mds_status cluster_transport_request_companion_list(
+    const char *mds_host, uint16_t mds_port,
+    struct companion_status **out, uint32_t *count);
+
+/**
+ * @brief Ask the daemon to start, stop, or restart a declared companion.
+ *
+ * @param mds_host  Daemon admin host.
+ * @param mds_port  Daemon admin port.
+ * @param action    One of the CT_COMPANION_ACTION_* constants.
+ * @param name      Companion name as declared in mds.conf.
+ * @return The daemon's status: MDS_OK, MDS_ERR_NOTFOUND for an
+ *         undeclared name, MDS_ERR_NOSUPPORT when the module is
+ *         absent, MDS_ERR_NOSPC when slot admission refused, etc.
+ */
+enum mds_status cluster_transport_request_companion_ctl(
+    const char *mds_host, uint16_t mds_port,
+    uint8_t action, const char *name);
+
+/**
+ * @brief Fetch the advisory NDB API slot budget from the daemon.
+ *
+ * @param mds_host   Daemon admin host.
+ * @param mds_port   Daemon admin port.
+ * @param[out] out   Receives the budget snapshot.
+ * @return MDS_OK on success.
+ */
+enum mds_status cluster_transport_request_companion_budget(
+    const char *mds_host, uint16_t mds_port,
+    struct companion_budget *out);
 
 /* -----------------------------------------------------------------------
  * Cluster membership registration (called from main after init)

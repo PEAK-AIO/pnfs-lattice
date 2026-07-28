@@ -60,6 +60,7 @@
 #include "mds_metrics.h"
 #include "mds_op_metrics.h"
 #include "mountd_compat.h"
+#include "companion.h"
 #ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
 #include "catalog_image.h"
@@ -322,6 +323,7 @@ int main(int argc, char *argv[])
 	uint32_t started_count = 0;
 	struct mountd_compat_ctx *mountd_compat = NULL;
 	struct metrics_http_ctx *mhttp = NULL;
+	struct companion_supervisor *companions = NULL;
 
 	/* Force line-buffered stderr so worker-thread diagnostics
 	 * reach the systemd journal promptly (glibc defaults to
@@ -1958,6 +1960,28 @@ if (s_pt != NULL) {
 		}
 	}
 
+	/* 9d. Companion processes.
+	 *
+	 * Spawns the helper programs declared with `companion.<name>.*`
+	 * keys in mds.conf and supervises them for the daemon's
+	 * lifetime.  Inert when nothing is declared: companion_start
+	 * then returns 0 with a NULL handle and no thread.  A failure
+	 * here is never fatal -- metadata service does not depend on
+	 * any companion, so we warn and keep serving.
+	 *
+	 * Registered with the cluster transport so `mds-admin companion`
+	 * can list, control, and budget them.  The transport only ever
+	 * receives declared names, never a path or argument vector. */
+	if (companion_start(&cfg, &companions) != 0) {
+		MDS_LOG_WARN(LOG_COMP_MDS,
+			"companion_start failed; declared companions will "
+			"not run");
+		companions = NULL;
+	}
+	if (ct_srv != NULL && companions != NULL) {
+		cluster_transport_server_set_companion(ct_srv, companions);
+	}
+
 	(void)fprintf(stdout, "pnfs-mds node %u started on %s:%u "
 		"(%u RPC listener(s), cluster transport port %u)%s%s\n",
 		cfg.self.id, cfg.self.hostname,
@@ -2037,6 +2061,20 @@ cleanup:
 	if (ct_srv != NULL) {
 		cluster_transport_server_stop(ct_srv);
 	}
+
+	/* Phase 3a: terminate companion processes.
+	 *
+	 * Deliberately after cluster_transport_server_stop(): an admin
+	 * connection thread may be inside a companion handler holding a
+	 * borrowed supervisor pointer, and only the transport stop
+	 * guarantees those threads have finished.  Clearing the
+	 * registration alone would not -- atomicity is not lifetime.
+	 *
+	 * Each child's process group gets SIGTERM, its configured grace
+	 * period, then SIGKILL, and every child is reaped before this
+	 * returns. */
+	companion_stop(companions);
+	companions = NULL;
 
 	/* Phase 3b: RonDB heartbeat + changefeed poller stop + deregister. */
 #ifdef HAVE_RONDB

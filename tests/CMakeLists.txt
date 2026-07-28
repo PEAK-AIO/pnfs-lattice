@@ -96,6 +96,9 @@ if(ENABLE_LAYOUT_COMMIT_AGGREGATOR)
                                     unit/test_layout_commit_aggregator.c)
 endif()
 add_executable(test_mountd_compat   unit/test_mountd_compat.c)
+if(ENABLE_COMPANION)
+    add_executable(test_companion   unit/test_companion.c)
+endif()
 
 foreach(test_target
     test_layout
@@ -154,6 +157,7 @@ foreach(test_target
     test_layout_cache
     test_layout_commit_aggregator
     test_mountd_compat
+    test_companion
 )
     # Skip iterations for targets that were not declared (gated tests
     # like test_resilver disappear when ENABLE_<NAME>=OFF).  This is

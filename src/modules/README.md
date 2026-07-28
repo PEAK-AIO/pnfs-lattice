@@ -68,3 +68,4 @@ endif()
 | `ds_prealloc` | `src/modules/ds_prealloc/` | ON | Pre-allocated DS placements to amortise CREATE cost. |
 | `wrr` | `src/modules/wrr/` | ON | Weighted-round-robin + capacity-derived placement kernels (community degrades to plain RR). |
 | `quota` | `src/modules/quota/` | ON | User/group quota enforcement (community is unbounded; all checks allow). |
+| `companion` | `src/modules/companion/` | ON | Supervises operator-declared helper processes (spawn, restart, resource fencing, NDB API slot budget). Both the real implementation and the stub ship here, so the gate is a real build choice; ON is inert until `companion.<name>.*` keys are declared. |

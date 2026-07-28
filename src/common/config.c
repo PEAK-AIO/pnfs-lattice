@@ -181,6 +181,353 @@ static char *strip_whitespace(char *s)
     return s;
 }
 
+/* -----------------------------------------------------------------------
+ * Companion declarations -- `companion.<name>.<field>` keys.
+ *
+ * Declarations are the only way a companion program can be named, so
+ * parsing here is deliberately strict: names are restricted to a
+ * filename-safe alphabet, every argument is its own key (no shell, no
+ * quoting, no word splitting), and out-of-range numbers keep the
+ * default rather than being silently truncated.
+ *
+ * Note this file runs before mds_log_init(), so diagnostics go to
+ * stderr like the rest of the parser.
+ * ----------------------------------------------------------------------- */
+
+/** Interpret an INI boolean the same way every other key here does. */
+static bool cfg_bool(const char *val)
+{
+    return strcmp(val, "true") == 0 || strcmp(val, "1") == 0;
+}
+
+/**
+ * Parse a whole decimal number within [lo, hi].
+ *
+ * Rejects trailing garbage so `stop_timeout_ms = 10s` is reported
+ * rather than silently accepted as 10.
+ *
+ * @return true when @a out was written; false (with a WARN) otherwise.
+ */
+static bool cfg_u32_range(const char *key, const char *val,
+                          unsigned long lo, unsigned long hi,
+                          uint32_t *out)
+{
+    char *end = NULL;
+    unsigned long v;
+
+    errno = 0;
+    v = strtoul(val, &end, 10);
+    if (end == val || (end != NULL && *end != '\0')) {
+        (void)fprintf(stderr,
+            "WARN: %s='%s' is not a number; ignoring\n", key, val);
+        return false;
+    }
+    if (errno == ERANGE || v < lo || v > hi) {
+        (void)fprintf(stderr,
+            "WARN: %s=%s out of range (%lu..%lu); ignoring\n",
+            key, val, lo, hi);
+        return false;
+    }
+    *out = (uint32_t)v;
+    return true;
+}
+
+/**
+ * Validate a companion name: non-empty, bounded, and restricted to
+ * [A-Za-z0-9_-].  '.' is excluded on purpose -- it separates the name
+ * from the field in the key, so allowing it would make
+ * `companion.a.b.exec` ambiguous.
+ */
+static bool companion_name_valid(const char *name)
+{
+    size_t len;
+
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    len = strlen(name);
+    if (len >= MDS_COMPANION_NAME_MAX) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Find the declaration slot for @a name, creating it on first sight.
+ *
+ * New slots are pre-loaded with the documented defaults so a minimal
+ * declaration (`companion.<name>.exec` alone) is fully usable.
+ *
+ * @return The slot, or NULL when the name is invalid or the bounded
+ *         array is full (both warned about here).
+ */
+static struct mds_companion_decl *
+companion_slot(struct mds_config *cfg, const char *name)
+{
+    struct mds_companion_decl *d;
+
+    for (uint32_t i = 0; i < cfg->companion_count; i++) {
+        if (strcmp(cfg->companions[i].name, name) == 0) {
+            return &cfg->companions[i];
+        }
+    }
+
+    if (!companion_name_valid(name)) {
+        (void)fprintf(stderr,
+            "WARN: invalid companion name '%s' "
+            "(expected 1..%d chars of [A-Za-z0-9_-]); ignoring\n",
+            name, MDS_COMPANION_NAME_MAX - 1);
+        return NULL;
+    }
+    if (cfg->companion_count >= MDS_MAX_COMPANIONS) {
+        (void)fprintf(stderr,
+            "WARN: more than %d companions declared; "
+            "ignoring '%s'\n", MDS_MAX_COMPANIONS, name);
+        return NULL;
+    }
+
+    d = &cfg->companions[cfg->companion_count++];
+    memset(d, 0, sizeof(*d));
+    (void)snprintf(d->name, sizeof(d->name), "%s", name);
+    d->restart                = COMPANION_RESTART_ON_FAILURE;
+    d->restart_backoff_ms     = 1000;
+    d->restart_backoff_max_ms = 60000;
+    d->max_restarts           = 5;
+    d->restart_reset_sec      = 60;
+    d->stop_timeout_ms        = 10000;
+    d->enabled                = true;
+    d->autostart              = true;
+    return d;
+}
+
+/**
+ * Apply one `companion.<name>.<field>` key.
+ *
+ * @param cfg   Config being populated.
+ * @param rest  Key text after the `companion.` prefix.
+ * @param val   Raw value text.
+ * @param full  Full key, used only for diagnostics.
+ */
+/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
+static void companion_apply_key(struct mds_config *cfg, const char *rest,
+                               const char *val, const char *full)
+{
+    char name[MDS_COMPANION_NAME_MAX];
+    const char *dot = strchr(rest, '.');
+    const char *field;
+    struct mds_companion_decl *d;
+    size_t nlen;
+
+    if (dot == NULL || dot == rest) {
+        (void)fprintf(stderr,
+            "WARN: malformed companion key '%s' "
+            "(expected companion.<name>.<field>); ignoring\n", full);
+        return;
+    }
+    nlen = (size_t)(dot - rest);
+    if (nlen >= sizeof(name)) {
+        (void)fprintf(stderr,
+            "WARN: companion name in '%s' exceeds %d bytes; ignoring\n",
+            full, MDS_COMPANION_NAME_MAX - 1);
+        return;
+    }
+    memcpy(name, rest, nlen);
+    name[nlen] = '\0';
+    field = dot + 1;
+
+    d = companion_slot(cfg, name);
+    if (d == NULL) {
+        return;  /* Already warned. */
+    }
+
+    if (strcmp(field, "exec") == 0) {
+        if (strlen(val) >= sizeof(d->exec_path)) {
+            (void)fprintf(stderr,
+                "WARN: %s exceeds %d bytes; ignoring\n",
+                full, MDS_COMPANION_PATH_MAX - 1);
+            return;
+        }
+        (void)snprintf(d->exec_path, sizeof(d->exec_path), "%s", val);
+    } else if (strncmp(field, "arg[", 4) == 0) {
+        /* Accept exactly `arg[N]`: isolate N, then range-check it. */
+        const char *istart = field + 4;
+        const char *close = strchr(istart, ']');
+        char idxbuf[16];
+        uint32_t idx = 0;
+        size_t ilen;
+
+        if (close == NULL || close[1] != '\0' || close == istart) {
+            (void)fprintf(stderr,
+                "WARN: malformed companion arg key '%s' "
+                "(expected arg[N]); ignoring\n", full);
+            return;
+        }
+        ilen = (size_t)(close - istart);
+        if (ilen >= sizeof(idxbuf)) {
+            (void)fprintf(stderr,
+                "WARN: companion arg index in '%s' is too long; "
+                "ignoring\n", full);
+            return;
+        }
+        memcpy(idxbuf, istart, ilen);
+        idxbuf[ilen] = '\0';
+        if (!cfg_u32_range(full, idxbuf, 0,
+                           MDS_COMPANION_ARGV_MAX - 1, &idx)) {
+            return;  /* Already warned. */
+        }
+        if (strlen(val) >= MDS_COMPANION_ARG_MAX) {
+            (void)fprintf(stderr,
+                "WARN: %s exceeds %d bytes; ignoring\n",
+                full, MDS_COMPANION_ARG_MAX - 1);
+            return;
+        }
+        (void)snprintf(d->argv[idx], MDS_COMPANION_ARG_MAX, "%s", val);
+        if (idx + 1 > d->argc) {
+            d->argc = idx + 1;
+        }
+    } else if (strcmp(field, "workdir") == 0) {
+        (void)snprintf(d->workdir, sizeof(d->workdir), "%s", val);
+    } else if (strcmp(field, "log_file") == 0) {
+        (void)snprintf(d->log_file, sizeof(d->log_file), "%s", val);
+    } else if (strcmp(field, "enabled") == 0) {
+        d->enabled = cfg_bool(val);
+    } else if (strcmp(field, "autostart") == 0) {
+        d->autostart = cfg_bool(val);
+    } else if (strcmp(field, "restart") == 0) {
+        if (strcmp(val, "never") == 0) {
+            d->restart = COMPANION_RESTART_NEVER;
+        } else if (strcmp(val, "on-failure") == 0 ||
+                   strcmp(val, "on_failure") == 0) {
+            d->restart = COMPANION_RESTART_ON_FAILURE;
+        } else if (strcmp(val, "always") == 0) {
+            d->restart = COMPANION_RESTART_ALWAYS;
+        } else {
+            (void)fprintf(stderr,
+                "WARN: %s='%s' invalid "
+                "(expected never|on-failure|always); keeping default\n",
+                full, val);
+        }
+    } else if (strcmp(field, "restart_backoff_ms") == 0) {
+        (void)cfg_u32_range(full, val, 100, 600000,
+                            &d->restart_backoff_ms);
+    } else if (strcmp(field, "restart_backoff_max_ms") == 0) {
+        (void)cfg_u32_range(full, val, 100, 3600000,
+                            &d->restart_backoff_max_ms);
+    } else if (strcmp(field, "max_restarts") == 0) {
+        (void)cfg_u32_range(full, val, 0, 1000, &d->max_restarts);
+    } else if (strcmp(field, "restart_reset_sec") == 0) {
+        (void)cfg_u32_range(full, val, 1, 86400, &d->restart_reset_sec);
+    } else if (strcmp(field, "stop_timeout_ms") == 0) {
+        (void)cfg_u32_range(full, val, 100, 600000, &d->stop_timeout_ms);
+    } else if (strcmp(field, "start_delay_ms") == 0) {
+        (void)cfg_u32_range(full, val, 0, 600000, &d->start_delay_ms);
+    } else if (strcmp(field, "rlimit_as_mb") == 0) {
+        (void)cfg_u32_range(full, val, 0, 1048576, &d->rlimit_as_mb);
+    } else if (strcmp(field, "rlimit_nofile") == 0) {
+        (void)cfg_u32_range(full, val, 0, 1048576, &d->rlimit_nofile);
+    } else if (strcmp(field, "rlimit_cpu_sec") == 0) {
+        (void)cfg_u32_range(full, val, 0, 31536000, &d->rlimit_cpu_sec);
+    } else if (strcmp(field, "systemd_scope") == 0) {
+        d->systemd_scope = cfg_bool(val);
+    } else if (strcmp(field, "memory_max_mb") == 0) {
+        (void)cfg_u32_range(full, val, 0, 1048576, &d->memory_max_mb);
+    } else if (strcmp(field, "ndb_conns") == 0) {
+        (void)cfg_u32_range(full, val, 0, 64, &d->ndb_conns);
+    } else {
+        (void)fprintf(stderr,
+            "WARN: unknown companion field '%s' in key '%s' -- "
+            "ignored\n", field, full);
+    }
+}
+
+/**
+ * Post-parse validation of every companion declaration.
+ *
+ * Rejects declarations that could not possibly work rather than
+ * discovering the problem at spawn time on a live daemon.  Soft
+ * inconsistencies (a backoff cap below the initial backoff) are
+ * clamped with a warning instead.
+ *
+ * @return MDS_OK, or MDS_ERR_INVAL when a declaration is unusable.
+ */
+static enum mds_status companion_validate(struct mds_config *cfg)
+{
+    for (uint32_t i = 0; i < cfg->companion_count; i++) {
+        struct mds_companion_decl *d = &cfg->companions[i];
+
+        if (!d->enabled) {
+            /*
+             * A disabled declaration is kept so it still shows up as
+             * DISABLED in admin output, but it is never spawned, so
+             * its fields do not have to be complete.
+             */
+            continue;
+        }
+
+        if (d->exec_path[0] == '\0') {
+            (void)fprintf(stderr,
+                "ERROR: companion '%s' has no exec path "
+                "(set companion.%s.exec)\n", d->name, d->name);
+            return MDS_ERR_INVAL;
+        }
+        if (d->exec_path[0] != '/') {
+            (void)fprintf(stderr,
+                "ERROR: companion.%s.exec must be an absolute path "
+                "(got '%s'); PATH is never searched\n",
+                d->name, d->exec_path);
+            return MDS_ERR_INVAL;
+        }
+        if (d->workdir[0] != '\0' && d->workdir[0] != '/') {
+            (void)fprintf(stderr,
+                "ERROR: companion.%s.workdir must be an absolute path "
+                "(got '%s')\n", d->name, d->workdir);
+            return MDS_ERR_INVAL;
+        }
+        if (d->log_file[0] != '\0' && d->log_file[0] != '/') {
+            (void)fprintf(stderr,
+                "ERROR: companion.%s.log_file must be an absolute path "
+                "(got '%s')\n", d->name, d->log_file);
+            return MDS_ERR_INVAL;
+        }
+        if (d->systemd_scope && d->memory_max_mb == 0) {
+            (void)fprintf(stderr,
+                "ERROR: companion.%s.systemd_scope=true requires "
+                "companion.%s.memory_max_mb > 0\n", d->name, d->name);
+            return MDS_ERR_INVAL;
+        }
+
+        /* Argument list must have no holes: argv is passed verbatim. */
+        for (uint32_t a = 0; a < d->argc; a++) {
+            if (d->argv[a][0] == '\0') {
+                (void)fprintf(stderr,
+                    "ERROR: companion '%s' is missing "
+                    "companion.%s.arg[%u]; argument indexes must be "
+                    "contiguous from 0\n", d->name, d->name,
+                    (unsigned)a);
+                return MDS_ERR_INVAL;
+            }
+        }
+
+        if (d->restart_backoff_max_ms < d->restart_backoff_ms) {
+            (void)fprintf(stderr,
+                "WARN: companion.%s.restart_backoff_max_ms (%u) below "
+                "restart_backoff_ms (%u); raising the cap\n",
+                d->name, (unsigned)d->restart_backoff_max_ms,
+                (unsigned)d->restart_backoff_ms);
+            d->restart_backoff_max_ms = d->restart_backoff_ms;
+        }
+    }
+    return MDS_OK;
+}
+
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 {
@@ -353,6 +700,19 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 
     /* Stripe lease duration (default 30s). */
     cfg->stripe_lease_duration_ms = 30000;
+
+    /*
+     * Companion processes.  The master switch defaults on, but with no
+     * `companion.<name>.*` keys declared the supervisor stays inert,
+     * so a fresh upgrade spawns nothing.  Slot accounting is advisory
+     * by default and reports no free-slot figure until the operator
+     * declares the cluster's total.
+     */
+    cfg->companion_enabled = true;
+    cfg->companion_count = 0;
+    cfg->ndb_api_slots_total = 0;
+    cfg->ndb_api_slots_reserved = 0;
+    cfg->companion_ndb_admission = COMPANION_NDB_ADVISORY;
 
     /* Logging defaults: stderr output, INFO global verbosity, and every
      * component inheriting the global level (-1 sentinel).  memset()
@@ -1297,6 +1657,32 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                     "(expected fatal|error|warn|info|debug|trace); "
                     "keeping default\n", val);
             }
+        /* Companion processes (src/modules/companion).  Declarations
+         * are the allowlist: nothing outside these keys can ever be
+         * executed by the daemon.  See docs/companion-processes.md. */
+        } else if (strcmp(key, "companion_enabled") == 0) {
+            cfg->companion_enabled = cfg_bool(val);
+        } else if (strcmp(key, "companion_ndb_admission") == 0) {
+            if (strcmp(val, "advisory") == 0) {
+                cfg->companion_ndb_admission = COMPANION_NDB_ADVISORY;
+            } else if (strcmp(val, "enforce") == 0) {
+                cfg->companion_ndb_admission = COMPANION_NDB_ENFORCE;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: companion_ndb_admission='%s' invalid "
+                    "(expected advisory|enforce); keeping advisory\n",
+                    val);
+            }
+        } else if (strcmp(key, "ndb_api_slots_total") == 0) {
+            /* Node ids in an NDB cluster top out at 255 in total. */
+            (void)cfg_u32_range(key, val, 0, 255,
+                                &cfg->ndb_api_slots_total);
+        } else if (strcmp(key, "ndb_api_slots_reserved") == 0) {
+            (void)cfg_u32_range(key, val, 0, 255,
+                                &cfg->ndb_api_slots_reserved);
+        } else if (strncmp(key, "companion.", 10) == 0) {
+            companion_apply_key(cfg, key + 10, val, key);
+
         } else if (strncmp(key, "log_level.", 10) == 0) {
             const char *comp_name = key + 10;
             int comp = mds_log_component_from_str(comp_name);
@@ -1320,6 +1706,17 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     }
 
     (void)fclose(fp);
+
+    /* Validate companion declarations before anything tries to spawn
+     * one.  A broken declaration is an operator error worth failing
+     * startup for, not a runtime surprise on a serving daemon. */
+    {
+        enum mds_status cst = companion_validate(cfg);
+
+        if (cst != MDS_OK) {
+            return cst;
+        }
+    }
 
     /* Validate: require_mtls needs all TLS cert paths. */
     if (cfg->require_mtls) {

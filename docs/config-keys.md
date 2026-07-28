@@ -101,6 +101,34 @@ hosts).
 ## Sharding
 - `shard_enabled` — bool master switch.  Default: false.
 - `hide_referral_junctions` — bool.  Default: false.  Cosmetic only.  When true, the `/shardN` referral junction directories are omitted from READDIR replies at the namespace **root only**.  `LOOKUP` still resolves them (so `cd /mnt/pnfs/shardN` works); this just hides them from `ls /mnt/pnfs`.  Hiding is an exact subtree-map match, so ordinary files and directories are never affected.  Caveat: tools that enumerate the root (`find`, `rsync`, `rm -rf /mnt/pnfs`, backup) will not descend into the hidden shards.
+## Companion processes
+Helper programs that the daemon starts, supervises, and terminates with itself.  Declarations in `mds.conf` are the allowlist: `mds-admin companion` requests carry a declared **name** only, never a path or argument vector, so the admin port cannot be used to execute anything the operator has not pre-approved.  Adding or changing a companion requires editing `mds.conf` and restarting the daemon — there is no reload path.  The feature is inert with no declarations present.  Full guide: `docs/companion-processes.md`.
+- `companion_enabled` — master switch.  Default: **true**.  `false` keeps declarations in place and starts nothing.
+- `companion.<name>.exec` — **required**; absolute path to the executable.  `PATH` is never searched and no shell is involved.  A relative path fails startup.
+- `companion.<name>.arg[N]` — one argument per key, N in 0..11.  Indexes must be contiguous from 0 (a gap fails startup).  Values are passed verbatim: no quoting, word-splitting, or globbing.
+- `companion.<name>.workdir` — absolute `chdir` target.  Default: `/`.
+- `companion.<name>.log_file` — absolute path for the child's stdout+stderr (append, mode 0640).  Default: inherit the daemon's descriptors.  Not created or rotated by the daemon.
+- `companion.<name>.enabled` — bool.  Default: true.  A disabled declaration still appears as `disabled` but can never start.
+- `companion.<name>.autostart` — bool.  Default: true.  false = declared but idle until an admin start.
+- `companion.<name>.restart` — `never|on-failure|always`.  Default: **on-failure** (exit status 0 counts as work finished).
+- `companion.<name>.restart_backoff_ms` (100..600000).  Default: 1000.  Doubles per retry.
+- `companion.<name>.restart_backoff_max_ms` (100..3600000).  Default: 60000.  Raised to the initial backoff if lower.
+- `companion.<name>.max_restarts` (0..1000).  Default: 5.  0 = never restart.  Exhausted leaves the companion `failed` until an operator starts it.
+- `companion.<name>.restart_reset_sec` (1..86400).  Default: 60.  Uptime that clears the failure burst counter.
+- `companion.<name>.stop_timeout_ms` (100..600000).  Default: 10000.  `SIGTERM`-to-`SIGKILL` grace period.
+- `companion.<name>.start_delay_ms` (0..600000).  Default: 0.  Applies to daemon-start autostart only; an explicit admin start is immediate.
+- `companion.<name>.rlimit_as_mb` (0..1048576).  Default: 0 = inherit.  `RLIMIT_AS` applied in the child before exec.
+- `companion.<name>.rlimit_nofile` (0..1048576).  Default: 0 = inherit.
+- `companion.<name>.rlimit_cpu_sec` (0..31536000).  Default: 0 = inherit.
+- `companion.<name>.systemd_scope` — bool.  Default: false.  Wraps the child in a transient systemd scope so cgroup memory pressure kills only the companion.  Requires `memory_max_mb`.  If `systemd-run` is missing the daemon warns and starts the program without the scope.
+- `companion.<name>.memory_max_mb` (0..1048576).  `MemoryMax` for the scope; required when `systemd_scope = true`.
+- `companion.<name>.ndb_conns` (0..64).  Default: 0.  Declared RonDB API connections, used for slot budgeting.
+Names accept `[A-Za-z0-9_-]` up to 63 chars (`.` separates name from field, so it is not permitted).  Maximum 8 companions per node.
+### RonDB API slot budget
+Advisory accounting surfaced by `mds-admin companion budget`.  `free = total - mds pool - reserved - companions running`, reported signed so oversubscription is visible.  Two limitations are inherent: `ndb_conns` is operator-declared intent that the daemon cannot verify against a child's real connection count, and the view is **per node** — peer MDS daemons and their companions are invisible.
+- `ndb_api_slots_total` (0..255).  Default: 0 = undeclared, which suppresses free-slot reporting.  Total `[api]` sections in the RonDB `config.ini`.
+- `ndb_api_slots_reserved` (0..255).  Default: 0.  Headroom held back for peer daemons and transient tools.
+- `companion_ndb_admission` — `advisory|enforce`.  Default: **advisory** (warn and spawn anyway, so a mis-declared budget cannot block an operator-requested program).  `enforce` refuses the spawn with `MDS_ERR_NOSPC`.
 ## Logging
 The daemon routes diagnostics through a leveled, component-aware logger (`src/common/log.c`).  Output defaults to stderr at `info`, which reproduces the historical behaviour (every pre-existing diagnostic is emitted at `info` or above).
 - `log_file` — path for diagnostics output.  Empty/unset → stderr.  A path is opened in **append** mode; if it cannot be opened the logger falls back to stderr.  Each record carries a UTC timestamp, component, and level.

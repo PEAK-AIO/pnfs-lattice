@@ -75,6 +75,12 @@ option(ENABLE_DS_PREALLOC   "Enable ds_prealloc module (enterprise-only)" OFF)
 option(ENABLE_WRR           "Enable wrr module (enterprise-only)" OFF)
 option(ENABLE_QUOTA         "Enable quota module (enterprise-only)" OFF)
 
+# The companion supervisor ships in full here (both companion.c and
+# companion_stub.c are present), so this gate is a genuine build-time
+# choice rather than an enterprise marker.  ON is inert until the
+# operator declares `companion.<name>.*` keys in mds.conf.
+option(ENABLE_COMPANION     "Enable companion process supervisor module" ON)
+
 if(ENABLE_RONDB)
     enable_language(CXX)
 endif()

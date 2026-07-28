@@ -3,6 +3,70 @@
 All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **Companion processes** — a new `companion` feature module
+  (`src/modules/companion/`, gated by `ENABLE_COMPANION`, default ON)
+  that lets the daemon spawn, supervise, restart, and terminate
+  operator-declared helper programs alongside itself. Each child runs
+  in its own process group, with an optional `setrlimit` fence
+  (`RLIMIT_AS` / `RLIMIT_NOFILE` / `RLIMIT_CPU`) and an optional
+  transient systemd scope carrying `MemoryMax`. Restart policy is
+  `never | on-failure | always` with exponential backoff, a capped
+  failure burst, and a counter that resets after stable uptime. See
+  `docs/companion-processes.md`.
+- Companions are declared **only** in `mds.conf` via
+  `companion.<name>.*` keys, which act as the allowlist: `exec`,
+  `arg[N]`, `workdir`, `log_file`, `enabled`, `autostart`, `restart`,
+  `restart_backoff_ms`, `restart_backoff_max_ms`, `max_restarts`,
+  `restart_reset_sec`, `stop_timeout_ms`, `start_delay_ms`,
+  `rlimit_as_mb`, `rlimit_nofile`, `rlimit_cpu_sec`, `systemd_scope`,
+  `memory_max_mb`, `ndb_conns`. Plus the node-wide
+  `companion_enabled`, `ndb_api_slots_total`,
+  `ndb_api_slots_reserved`, and `companion_ndb_admission`.
+- **Advisory RonDB `[api]` slot budget** — companions declare the NDB
+  connections they will open, and `mds-admin companion budget` reports
+  declared total, this daemon's pool, reserved headroom, and declared
+  versus running companion slots. The free figure is signed so
+  oversubscription is visible instead of clamped.
+  `companion_ndb_admission = enforce` refuses a spawn that would
+  exceed the declared total; the default `advisory` warns and proceeds.
+- New `mds-admin companion` subcommands: `list`, `status`, `start`,
+  `stop`, `restart`, and `budget` (with a display-only
+  `--total-api-slots` what-if override), carried over the existing
+  cluster-transport admin endpoint as message types 89–94.
+
+### Security
+- The admin control path transmits an action plus a **declared
+  companion name** only — never an executable path, argument vector,
+  or resource limit. An operator with admin-port access can start and
+  stop pre-approved programs and nothing else, so the feature adds no
+  remote code-execution surface. Programs are launched with `execv()`
+  against an absolute path: no shell, no `PATH` lookup, and one config
+  key per argument, so quoting and globbing semantics do not exist.
+- Spawned children have their signal mask cleared (the daemon blocks
+  `SIGINT`/`SIGTERM` in every thread, which a child would otherwise
+  inherit) and every inherited descriptor above stderr closed, so a
+  companion cannot hold catalogue connections, listening sockets, TLS
+  state, or the daemon log open.
+
+### Notes
+- **Inert by default.** With no `companion.<name>.*` keys declared, no
+  supervisor thread is created and no process is spawned, so an
+  upgrade changes nothing until an operator opts in.
+- Adding or changing a companion requires editing `mds.conf` and
+  restarting the daemon; there is no reload path and no way to launch
+  an ad-hoc command.
+- A structurally invalid declaration (relative `exec`, `workdir`, or
+  `log_file`; missing `exec`; a gap in `arg[N]`; `systemd_scope`
+  without `memory_max_mb`) now aborts daemon startup with an error
+  naming the key, rather than failing later at spawn time.
+- Slot budgeting is advisory accounting, not a guarantee: the daemon
+  cannot observe a child's real NDB connection count, and the view is
+  per node — peer MDS daemons and their companions are invisible, so
+  `ndb_api_slots_reserved` exists to reserve headroom for them.
+
 ## [v0.1.1-community] — 2026-05-02
 
 ### Added

@@ -4,6 +4,7 @@
 add_executable(mds-admin
     mds_admin.c
     admin_util.c
+    admin_companion.c
 )
 
 target_include_directories(mds-admin PRIVATE
