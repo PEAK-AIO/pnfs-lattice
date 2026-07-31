@@ -1609,19 +1609,37 @@ struct rondb_inline_stripe_attrs {
     NdbRecAttr *a_fh;
 };
 
-static void rondb_get_inode_inline_stripe(NdbOperation *op,
-                                          const NdbDictionary::Table *tbl,
-                                          struct rondb_inline_stripe_attrs *o)
+/**
+ * Request the v9 inline-stripe columns on @op.
+ *
+ * An ABSENT column set (pre-v9 table) is a legitimate outcome: the
+ * handles stay NULL and the packer emits an empty inline entry, so the
+ * reader falls back to the side tables.  A column set that IS present
+ * but whose getValue() fails is a different condition and is reported
+ * as such, so that a resource failure is not indistinguishable from
+ * "this file has no inline DS map".
+ *
+ * @return 0 on success (including the legitimately-absent case),
+ *         -2 when a present column's getValue() failed.
+ */
+static int rondb_get_inode_inline_stripe(NdbOperation *op,
+                                         const NdbDictionary::Table *tbl,
+                                         struct rondb_inline_stripe_attrs *o)
 {
     o->a_dsid = o->a_unit = o->a_fhlen = o->a_fh = nullptr;
     if (tbl == nullptr ||
         tbl->getColumn(RONDB_INO_COL_DS_ID) == nullptr) {
-        return;
+        return 0;   /* pre-v9 table -- packs as "no inline entry" */
     }
     o->a_dsid  = op->getValue(RONDB_INO_COL_DS_ID, nullptr);
     o->a_unit  = op->getValue(RONDB_INO_COL_STRIPE_UNIT, nullptr);
     o->a_fhlen = op->getValue(RONDB_INO_COL_NFS_FH_LEN, nullptr);
     o->a_fh    = op->getValue(RONDB_INO_COL_NFS_FH, nullptr);
+    if (o->a_dsid == nullptr || o->a_unit == nullptr ||
+        o->a_fhlen == nullptr || o->a_fh == nullptr) {
+        return -2;
+    }
+    return 0;
 }
 
 /* Pack the v9 inline trailer (ds_id, stripe_unit, nfs_fh_len, nfs_fh[128
@@ -1653,6 +1671,181 @@ static void rondb_pack_inode_inline_stripe(uint8_t **pp,
     }
     p += MDS_NFS_FH_MAX;
     *pp = p;
+}
+
+/* -----------------------------------------------------------------------
+ * Shared inode read + wire-pack helpers
+ *
+ * EVERY shim path that reads an mds_inodes row and materialises the
+ * rondb_inode wire image MUST use this pair.
+ *
+ * The column set has grown by a trailer per schema version (v8
+ * synthetic DS owner, v9 inline single-stripe DS map) and will grow
+ * again.  One fetch and one packer gives an added field exactly one
+ * place to be handled, instead of one per hand-rolled copy of the
+ * column list.
+ * ----------------------------------------------------------------------- */
+
+/** Complete NdbRecAttr set for one mds_inodes row. */
+struct rondb_inode_attrs {
+    /* v1 base -- always present. */
+    NdbRecAttr *a_type, *a_mode, *a_nlink;
+    NdbRecAttr *a_uid, *a_gid;
+    NdbRecAttr *a_size, *a_sused;
+    NdbRecAttr *a_atsec, *a_atnsec;
+    NdbRecAttr *a_mtsec, *a_mtnsec;
+    NdbRecAttr *a_ctsec, *a_ctnsec;
+    NdbRecAttr *a_change, *a_gen;
+    NdbRecAttr *a_flags, *a_verf;
+    NdbRecAttr *a_parent, *a_shard;
+    /* v8 stored synthetic DS owner -- NULL on a pre-v8 table. */
+    NdbRecAttr *a_ssuid, *a_ssgid;
+    /* v9 inline single-stripe DS map -- NULL members on a pre-v9 table. */
+    struct rondb_inline_stripe_attrs inl;
+};
+
+/**
+ * Request every mds_inodes column on @op.
+ *
+ * The v8 / v9 columns are getColumn-guarded: asking for a column the
+ * table does not have aborts the entire read transaction (NDB 4350), so
+ * on an older table they are skipped here and pack as zeros.  Note the
+ * two distinct meanings of a NULL handle -- "column absent from this
+ * table" (fine) versus "column present, getValue() failed" (an error) --
+ * are deliberately NOT conflated; see rondb_get_inode_inline_stripe.
+ *
+ * @return  0  every requested handle was obtained.  Any NULL v8/v9
+ *             handle then unambiguously means the column is absent, so
+ *             rondb_pack_inode_attrs may treat it as "pack zeros".
+ *         -1  invalid arguments (programming error).  No NDB call was
+ *             made, so there is NO transaction error to report -- do
+ *             not call tx->getNdbError() on this path.
+ *         -2  an NDB getValue() failed (e.g. operation exhaustion).
+ *             The failure is recorded on the transaction, so
+ *             tx->getNdbError() is meaningful here.
+ *
+ * On any non-zero return the caller must not dereference the set and
+ * should abort the transaction.
+ */
+static int rondb_get_inode_attrs(NdbOperation *op,
+                                 const NdbDictionary::Table *tbl,
+                                 struct rondb_inode_attrs *a)
+{
+    if (op == nullptr || tbl == nullptr || a == nullptr) {
+        return -1;
+    }
+
+    a->a_type   = op->getValue(RONDB_INO_COL_TYPE, nullptr);
+    a->a_mode   = op->getValue(RONDB_INO_COL_MODE, nullptr);
+    a->a_nlink  = op->getValue(RONDB_INO_COL_NLINK, nullptr);
+    a->a_uid    = op->getValue(RONDB_INO_COL_UID, nullptr);
+    a->a_gid    = op->getValue(RONDB_INO_COL_GID, nullptr);
+    a->a_size   = op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
+    a->a_sused  = op->getValue(RONDB_INO_COL_SPACE_USED, nullptr);
+    a->a_atsec  = op->getValue(RONDB_INO_COL_ATIME_SEC, nullptr);
+    a->a_atnsec = op->getValue(RONDB_INO_COL_ATIME_NSEC, nullptr);
+    a->a_mtsec  = op->getValue(RONDB_INO_COL_MTIME_SEC, nullptr);
+    a->a_mtnsec = op->getValue(RONDB_INO_COL_MTIME_NSEC, nullptr);
+    a->a_ctsec  = op->getValue(RONDB_INO_COL_CTIME_SEC, nullptr);
+    a->a_ctnsec = op->getValue(RONDB_INO_COL_CTIME_NSEC, nullptr);
+    a->a_change = op->getValue(RONDB_INO_COL_CHANGE, nullptr);
+    a->a_gen    = op->getValue(RONDB_INO_COL_GENERATION, nullptr);
+    a->a_flags  = op->getValue(RONDB_INO_COL_FLAGS, nullptr);
+    a->a_verf   = op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
+    a->a_parent = op->getValue(RONDB_INO_COL_PARENT, nullptr);
+    a->a_shard  = op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
+
+    /* v1 base columns are mandatory on every table version. */
+    if (a->a_type == nullptr || a->a_mode == nullptr ||
+        a->a_nlink == nullptr || a->a_uid == nullptr ||
+        a->a_gid == nullptr || a->a_size == nullptr ||
+        a->a_sused == nullptr || a->a_atsec == nullptr ||
+        a->a_atnsec == nullptr || a->a_mtsec == nullptr ||
+        a->a_mtnsec == nullptr || a->a_ctsec == nullptr ||
+        a->a_ctnsec == nullptr || a->a_change == nullptr ||
+        a->a_gen == nullptr || a->a_flags == nullptr ||
+        a->a_verf == nullptr || a->a_parent == nullptr ||
+        a->a_shard == nullptr) {
+        return -2;
+    }
+
+    /* v8 stored synthetic DS owner (RFC 8435 S2.2.1).  An absent column
+     * pair is legitimate and packs as zeros; a PRESENT pair whose
+     * getValue() fails is a real error, not "no synth owner". */
+    a->a_ssuid = nullptr;
+    a->a_ssgid = nullptr;
+    if (tbl->getColumn(RONDB_INO_COL_SYNTH_SUID) != nullptr) {
+        a->a_ssuid = op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr);
+        a->a_ssgid = op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr);
+        if (a->a_ssuid == nullptr || a->a_ssgid == nullptr) {
+            return -2;
+        }
+    }
+
+    /* v9 inline single-stripe DS map -- same absent-vs-failed
+     * distinction, made inside the helper. */
+    return rondb_get_inode_inline_stripe(op, tbl, &a->inl);
+}
+
+/**
+ * Pack a completed inode read into the canonical RONDB_INODE_FIXED_SIZE
+ * wire image consumed by rondb_inode_deserialize().
+ *
+ * @buf must be at least RONDB_INODE_FIXED_SIZE bytes.  Callers do NOT
+ * need to pre-zero it: every byte the layout defines is written here,
+ * and the slack between the last packed field and the declared fixed
+ * size is zeroed explicitly so the image is always deterministic.
+ *
+ * @fileid is passed explicitly because it is the PK the caller read
+ * with rather than a fetched column.
+ *
+ * Byte layout must stay in lockstep with rondb_inode_serialize() /
+ * rondb_inode_deserialize() in rondb_schema.c.
+ */
+static void rondb_pack_inode_attrs(uint8_t *buf, uint64_t fileid,
+                                   const struct rondb_inode_attrs *a)
+{
+    uint8_t *p = buf;
+
+    fdb_put_u64(p, fileid);                              p += 8;
+    fdb_put_u8 (p, (uint8_t)a->a_type->u_8_value());     p += 1;
+    fdb_put_u32(p, a->a_mode->u_32_value());             p += 4;
+    fdb_put_u32(p, a->a_nlink->u_32_value());            p += 4;
+    fdb_put_u64(p, a->a_uid->u_64_value());              p += 8;
+    fdb_put_u64(p, a->a_gid->u_64_value());              p += 8;
+    fdb_put_u64(p, a->a_size->u_64_value());             p += 8;
+    fdb_put_u64(p, a->a_sused->u_64_value());            p += 8;
+    fdb_put_u64(p, a->a_atsec->u_64_value());            p += 8;
+    fdb_put_u32(p, a->a_atnsec->u_32_value());           p += 4;
+    fdb_put_u64(p, a->a_mtsec->u_64_value());            p += 8;
+    fdb_put_u32(p, a->a_mtnsec->u_32_value());           p += 4;
+    fdb_put_u64(p, a->a_ctsec->u_64_value());            p += 8;
+    fdb_put_u32(p, a->a_ctnsec->u_32_value());           p += 4;
+    fdb_put_u64(p, a->a_change->u_64_value());           p += 8;
+    fdb_put_u64(p, a->a_gen->u_64_value());              p += 8;
+    fdb_put_u32(p, a->a_flags->u_32_value());            p += 4;
+    fdb_put_u64(p, a->a_verf->u_64_value());             p += 8;
+    fdb_put_u64(p, a->a_parent->u_64_value());           p += 8;
+    fdb_put_u32(p, a->a_shard->u_32_value());            p += 4;
+
+    /* v8 synth trailer (NULL-safe: pre-v8 table or row -> 0). */
+    fdb_put_u32(p, (a->a_ssuid != nullptr && !a->a_ssuid->isNULL())
+                    ? a->a_ssuid->u_32_value() : 0U);    p += 4;
+    fdb_put_u32(p, (a->a_ssgid != nullptr && !a->a_ssgid->isNULL())
+                    ? a->a_ssgid->u_32_value() : 0U);    p += 4;
+
+    /* v9 inline single-stripe trailer (NULL-safe inside the helper). */
+    rondb_pack_inode_inline_stripe(&p, &a->inl);
+
+    /* Zero the slack up to the declared fixed size so no reader ever
+     * sees uninitialised bytes where a future trailer will live. */
+    {
+        size_t written = (size_t)(p - buf);
+        if (written < (size_t)RONDB_INODE_FIXED_SIZE) {
+            std::memset(p, 0,
+                        (size_t)RONDB_INODE_FIXED_SIZE - written);
+        }
+    }
 }
 
 static int rondb_compare_name_bytes(const char *lhs, size_t lhs_len,
@@ -3383,37 +3576,24 @@ int rondb_shim_inode_get(void *handle, uint64_t fileid,
     op->readTuple(rondb_map_lock_mode(read_mode));
     (void)rondb_equal_u64(op, RONDB_INO_COL_FILEID, fileid);
 
-    /* Request all columns via getValue into NdbRecAttr. */
-    NdbRecAttr *a_type     = op->getValue(RONDB_INO_COL_TYPE, nullptr);
-    NdbRecAttr *a_mode     = op->getValue(RONDB_INO_COL_MODE, nullptr);
-    NdbRecAttr *a_nlink    = op->getValue(RONDB_INO_COL_NLINK, nullptr);
-    NdbRecAttr *a_uid      = op->getValue(RONDB_INO_COL_UID, nullptr);
-    NdbRecAttr *a_gid      = op->getValue(RONDB_INO_COL_GID, nullptr);
-    NdbRecAttr *a_size     = op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
-    NdbRecAttr *a_sused    = op->getValue(RONDB_INO_COL_SPACE_USED, nullptr);
-    NdbRecAttr *a_atsec    = op->getValue(RONDB_INO_COL_ATIME_SEC, nullptr);
-    NdbRecAttr *a_atnsec   = op->getValue(RONDB_INO_COL_ATIME_NSEC, nullptr);
-    NdbRecAttr *a_mtsec    = op->getValue(RONDB_INO_COL_MTIME_SEC, nullptr);
-    NdbRecAttr *a_mtnsec   = op->getValue(RONDB_INO_COL_MTIME_NSEC, nullptr);
-    NdbRecAttr *a_ctsec    = op->getValue(RONDB_INO_COL_CTIME_SEC, nullptr);
-    NdbRecAttr *a_ctnsec   = op->getValue(RONDB_INO_COL_CTIME_NSEC, nullptr);
-    NdbRecAttr *a_change   = op->getValue(RONDB_INO_COL_CHANGE, nullptr);
-    NdbRecAttr *a_gen      = op->getValue(RONDB_INO_COL_GENERATION, nullptr);
-    NdbRecAttr *a_flags    = op->getValue(RONDB_INO_COL_FLAGS, nullptr);
-    NdbRecAttr *a_verf     = op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
-    NdbRecAttr *a_parent   = op->getValue(RONDB_INO_COL_PARENT, nullptr);
-    NdbRecAttr *a_shard    = op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
-    /* v8 stored synthetic DS owner.  GUARDED: requesting a column the table
-     * doesn't have (cluster predating v8, ALTER unsupported) aborts the whole
-     * read transaction (NDB 4350).  Skip the getValue when absent -> packed 0. */
-    const bool have_synth =
-        (tbl->getColumn(RONDB_INO_COL_SYNTH_SUID) != nullptr);
-    NdbRecAttr *a_ssuid    = have_synth
-        ? op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr) : nullptr;
-    NdbRecAttr *a_ssgid    = have_synth
-        ? op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr) : nullptr;
-    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
-    rondb_get_inode_inline_stripe(op, tbl, &a_inl);
+    /* Request every column via the shared helper (v8 synth + v9 inline
+     * trailers included) so this path can never drift from the
+     * canonical wire image.  See rondb_get_inode_attrs. */
+    struct rondb_inode_attrs ia;
+    {
+        int arc = rondb_get_inode_attrs(op, tbl, &ia);
+        if (arc == -2) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "inode_get getValue");
+        }
+        if (arc != 0) {
+            /* Invalid arguments: no NDB call was made, so there is no
+             * transaction error to report. */
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
+    }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -3429,37 +3609,8 @@ int rondb_shim_inode_get(void *handle, uint64_t fileid,
         return 1; /* NOT_FOUND */
     }
 
-    /* Pack columns into rondb_inode byte format via direct endian writes. */
-    {
-        uint8_t *p = buf;
-        fdb_put_u64(p, fileid);                              p += 8;
-        fdb_put_u8(p, (uint8_t)a_type->u_8_value());        p += 1;
-        fdb_put_u32(p, a_mode->u_32_value());                p += 4;
-        fdb_put_u32(p, a_nlink->u_32_value());               p += 4;
-        fdb_put_u64(p, a_uid->u_64_value());                 p += 8;
-        fdb_put_u64(p, a_gid->u_64_value());                 p += 8;
-        fdb_put_u64(p, a_size->u_64_value());                p += 8;
-        fdb_put_u64(p, a_sused->u_64_value());               p += 8;
-        fdb_put_u64(p, a_atsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_atnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_mtsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_mtnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_ctsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_ctnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_change->u_64_value());              p += 8;
-        fdb_put_u64(p, a_gen->u_64_value());                 p += 8;
-        fdb_put_u32(p, a_flags->u_32_value());               p += 4;
-        fdb_put_u64(p, a_verf->u_64_value());                p += 8;
-        fdb_put_u64(p, a_parent->u_64_value());              p += 8;
-        fdb_put_u32(p, a_shard->u_32_value());               p += 4;
-        /* v8 synth trailer (NULL-safe: pre-v8 rows -> 0). */
-        fdb_put_u32(p, (a_ssuid != nullptr && !a_ssuid->isNULL())
-                        ? a_ssuid->u_32_value() : 0U);       p += 4;
-        fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
-                        ? a_ssgid->u_32_value() : 0U);       p += 4;
-        /* v9 inline single-stripe trailer. */
-        rondb_pack_inode_inline_stripe(&p, &a_inl);
-    }
+    /* Pack the complete wire image via the shared packer. */
+    rondb_pack_inode_attrs(buf, fileid, &ia);
 
     rondb_get_ndb(state)->closeTransaction(tx);
     *outlen = RONDB_INODE_FIXED_SIZE;
@@ -3678,6 +3829,11 @@ int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
     rd_op->readTuple(NdbOperation::LM_Exclusive);
     (void)rondb_equal_u64(rd_op, RONDB_INO_COL_FILEID, fileid);
 
+    /* Deliberately NOT rondb_get_inode_attrs(): the merged struct stays
+     * local to this function, and the write-back uses updateTuple(),
+     * which leaves every column it does not setValue() untouched.
+     * rondb_set_inode_values() sets neither the v8 synth nor the v9
+     * inline-stripe columns, so those survive the RMW unread. */
     NdbRecAttr *a_type   = rd_op->getValue(RONDB_INO_COL_TYPE, nullptr);
     NdbRecAttr *a_mode   = rd_op->getValue(RONDB_INO_COL_MODE, nullptr);
     NdbRecAttr *a_nlink  = rd_op->getValue(RONDB_INO_COL_NLINK, nullptr);
@@ -3918,33 +4074,21 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     ino_op->readTuple(NdbOperation::LM_CommittedRead);
     (void)rondb_equal_u64(ino_op, RONDB_INO_COL_FILEID, cfid);
 
-    NdbRecAttr *a_type   = ino_op->getValue(RONDB_INO_COL_TYPE, nullptr);
-    NdbRecAttr *a_mode   = ino_op->getValue(RONDB_INO_COL_MODE, nullptr);
-    NdbRecAttr *a_nlink  = ino_op->getValue(RONDB_INO_COL_NLINK, nullptr);
-    NdbRecAttr *a_uid    = ino_op->getValue(RONDB_INO_COL_UID, nullptr);
-    NdbRecAttr *a_gid    = ino_op->getValue(RONDB_INO_COL_GID, nullptr);
-    NdbRecAttr *a_size   = ino_op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
-    NdbRecAttr *a_sused  = ino_op->getValue(RONDB_INO_COL_SPACE_USED, nullptr);
-    NdbRecAttr *a_atsec  = ino_op->getValue(RONDB_INO_COL_ATIME_SEC, nullptr);
-    NdbRecAttr *a_atnsec = ino_op->getValue(RONDB_INO_COL_ATIME_NSEC, nullptr);
-    NdbRecAttr *a_mtsec  = ino_op->getValue(RONDB_INO_COL_MTIME_SEC, nullptr);
-    NdbRecAttr *a_mtnsec = ino_op->getValue(RONDB_INO_COL_MTIME_NSEC, nullptr);
-    NdbRecAttr *a_ctsec  = ino_op->getValue(RONDB_INO_COL_CTIME_SEC, nullptr);
-    NdbRecAttr *a_ctnsec = ino_op->getValue(RONDB_INO_COL_CTIME_NSEC, nullptr);
-    NdbRecAttr *a_change = ino_op->getValue(RONDB_INO_COL_CHANGE, nullptr);
-    NdbRecAttr *a_gen    = ino_op->getValue(RONDB_INO_COL_GENERATION, nullptr);
-    NdbRecAttr *a_flags  = ino_op->getValue(RONDB_INO_COL_FLAGS, nullptr);
-    NdbRecAttr *a_verf   = ino_op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
-    NdbRecAttr *a_parent = ino_op->getValue(RONDB_INO_COL_PARENT, nullptr);
-    NdbRecAttr *a_shard  = ino_op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
-    const bool have_synth =
-        (ino_tbl->getColumn(RONDB_INO_COL_SYNTH_SUID) != nullptr);
-    NdbRecAttr *a_ssuid  = have_synth
-        ? ino_op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr) : nullptr;
-    NdbRecAttr *a_ssgid  = have_synth
-        ? ino_op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr) : nullptr;
-    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
-    rondb_get_inode_inline_stripe(ino_op, ino_tbl, &a_inl);
+    /* Shared fetch -- same column set and trailers as every other
+     * inode read path (see rondb_get_inode_attrs). */
+    struct rondb_inode_attrs ia;
+    {
+        int arc = rondb_get_inode_attrs(ino_op, ino_tbl, &ia);
+        if (arc == -2) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err, "ns_lookup getValue");
+        }
+        if (arc != 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
+    }
 
     /* Commit -- both reads complete in this single round-trip. */
     if (tx->execute(NdbTransaction::Commit) == -1) {
@@ -3962,37 +4106,8 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     *child_fileid = cfid;
     *child_type   = ctype;
 
-    /* Pack inode columns into byte buffer. */
-    {
-        uint8_t *p = inode_buf;
-        fdb_put_u64(p, cfid);                                p += 8;
-        fdb_put_u8(p, (uint8_t)a_type->u_8_value());        p += 1;
-        fdb_put_u32(p, a_mode->u_32_value());                p += 4;
-        fdb_put_u32(p, a_nlink->u_32_value());               p += 4;
-        fdb_put_u64(p, a_uid->u_64_value());                 p += 8;
-        fdb_put_u64(p, a_gid->u_64_value());                 p += 8;
-        fdb_put_u64(p, a_size->u_64_value());                p += 8;
-        fdb_put_u64(p, a_sused->u_64_value());               p += 8;
-        fdb_put_u64(p, a_atsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_atnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_mtsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_mtnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_ctsec->u_64_value());               p += 8;
-        fdb_put_u32(p, a_ctnsec->u_32_value());              p += 4;
-        fdb_put_u64(p, a_change->u_64_value());              p += 8;
-        fdb_put_u64(p, a_gen->u_64_value());                 p += 8;
-        fdb_put_u32(p, a_flags->u_32_value());               p += 4;
-        fdb_put_u64(p, a_verf->u_64_value());                p += 8;
-        fdb_put_u64(p, a_parent->u_64_value());              p += 8;
-        fdb_put_u32(p, a_shard->u_32_value());               p += 4;
-        /* v8 synth trailer (NULL-safe: pre-v8 rows -> 0). */
-        fdb_put_u32(p, (a_ssuid != nullptr && !a_ssuid->isNULL())
-                        ? a_ssuid->u_32_value() : 0U);       p += 4;
-        fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
-                        ? a_ssgid->u_32_value() : 0U);       p += 4;
-        /* v9 inline single-stripe trailer. */
-        rondb_pack_inode_inline_stripe(&p, &a_inl);
-    }
+    /* Pack the complete wire image via the shared packer. */
+    rondb_pack_inode_attrs(inode_buf, cfid, &ia);
 
     rondb_get_ndb(state)->closeTransaction(tx);
     *inode_outlen = RONDB_INODE_FIXED_SIZE;
@@ -5096,22 +5211,14 @@ int rondb_shim_dirent_name_for_child(void *handle,
  * ----------------------------------------------------------------------- */
 
 /**
- * Per-row set of NdbRecAttr pointers for the fused inode read.  One
- * instance per dirent row keeps the getValue() pointers alive until
- * after execute(Commit) so the values can be packed into the caller's
+ * Per-row state for the fused inode read.  One instance per dirent row
+ * keeps the operation and its getValue() handles alive until after
+ * execute(Commit) so the values can be packed into the caller's
  * fixed-layout inode buffer.
  */
 struct rondb_readdir_plus_ino_set {
     NdbOperation *op;
-    NdbRecAttr *a_type, *a_mode, *a_nlink;
-    NdbRecAttr *a_uid, *a_gid;
-    NdbRecAttr *a_size, *a_sused;
-    NdbRecAttr *a_atsec, *a_atnsec;
-    NdbRecAttr *a_mtsec, *a_mtnsec;
-    NdbRecAttr *a_ctsec, *a_ctnsec;
-    NdbRecAttr *a_change, *a_gen;
-    NdbRecAttr *a_flags, *a_verf;
-    NdbRecAttr *a_parent, *a_shard;
+    struct rondb_inode_attrs attrs;
 };
 
 /*
@@ -5120,9 +5227,14 @@ struct rondb_readdir_plus_ino_set {
  * window rows[first, end), queue one fused inode read per dirent on the
  * SAME tx, commit with AO_IgnoreError (so a per-row 626 marks just that
  * entry's attrs unavailable instead of aborting the batch), materialise
- * each 137-byte rondb_inode, and deliver via cb.  Closes `tx` before
+ * each rondb_inode wire image, and deliver via cb.  Closes `tx` before
  * returning.  Used by both the name-order and the fileid-cursor
  * readdir_plus variants.
+ *
+ * The inode image comes from the shared rondb_get_inode_attrs /
+ * rondb_pack_inode_attrs pair, so an entry carries exactly the same
+ * bytes an inode_get or ns_lookup of the same fileid would produce,
+ * trailers included.
  */
 static int rondb_readdir_plus_deliver(
     rondb_shim_handle *state,
@@ -5157,27 +5269,21 @@ static int rondb_readdir_plus_deliver(
         (void)rondb_equal_u64(s.op, RONDB_INO_COL_FILEID,
                               rows[i].child_fid);
 
-        /* Column order mirrors rondb_shim_inode_get to keep a single
-         * source of truth for the 137-byte rondb_inode layout. */
-        s.a_type   = s.op->getValue(RONDB_INO_COL_TYPE, nullptr);
-        s.a_mode   = s.op->getValue(RONDB_INO_COL_MODE, nullptr);
-        s.a_nlink  = s.op->getValue(RONDB_INO_COL_NLINK, nullptr);
-        s.a_uid    = s.op->getValue(RONDB_INO_COL_UID, nullptr);
-        s.a_gid    = s.op->getValue(RONDB_INO_COL_GID, nullptr);
-        s.a_size   = s.op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
-        s.a_sused  = s.op->getValue(RONDB_INO_COL_SPACE_USED, nullptr);
-        s.a_atsec  = s.op->getValue(RONDB_INO_COL_ATIME_SEC, nullptr);
-        s.a_atnsec = s.op->getValue(RONDB_INO_COL_ATIME_NSEC, nullptr);
-        s.a_mtsec  = s.op->getValue(RONDB_INO_COL_MTIME_SEC, nullptr);
-        s.a_mtnsec = s.op->getValue(RONDB_INO_COL_MTIME_NSEC, nullptr);
-        s.a_ctsec  = s.op->getValue(RONDB_INO_COL_CTIME_SEC, nullptr);
-        s.a_ctnsec = s.op->getValue(RONDB_INO_COL_CTIME_NSEC, nullptr);
-        s.a_change = s.op->getValue(RONDB_INO_COL_CHANGE, nullptr);
-        s.a_gen    = s.op->getValue(RONDB_INO_COL_GENERATION, nullptr);
-        s.a_flags  = s.op->getValue(RONDB_INO_COL_FLAGS, nullptr);
-        s.a_verf   = s.op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
-        s.a_parent = s.op->getValue(RONDB_INO_COL_PARENT, nullptr);
-        s.a_shard  = s.op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
+        /* Shared fetch: the SAME column set every other inode read path
+         * uses, v8 synth and v9 inline-stripe trailers included. */
+        {
+            int arc = rondb_get_inode_attrs(s.op, ino_tbl, &s.attrs);
+            if (arc == -2) {
+                err = tx->getNdbError();
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return rondb_report_error(err,
+                                          "readdir_plus getValue");
+            }
+            if (arc != 0) {
+                rondb_get_ndb(state)->closeTransaction(tx);
+                return -1;
+            }
+        }
     }
 
     /* AO_IgnoreError: a per-op 626 (row missing) no longer aborts the
@@ -5194,48 +5300,19 @@ static int rondb_readdir_plus_deliver(
         }
     }
 
-    /* Phase 3: materialise each row into the 137-byte rondb_inode
-     * buffer and deliver it via the caller's callback.  Stopping early
-     * (cb returns non-zero) is honoured. */
+    /* Phase 3: materialise each row into the rondb_inode wire image and
+     * deliver it via the caller's callback.  Stopping early (cb returns
+     * non-zero) is honoured. */
     for (size_t i = first; i < end; i++) {
         rondb_readdir_plus_ino_set &s = ino_ops[i - first];
         uint8_t inode_buf[RONDB_INODE_FIXED_SIZE];
-        int inode_valid = 1;
-
-        /* This READDIRPLUS packer only fills through home_shard_id (the
-         * base attrs a directory listing needs); it does not read the
-         * synth or v9 inline-stripe trailers.  Zero the whole buffer so
-         * the unread trailer bytes deserialize as "no synth / no inline"
-         * rather than uninitialised stack (which, with the v9 fixed size,
-         * would otherwise decode into a bogus inline DS map). */
-        std::memset(inode_buf, 0, sizeof(inode_buf));
-
-        if (s.op->getNdbError().code == 626) {
-            inode_valid = 0;
-        }
+        int inode_valid = (s.op->getNdbError().code == 626) ? 0 : 1;
 
         if (inode_valid) {
-            uint8_t *p = inode_buf;
-            fdb_put_u64(p, rows[i].child_fid);                 p += 8;
-            fdb_put_u8(p,  (uint8_t)s.a_type->u_8_value());    p += 1;
-            fdb_put_u32(p, s.a_mode->u_32_value());            p += 4;
-            fdb_put_u32(p, s.a_nlink->u_32_value());           p += 4;
-            fdb_put_u64(p, s.a_uid->u_64_value());             p += 8;
-            fdb_put_u64(p, s.a_gid->u_64_value());             p += 8;
-            fdb_put_u64(p, s.a_size->u_64_value());            p += 8;
-            fdb_put_u64(p, s.a_sused->u_64_value());           p += 8;
-            fdb_put_u64(p, s.a_atsec->u_64_value());           p += 8;
-            fdb_put_u32(p, s.a_atnsec->u_32_value());          p += 4;
-            fdb_put_u64(p, s.a_mtsec->u_64_value());           p += 8;
-            fdb_put_u32(p, s.a_mtnsec->u_32_value());          p += 4;
-            fdb_put_u64(p, s.a_ctsec->u_64_value());           p += 8;
-            fdb_put_u32(p, s.a_ctnsec->u_32_value());          p += 4;
-            fdb_put_u64(p, s.a_change->u_64_value());          p += 8;
-            fdb_put_u64(p, s.a_gen->u_64_value());             p += 8;
-            fdb_put_u32(p, s.a_flags->u_32_value());           p += 4;
-            fdb_put_u64(p, s.a_verf->u_64_value());            p += 8;
-            fdb_put_u64(p, s.a_parent->u_64_value());          p += 8;
-            fdb_put_u32(p, s.a_shard->u_32_value());           p += 4;
+            /* Shared packer: complete image, trailers included, and it
+             * zeroes its own trailing slack. */
+            rondb_pack_inode_attrs(inode_buf, rows[i].child_fid,
+                                   &s.attrs);
         }
 
         if (cb(rows[i].child_fid, rows[i].child_type,
@@ -5637,27 +5714,7 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
     NdbTransaction *tx;
     NdbOperation *op;
     NdbOperation *upd;
-    NdbRecAttr *a_type;
-    NdbRecAttr *a_mode;
-    NdbRecAttr *a_nlink;
-    NdbRecAttr *a_uid;
-    NdbRecAttr *a_gid;
-    NdbRecAttr *a_size;
-    NdbRecAttr *a_sused;
-    NdbRecAttr *a_atsec;
-    NdbRecAttr *a_atnsec;
-    NdbRecAttr *a_mtsec;
-    NdbRecAttr *a_mtnsec;
-    NdbRecAttr *a_ctsec;
-    NdbRecAttr *a_ctnsec;
-    NdbRecAttr *a_change;
-    NdbRecAttr *a_gen;
-    NdbRecAttr *a_flags;
-    NdbRecAttr *a_verf;
-    NdbRecAttr *a_parent;
-    NdbRecAttr *a_shard;
-    NdbRecAttr *a_ssuid;
-    NdbRecAttr *a_ssgid;
+    struct rondb_inode_attrs ia;
     NdbError err;
     struct mds_inode ino;
     uint32_t shard;
@@ -5689,34 +5746,21 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
 
     op->readTuple(NdbOperation::LM_Exclusive);
     (void)rondb_equal_u64(op, RONDB_INO_COL_FILEID, fileid);
-    a_type = op->getValue(RONDB_INO_COL_TYPE, nullptr);
-    a_mode = op->getValue(RONDB_INO_COL_MODE, nullptr);
-    a_nlink = op->getValue(RONDB_INO_COL_NLINK, nullptr);
-    a_uid = op->getValue(RONDB_INO_COL_UID, nullptr);
-    a_gid = op->getValue(RONDB_INO_COL_GID, nullptr);
-    a_size = op->getValue(RONDB_INO_COL_FILE_SIZE, nullptr);
-    a_sused = op->getValue(RONDB_INO_COL_SPACE_USED, nullptr);
-    a_atsec = op->getValue(RONDB_INO_COL_ATIME_SEC, nullptr);
-    a_atnsec = op->getValue(RONDB_INO_COL_ATIME_NSEC, nullptr);
-    a_mtsec = op->getValue(RONDB_INO_COL_MTIME_SEC, nullptr);
-    a_mtnsec = op->getValue(RONDB_INO_COL_MTIME_NSEC, nullptr);
-    a_ctsec = op->getValue(RONDB_INO_COL_CTIME_SEC, nullptr);
-    a_ctnsec = op->getValue(RONDB_INO_COL_CTIME_NSEC, nullptr);
-    a_change = op->getValue(RONDB_INO_COL_CHANGE, nullptr);
-    a_gen = op->getValue(RONDB_INO_COL_GENERATION, nullptr);
-    a_flags = op->getValue(RONDB_INO_COL_FLAGS, nullptr);
-    a_verf = op->getValue(RONDB_INO_COL_CREATE_VERF, nullptr);
-    a_parent = op->getValue(RONDB_INO_COL_PARENT, nullptr);
-    a_shard = op->getValue(RONDB_INO_COL_HOME_SHARD, nullptr);
-    if (tbl->getColumn(RONDB_INO_COL_SYNTH_SUID) != nullptr) {
-        a_ssuid = op->getValue(RONDB_INO_COL_SYNTH_SUID, nullptr);
-        a_ssgid = op->getValue(RONDB_INO_COL_SYNTH_SGID, nullptr);
-    } else {
-        a_ssuid = nullptr;
-        a_ssgid = nullptr;
+    /* Shared fetch -- same column set and trailers as every other
+     * inode read path (see rondb_get_inode_attrs). */
+    {
+        int arc = rondb_get_inode_attrs(op, tbl, &ia);
+        if (arc == -2) {
+            err = tx->getNdbError();
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return rondb_report_error(err,
+                                      "ns_nlink_adjust getValue");
+        }
+        if (arc != 0) {
+            rondb_get_ndb(state)->closeTransaction(tx);
+            return -1;
+        }
     }
-    struct rondb_inline_stripe_attrs a_inl;   /* v9 inline single-stripe */
-    rondb_get_inode_inline_stripe(op, tbl, &a_inl);
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -5725,37 +5769,7 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
         return rondb_report_error(err, "ns_nlink_adjust read");
     }
 
-    {
-        uint8_t *p = buf;
-
-        fdb_put_u64(p, fileid);                      p += 8;
-        fdb_put_u8(p, (uint8_t)a_type->u_8_value()); p += 1;
-        fdb_put_u32(p, a_mode->u_32_value());        p += 4;
-        fdb_put_u32(p, a_nlink->u_32_value());       p += 4;
-        fdb_put_u64(p, a_uid->u_64_value());         p += 8;
-        fdb_put_u64(p, a_gid->u_64_value());         p += 8;
-        fdb_put_u64(p, a_size->u_64_value());        p += 8;
-        fdb_put_u64(p, a_sused->u_64_value());       p += 8;
-        fdb_put_u64(p, a_atsec->u_64_value());       p += 8;
-        fdb_put_u32(p, a_atnsec->u_32_value());      p += 4;
-        fdb_put_u64(p, a_mtsec->u_64_value());       p += 8;
-        fdb_put_u32(p, a_mtnsec->u_32_value());      p += 4;
-        fdb_put_u64(p, a_ctsec->u_64_value());       p += 8;
-        fdb_put_u32(p, a_ctnsec->u_32_value());      p += 4;
-        fdb_put_u64(p, a_change->u_64_value());      p += 8;
-        fdb_put_u64(p, a_gen->u_64_value());         p += 8;
-        fdb_put_u32(p, a_flags->u_32_value());       p += 4;
-        fdb_put_u64(p, a_verf->u_64_value());        p += 8;
-        fdb_put_u64(p, a_parent->u_64_value());      p += 8;
-        fdb_put_u32(p, a_shard->u_32_value());       p += 4;
-        /* v8 synth trailer (NULL-safe: pre-v8 rows -> 0). */
-        fdb_put_u32(p, (a_ssuid != nullptr && !a_ssuid->isNULL())
-                        ? a_ssuid->u_32_value() : 0U);       p += 4;
-        fdb_put_u32(p, (a_ssgid != nullptr && !a_ssgid->isNULL())
-                        ? a_ssgid->u_32_value() : 0U);       p += 4;
-        /* v9 inline single-stripe trailer. */
-        rondb_pack_inode_inline_stripe(&p, &a_inl);
-    }
+    rondb_pack_inode_attrs(buf, fileid, &ia);
 
     if (rondb_inode_deserialize(buf, sizeof(buf), &ino, &shard) != 0) {
         rondb_get_ndb(state)->closeTransaction(tx);

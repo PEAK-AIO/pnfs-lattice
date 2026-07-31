@@ -120,14 +120,187 @@ static void test_inode_round_trip(void)
 }
 
 /* -----------------------------------------------------------------------
- * 2. Inode size is exactly 137 bytes (FDB 133 + home_shard_id 4)
+ * 2. Inode wire-image trailer boundaries
+ *
+ * rondb_inode_deserialize() selects each optional trailer purely on the
+ * buffer LENGTH, so these constants decide which trailers are decoded at
+ * all.  A trailer added to the layout without extending
+ * RONDB_INODE_FIXED_SIZE would simply never be read back.
+ *
+ * Pin all three so a layout change that forgets the boundaries breaks
+ * here first.
  * ----------------------------------------------------------------------- */
 
 static void test_inode_size(void)
 {
-	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 137);
-	/* 137 = 133 (base inode fields) + 4 (home_shard_id). */
-	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 133 + 4);
+	ASSERT_EQ(RONDB_INODE_V1_SIZE,    137);
+	ASSERT_EQ(RONDB_INODE_V8_SIZE,    145);  /* + synth_suid/sgid   */
+	ASSERT_EQ(RONDB_INODE_FIXED_SIZE, 285);  /* + v9 inline stripe  */
+
+	/* Boundaries must stay strictly ascending, otherwise the
+	 * length gates in rondb_inode_deserialize() overlap. */
+	ASSERT_TRUE(RONDB_INODE_V1_SIZE < RONDB_INODE_V8_SIZE);
+	ASSERT_TRUE(RONDB_INODE_V8_SIZE < RONDB_INODE_FIXED_SIZE);
+	ASSERT_TRUE(RONDB_INODE_FIXED_SIZE <= RONDB_INODE_MAX_SIZE);
+}
+
+/* -----------------------------------------------------------------------
+ * 2b. An inode carrying the v9 inline single-stripe DS map must survive
+ *     a full round-trip.
+ *
+ * For a single-stripe file this map is the ONLY record of which DS holds
+ * the data -- such files have no mds_stripe_maps / mds_stripe_entries
+ * rows by design -- so losing it in transit leaves the file's layout
+ * unrecoverable.
+ * ----------------------------------------------------------------------- */
+
+static void test_inode_inline_stripe_round_trip(void)
+{
+	struct mds_inode orig, got;
+	uint8_t buf[RONDB_INODE_MAX_SIZE];
+	uint32_t shard_out = 0;
+	int n;
+	uint32_t i;
+
+	memset(&orig, 0, sizeof(orig));
+	orig.fileid = 216033;
+	orig.type = MDS_FTYPE_REG;
+	orig.mode = 0100644;
+	orig.nlink = 1;
+	orig.size = 7;
+	orig.flags = MDS_IFLAG_INLINE_STRIPE;
+	orig.synth_suid = 4000;
+	orig.synth_sgid = 4001;
+	orig.inline_ds_id = 7;
+	orig.stripe_unit = 1048576;
+	orig.inline_fh_len = 36;
+	for (i = 0; i < orig.inline_fh_len; i++) {
+		orig.inline_fh[i] = (uint8_t)(0x40 + i);
+	}
+
+	n = rondb_inode_serialize(&orig, 0, buf, sizeof(buf));
+	ASSERT_EQ(n, RONDB_INODE_FIXED_SIZE);
+	ASSERT_EQ(rondb_inode_deserialize(buf, (size_t)n, &got,
+					  &shard_out), 0);
+
+	ASSERT_EQ(got.flags, (uint32_t)MDS_IFLAG_INLINE_STRIPE);
+	/* The v9 trailer: flag set MUST imply a usable DS binding. */
+	ASSERT_EQ(got.inline_ds_id, (uint32_t)7);
+	ASSERT_EQ(got.stripe_unit, (uint32_t)1048576);
+	ASSERT_EQ(got.inline_fh_len, (uint32_t)36);
+	ASSERT_EQ(memcmp(got.inline_fh, orig.inline_fh, 36), 0);
+	/* v8 synth owner rides in the same image. */
+	ASSERT_EQ(got.synth_suid, (uint32_t)4000);
+	ASSERT_EQ(got.synth_sgid, (uint32_t)4001);
+}
+
+/* -----------------------------------------------------------------------
+ * 2c. Trailers are gated on buffer length.
+ *
+ * This is the upgrade-compatibility contract for a PERSISTED image --
+ * e.g. the rename journal's inode_snapshot column -- written by a binary
+ * that predates a trailer: the older, shorter image still decodes, with
+ * the newer fields defaulting to zero.
+ *
+ * Note the corollary: because the omitted region defaults to zero, a
+ * short image and a full image with zeroed trailers deserialize to the
+ * same struct.  Length therefore cannot signal "trailer not fetched";
+ * only fetching the columns can.
+ * ----------------------------------------------------------------------- */
+
+static void test_inode_trailers_gated_by_length(void)
+{
+	struct mds_inode orig, got;
+	uint8_t buf[RONDB_INODE_MAX_SIZE];
+
+	memset(&orig, 0, sizeof(orig));
+	orig.fileid = 4242;
+	orig.type = MDS_FTYPE_REG;
+	orig.flags = MDS_IFLAG_INLINE_STRIPE;
+	orig.synth_suid = 4000;
+	orig.synth_sgid = 4001;
+	orig.inline_ds_id = 7;
+	orig.stripe_unit = 65536;
+	orig.inline_fh_len = 4;
+	memcpy(orig.inline_fh, "\xDE\xAD\xBE\xEF", 4);
+
+	ASSERT_EQ(rondb_inode_serialize(&orig, 0, buf, sizeof(buf)),
+		  RONDB_INODE_FIXED_SIZE);
+
+	/* v1 length: neither trailer decoded. */
+	ASSERT_EQ(rondb_inode_deserialize(buf, RONDB_INODE_V1_SIZE,
+					  &got, NULL), 0);
+	ASSERT_EQ_U64(got.fileid, orig.fileid);
+	ASSERT_EQ(got.synth_suid, (uint32_t)0);
+	ASSERT_EQ(got.inline_fh_len, (uint32_t)0);
+
+	/* v8 length: synth decoded, inline still absent. */
+	ASSERT_EQ(rondb_inode_deserialize(buf, RONDB_INODE_V8_SIZE,
+					  &got, NULL), 0);
+	ASSERT_EQ(got.synth_suid, (uint32_t)4000);
+	ASSERT_EQ(got.inline_fh_len, (uint32_t)0);
+
+	/* Full length: everything decoded. */
+	ASSERT_EQ(rondb_inode_deserialize(buf, RONDB_INODE_FIXED_SIZE,
+					  &got, NULL), 0);
+	ASSERT_EQ(got.synth_suid, (uint32_t)4000);
+	ASSERT_EQ(got.inline_fh_len, (uint32_t)4);
+}
+
+/* -----------------------------------------------------------------------
+ * 2d. Pin the region of the image the serializer actually writes.
+ *
+ * Serialising the same inode into two differently-poisoned buffers
+ * makes every byte the serializer did NOT write show up as a mismatch.
+ * The first mismatch therefore marks the end of the real payload, and
+ * it must cover everything rondb_inode_deserialize() reads -- otherwise
+ * a reader would consume caller stack.
+ * ----------------------------------------------------------------------- */
+
+static void test_inode_serializer_covers_all_decoded_bytes(void)
+{
+	/* base 125 + v8 synth 8 + v9 (ds_id 4 + unit 4 + fh_len 4
+	 * + fh 128). */
+	const int payload = 125 + 8 + (4 + 4 + 4 + MDS_NFS_FH_MAX);
+	struct mds_inode orig;
+	uint8_t a[RONDB_INODE_MAX_SIZE];
+	uint8_t b[RONDB_INODE_MAX_SIZE];
+	int first_diff = -1;
+	int i;
+
+	memset(&orig, 0, sizeof(orig));
+	orig.fileid = 99;
+	orig.type = MDS_FTYPE_REG;
+	orig.flags = MDS_IFLAG_INLINE_STRIPE;
+	orig.inline_ds_id = 3;
+	orig.inline_fh_len = 8;
+	memcpy(orig.inline_fh, "\x01\x02\x03\x04\x05\x06\x07\x08", 8);
+
+	memset(a, 0xAA, sizeof(a));
+	memset(b, 0x55, sizeof(b));
+	ASSERT_EQ(rondb_inode_serialize(&orig, 1, a, sizeof(a)),
+		  RONDB_INODE_FIXED_SIZE);
+	ASSERT_EQ(rondb_inode_serialize(&orig, 1, b, sizeof(b)),
+		  RONDB_INODE_FIXED_SIZE);
+
+	for (i = 0; i < (int)sizeof(a); i++) {
+		if (a[i] != b[i]) {
+			first_diff = i;
+			break;
+		}
+	}
+
+	/* Everything the deserializer consumes must be genuinely written. */
+	ASSERT_EQ(first_diff, payload);
+
+	/* NOTE: payload (273) is 12 bytes short of
+	 * RONDB_INODE_FIXED_SIZE (285) -- the three boundary constants
+	 * each carry 12 bytes of slack over the fields they describe.
+	 * Harmless today because every caller passes the declared size
+	 * and the deserializer stops at `payload`, but it means "bytes
+	 * written" and "length reported" are NOT the same number.  Do
+	 * not narrow the constants without auditing every producer. */
+	ASSERT_TRUE(payload < RONDB_INODE_FIXED_SIZE);
 }
 
 /* -----------------------------------------------------------------------
@@ -399,6 +572,9 @@ int main(void)
 
 	RUN_TEST(test_inode_round_trip);
 	RUN_TEST(test_inode_size);
+	RUN_TEST(test_inode_inline_stripe_round_trip);
+	RUN_TEST(test_inode_trailers_gated_by_length);
+	RUN_TEST(test_inode_serializer_covers_all_decoded_bytes);
 	RUN_TEST(test_stripe_entry_round_trip);
 	RUN_TEST(test_rj_round_trip);
 	RUN_TEST(test_lock_res_parent_name);
