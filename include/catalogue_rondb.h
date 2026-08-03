@@ -276,6 +276,23 @@ int rondb_shim_ns_create(void *handle,
                          const uint8_t *stripe_buf, uint32_t stripe_len,
                          uint32_t stripe_count);
 
+/** Atomic wide CREATE: insert an already allocated regular-file inode,
+ *  dirent, exact stripe header/entries, and parent update in one NDB
+ *  transaction.  Entries use the same variable-length wire encoding as
+ *  rondb_shim_ns_create.  Returns 0 on success, 1 on name collision,
+ *  -2 on a retryable NDB error, or -1 on a permanent error. */
+int rondb_shim_ns_create_wide(
+    void *handle,
+    uint64_t parent_fileid,
+    const char *name,
+    const uint8_t *child_inode_buf,
+    uint32_t child_ino_len,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const uint8_t *stripe_buf,
+    uint32_t stripe_len);
+
 /** Atomic RENAME: single NDB transaction (T2/T3 class).
  *  Deletes src dirent, writes dst dirent, atomically updates both
  *  parent inodes via interpretedUpdateTuple, optionally handles
@@ -573,6 +590,7 @@ int rondb_shim_ns_create_with_layout(
     const uint8_t *child_inode_buf, uint32_t child_ino_len,
     int32_t parent_nlink_delta,
     const uint8_t *stripe_buf, uint32_t stripe_len, uint32_t stripe_count,
+    uint32_t stripe_unit, uint32_t mirror_count,
     uint64_t layout_clientid, uint32_t layout_iomode,
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,

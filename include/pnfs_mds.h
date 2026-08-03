@@ -205,35 +205,15 @@ enum cluster_mode {
  * Phase F (aggregated LAYOUTCOMMIT).  Persisted in the inode flags
  * column so all MDSes observe the mode. */
 #define MDS_IFLAG_HPC_SHARED (1U << 3)
-/* Phase 3 of the QA plan -- HPC-Shared wide CREATE in flight.
+/* Legacy HPC-Shared wide CREATE crash marker.
  *
- * Set by hpc_shared_create_wide_layout() on the freshly-created
- * inode BEFORE the wide stripe map is persisted.  Cleared after
- * mds_cat_stripe_map_put() returns MDS_OK.  An MDS crash between
- * the inode commit and the stripe-map commit leaves the file with
- * this bit set; the inode + dirent are visible in the catalogue
- * but should not be reachable via NFSv4 because the wide stripe map
- * is missing.
- *
- * The compound read path (compound_inode_get, compound_lookup_local_child)
- * filters inodes carrying this flag so clients see NFS4ERR_NOENT
- * instead of an inconsistent file.
- *
- * Cleanup status (QA review Blocker 5).  The runtime filter is the
- * ONLY mechanism shipped today -- there is NO lazy-reap-on-access and
- * NO scan-based reaper.  A persistent orphan inode that survives an
- * MDS crash stays in the catalogue indefinitely; it is harmless
- * (invisible to every client and to readdir) but consumes a fileid
- * row.  Adding a startup / periodic scanner that walks inodes by flag
- * and removes any whose stripe_map row is absent is tracked as a
- * focused follow-up (see docs/hpc-shared-files.md "Deferred").  Do
- * NOT rely on the GC drainer's stripe_map_scan to reap these: the
- * GC drainer reclaims orphan stripe_map rows whose inode is gone,
- * NOT orphan inodes whose stripe_map is gone -- the inverse direction.
- *
- * Plain (non-HPC) CREATEs do NOT set this flag -- the legacy 1x1
- * fused CREATE primitive in catalogue_rondb_ns_create_with_layout
- * already gives crash atomicity. */
+ * Earlier releases committed the inode and dirent before separately writing
+ * the wide stripe map.  A crash in that window leaves this bit set.  Current
+ * hpc_shared_create_wide_layout() uses one RonDB transaction and never sets
+ * the bit.  NFS-facing reads continue to hide legacy marked inodes until the
+ * migration/recovery path verifies a complete stripe map or removes the
+ * incomplete namespace entry.
+ */
 #define MDS_IFLAG_HPC_CREATE_PENDING (1U << 4)
 
 /*
@@ -952,6 +932,14 @@ struct mds_config {
      * (multi-DS-per-mirror flex-files support); older clients treat
      * the striped form's stripes as mirrors and corrupt data. */
     bool hpc_serve_layouts;                                /**< Default false. */
+
+    /* Startup namespace scan that repairs MDS_IFLAG_HPC_CREATE_PENDING
+     * rows left by pre-atomic wide-create releases.  The scan walks the
+     * whole namespace from the root, so it is opt-in: enable it once
+     * after upgrading from an affected release.  Lazy lookup-time
+     * recovery is always active regardless of this switch.
+     * INI key: hpc_pending_recovery_scan = true|false. */
+    bool hpc_pending_recovery_scan;                        /**< Default false. */
 
     /* Master switch for client-direct pNFS layouts.  When false, every
      * LAYOUTGET returns LAYOUTUNAVAILABLE and clients fall back to MDS

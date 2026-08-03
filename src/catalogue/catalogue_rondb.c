@@ -652,6 +652,172 @@ enum mds_status catalogue_rondb_ns_create(
 	return MDS_OK;
 }
 
+static enum mds_status catalogue_rondb_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries,
+	bool *safe_to_discard)
+{
+	void *handle = rondb_handle(cat);
+	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
+	uint8_t *stripe_buf;
+	size_t stripe_buf_len;
+	size_t stripe_offset;
+	int rc = -1;
+
+	/* Default: never let the caller reclaim the DS bundle unless we PROVE
+	 * the create did not publish a live file at child->fileid. */
+	if (safe_to_discard != NULL) {
+		*safe_to_discard = false;
+	}
+
+	if (handle == NULL || name == NULL || child == NULL || entries == NULL ||
+	    child->fileid == 0 || child->parent_fileid != parent_fileid ||
+	    child->type != MDS_FTYPE_REG || stripe_count == 0 ||
+	    stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+	    mirror_count != 1 ||
+	    (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+		/* Nothing attempted; any captured DS files are orphaned. */
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
+		return MDS_ERR_INVAL;
+	}
+	if (rondb_inode_serialize(child, 0, child_buf, sizeof(child_buf)) < 0) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
+		return MDS_ERR_IO;
+	}
+
+	stripe_buf_len = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
+		    entries[stripe_index].nfs_fh_len >
+		    SIZE_MAX - stripe_buf_len - 8U) {
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
+			return MDS_ERR_INVAL;
+		}
+		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
+	}
+	if (stripe_buf_len > UINT32_MAX) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
+		return MDS_ERR_INVAL;
+	}
+
+	stripe_buf = malloc(stripe_buf_len);
+	if (stripe_buf == NULL) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
+		return MDS_ERR_NOMEM;
+	}
+	stripe_offset = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		const struct mds_ds_map_entry *entry = &entries[stripe_index];
+
+		fdb_put_u32(stripe_buf + stripe_offset, entry->ds_id);
+		fdb_put_u32(stripe_buf + stripe_offset + 4U, entry->nfs_fh_len);
+		if (entry->nfs_fh_len > 0) {
+			memcpy(stripe_buf + stripe_offset + 8U, entry->nfs_fh,
+			       entry->nfs_fh_len);
+		}
+		stripe_offset += 8U + entry->nfs_fh_len;
+	}
+
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_create_wide(
+			handle, parent_fileid, name, child_buf,
+			RONDB_INODE_FIXED_SIZE, stripe_count, stripe_unit,
+			mirror_count, stripe_buf, (uint32_t)stripe_buf_len);
+		if (rc != -2) {
+			break;
+		}
+		rondb_transient_backoff(attempt);
+	}
+	free(stripe_buf);
+
+	if (rc == 0) {
+		/* Committed and live; the DS bundle is now owned by the file. */
+		catalog_stat_inc(&cat->stats.authority_writes);
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = false;
+		}
+		return MDS_OK;
+	}
+
+	/* Non-success (ConstraintViolation, permanent error, or transient-
+	 * retry exhaustion).  ns_create_wide commits inode + dirent + parent +
+	 * stripe map in ONE NDB transaction, but a lost reply after a
+	 * successful commit is indistinguishable from a real failure here.
+	 * Resolve with a committed lookup of (parent, name):
+	 *   dirent -> our child->fileid : our txn committed (idempotent success
+	 *       on a lost-reply retry) -> MDS_OK, do NOT reclaim (LIVE).
+	 *   dirent -> a different fileid : genuine foreign collision ->
+	 *       MDS_ERR_EXISTS, reclaim our orphaned DS bundle.
+	 *   dirent absent + ConstraintViolation : a non-namespace integrity
+	 *       violation aborted the txn atomically -> MDS_ERR_IO, reclaim.
+	 *   dirent absent + transient exhaustion, or the lookup itself is
+	 *       indeterminate -> MDS_ERR_DELAY, do NOT reclaim (commit may have
+	 *       landed / be in flight). */
+	{
+		uint64_t found_fid = 0;
+		uint8_t found_type = 0;
+		uint8_t lbuf[RONDB_INODE_MAX_SIZE];
+		uint32_t lout = 0;
+		int lrc;
+
+		lrc = rondb_shim_ns_lookup(handle, parent_fileid, name,
+					   &found_fid, &found_type,
+					   lbuf, sizeof(lbuf), &lout);
+		if (lrc == 0) {
+			if (found_fid == child->fileid) {
+				catalog_stat_inc(&cat->stats.authority_writes);
+				if (safe_to_discard != NULL) {
+					*safe_to_discard = false;
+				}
+				return MDS_OK;
+			}
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
+			return MDS_ERR_EXISTS;
+		}
+		if (lrc == 1) {
+			if (rc == -2) {
+				/* Transient exhaustion; write may still be
+				 * resolving.  Do not reclaim. */
+				if (safe_to_discard != NULL) {
+					*safe_to_discard = false;
+				}
+				return MDS_ERR_DELAY;
+			}
+			/* Permanent / ConstraintViolation with no published
+			 * dirent: txn aborted atomically -> orphaned DS bundle. */
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
+			return MDS_ERR_IO;
+		}
+		/* Lookup itself transient (-2) or errored: indeterminate. */
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = false;
+		}
+		return MDS_ERR_DELAY;
+	}
+}
+
 enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 						uint64_t parent_fileid,
 						const char *name,
@@ -2433,13 +2599,23 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		return MDS_ERR_INVAL;
 	}
 
-	/* Placement inputs -- all derived from the single prealloc pop
-	 * below so the fused transaction commits ONE consistent choice. */
+	/*
+	 * Pop once and derive every placement input from that entry.
+	 *
+	 * A prior peek followed by a separate pop could select different
+	 * entries under concurrent CREATEs.  That persisted one DS in the
+	 * stripe map while granting a layout for another DS.
+	 */
 	uint32_t layout_ds_id = 0;
 	uint32_t layout_ds_count = 0;
 	uint8_t stripe_buf[256];
 	uint32_t stripe_buf_len = 0;
 	uint32_t stripe_count_for_create = 0;
+	/* Stripe unit persisted with the 1x1 map.  Defaults to the
+	 * historical 65536 and is replaced by the popped prealloc
+	 * entry's configured unit below, so the durable header matches
+	 * the ring's (config-derived) geometry. */
+	uint32_t create_stripe_unit = 65536;
 	/* v8: synth owner carried out of the pop block onto the child inode. */
 	uint32_t child_synth_suid = 0;
 	uint32_t child_synth_sgid = 0;
@@ -2540,6 +2716,7 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			parent_nlink_delta,
 			stripe_count_for_create > 0 ? stripe_buf : NULL,
 			stripe_buf_len, stripe_count_for_create,
+			create_stripe_unit, 1,
 			layout_clientid, layout_iomode,
 			layout_offset, layout_length,
 			layout_stateid ? layout_stateid->other : NULL,
@@ -2778,6 +2955,22 @@ static enum mds_status rondb_auth_ns_create(
 	(void)txn;
 	return catalogue_rondb_ns_create(cat, parent, name, type,
 					mode, uid, gid, prealloc, out);
+}
+
+static enum mds_status rondb_auth_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries,
+	bool *safe_to_discard)
+{
+	return catalogue_rondb_ns_create_wide(
+		cat, parent, name, child, stripe_count, stripe_unit,
+		mirror_count, entries, safe_to_discard);
 }
 
 static enum mds_status rondb_auth_ns_remove(
@@ -3587,6 +3780,7 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
 
 static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_parent_touch         = rondb_auth_ns_parent_touch,
@@ -3688,6 +3882,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 
 static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_rename         = rondb_locked_ns_rename,

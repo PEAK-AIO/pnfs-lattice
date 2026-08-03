@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "pnfs_mds.h"      /* MDS_MAX_STRIPES, mds_status */
 #include "hpc_shared.h"
@@ -24,6 +25,10 @@
 static int passed;
 static int failed;
 
+static void create_legacy_pending_file(
+    struct mds_catalogue *catalogue,
+    const char *name,
+    struct mds_inode *out_inode);
 #define ASSERT_TRUE(cond) do {                                          \
     if (!(cond)) {                                                      \
         fprintf(stderr, "  FAIL %s:%d: %s\n",                           \
@@ -304,46 +309,273 @@ static void test_create_wide_invalid_args(void)
     fprintf(stdout, "PASS\n");
     passed++;
 }
-
-/* Phase 3 of the QA plan -- simulate the crash-between-rows orphan.
- *
- * Construct an inode at the catalogue layer that mirrors the state
- * left behind by an MDS that crashed after committing the inode +
- * dirent rows but before the stripe_map row.  The catalogue layer
- * does not filter the PENDING bit -- it is the NFS-facing read path
- * (compound_inode_get / compound_lookup_local_child) that does -- so
- * we assert that:
- *   (a) mds_cat_ns_getattr surfaces the orphan with the flag set
- *       (cleanup paths need to see it);
- *   (b) clearing the flag via mds_cat_ns_setattr is observable on a
- *       follow-up read (the same primitive the helper uses on its
- *       success path).
- *
- * This complements the happy-path assertions in
- * test_create_wide_happy_4_stripes by pinning the lifecycle of the
- * flag without depending on compound_data plumbing.
- */
-static void test_pending_flag_lifecycle(void)
+static void test_pending_recovery_scan(void)
 {
-    fprintf(stdout, "  pending_flag_lifecycle:           ");
+    struct hpc_pending_recovery_stats stats;
+    struct mds_catalogue *catalogue;
+    struct mds_ds_map_entry entry;
+    struct mds_inode complete;
+    struct mds_inode incomplete;
 
-    struct mds_catalogue *db = open_test_catalogue();
-    assert(db != NULL);
+    fprintf(stdout, "  pending_recovery_scan:            ");
+    catalogue = open_test_catalogue();
+    assert(catalogue != NULL);
+    create_legacy_pending_file(catalogue, "scan-complete", &complete);
+    create_legacy_pending_file(catalogue, "scan-incomplete", &incomplete);
+    memset(&entry, 0, sizeof(entry));
+    entry.ds_id = 91;
+    entry.nfs_fh_len = 1;
+    entry.nfs_fh[0] = 0x91;
+    ASSERT_EQ(mds_cat_stripe_map_put(
+                  catalogue, NULL, complete.fileid, 1, 65536, 1, &entry),
+              MDS_OK);
 
-    /* Allocate a fileid and persist a synthetic orphan inode with the
-     * PENDING bit set, mirroring hpc_create_inode_and_dirent's pre-
-     * stripe-map state.  No DSes / no stripe map -- we only need the
-     * inode row for this lifecycle check. */
-    uint64_t fid = 0;
-    ASSERT_EQ(mds_cat_alloc_fileid(db, NULL, &fid), MDS_OK);
-    ASSERT_TRUE(fid != 0);
+    ASSERT_EQ(hpc_shared_recover_pending_scan(catalogue, &stats), MDS_OK);
+    ASSERT_EQ(stats.promoted, 1u);
+    ASSERT_EQ(stats.reaped, 1u);
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, complete.fileid, &complete),
+              MDS_OK);
+    ASSERT_TRUE((complete.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0);
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, incomplete.fileid, &incomplete),
+              MDS_ERR_NOTFOUND);
+    mds_catalogue_close(catalogue);
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+static void test_atomic_wide_create(void)
+{
+    struct mds_catalogue *catalogue;
+    struct mds_ds_map_entry stripe_entries[2];
+    struct mds_inode child;
+    struct mds_inode collision;
+    struct mds_inode lookup_child;
+    struct mds_inode parent_before;
+    struct mds_inode parent_after;
+    struct mds_ds_map_entry *read_entries = NULL;
+    uint32_t stripe_count = 0;
+    uint32_t stripe_unit = 0;
+    uint32_t mirror_count = 0;
+    uint64_t fileid = 0;
+    uint64_t collision_fileid = 0;
+    enum mds_status status;
+    bool safe_discard = false;
 
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
+    fprintf(stdout, "  atomic_wide_create:                ");
+    catalogue = open_test_catalogue();
+    assert(catalogue != NULL);
+    memset(stripe_entries, 0, sizeof(stripe_entries));
+    stripe_entries[0].ds_id = 11;
+    stripe_entries[0].nfs_fh_len = 2;
+    stripe_entries[0].nfs_fh[0] = 0xa1;
+    stripe_entries[0].nfs_fh[1] = 0xa2;
+    stripe_entries[1].ds_id = 12;
+    stripe_entries[1].nfs_fh_len = 2;
+    stripe_entries[1].nfs_fh[0] = 0xb1;
+    stripe_entries[1].nfs_fh[1] = 0xb2;
 
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, MDS_FILEID_ROOT, &parent_before),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_alloc_fileid(catalogue, NULL, &fileid), MDS_OK);
+    memset(&child, 0, sizeof(child));
+    child.fileid = fileid;
+    child.parent_fileid = MDS_FILEID_ROOT;
+    child.type = MDS_FTYPE_REG;
+    child.mode = 0644;
+    child.nlink = 1;
+    child.change = 1;
+    child.generation = 1;
+    child.flags = MDS_IFLAG_HPC_SHARED;
+
+    status = mds_cat_ns_create_wide(
+        catalogue, MDS_FILEID_ROOT, "atomic-wide", &child, 2, 131072, 1,
+        stripe_entries, &safe_discard);
+    ASSERT_EQ(status, MDS_OK);
+    ASSERT_TRUE(!safe_discard);
+    ASSERT_EQ(mds_cat_ns_lookup(catalogue, MDS_FILEID_ROOT, "atomic-wide",
+                                &lookup_child),
+              MDS_OK);
+    ASSERT_EQ(lookup_child.fileid, child.fileid);
+    ASSERT_TRUE((lookup_child.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0);
+    ASSERT_EQ(mds_cat_stripe_map_get(catalogue, child.fileid, &stripe_count,
+                                     &stripe_unit, &mirror_count,
+                                     &read_entries),
+              MDS_OK);
+    ASSERT_EQ(stripe_count, 2u);
+    ASSERT_EQ(stripe_unit, 131072u);
+    ASSERT_EQ(mirror_count, 1u);
+    ASSERT_TRUE(read_entries != NULL);
+    ASSERT_EQ(read_entries[0].ds_id, stripe_entries[0].ds_id);
+    ASSERT_EQ(read_entries[1].ds_id, stripe_entries[1].ds_id);
+    free(read_entries);
+    read_entries = NULL;
+
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, MDS_FILEID_ROOT, &parent_after),
+              MDS_OK);
+    ASSERT_EQ(parent_after.change, parent_before.change + 1);
+    ASSERT_EQ(mds_cat_alloc_fileid(catalogue, NULL, &collision_fileid),
+              MDS_OK);
+    collision = child;
+    collision.fileid = collision_fileid;
+
+    status = mds_cat_ns_create_wide(
+        catalogue, MDS_FILEID_ROOT, "atomic-wide", &collision, 2, 131072, 1,
+        stripe_entries, &safe_discard);
+    ASSERT_EQ(status, MDS_ERR_EXISTS);
+    ASSERT_TRUE(safe_discard);
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, collision_fileid, &lookup_child),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_stripe_map_get(catalogue, collision_fileid,
+                                     &stripe_count, &stripe_unit,
+                                     &mirror_count, &read_entries),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, MDS_FILEID_ROOT, &parent_before),
+              MDS_OK);
+    ASSERT_EQ(parent_before.change, parent_after.change);
+
+    mds_catalogue_close(catalogue);
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
+/* -----------------------------------------------------------------------
+ * N-to-1 concurrency: two clients race the SAME wide-create name.
+ *
+ * The fused ns_create_wide + safe_to_discard contract must yield exactly
+ * one winner (MDS_OK, safe_to_discard == false, i.e. LIVE, keep the DS
+ * bundle) and exactly one loser (MDS_ERR_EXISTS, safe_to_discard == true,
+ * i.e. reclaim the orphaned DS bundle).  The published dirent must resolve
+ * to the winner and the loser must leave no inode.  Repeated many rounds to
+ * shake out races.
+ * ----------------------------------------------------------------------- */
+struct wide_race_ctx {
+    struct mds_catalogue *cat;
+    uint64_t fileid;
+    const struct mds_ds_map_entry *entries;
+    enum mds_status status;
+    bool safe;
+    pthread_barrier_t *barrier;
+};
+
+static void *wide_race_worker(void *arg)
+{
+    struct wide_race_ctx *c = arg;
+    struct mds_inode child;
+
+    memset(&child, 0, sizeof(child));
+    child.fileid = c->fileid;
+    child.parent_fileid = MDS_FILEID_ROOT;
+    child.type = MDS_FTYPE_REG;
+    child.mode = 0644;
+    child.nlink = 1;
+    child.change = 1;
+    child.generation = 1;
+    child.flags = MDS_IFLAG_HPC_SHARED;
+    c->safe = false;
+    (void)pthread_barrier_wait(c->barrier);  /* maximise overlap */
+    c->status = mds_cat_ns_create_wide(
+        c->cat, MDS_FILEID_ROOT, "race", &child, 2, 131072, 1,
+        c->entries, &c->safe);
+    return NULL;
+}
+
+static void test_atomic_wide_create_race(void)
+{
+    struct mds_ds_map_entry entries[2];
+    const int ROUNDS = 200;
+    int ok_total = 0;
+    int exists_total = 0;
+    int round;
+
+    fprintf(stdout, "  atomic_wide_create_race:          ");
+    memset(entries, 0, sizeof(entries));
+    entries[0].ds_id = 21;
+    entries[0].nfs_fh_len = 1;
+    entries[0].nfs_fh[0] = 0xc1;
+    entries[1].ds_id = 22;
+    entries[1].nfs_fh_len = 1;
+    entries[1].nfs_fh[0] = 0xc2;
+
+    for (round = 0; round < ROUNDS; round++) {
+        struct mds_catalogue *cat = open_test_catalogue();
+        pthread_t th[2];
+        pthread_barrier_t barrier;
+        struct wide_race_ctx c[2];
+        struct mds_inode looked;
+        uint64_t winner_fid = 0;
+        int ok = 0;
+        int exists = 0;
+        int i;
+
+        ASSERT_TRUE(cat != NULL);
+        pthread_barrier_init(&barrier, NULL, 2);
+        for (i = 0; i < 2; i++) {
+            uint64_t fid = 0;
+            ASSERT_EQ(mds_cat_alloc_fileid(cat, NULL, &fid), MDS_OK);
+            c[i].cat = cat;
+            c[i].fileid = fid;
+            c[i].entries = entries;
+            c[i].status = MDS_ERR_IO;
+            c[i].safe = false;
+            c[i].barrier = &barrier;
+        }
+        for (i = 0; i < 2; i++) {
+            (void)pthread_create(&th[i], NULL, wide_race_worker, &c[i]);
+        }
+        for (i = 0; i < 2; i++) {
+            (void)pthread_join(th[i], NULL);
+        }
+        pthread_barrier_destroy(&barrier);
+
+        for (i = 0; i < 2; i++) {
+            if (c[i].status == MDS_OK) {
+                ok++;
+                winner_fid = c[i].fileid;
+                ASSERT_TRUE(!c[i].safe);   /* LIVE: keep the DS bundle */
+            } else {
+                ASSERT_EQ(c[i].status, MDS_ERR_EXISTS);
+                exists++;
+                ASSERT_TRUE(c[i].safe);    /* orphan: reclaim */
+            }
+        }
+        ASSERT_EQ(ok, 1);
+        ASSERT_EQ(exists, 1);
+        ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT, "race", &looked),
+                  MDS_OK);
+        ASSERT_EQ(looked.fileid, winner_fid);
+        for (i = 0; i < 2; i++) {
+            if (c[i].fileid != winner_fid) {
+                struct mds_inode gone;
+                ASSERT_EQ(mds_cat_ns_getattr(cat, c[i].fileid, &gone),
+                          MDS_ERR_NOTFOUND);
+            }
+        }
+        ok_total += ok;
+        exists_total += exists;
+        mds_catalogue_close(cat);
+    }
+
+    ASSERT_EQ(ok_total, ROUNDS);
+    ASSERT_EQ(exists_total, ROUNDS);
+    fprintf(stdout, "PASS (%d rounds)\n", ROUNDS);
+    passed++;
+}
+
+static void create_legacy_pending_file(
+    struct mds_catalogue *catalogue,
+    const char *name,
+    struct mds_inode *out_inode)
+{
     struct mds_inode pending;
+    struct mds_cat_txn *transaction = NULL;
+    struct timespec now;
+    uint64_t fileid = 0;
+
+    ASSERT_EQ(mds_cat_alloc_fileid(catalogue, NULL, &fileid), MDS_OK);
+    ASSERT_TRUE(fileid != 0);
+    clock_gettime(CLOCK_REALTIME, &now);
     memset(&pending, 0, sizeof(pending));
-    pending.fileid = fid;
+    pending.fileid = fileid;
+    pending.parent_fileid = MDS_FILEID_ROOT;
     pending.type = MDS_FTYPE_REG;
     pending.mode = 0644;
     pending.nlink = 1;
@@ -354,32 +586,102 @@ static void test_pending_flag_lifecycle(void)
     pending.generation = 1;
     pending.flags = MDS_IFLAG_HPC_SHARED | MDS_IFLAG_HPC_CREATE_PENDING;
 
-    struct mds_cat_txn *txn = NULL;
-    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_cat_inode_put(db, txn, &pending), MDS_OK);
-    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
-
-    /* (a) Catalogue layer surfaces the orphan with PENDING set. */
-    struct mds_inode read_back;
-    ASSERT_EQ(mds_cat_ns_getattr(db, fid, &read_back), MDS_OK);
-    ASSERT_TRUE((read_back.flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0);
-    ASSERT_TRUE((read_back.flags & MDS_IFLAG_HPC_SHARED) != 0);
-
-    /* (b) Clearing the flag via the same primitive the helper uses on
-     *     its success path makes the file visible on subsequent reads. */
-    struct mds_inode cleared = read_back;
-    cleared.flags &= ~MDS_IFLAG_HPC_CREATE_PENDING;
-    ASSERT_EQ(mds_cat_ns_setattr(db, NULL, fid, &cleared,
-                                 MDS_ATTR_FLAGS),
+    ASSERT_EQ(mds_cat_txn_begin(
+                  catalogue, MDS_CAT_TXN_WRITE, &transaction),
               MDS_OK);
+    ASSERT_EQ(mds_cat_inode_put(catalogue, transaction, &pending), MDS_OK);
+    ASSERT_EQ(mds_cat_dirent_put(
+                  catalogue, transaction, MDS_FILEID_ROOT, name,
+                  pending.fileid, (uint8_t)pending.type),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(transaction), MDS_OK);
+    *out_inode = pending;
+}
 
-    struct mds_inode after;
-    ASSERT_EQ(mds_cat_ns_getattr(db, fid, &after), MDS_OK);
-    ASSERT_TRUE((after.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0);
-    ASSERT_TRUE((after.flags & MDS_IFLAG_HPC_SHARED) != 0);
+static void test_pending_recovery_complete_map(void)
+{
+    struct compound_data compound;
+    struct mds_catalogue *catalogue;
+    struct mds_ds_map_entry entries[2];
+    struct mds_ds_map_entry *read_entries = NULL;
+    struct mds_inode pending;
+    struct mds_inode recovered;
+    uint32_t stripe_count = 0;
+    uint32_t stripe_unit = 0;
+    uint32_t mirror_count = 0;
 
-    mds_catalogue_close(db);
+    fprintf(stdout, "  pending_recovery_complete_map:    ");
+    catalogue = open_test_catalogue();
+    assert(catalogue != NULL);
+    create_legacy_pending_file(catalogue, "legacy-complete", &pending);
+    memset(entries, 0, sizeof(entries));
+    entries[0].ds_id = 71;
+    entries[0].nfs_fh_len = 1;
+    entries[0].nfs_fh[0] = 0x71;
+    entries[1].ds_id = 72;
+    entries[1].nfs_fh_len = 1;
+    entries[1].nfs_fh[0] = 0x72;
+    ASSERT_EQ(mds_cat_stripe_map_put(
+                  catalogue, NULL, pending.fileid, 2, 65536, 1, entries),
+              MDS_OK);
+    memset(&compound, 0, sizeof(compound));
+    compound.cat = catalogue;
 
+    ASSERT_EQ(hpc_shared_recover_pending(&compound, &pending), MDS_OK);
+    ASSERT_TRUE((pending.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0);
+    ASSERT_EQ(mds_cat_ns_lookup(
+                  catalogue, MDS_FILEID_ROOT, "legacy-complete", &recovered),
+              MDS_OK);
+    ASSERT_TRUE((recovered.flags & MDS_IFLAG_HPC_CREATE_PENDING) == 0);
+    ASSERT_EQ(mds_cat_stripe_map_get(
+                  catalogue, pending.fileid, &stripe_count, &stripe_unit,
+                  &mirror_count, &read_entries),
+              MDS_OK);
+    ASSERT_EQ(stripe_count, 2u);
+    ASSERT_EQ(stripe_unit, 65536u);
+    ASSERT_EQ(mirror_count, 1u);
+    free(read_entries);
+    mds_catalogue_close(catalogue);
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
+static void test_pending_recovery_incomplete_map(void)
+{
+    struct compound_data compound;
+    struct mds_catalogue *catalogue;
+    struct mds_ds_map_entry entry;
+    struct mds_inode pending;
+    struct mds_inode recovered;
+    uint32_t gc_count = 0;
+
+    fprintf(stdout, "  pending_recovery_incomplete_map:  ");
+    catalogue = open_test_catalogue();
+    assert(catalogue != NULL);
+    create_legacy_pending_file(catalogue, "legacy-incomplete", &pending);
+    memset(&entry, 0, sizeof(entry));
+    entry.ds_id = 81;
+    entry.nfs_fh_len = 1;
+    entry.nfs_fh[0] = 0x81;
+    /* A zero stripe unit is incomplete metadata but retains a DS handle
+     * that recovery must queue before reaping the legacy namespace row. */
+    ASSERT_EQ(mds_cat_stripe_map_put(
+                  catalogue, NULL, pending.fileid, 1, 0, 1, &entry),
+              MDS_OK);
+    memset(&compound, 0, sizeof(compound));
+    compound.cat = catalogue;
+
+    ASSERT_EQ(hpc_shared_recover_pending(&compound, &pending),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_ns_lookup(
+                  catalogue, MDS_FILEID_ROOT, "legacy-incomplete",
+                  &recovered),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_ns_getattr(catalogue, pending.fileid, &recovered),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(mds_cat_gc_count(catalogue, &gc_count), MDS_OK);
+    ASSERT_TRUE(gc_count > 0);
+    mds_catalogue_close(catalogue);
     fprintf(stdout, "PASS\n");
     passed++;
 }
@@ -424,9 +726,16 @@ int main(void)
 
     /* Phase C / Steps 4 + 5 -- wide create (community subset). */
     test_create_wide_invalid_args();
+    test_atomic_wide_create();
+    test_atomic_wide_create_race();
 
-    /* Phase 3 of the QA plan -- PENDING flag lifecycle. */
-    test_pending_flag_lifecycle();
+    /* Recovery tests fabricate freshly-written legacy rows; disable
+     * the rolling-upgrade reap grace so incomplete rows are eligible
+     * immediately instead of after the production age window. */
+    hpc_shared_test_set_pending_reap_grace(0);
+    test_pending_recovery_complete_map();
+    test_pending_recovery_incomplete_map();
+    test_pending_recovery_scan();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
