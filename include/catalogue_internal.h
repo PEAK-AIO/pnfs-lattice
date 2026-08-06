@@ -19,6 +19,7 @@
 /* Forward declarations for vtable parameter types. */
 struct ds_prealloc_ctx;
 struct mds_ds_info;
+struct mds_ds_map_entry;
 struct mds_quota_rule;
 struct mds_quota_usage;
 struct mds_gc_entry;
@@ -69,6 +70,23 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name, const struct mds_inode *child,
         uint32_t stripe_count);
+    /** Optional fused final-unlink: ns_remove_known semantics PLUS the
+     * caller's unique-DS GC-queue rows committed in the SAME backend
+     * transaction, so a committed final unlink can never leave its DS
+     * objects unqueued and the per-remove gc_enqueue round-trip
+     * disappears.  *gc_folded reports whether the rows were actually
+     * folded (false when the remove degenerated to a non-final
+     * unlink).  MDS_ERR_STALE means the dirent no longer resolves to
+     * @child (concurrent replace) and the caller must fall back to
+     * the legacy split path.  Leave NULL when the backend cannot fuse;
+     * the dispatch wrapper then returns MDS_ERR_NOSUPPORT. */
+    enum mds_status (*ns_remove_known_gc)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t parent,
+        const char *name, const struct mds_inode *child,
+        uint32_t stripe_count,
+        const struct mds_ds_map_entry *gc_entries,
+        uint32_t gc_entry_count,
+        bool *gc_folded);
     /* parent_touch flush target: one interpreted update on the parent
      * inode row (change += delta, mtime/ctime = stamp).  Missing parent
      * row is MDS_OK.  Optional slot: NULL => NOSUPPORT and the feature

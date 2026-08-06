@@ -2301,6 +2301,98 @@ static void test_gc_on_remove(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_gc_on_remove_fused -- the fused REMOVE+GC path (ns_remove_known_gc)
+ * enqueues exactly ONE GC row per unique DS in the same operation as the
+ * remove: no duplicate rows from the legacy split path, dedup across
+ * stripes on the same DS, stripe map dropped, name gone.
+ * ----------------------------------------------------------------------- */
+
+static void test_gc_on_remove_fused(void)
+{
+	struct compound_data cd;
+	struct nfs4_op ops[4];
+	struct nfs4_result res[4];
+	struct mds_catalogue *db;
+	char *path;
+	uint32_t n, gc_count;
+	uint64_t file_fid;
+
+	db = open_test_db(&path);
+	seed_patched_ready_ds(db, 1, "10.0.0.1:/ds1");
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("gcfused", MDS_FTYPE_REG, 0644);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	file_fid = res[2].res.create.inode.fileid;
+
+	clear_inline_flag(db, file_fid);
+
+	/* Two stripes on the SAME DS: the fused path must dedup them
+	 * into a single GC row. */
+	{
+		struct mds_ds_map_entry sme[2];
+		struct mds_cat_txn *txn = NULL;
+
+		memset(sme, 0, sizeof(sme));
+		sme[0].ds_id = 1;
+		sme[1].ds_id = 1;
+		VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
+		VERIFY(mds_cat_stripe_map_put(db, txn, file_fid,
+					      2, 65536, 1, sme) == MDS_OK);
+		VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
+	}
+
+	ASSERT_EQ(mds_cat_gc_count(db, &gc_count), MDS_OK);
+	ASSERT_EQ(gc_count, (uint32_t)0);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_remove("gcfused");
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+
+	/* Exactly ONE row: unique-DS dedup, and no double-enqueue from
+	 * the legacy path running on top of the fused one. */
+	ASSERT_EQ(mds_cat_gc_count(db, &gc_count), MDS_OK);
+	ASSERT_EQ(gc_count, (uint32_t)1);
+	{
+		struct mds_gc_entry entry;
+
+		ASSERT_EQ(mds_cat_gc_peek(db, &entry), MDS_OK);
+		ASSERT_EQ(entry.fileid, file_fid);
+		ASSERT_EQ(entry.ds_id, (uint32_t)1);
+	}
+
+	/* Name gone... */
+	{
+		struct mds_inode child;
+
+		ASSERT_EQ(mds_cat_ns_lookup(db, MDS_FILEID_ROOT, "gcfused",
+					    &child), MDS_ERR_NOTFOUND);
+	}
+	/* ...and the stripe map dropped with it. */
+	{
+		uint32_t sc;
+		struct mds_ds_map_entry *ent = NULL;
+
+		ASSERT_EQ(mds_cat_stripe_map_get(db, file_fid,
+			&sc, NULL, NULL, &ent), MDS_ERR_NOTFOUND);
+	}
+
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
  * test_proxy_read_write_compound -- proxy READ/WRITE through compound
  * ----------------------------------------------------------------------- */
 
@@ -4973,6 +5065,7 @@ int main(void)
 	RUN_TEST(test_openattr_create_remove);
 	RUN_TEST(test_openattr_read_write);
 	RUN_TEST(test_gc_on_remove);
+	RUN_TEST(test_gc_on_remove_fused);
 	RUN_TEST(test_proxy_read_write_compound);
 	RUN_TEST(test_read_bad_seqid);
 	RUN_TEST(test_inline_read_bad_stateid_does_not_promote);
