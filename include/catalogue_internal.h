@@ -396,6 +396,18 @@ struct mds_coordination_ops {
         uint64_t offset, uint64_t length,
         const struct nfs4_stateid *stateid,
         const uint32_t *ds_ids, uint32_t ds_count);
+    /** Optional renewal variant: persist the saturating UNION of the
+     * existing row's byte range and the new window (monotonic seqid)
+     * so the row stays a superset of every range granted under the
+     * stateid (recall-coverage invariant).  Leave NULL when the
+     * backend has no read-modify-write path; the dispatch wrapper
+     * then falls back to the plain layout_grant overwrite. */
+    enum mds_status (*layout_grant_union)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t clientid,
+        uint64_t fileid, uint32_t iomode,
+        uint64_t offset, uint64_t length,
+        const struct nfs4_stateid *stateid,
+        const uint32_t *ds_ids, uint32_t ds_count);
     enum mds_status (*layout_return)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn,
         const uint8_t stateid_other[12],

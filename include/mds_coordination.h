@@ -114,6 +114,32 @@ enum mds_status mds_coord_layout_grant(struct mds_catalogue *cat,
 				       const uint32_t *ds_ids,
 				       uint32_t ds_count);
 
+/**
+ * Renewal variant of mds_coord_layout_grant: persist the SATURATING
+ * UNION of the existing layout_state row's byte range and the new
+ * grant window (monotonic seqid) instead of overwriting the row.
+ *
+ * A plain grant overwrite on renewal narrows the persisted range to
+ * the newest window, so the byte-range recall scanner loses coverage
+ * of earlier windows the client still holds -- a conflicting request
+ * then never recalls them (under-recall).  The union keeps the row a
+ * superset of everything granted under the stateid; over-recall is
+ * safe.
+ *
+ * Backends without a native union slot fall back to the plain grant
+ * (overwrite) so behaviour is never worse than before.
+ */
+enum mds_status mds_coord_layout_grant_union(struct mds_catalogue *cat,
+					     struct mds_cat_txn *txn,
+					     uint64_t clientid,
+					     uint64_t fileid,
+					     uint32_t iomode,
+					     uint64_t offset,
+					     uint64_t length,
+					     const struct nfs4_stateid *stateid,
+					     const uint32_t *ds_ids,
+					     uint32_t ds_count);
+
 enum mds_status mds_coord_layout_return(struct mds_catalogue *cat,
 					struct mds_cat_txn *txn,
 					const uint8_t stateid_other[12],

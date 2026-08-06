@@ -562,7 +562,13 @@ static uint64_t layout_clamp_grant_length(uint64_t offset, uint64_t length)
 	return length;
 }
 
-static enum nfs4_status layout_select_grant_range(
+/* Non-static for unit tests: the request-anchored, cap-widened grant
+ * window policy below is load-bearing for large sequential writers
+ * (a renewal at any offset -- including offsets at or beyond
+ * layout_grant_max_length_bytes -- must receive a window that covers
+ * the requested offset, or pNFS I/O would wall there and fall back to
+ * MDS proxy I/O).  tests/unit/test_compound.c locks the policy down. */
+enum nfs4_status layout_select_grant_range(
 	const struct nfs4_arg_layoutget *a,
 	const struct mds_inode *inode,
 	uint32_t configured_stripe_unit,
@@ -731,6 +737,40 @@ static void layout_pick_stateid(struct compound_data *cd,
 	/* Step 3: not a known layout stateid (open stateid, special-zero,
 	 * or first LAYOUTGET on a fresh client).  Allocate a fresh one. */
 	make_layout_stateid(cd != NULL ? cd->mds_id : 0, out);
+}
+
+/*
+ * Persist a layout grant, routing renewals through the union-put.
+ *
+ * Fresh grants keep the fast blind write.  Renewals (the client
+ * re-presenting a tracked layout stateid) must UNION the persisted
+ * byte range with the new window: overwriting would narrow the row to
+ * the newest window and the byte-range recall scanner -- which skips
+ * holders whose row is disjoint from a recalled range -- would lose
+ * coverage of earlier windows the client still holds (under-recall).
+ * Backends without a union slot fall back to the overwrite inside the
+ * dispatch wrapper, which is exactly the pre-change behaviour.
+ */
+static void layout_persist_grant(struct compound_data *cd,
+				 bool is_renewal,
+				 const struct nfs4_stateid *sid,
+				 uint32_t iomode,
+				 uint64_t offset, uint64_t length,
+				 const uint32_t *ds_ids, uint32_t ds_count)
+{
+	if (is_renewal) {
+		(void)mds_coord_layout_grant_union(cd->cat, NULL,
+						   cd->clientid,
+						   cd->current_fh.fileid,
+						   iomode, offset, length,
+						   sid, ds_ids, ds_count);
+		return;
+	}
+	(void)mds_coord_layout_grant(cd->cat, NULL,
+				     cd->clientid,
+				     cd->current_fh.fileid,
+				     iomode, offset, length,
+				     sid, ds_ids, ds_count);
 }
 
 static bool layout_state_is_root_global(const struct compound_data *cd)
@@ -1078,6 +1118,22 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 	/*
+	 * Renewal detection: only layout stateids live in the in-memory
+	 * seqid tracker, so a peek hit identifies the client
+	 * re-presenting a layout we granted earlier (open stateids and
+	 * special stateids always miss).  Renewals route their persist
+	 * through the union-put (see layout_persist_grant) and skip the
+	 * fused read+blind-write path whose overwrite would narrow the
+	 * persisted range.  A post-restart renewal (tracker cold, row
+	 * only in NDB) misses here and takes the fresh-grant path once;
+	 * from the next renewal on it unions again.
+	 */
+	uint32_t renew_peek_seqid = 0;
+	const bool is_renewal =
+		client_sid.seqid != 0 &&
+		layout_seqid_peek(client_sid.other, &renew_peek_seqid);
+
+	/*
 	 * Phase 6 -- wide long-lived layout grant.
 	 *
 	 * Rather than echo the client's requested range and iomode,
@@ -1186,11 +1242,9 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		const bool has_pregrant =
 			cd->layout_pregranted &&
 			cd->layout_pregrant_fileid == cd->current_fh.fileid;
-		uint32_t cap_cur_seqid = 0;
-		const bool is_renewal =
-			client_sid.seqid != 0 &&
-			layout_seqid_peek(client_sid.other, &cap_cur_seqid);
 
+		/* is_renewal (computed once above from the same tracker
+		 * peek) identifies the no-new-entry renewal case. */
 		if (!has_pregrant && !is_renewal) {
 			return NFS4ERR_RESOURCE;
 		}
@@ -1484,14 +1538,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 						free(entries);
 						return ds_nst;
 					}
-					(void)mds_coord_layout_grant(
-						cd->cat, NULL,
-						cd->clientid,
-						cd->current_fh.fileid,
+					layout_persist_grant(
+						cd, is_renewal,
+						&layout_sid,
 						grant_iomode,
 						grant_offset,
 						grant_length,
-						&layout_sid,
 						ds_ids.ids, ds_ids.count);
 					layout_ds_id_list_destroy(&ds_ids);
 				}
@@ -1543,10 +1595,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					free(entries);
 					return ds_nst;
 				}
-				(void)mds_coord_layout_grant(cd->cat, NULL,
-					cd->clientid, cd->current_fh.fileid,
-					grant_iomode, grant_offset, grant_length,
-					&layout_sid, ds_ids.ids, ds_ids.count);
+				layout_persist_grant(cd, is_renewal,
+					&layout_sid, grant_iomode,
+					grant_offset, grant_length,
+					ds_ids.ids, ds_ids.count);
 				layout_ds_id_list_destroy(&ds_ids);
 			}
 		}
@@ -1621,12 +1673,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					layout_pick_stateid(cd, &client_sid,
 							    &fast_sid);
 					if (!cd->skip_transient_ndb) {
-						(void)mds_coord_layout_grant(
-							cd->cat, NULL,
-							cd->clientid,
-							cd->current_fh.fileid,
+						layout_persist_grant(
+							cd, is_renewal,
+							&fast_sid,
 							grant_iomode, grant_offset,
-							grant_length, &fast_sid,
+							grant_length,
 							&cd->stripe_cached_ds_id,
 							1);
 					}
@@ -1662,11 +1713,15 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		}
 
 		/* Phase 2: Use fused stripe_get + layout_grant when
-		 * RonDB backend is active.  Saves 1 NDB round-trip. */
+		 * RonDB backend is active.  Saves 1 NDB round-trip.
+		 * Renewals are excluded: the fused write is a blind
+		 * overwrite of the layout_state row, which would narrow
+		 * the persisted range; they take the read + union path
+		 * below instead (same round-trip count). */
 #ifdef HAVE_RONDB
 		if (cd->cat != NULL &&
 		    mds_catalogue_backend_type(cd->cat) == MDS_BACKEND_RONDB &&
-		    !cd->skip_transient_ndb) {
+		    !cd->skip_transient_ndb && !is_renewal) {
 			struct nfs4_stateid fused_sid;
 			layout_pick_stateid(cd, &client_sid, &fused_sid);
 
@@ -1981,13 +2036,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 						free(entries);
 						return nst;
 					}
-					(void)mds_coord_layout_grant(
-						cd->cat, NULL,
-						cd->clientid,
-						cd->current_fh.fileid,
+					layout_persist_grant(
+						cd, is_renewal,
+						&layout_sid,
 						grant_iomode, grant_offset,
 						grant_length,
-						&layout_sid,
 						ds_ids.ids, ds_ids.count);
 					layout_ds_id_list_destroy(&ds_ids);
 				}
@@ -2128,11 +2181,10 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					free(entries);
 					return nst;
 				}
-				(void)mds_coord_layout_grant(
-					cd->cat, NULL,
-					cd->clientid, cd->current_fh.fileid,
-					grant_iomode, grant_offset, grant_length,
+				layout_persist_grant(
+					cd, is_renewal,
 					&layout_sid,
+					grant_iomode, grant_offset, grant_length,
 					ds_ids.ids, ds_ids.count);
 				layout_ds_id_list_destroy(&ds_ids);
 			}

@@ -26,6 +26,7 @@
 #include "subtree_map.h"
 #include "ds_cache.h"
 #include "xdr_codec.h"
+#include "layout_range.h"
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -1700,6 +1701,58 @@ static void test_getattr_space_gated_on_bitmap(void)
 
 	ds_cache_destroy(dsc);
 	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_layout_range_union -- the saturating byte-range union backing
+ * the renewal union-put.  The persisted layout_state row must stay a
+ * SUPERSET of every granted window (recall-coverage invariant), so
+ * the union must never shrink and must preserve the RFC 8881 "to
+ * EOF" length sentinel.
+ * ----------------------------------------------------------------------- */
+
+static void test_layout_range_union(void)
+{
+	uint64_t off = 0;
+	uint64_t len = 0;
+
+	/* Disjoint windows: union spans the gap. */
+	layout_range_union_saturating(0, 100, 1000, 100, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, (uint64_t)1100);
+
+	/* The renewal shape: old [0, 64G), new [64G, 64G) -> [0, 128G). */
+	layout_range_union_saturating(0, 1ULL << 36,
+				      1ULL << 36, 1ULL << 36, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, (uint64_t)(1ULL << 37));
+
+	/* Contained window: union is the outer range. */
+	layout_range_union_saturating(0, 1000, 100, 100, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, (uint64_t)1000);
+
+	/* to-EOF sentinel dominates from either side. */
+	layout_range_union_saturating(100, UINT64_MAX, 0, 50, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, UINT64_MAX);
+	layout_range_union_saturating(0, 50, 100, UINT64_MAX, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, UINT64_MAX);
+
+	/* Empty range contributes nothing. */
+	layout_range_union_saturating(0, 0, 500, 100, &off, &len);
+	ASSERT_EQ(off, (uint64_t)500);
+	ASSERT_EQ(len, (uint64_t)100);
+	layout_range_union_saturating(500, 100, 0, 0, &off, &len);
+	ASSERT_EQ(off, (uint64_t)500);
+	ASSERT_EQ(len, (uint64_t)100);
+
+	/* End-offset saturation degrades to the EOF sentinel. */
+	layout_range_union_saturating(UINT64_MAX - 10, UINT64_MAX - 1,
+				      0, 10, &off, &len);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, UINT64_MAX);
 }
 
 /* -----------------------------------------------------------------------
@@ -5054,6 +5107,7 @@ int main(void)
 
 	RUN_TEST(test_root_getattr);
 	RUN_TEST(test_getattr_space_gated_on_bitmap);
+	RUN_TEST(test_layout_range_union);
 	RUN_TEST(test_backend_client_stats_dispatch);
 	RUN_TEST(test_putrootfh_discards_stale_snapshot);
 	RUN_TEST(test_lookupp_discards_child_snapshot);

@@ -94,6 +94,26 @@ void make_layout_stateid(uint32_t mds_id, struct nfs4_stateid *out);
 bool layout_seqid_at_capacity(void);
 
 /**
+ * LAYOUTGET grant-window policy (defined in compound_layout.c).
+ *
+ * Computes the request-anchored, cap-widened grant window: the window
+ * always starts at the client's requested offset (so a renewal at ANY
+ * offset -- including at or beyond layout_grant_max_length_bytes --
+ * receives a covering segment; there is no offset wall) and is widened
+ * up to the configured maximum window to absorb writeback LAYOUTGET
+ * storms.  Exposed for unit tests, which lock this policy down.
+ *
+ * @return NFS4_OK, NFS4ERR_INVAL on overflowing/absurd requests, or
+ *         NFS4ERR_IO on NULL arguments.
+ */
+enum nfs4_status layout_select_grant_range(
+	const struct nfs4_arg_layoutget *a,
+	const struct mds_inode *inode,
+	uint32_t configured_stripe_unit,
+	uint64_t *grant_offset,
+	uint64_t *grant_length);
+
+/**
  * Read an inode using the request-local snapshot if available.
  *
  * Checks current_inode/saved_inode snapshots first.  On miss,

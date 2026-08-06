@@ -2600,6 +2600,32 @@ static enum mds_status catalogue_rondb_layout_grant(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
+/* Renewal union-put: keeps the persisted row a superset of every
+ * range granted under the stateid (recall-coverage invariant).  See
+ * rondb_shim_layout_state_union_put for the transaction shape. */
+static enum mds_status catalogue_rondb_layout_grant_union(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t clientid, uint64_t fileid, uint32_t iomode,
+	uint64_t offset, uint64_t length,
+	const struct nfs4_stateid *stateid,
+	const uint32_t *ds_ids, uint32_t ds_count)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	(void)txn;
+	if (h == NULL || stateid == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_layout_state_union_put(h, stateid->other,
+					       clientid, fileid,
+					       iomode, offset, length,
+					       stateid->seqid,
+					       ds_ids, ds_count);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
 /**
  * Phase 2: Fused stripe_get + layout_grant in one NDB txn.
  * Saves 1 NDB round-trip compared to separate calls.
@@ -4317,6 +4343,7 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 	.journal_del             = catalogue_rondb_journal_del,
 	.journal_scan            = catalogue_rondb_journal_scan,
 	.layout_grant            = catalogue_rondb_layout_grant,
+	.layout_grant_union      = catalogue_rondb_layout_grant_union,
 	.layout_return           = catalogue_rondb_layout_return,
 	.layout_get_by_stateid   = catalogue_rondb_layout_get_by_stateid,
 	.layout_scan_for_file    = catalogue_rondb_layout_scan_for_file,

@@ -644,6 +644,26 @@ int rondb_shim_layout_state_put(void *handle,
                                 uint64_t length, uint32_t seqid,
                                 const uint32_t *ds_ids, uint32_t ds_count);
 
+/** Renewal union-put for mds_layout_state.
+ *
+ *  One NDB transaction: reads the row under an exclusive lock, unions
+ *  the byte range with (offset, length) via
+ *  layout_range_union_saturating, keeps the seqid monotonic
+ *  (max(row, new)), and updates in place -- so concurrent renewals
+ *  cannot lose ranges or regress the seqid, and the row stays a
+ *  superset of every range granted under the stateid (recall-coverage
+ *  invariant).  When the row is absent (first grant with this stateid,
+ *  or post-restart renewal), falls back internally to the full
+ *  rondb_shim_layout_state_put insert.
+ *  Returns 0 on success, -1 on error, -2 transient-exhausted. */
+int rondb_shim_layout_state_union_put(void *handle,
+                                      const uint8_t stateid_other[12],
+                                      uint64_t clientid, uint64_t fileid,
+                                      uint32_t iomode, uint64_t offset,
+                                      uint64_t length, uint32_t seqid,
+                                      const uint32_t *ds_ids,
+                                      uint32_t ds_count);
+
 /** Phase 2: Fused stripe_get + layout_grant in one NDB transaction.
  *  Reads stripe map header+entries, then writes layout_state + indexes,
  *  all in a single NDB transaction (saves 1 NDB RT vs separate calls).
