@@ -188,6 +188,17 @@ static void close_test_cat(struct mds_catalogue *cat, char *path)
 	free(path);
 }
 
+/* layout_select_grant_range lives in compound_internal.h (private);
+ * re-declare locally (same pattern as compound_validate_name below)
+ * so the linker resolves it against pnfs_mds_core without dragging
+ * the private header into the test binary. */
+enum nfs4_status layout_select_grant_range(
+	const struct nfs4_arg_layoutget *a,
+	const struct mds_inode *inode,
+	uint32_t configured_stripe_unit,
+	uint64_t *grant_offset,
+	uint64_t *grant_length);
+
 static char *make_ds_tmpdir(void);
 static void rm_ds_tmpdir(char *p);
 static void seed_ds(struct mds_catalogue *db, uint32_t ds_id, const char *addr);
@@ -1701,6 +1712,85 @@ static void test_getattr_space_gated_on_bitmap(void)
 
 	ds_cache_destroy(dsc);
 	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_layout_grant_range_policy -- lock down the LAYOUTGET grant
+ * window policy: request-anchored (a renewal at ANY offset receives a
+ * covering segment -- no wall at layout_grant_max_length_bytes) and
+ * widened to exactly the configured cap.  Large sequential writers
+ * depend on this: writeback crossing the previous window re-requests
+ * at the higher offset and must get [offset, offset+cap).
+ * ----------------------------------------------------------------------- */
+
+static void test_layout_grant_range_policy(void)
+{
+	const uint64_t cap = (1ULL << 36); /* default 64 GiB */
+	struct nfs4_arg_layoutget a;
+	struct mds_inode ino;
+	uint64_t off = 0;
+	uint64_t len = 0;
+
+	compound_layout_set_grant_max_length(cap);
+	memset(&ino, 0, sizeof(ino));
+
+	/* Fresh grant at offset 0: window widened to the cap. */
+	memset(&a, 0, sizeof(a));
+	a.offset = 0;
+	a.length = UINT64_MAX;
+	a.minlength = 4096;
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4_OK);
+	ASSERT_EQ(off, (uint64_t)0);
+	ASSERT_EQ(len, cap);
+
+	/* Renewal far past the cap (e.g. writeback at 100 GiB with a
+	 * 64 GiB window): the grant must anchor at the REQUESTED offset
+	 * and cover it -- no wall. */
+	memset(&a, 0, sizeof(a));
+	a.offset = 100ULL << 30;
+	a.length = UINT64_MAX;
+	a.minlength = 4096;
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4_OK);
+	ASSERT_EQ(off, (uint64_t)(100ULL << 30));
+	ASSERT_EQ(len, cap);
+
+	/* Finite ask larger than the cap clamps to the cap (renewals
+	 * re-request the tail). */
+	memset(&a, 0, sizeof(a));
+	a.offset = 0;
+	a.length = cap * 2;
+	a.minlength = 4096;
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4_OK);
+	ASSERT_EQ(len, cap);
+
+	/* A small finite ask is widened up to the cap (streaming-write
+	 * fix: per-page writeback LAYOUTGETs must not get page-sized
+	 * grants). */
+	memset(&a, 0, sizeof(a));
+	a.offset = 0;
+	a.length = 4096;
+	a.minlength = 4096;
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4_OK);
+	ASSERT_EQ(len, cap);
+
+	/* Overflow / absurd requests are rejected. */
+	memset(&a, 0, sizeof(a));
+	a.offset = UINT64_MAX;
+	a.length = UINT64_MAX;
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4ERR_INVAL);
+	memset(&a, 0, sizeof(a));
+	a.offset = UINT64_MAX - 8;
+	a.length = 4096; /* offset + length wraps */
+	ASSERT_EQ(layout_select_grant_range(&a, &ino, 65536, &off, &len),
+		  NFS4ERR_INVAL);
+
+	/* Restore the default in case a later test depends on it. */
+	compound_layout_set_grant_max_length(1ULL << 36);
 }
 
 /* -----------------------------------------------------------------------
@@ -5107,6 +5197,7 @@ int main(void)
 
 	RUN_TEST(test_root_getattr);
 	RUN_TEST(test_getattr_space_gated_on_bitmap);
+	RUN_TEST(test_layout_grant_range_policy);
 	RUN_TEST(test_layout_range_union);
 	RUN_TEST(test_backend_client_stats_dispatch);
 	RUN_TEST(test_putrootfh_discards_stale_snapshot);
