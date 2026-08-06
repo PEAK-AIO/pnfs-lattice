@@ -243,16 +243,17 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
     }
 
     /*
-     * Phase 4 scaffold: propagate the ndb_async_writes feature
-     * flag to the shim.  Off by default; flipping it on alone
-     * does nothing until the async-aware ns_create variant
-     * lands.  Logged so operators can confirm the config is
-     * being parsed correctly.
+     * Phase 4: propagate the ndb_async_writes feature flag to the
+     * shim.  When true this arms the per-connection flush threads
+     * and routes single-Commit creates (ns_create and the fused
+     * create+layout) through the async batch pipeline; when false
+     * (default) no flush threads are started and every write uses
+     * the plain synchronous execute() path.
      */
     rondb_shim_set_async_writes(state->handle, cfg->ndb_async_writes);
     MDS_LOG_INFO(LOG_COMP_CAT,
-        "RonDB ndb_async_writes=%s (scaffold; async-aware "
-        "write path pending empirical validation)",
+        "RonDB ndb_async_writes=%s (async batch pipeline for "
+        "single-commit creates)",
         cfg->ndb_async_writes ? "true" : "false");
 
 	cat->backend = MDS_BACKEND_RONDB;

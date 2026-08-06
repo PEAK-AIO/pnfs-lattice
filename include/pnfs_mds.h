@@ -1007,16 +1007,18 @@ struct mds_config {
     uint32_t            ndb_conn_pool_size;
 
     /*
-     * Phase 4 feature flag: when true, ns_create routes through the
-     * existing rondb_async_exec pipeline (executeAsynchPrepare +
+     * Phase 4 feature flag: when true, single-Commit creates
+     * (ns_create and the fused create+layout) route through the
+     * rondb_async_exec pipeline (executeAsynchPrepare +
      * sendPreparedTransactions driven by the per-connection flush
-     * thread).  At high concurrency this batches multiple worker
-     * threads' commits into fewer TCP segments, reducing network
-     * overhead.  Default false: the sync execute() path has the
-     * same correctness and lower per-op latency at low concurrency.
-     * Flip to true and re-run the concurrent mdtest / bench to
-     * decide if the async path is worth adopting for a given
-     * deployment profile.
+     * thread, armed lazily when this flag is set).  At high
+     * concurrency this batches multiple worker threads' commits
+     * into fewer TCP segments, reducing network overhead.  Default
+     * false: no flush threads are started and the sync execute()
+     * path is used -- same correctness, lower per-op latency at low
+     * concurrency.  Flip to true and re-run the concurrent mdtest /
+     * bench to decide if the async path is worth adopting for a
+     * given deployment profile.
      */
     bool                ndb_async_writes;
 

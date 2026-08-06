@@ -142,14 +142,22 @@ struct rondb_shim_handle {
     std::atomic<uint32_t>   conn_rr{0};  /* round-robin counter */
 
     /*
-     * Phase 4: when true, future async-aware shim entrypoints
-     * (rondb_shim_ns_create_async etc.) are eligible to route
-     * through the rondb_async_exec batch pipeline.  The flag is
-     * plumbed now so operators can opt in via mds.conf
-     * (ndb_async_writes=true); the actual dispatch lands in a
-     * follow-up once concurrent-workload measurement justifies it.
+     * Phase 4: when true, single-Commit creates (rondb_shim_ns_create
+     * and rondb_shim_ns_create_with_layout) route through the
+     * rondb_async_exec batch pipeline so concurrent workers' commits
+     * share sendPreparedTransactions()/pollNdb() cycles.  Operators
+     * opt in via mds.conf (ndb_async_writes=true); default off keeps
+     * the plain synchronous execute() path.
      */
     std::atomic<bool>       async_writes{false};
+
+    /* One-time arming of the async pipeline (conn_ctxs[].ndb + flush
+     * threads), performed lazily by rondb_async_pipeline_start() so
+     * that async_writes=false deployments never carry flush threads.
+     * async_start_mutex makes arming idempotent; async_started marks
+     * completion. */
+    std::mutex              async_start_mutex;
+    bool                    async_started{false};
 
     /* Thread-local Ndb pool: each thread gets its own Ndb object
      * lazily created from one of the pooled connections.  The pool
@@ -409,15 +417,25 @@ static void ndb_flush_thread_fn(ndb_conn_ctx *ctx)
     while (!ctx->stop.load(std::memory_order_acquire)) {
         std::unique_lock<std::mutex> lock(ctx->ndb_mutex);
 
-        /* Sleep when idle to avoid CPU spinning. */
+        /* Sleep when idle to avoid CPU spinning.  Submitters raise
+         * in_flight under ndb_mutex and notify wake_cv right after
+         * (rondb_async_exec), so wakeup is prompt; the timeout is a
+         * defensive re-check against a missed notification. */
         if (ctx->in_flight.load(std::memory_order_acquire) == 0) {
-            ctx->wake_cv.wait_for(lock, std::chrono::milliseconds(10),
+            ctx->wake_cv.wait_for(lock, std::chrono::milliseconds(100),
                 [ctx] {
                     return ctx->in_flight.load(std::memory_order_acquire) > 0
                         || ctx->stop.load(std::memory_order_acquire);
                 });
             if (ctx->stop.load(std::memory_order_acquire)) {
                 break;
+            }
+            if (ctx->in_flight.load(std::memory_order_acquire) == 0) {
+                /* Timed out with no work queued: skip the NDB API
+                 * calls entirely.  An idle armed pipeline costs one
+                 * mutex+condvar cycle per 100 ms instead of a
+                 * send+poll every 10 ms. */
+                continue;
             }
         }
 
@@ -515,6 +533,63 @@ static int rondb_async_exec(rondb_shim_handle *state, int conn_idx,
     ctx->ndb_mutex.lock();
 
     return result.error;
+}
+
+/**
+ * Phase 4: arm the async batch pipeline (idempotent).
+ *
+ * Creates each connection's shared Ndb object and starts its flush
+ * thread.  Deliberately NOT done at connect time: with
+ * ndb_async_writes=false (the default) no flush threads exist and an
+ * idle MDS never polls the NDB API.  Called from
+ * rondb_shim_set_async_writes() during catalogue open, which runs
+ * before worker threads issue requests -- thread creation then
+ * publishes conn_ctxs[].ndb to workers (rondb_async_lock tolerates
+ * unarmed contexts by returning nullptr regardless).
+ *
+ * @return number of connections successfully armed.
+ */
+static int rondb_async_pipeline_start(rondb_shim_handle *state)
+{
+    int armed = 0;
+
+    std::lock_guard<std::mutex> start_lock(state->async_start_mutex);
+    if (state->async_started) {
+        for (int ci = 0; ci < state->conn_count; ci++) {
+            if (state->conn_ctxs[ci].ndb != nullptr) {
+                armed++;
+            }
+        }
+        return armed;
+    }
+
+    for (int ci = 0; ci < state->conn_count; ci++) {
+        ndb_conn_ctx *ctx = &state->conn_ctxs[ci];
+        ctx->ndb = new (std::nothrow) Ndb(state->connections[ci],
+                                          state->schema);
+        if (ctx->ndb == nullptr) {
+            std::fprintf(stderr,
+                "WARN: async Ndb alloc failed for conn[%d]\n", ci);
+            continue;
+        }
+        if (ctx->ndb->init() != 0) {
+            std::fprintf(stderr,
+                "WARN: async Ndb::init() failed for conn[%d]: "
+                "code=%d msg=%s\n",
+                ci, ctx->ndb->getNdbError().code,
+                ctx->ndb->getNdbError().message);
+            delete ctx->ndb;
+            ctx->ndb = nullptr;
+            continue;
+        }
+        ctx->stop.store(false, std::memory_order_release);
+        ctx->in_flight.store(0, std::memory_order_release);
+        ctx->flush_thread = std::thread(ndb_flush_thread_fn, ctx);
+        armed++;
+    }
+
+    state->async_started = true;
+    return armed;
 }
 
 static const NdbDictionary::Table *rondb_get_probe_table(rondb_shim_handle *state)
@@ -836,33 +911,12 @@ int rondb_shim_connect_pool(const char *connect_string,
     /* Legacy alias for code using ->connection. */
     state->connection = state->connections[0];
 
-    /* Phase 3: create per-connection shared Ndb + flush threads.
-     * Each flush thread drives sendPreparedTransactions()+pollNdb()
-     * for its connection's shared Ndb, batching operations from
-     * multiple worker threads into fewer TCP segments. */
-    for (int ci = 0; ci < state->conn_count; ci++) {
-        ndb_conn_ctx *ctx = &state->conn_ctxs[ci];
-        ctx->ndb = new (std::nothrow) Ndb(state->connections[ci],
-                                          state->schema);
-        if (ctx->ndb == nullptr) {
-            std::fprintf(stderr,
-                "WARN: async Ndb alloc failed for conn[%d]\n", ci);
-            continue;
-        }
-        if (ctx->ndb->init() != 0) {
-            std::fprintf(stderr,
-                "WARN: async Ndb::init() failed for conn[%d]: "
-                "code=%d msg=%s\n",
-                ci, ctx->ndb->getNdbError().code,
-                ctx->ndb->getNdbError().message);
-            delete ctx->ndb;
-            ctx->ndb = nullptr;
-            continue;
-        }
-        ctx->stop.store(false, std::memory_order_release);
-        ctx->in_flight.store(0, std::memory_order_release);
-        ctx->flush_thread = std::thread(ndb_flush_thread_fn, ctx);
-    }
+    /* Phase 3/4: the per-connection shared Ndb objects + flush threads
+     * behind the async batch pipeline are NOT created here.  They are
+     * armed lazily by rondb_shim_set_async_writes(handle, 1) via
+     * rondb_async_pipeline_start(), so ndb_async_writes=false (the
+     * default) deployments carry no flush threads and never poll the
+     * NDB API while idle. */
 
     std::fprintf(stderr,
         "INFO: RonDB connection pool: %d connection(s) to %s\n",
@@ -991,6 +1045,19 @@ void rondb_shim_set_async_writes(void *handle, int enabled)
     if (state == nullptr) {
         return;
     }
+
+    if (enabled != 0) {
+        /* Arm the pipeline before publishing the flag so the create
+         * paths never observe async_writes=true with no flush
+         * threads.  (rondb_async_lock also tolerates an unarmed
+         * context by returning nullptr, which falls back to the
+         * synchronous route.) */
+        int armed = rondb_async_pipeline_start(state);
+        std::fprintf(stderr,
+            "INFO: RonDB async write pipeline armed on %d/%d "
+            "connection(s)\n", armed, state->conn_count);
+    }
+
     state->async_writes.store(enabled != 0,
                               std::memory_order_release);
 }
@@ -7498,6 +7565,10 @@ int rondb_shim_ns_create(void *handle,
     uint8_t name_value[MDS_MAX_NAME + 2];
     uint32_t name_value_len = 0;
     bool inline_single = false;   /* v9: set once child_ino is built */
+    /* Phase 4 async routing (see the block above startTransaction). */
+    Ndb *ndb = nullptr;
+    bool use_async = false;
+    int async_idx = -1;
 
     if (state == nullptr || name == nullptr ||
         child_inode_buf == nullptr) {
@@ -7514,21 +7585,55 @@ int rondb_shim_ns_create(void *handle,
         return -1;
     }
 
-    dict = rondb_get_dictionary(state);
-    if (dict == nullptr) { return -1; }
+    /*
+     * Phase 4: when ndb_async_writes is on and the batch pipeline is
+     * armed, run this transaction on the connection's shared Ndb.
+     * rondb_async_lock() returns with ctx->ndb_mutex HELD; the lock
+     * stays held through op definition and closeTransaction, except
+     * inside rondb_async_exec() which releases it around the network
+     * wait so concurrent workers' commits batch into shared
+     * send/poll cycles.  If the shared Ndb is unavailable, fall back
+     * to the plain synchronous thread-local path (identical to
+     * async off).
+     */
+    if (state->async_writes.load(std::memory_order_acquire)) {
+        ndb = rondb_async_lock(state, &async_idx);
+        use_async = (ndb != nullptr);
+    }
+    if (ndb == nullptr) {
+        ndb = rondb_get_ndb(state);
+        if (ndb == nullptr) {
+            return -1;
+        }
+    }
+
+    /* Table metadata must come from the executing Ndb object's own
+     * dictionary so metadata and transaction share one Ndb instance
+     * in both modes. */
+    dict = ndb->getDictionary();
+    if (dict == nullptr) {
+        (void)rondb_report_error(ndb->getNdbError(), "getDictionary()");
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return -1;
+    }
     ino_tbl = dict->getTable(RONDB_TBL_INODES);
     dir_tbl = dict->getTable(RONDB_TBL_DIRENTS);
-    if (ino_tbl == nullptr || dir_tbl == nullptr) { return -1; }
+    if (ino_tbl == nullptr || dir_tbl == nullptr) {
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return -1;
+    }
 
     /* Hint on parent partition (dirent + parent inode live there). */
     {
         uint8_t pk_buf[8];
         fdb_put_u64(pk_buf, parent_fileid);
-        tx = rondb_get_ndb(state)->startTransaction(dir_tbl, (const char *)pk_buf, 8);
+        tx = ndb->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "ns_create startTx");
+        int rc = rondb_report_error(ndb->getNdbError(),
+                                    "ns_create startTx");
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return rc;
     }
 
     /* 1. Insert dirent (insertTuple fails on PK conflict -> EXISTS). */
@@ -7596,7 +7701,10 @@ int rondb_shim_ns_create(void *handle,
             uint32_t s_off = 0;
             for (uint32_t si = 0; si < stripe_count; si++) {
                 if (s_off + 8 > stripe_len) {
-                    rondb_get_ndb(state)->closeTransaction(tx);
+                    ndb->closeTransaction(tx);
+                    if (use_async) {
+                        rondb_async_unlock(state, async_idx);
+                    }
                     std::fprintf(stderr,
                         "ERROR: ns_create stripe buffer overrun: "
                         "entry %u header at %u exceeds len %u\n",
@@ -7606,7 +7714,10 @@ int rondb_shim_ns_create(void *handle,
                 uint32_t ds_id = fdb_get_u32(stripe_buf + s_off);
                 uint32_t fh_len = fdb_get_u32(stripe_buf + s_off + 4);
                 if (fh_len > stripe_len - s_off - 8) {
-                    rondb_get_ndb(state)->closeTransaction(tx);
+                    ndb->closeTransaction(tx);
+                    if (use_async) {
+                        rondb_async_unlock(state, async_idx);
+                    }
                     std::fprintf(stderr,
                         "ERROR: ns_create stripe buffer overrun: "
                         "entry %u fh_len %u exceeds len %u\n",
@@ -7645,10 +7756,14 @@ int rondb_shim_ns_create(void *handle,
     }
 
     {
-        int commit_rc = tx->execute(NdbTransaction::Commit);
+        int commit_rc = use_async
+            ? rondb_async_exec(state, async_idx, tx,
+                               NdbTransaction::Commit)
+            : tx->execute(NdbTransaction::Commit);
         if (commit_rc == -1) {
             err = tx->getNdbError();
-            rondb_get_ndb(state)->closeTransaction(tx);
+            ndb->closeTransaction(tx);
+            if (use_async) { rondb_async_unlock(state, async_idx); }
             if (err.classification == NdbError::ConstraintViolation) {
                 return 1; /* EXISTS -- dirent PK conflict */
             }
@@ -7659,12 +7774,14 @@ int rondb_shim_ns_create(void *handle,
         }
     }
 
-    rondb_get_ndb(state)->closeTransaction(tx);
+    ndb->closeTransaction(tx);
+    if (use_async) { rondb_async_unlock(state, async_idx); }
     return 0;
 
 ns_create_err:
     err = tx->getNdbError();
-    rondb_get_ndb(state)->closeTransaction(tx);
+    ndb->closeTransaction(tx);
+    if (use_async) { rondb_async_unlock(state, async_idx); }
     if (rondb_is_temporary(err)) {
         return -2;
     }
@@ -7703,6 +7820,10 @@ int rondb_shim_ns_create_with_layout(
     uint8_t name_value[MDS_MAX_NAME + 2];
     uint32_t name_value_len = 0;
     bool inline_single = false;   /* v9: set once child_ino is built */
+    /* Phase 4 async routing (see the block above startTransaction). */
+    Ndb *ndb = nullptr;
+    bool use_async = false;
+    int async_idx = -1;
 
     /*
      * Per-op tracking for commit-failure diagnostics.  Only emits
@@ -7755,22 +7876,51 @@ int rondb_shim_ns_create_with_layout(
         return -1;
     }
 
-    dict = rondb_get_dictionary(state);
-    if (dict == nullptr) { return -1; }
+    /*
+     * Phase 4: same async routing as rondb_shim_ns_create -- the
+     * fused create is also a single-Commit transaction, so it is
+     * eligible for the batch pipeline.  rondb_async_lock() returns
+     * with ctx->ndb_mutex held; rondb_async_exec() releases it
+     * around the network wait.  Fall back to the synchronous
+     * thread-local path when the pipeline is unavailable.
+     */
+    if (state->async_writes.load(std::memory_order_acquire)) {
+        ndb = rondb_async_lock(state, &async_idx);
+        use_async = (ndb != nullptr);
+    }
+    if (ndb == nullptr) {
+        ndb = rondb_get_ndb(state);
+        if (ndb == nullptr) {
+            return -1;
+        }
+    }
+
+    /* Table metadata from the executing Ndb object's own dictionary
+     * (see rondb_shim_ns_create). */
+    dict = ndb->getDictionary();
+    if (dict == nullptr) {
+        (void)rondb_report_error(ndb->getNdbError(), "getDictionary()");
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return -1;
+    }
     ino_tbl = dict->getTable(RONDB_TBL_INODES);
     dir_tbl = dict->getTable(RONDB_TBL_DIRENTS);
-    if (ino_tbl == nullptr || dir_tbl == nullptr) { return -1; }
+    if (ino_tbl == nullptr || dir_tbl == nullptr) {
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return -1;
+    }
 
     /* Hint on parent partition. */
     {
         uint8_t pk_buf[8];
         fdb_put_u64(pk_buf, parent_fileid);
-        tx = rondb_get_ndb(state)->startTransaction(
-            dir_tbl, (const char *)pk_buf, 8);
+        tx = ndb->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
-        return rondb_report_error(rondb_get_ndb(state)->getNdbError(),
-                                 "ns_create_wl startTx");
+        int rc = rondb_report_error(ndb->getNdbError(),
+                                    "ns_create_wl startTx");
+        if (use_async) { rondb_async_unlock(state, async_idx); }
+        return rc;
     }
 
     /* 1. Insert dirent. */
@@ -7836,7 +7986,10 @@ int rondb_shim_ns_create_with_layout(
             uint32_t s_off = 0;
             for (uint32_t si = 0; si < stripe_count; si++) {
                 if (s_off + 8 > stripe_len) {
-                    rondb_get_ndb(state)->closeTransaction(tx);
+                    ndb->closeTransaction(tx);
+                    if (use_async) {
+                        rondb_async_unlock(state, async_idx);
+                    }
                     std::fprintf(stderr,
                         "ERROR: ns_create_wl stripe buffer overrun: "
                         "entry %u header at %u exceeds len %u\n",
@@ -7846,7 +7999,10 @@ int rondb_shim_ns_create_with_layout(
                 uint32_t ds_id = fdb_get_u32(stripe_buf + s_off);
                 uint32_t fh_len = fdb_get_u32(stripe_buf + s_off + 4);
                 if (fh_len > stripe_len - s_off - 8) {
-                    rondb_get_ndb(state)->closeTransaction(tx);
+                    ndb->closeTransaction(tx);
+                    if (use_async) {
+                        rondb_async_unlock(state, async_idx);
+                    }
                     std::fprintf(stderr,
                         "ERROR: ns_create_wl stripe buffer overrun: "
                         "entry %u fh_len %u exceeds len %u\n",
@@ -7978,26 +8134,36 @@ int rondb_shim_ns_create_with_layout(
         }
     }
 
-    /* Single Commit covering dirent + inode + parent + stripe + layout. */
-    if (tx->execute(NdbTransaction::Commit) == -1) {
-        err = tx->getNdbError();
-        dump_op_errors("Commit");
-        rondb_get_ndb(state)->closeTransaction(tx);
-        if (err.classification == NdbError::ConstraintViolation) {
-            return 1; /* EXISTS */
+    /* Single Commit covering dirent + inode + parent + stripe + layout.
+     * Async mode routes it through the batch pipeline. */
+    {
+        int commit_rc = use_async
+            ? rondb_async_exec(state, async_idx, tx,
+                               NdbTransaction::Commit)
+            : tx->execute(NdbTransaction::Commit);
+        if (commit_rc == -1) {
+            err = tx->getNdbError();
+            dump_op_errors("Commit");
+            ndb->closeTransaction(tx);
+            if (use_async) { rondb_async_unlock(state, async_idx); }
+            if (err.classification == NdbError::ConstraintViolation) {
+                return 1; /* EXISTS */
+            }
+            if (rondb_is_temporary(err)) {
+                return -2;
+            }
+            return rondb_report_error(err, "ns_create_wl commit");
         }
-        if (rondb_is_temporary(err)) {
-            return -2;
-        }
-        return rondb_report_error(err, "ns_create_wl commit");
     }
 
-    rondb_get_ndb(state)->closeTransaction(tx);
+    ndb->closeTransaction(tx);
+    if (use_async) { rondb_async_unlock(state, async_idx); }
     return 0;
 
 ns_create_wl_err:
     err = tx->getNdbError();
-    rondb_get_ndb(state)->closeTransaction(tx);
+    ndb->closeTransaction(tx);
+    if (use_async) { rondb_async_unlock(state, async_idx); }
     return rondb_report_error(err, "ns_create_wl op");
 }
 
