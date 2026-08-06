@@ -535,11 +535,20 @@ enum mds_status hpc_shared_create_wide_layout(
         return st;
     }
 
+    bool safe_to_discard = false;
     st = mds_cat_ns_create_wide(
         cat, parent_fileid, name, &child, batch.stripe_count,
-        batch.stripe_unit, batch.mirror_count, batch.entries);
+        batch.stripe_unit, batch.mirror_count, batch.entries,
+        &safe_to_discard);
     if (st != MDS_OK) {
-        hpc_create_gc_enqueue_entries(cat, child.fileid, &batch);
+        /* Reclaim the DS bundle only when the create is PROVEN not to have
+         * published a live file at child.fileid.  On an indeterminate
+         * result (MDS_ERR_DELAY) the commit may have landed, so we must not
+         * GC a possibly-live file's backing store; the pending-recovery
+         * scan / reconciliation handles that case. */
+        if (safe_to_discard) {
+            hpc_create_gc_enqueue_entries(cat, child.fileid, &batch);
+        }
         ds_prealloc_batch_result_destroy(&batch);
         return st;
     }

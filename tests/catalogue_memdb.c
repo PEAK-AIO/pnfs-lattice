@@ -454,7 +454,8 @@ static enum mds_status mem_ns_create_wide(
     uint32_t stripe_count,
     uint32_t stripe_unit,
     uint32_t mirror_count,
-    const struct mds_ds_map_entry *entries)
+    const struct mds_ds_map_entry *entries,
+    bool *safe_to_discard)
 {
     struct memdb *memdb;
     struct mds_ds_map_entry *copied_entries;
@@ -465,22 +466,38 @@ static enum mds_status mem_ns_create_wide(
     int parent_index;
     int stripe_index;
 
+    /* Default: never reclaim unless proven nothing live was published at
+     * child->fileid.  memdb is synchronous (no lost replies), so every
+     * non-success path here means nothing was published. */
+    if (safe_to_discard != NULL) {
+        *safe_to_discard = false;
+    }
+
     if (cat == NULL || name == NULL || child == NULL || entries == NULL ||
         child->fileid == 0 || child->parent_fileid != parent_fileid ||
         child->type != MDS_FTYPE_REG || stripe_count == 0 ||
         stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
         mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS ||
         (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_INVAL;
     }
 
     entry_count = (uint64_t)stripe_count * mirror_count;
     if (entry_count > UINT32_MAX) {
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_INVAL;
     }
 
     copied_entries = calloc((size_t)entry_count, sizeof(*copied_entries));
     if (copied_entries == NULL) {
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_NOMEM;
     }
     memcpy(copied_entries, entries,
@@ -488,6 +505,9 @@ static enum mds_status mem_ns_create_wide(
 
     if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_IO;
     }
 
@@ -497,21 +517,33 @@ static enum mds_status mem_ns_create_wide(
     if (parent_index < 0) {
         pthread_mutex_unlock(&memdb->lock);
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_NOTFOUND;
     }
     if (memdb->inodes[parent_index].type != MDS_FTYPE_DIR) {
         pthread_mutex_unlock(&memdb->lock);
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_NOTDIR;
     }
     if (memdb_find_dirent(memdb, parent_fileid, name) >= 0) {
         pthread_mutex_unlock(&memdb->lock);
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_EXISTS;
     }
     if (memdb_find_inode(memdb, child->fileid) >= 0) {
         pthread_mutex_unlock(&memdb->lock);
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_EXISTS;
     }
 
@@ -528,6 +560,9 @@ static enum mds_status mem_ns_create_wide(
     if (child_index < 0 || dirent_index < 0 || stripe_index < 0) {
         pthread_mutex_unlock(&memdb->lock);
         free(copied_entries);
+        if (safe_to_discard != NULL) {
+            *safe_to_discard = true;
+        }
         return MDS_ERR_NOSPC;
     }
 

@@ -209,17 +209,21 @@ enum mds_status mds_cat_ns_create_wide(
     uint32_t stripe_count,
     uint32_t stripe_unit,
     uint32_t mirror_count,
-    const struct mds_ds_map_entry *entries)
+    const struct mds_ds_map_entry *entries,
+    bool *safe_to_discard)
 {
+    if (safe_to_discard != NULL) {
+        *safe_to_discard = false;
+    }
     if (cat == NULL || cat->auth_ops == NULL ||
         cat->auth_ops->ns_create_wide == NULL || name == NULL ||
-        child == NULL || entries == NULL) {
+        child == NULL || entries == NULL || safe_to_discard == NULL) {
         return MDS_ERR_INVAL;
     }
     return CAT_TIMED(MDS_CATOP_NS_CREATE,
         cat->auth_ops->ns_create_wide(cat, parent_fileid, name, child,
                                       stripe_count, stripe_unit, mirror_count,
-                                      entries));
+                                      entries, safe_to_discard));
 }
 
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,

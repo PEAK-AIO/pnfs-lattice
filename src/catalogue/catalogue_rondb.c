@@ -660,7 +660,8 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 	uint32_t stripe_count,
 	uint32_t stripe_unit,
 	uint32_t mirror_count,
-	const struct mds_ds_map_entry *entries)
+	const struct mds_ds_map_entry *entries,
+	bool *safe_to_discard)
 {
 	void *handle = rondb_handle(cat);
 	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
@@ -669,15 +670,28 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 	size_t stripe_offset;
 	int rc = -1;
 
+	/* Default: never let the caller reclaim the DS bundle unless we PROVE
+	 * the create did not publish a live file at child->fileid. */
+	if (safe_to_discard != NULL) {
+		*safe_to_discard = false;
+	}
+
 	if (handle == NULL || name == NULL || child == NULL || entries == NULL ||
 	    child->fileid == 0 || child->parent_fileid != parent_fileid ||
 	    child->type != MDS_FTYPE_REG || stripe_count == 0 ||
 	    stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
 	    mirror_count != 1 ||
 	    (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+		/* Nothing attempted; any captured DS files are orphaned. */
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
 		return MDS_ERR_INVAL;
 	}
 	if (rondb_inode_serialize(child, 0, child_buf, sizeof(child_buf)) < 0) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
 		return MDS_ERR_IO;
 	}
 
@@ -687,16 +701,25 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
 		    entries[stripe_index].nfs_fh_len >
 		    SIZE_MAX - stripe_buf_len - 8U) {
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
 			return MDS_ERR_INVAL;
 		}
 		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
 	}
 	if (stripe_buf_len > UINT32_MAX) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
 		return MDS_ERR_INVAL;
 	}
 
 	stripe_buf = malloc(stripe_buf_len);
 	if (stripe_buf == NULL) {
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = true;
+		}
 		return MDS_ERR_NOMEM;
 	}
 	stripe_offset = 0;
@@ -724,15 +747,75 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 		rondb_transient_backoff(attempt);
 	}
 	free(stripe_buf);
-	if (rc == 1) {
-		return MDS_ERR_EXISTS;
-	}
-	if (rc != 0) {
-		return MDS_ERR_IO;
+
+	if (rc == 0) {
+		/* Committed and live; the DS bundle is now owned by the file. */
+		catalog_stat_inc(&cat->stats.authority_writes);
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = false;
+		}
+		return MDS_OK;
 	}
 
-	catalog_stat_inc(&cat->stats.authority_writes);
-	return MDS_OK;
+	/* Non-success (ConstraintViolation, permanent error, or transient-
+	 * retry exhaustion).  ns_create_wide commits inode + dirent + parent +
+	 * stripe map in ONE NDB transaction, but a lost reply after a
+	 * successful commit is indistinguishable from a real failure here.
+	 * Resolve with a committed lookup of (parent, name):
+	 *   dirent -> our child->fileid : our txn committed (idempotent success
+	 *       on a lost-reply retry) -> MDS_OK, do NOT reclaim (LIVE).
+	 *   dirent -> a different fileid : genuine foreign collision ->
+	 *       MDS_ERR_EXISTS, reclaim our orphaned DS bundle.
+	 *   dirent absent + ConstraintViolation : a non-namespace integrity
+	 *       violation aborted the txn atomically -> MDS_ERR_IO, reclaim.
+	 *   dirent absent + transient exhaustion, or the lookup itself is
+	 *       indeterminate -> MDS_ERR_DELAY, do NOT reclaim (commit may have
+	 *       landed / be in flight). */
+	{
+		uint64_t found_fid = 0;
+		uint8_t found_type = 0;
+		uint8_t lbuf[RONDB_INODE_MAX_SIZE];
+		uint32_t lout = 0;
+		int lrc;
+
+		lrc = rondb_shim_ns_lookup(handle, parent_fileid, name,
+					   &found_fid, &found_type,
+					   lbuf, sizeof(lbuf), &lout);
+		if (lrc == 0) {
+			if (found_fid == child->fileid) {
+				catalog_stat_inc(&cat->stats.authority_writes);
+				if (safe_to_discard != NULL) {
+					*safe_to_discard = false;
+				}
+				return MDS_OK;
+			}
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
+			return MDS_ERR_EXISTS;
+		}
+		if (lrc == 1) {
+			if (rc == -2) {
+				/* Transient exhaustion; write may still be
+				 * resolving.  Do not reclaim. */
+				if (safe_to_discard != NULL) {
+					*safe_to_discard = false;
+				}
+				return MDS_ERR_DELAY;
+			}
+			/* Permanent / ConstraintViolation with no published
+			 * dirent: txn aborted atomically -> orphaned DS bundle. */
+			if (safe_to_discard != NULL) {
+				*safe_to_discard = true;
+			}
+			return MDS_ERR_IO;
+		}
+		/* Lookup itself transient (-2) or errored: indeterminate. */
+		if (safe_to_discard != NULL) {
+			*safe_to_discard = false;
+		}
+		return MDS_ERR_DELAY;
+	}
 }
 
 enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
@@ -2987,11 +3070,12 @@ static enum mds_status rondb_auth_ns_create_wide(
 	uint32_t stripe_count,
 	uint32_t stripe_unit,
 	uint32_t mirror_count,
-	const struct mds_ds_map_entry *entries)
+	const struct mds_ds_map_entry *entries,
+	bool *safe_to_discard)
 {
 	return catalogue_rondb_ns_create_wide(
 		cat, parent, name, child, stripe_count, stripe_unit,
-		mirror_count, entries);
+		mirror_count, entries, safe_to_discard);
 }
 
 static enum mds_status rondb_auth_ns_remove(

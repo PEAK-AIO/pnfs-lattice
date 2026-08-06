@@ -67,7 +67,8 @@ struct mds_authority_ops {
         const struct mds_inode *child,
         uint32_t stripe_count, uint32_t stripe_unit,
         uint32_t mirror_count,
-        const struct mds_ds_map_entry *entries);
+        const struct mds_ds_map_entry *entries,
+        bool *safe_to_discard);
     enum mds_status (*ns_remove)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name);

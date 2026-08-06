@@ -182,6 +182,12 @@ enum mds_status mds_cat_ns_create(struct mds_catalogue *cat,
  * @param entries        Stripe-major DS entries.
  * @return MDS_OK on success, MDS_ERR_EXISTS on name collision, or an error.
  *
+ * @param[out] safe_to_discard  Set true only when the create is PROVEN not to
+ *   have published a live file at @p child->fileid (genuine foreign EXISTS or a
+ *   definitive abort), so the caller may reclaim the DS bundle.  Set false on
+ *   success and on any indeterminate result (MDS_ERR_DELAY), where the commit
+ *   may have landed and the DS bundle must NOT be reclaimed.
+ *
  * Ownership: callers retain @p child and @p entries.
  * Thread safety: backend transaction serializes concurrent namespace changes.
  */
@@ -193,7 +199,8 @@ enum mds_status mds_cat_ns_create_wide(
 	uint32_t stripe_count,
 	uint32_t stripe_unit,
 	uint32_t mirror_count,
-	const struct mds_ds_map_entry *entries);
+	const struct mds_ds_map_entry *entries,
+	bool *safe_to_discard);
 
 /** Remove a dirent + inode (if nlink drops to 0) + parent touch. */
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,

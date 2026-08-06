@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "pnfs_mds.h"      /* MDS_MAX_STRIPES, mds_status */
 #include "hpc_shared.h"
@@ -357,6 +358,7 @@ static void test_atomic_wide_create(void)
     uint64_t fileid = 0;
     uint64_t collision_fileid = 0;
     enum mds_status status;
+    bool safe_discard = false;
 
     fprintf(stdout, "  atomic_wide_create:                ");
     catalogue = open_test_catalogue();
@@ -386,8 +388,9 @@ static void test_atomic_wide_create(void)
 
     status = mds_cat_ns_create_wide(
         catalogue, MDS_FILEID_ROOT, "atomic-wide", &child, 2, 131072, 1,
-        stripe_entries);
+        stripe_entries, &safe_discard);
     ASSERT_EQ(status, MDS_OK);
+    ASSERT_TRUE(!safe_discard);
     ASSERT_EQ(mds_cat_ns_lookup(catalogue, MDS_FILEID_ROOT, "atomic-wide",
                                 &lookup_child),
               MDS_OK);
@@ -416,8 +419,9 @@ static void test_atomic_wide_create(void)
 
     status = mds_cat_ns_create_wide(
         catalogue, MDS_FILEID_ROOT, "atomic-wide", &collision, 2, 131072, 1,
-        stripe_entries);
+        stripe_entries, &safe_discard);
     ASSERT_EQ(status, MDS_ERR_EXISTS);
+    ASSERT_TRUE(safe_discard);
     ASSERT_EQ(mds_cat_ns_getattr(catalogue, collision_fileid, &lookup_child),
               MDS_ERR_NOTFOUND);
     ASSERT_EQ(mds_cat_stripe_map_get(catalogue, collision_fileid,
@@ -430,6 +434,129 @@ static void test_atomic_wide_create(void)
 
     mds_catalogue_close(catalogue);
     fprintf(stdout, "PASS\n");
+    passed++;
+}
+
+/* -----------------------------------------------------------------------
+ * N-to-1 concurrency: two clients race the SAME wide-create name.
+ *
+ * The fused ns_create_wide + safe_to_discard contract must yield exactly
+ * one winner (MDS_OK, safe_to_discard == false, i.e. LIVE, keep the DS
+ * bundle) and exactly one loser (MDS_ERR_EXISTS, safe_to_discard == true,
+ * i.e. reclaim the orphaned DS bundle).  The published dirent must resolve
+ * to the winner and the loser must leave no inode.  Repeated many rounds to
+ * shake out races.
+ * ----------------------------------------------------------------------- */
+struct wide_race_ctx {
+    struct mds_catalogue *cat;
+    uint64_t fileid;
+    const struct mds_ds_map_entry *entries;
+    enum mds_status status;
+    bool safe;
+    pthread_barrier_t *barrier;
+};
+
+static void *wide_race_worker(void *arg)
+{
+    struct wide_race_ctx *c = arg;
+    struct mds_inode child;
+
+    memset(&child, 0, sizeof(child));
+    child.fileid = c->fileid;
+    child.parent_fileid = MDS_FILEID_ROOT;
+    child.type = MDS_FTYPE_REG;
+    child.mode = 0644;
+    child.nlink = 1;
+    child.change = 1;
+    child.generation = 1;
+    child.flags = MDS_IFLAG_HPC_SHARED;
+    c->safe = false;
+    (void)pthread_barrier_wait(c->barrier);  /* maximise overlap */
+    c->status = mds_cat_ns_create_wide(
+        c->cat, MDS_FILEID_ROOT, "race", &child, 2, 131072, 1,
+        c->entries, &c->safe);
+    return NULL;
+}
+
+static void test_atomic_wide_create_race(void)
+{
+    struct mds_ds_map_entry entries[2];
+    const int ROUNDS = 200;
+    int ok_total = 0;
+    int exists_total = 0;
+    int round;
+
+    fprintf(stdout, "  atomic_wide_create_race:          ");
+    memset(entries, 0, sizeof(entries));
+    entries[0].ds_id = 21;
+    entries[0].nfs_fh_len = 1;
+    entries[0].nfs_fh[0] = 0xc1;
+    entries[1].ds_id = 22;
+    entries[1].nfs_fh_len = 1;
+    entries[1].nfs_fh[0] = 0xc2;
+
+    for (round = 0; round < ROUNDS; round++) {
+        struct mds_catalogue *cat = open_test_catalogue();
+        pthread_t th[2];
+        pthread_barrier_t barrier;
+        struct wide_race_ctx c[2];
+        struct mds_inode looked;
+        uint64_t winner_fid = 0;
+        int ok = 0;
+        int exists = 0;
+        int i;
+
+        ASSERT_TRUE(cat != NULL);
+        pthread_barrier_init(&barrier, NULL, 2);
+        for (i = 0; i < 2; i++) {
+            uint64_t fid = 0;
+            ASSERT_EQ(mds_cat_alloc_fileid(cat, NULL, &fid), MDS_OK);
+            c[i].cat = cat;
+            c[i].fileid = fid;
+            c[i].entries = entries;
+            c[i].status = MDS_ERR_IO;
+            c[i].safe = false;
+            c[i].barrier = &barrier;
+        }
+        for (i = 0; i < 2; i++) {
+            (void)pthread_create(&th[i], NULL, wide_race_worker, &c[i]);
+        }
+        for (i = 0; i < 2; i++) {
+            (void)pthread_join(th[i], NULL);
+        }
+        pthread_barrier_destroy(&barrier);
+
+        for (i = 0; i < 2; i++) {
+            if (c[i].status == MDS_OK) {
+                ok++;
+                winner_fid = c[i].fileid;
+                ASSERT_TRUE(!c[i].safe);   /* LIVE: keep the DS bundle */
+            } else {
+                ASSERT_EQ(c[i].status, MDS_ERR_EXISTS);
+                exists++;
+                ASSERT_TRUE(c[i].safe);    /* orphan: reclaim */
+            }
+        }
+        ASSERT_EQ(ok, 1);
+        ASSERT_EQ(exists, 1);
+        ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT, "race", &looked),
+                  MDS_OK);
+        ASSERT_EQ(looked.fileid, winner_fid);
+        for (i = 0; i < 2; i++) {
+            if (c[i].fileid != winner_fid) {
+                struct mds_inode gone;
+                ASSERT_EQ(mds_cat_ns_getattr(cat, c[i].fileid, &gone),
+                          MDS_ERR_NOTFOUND);
+            }
+        }
+        ok_total += ok;
+        exists_total += exists;
+        mds_catalogue_close(cat);
+    }
+
+    ASSERT_EQ(ok_total, ROUNDS);
+    ASSERT_EQ(exists_total, ROUNDS);
+    fprintf(stdout, "PASS (%d rounds)\n", ROUNDS);
     passed++;
 }
 
@@ -600,6 +727,7 @@ int main(void)
     /* Phase C / Steps 4 + 5 -- wide create (community subset). */
     test_create_wide_invalid_args();
     test_atomic_wide_create();
+    test_atomic_wide_create_race();
 
     /* Recovery tests fabricate freshly-written legacy rows; disable
      * the rolling-upgrade reap grace so incomplete rows are eligible
