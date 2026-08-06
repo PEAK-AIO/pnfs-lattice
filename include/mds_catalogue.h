@@ -113,6 +113,46 @@ void mds_catalogue_close(struct mds_catalogue *cat);
  *  Returns NULL if cat is NULL or no backend is attached. */
 void *mds_catalogue_backend_handle(const struct mds_catalogue *cat);
 
+/**
+ * Backend client-side behaviour counters (cumulative, monotonic).
+ *
+ * Populated from the backend's own client library instrumentation
+ * (e.g. the NDB API per-object counters), so reading them costs the
+ * hot path nothing.  exec_waits is the number of backend round trips
+ * (times a request thread blocked on a data-node response) -- the
+ * denominator-free way to measure metadata cost: sample before and
+ * after a workload phase and divide the delta by the op count.
+ */
+struct mds_cat_backend_client_stats {
+	uint64_t exec_waits;      /**< Backend execute round trips. */
+	uint64_t scan_waits;      /**< Scan-batch waits. */
+	uint64_t meta_waits;      /**< Dictionary/meta waits. */
+	uint64_t wait_nanos;      /**< Nanoseconds blocked on the backend. */
+	uint64_t bytes_sent;      /**< Bytes sent to the backend. */
+	uint64_t bytes_recvd;     /**< Bytes received from the backend. */
+	uint64_t txn_started;     /**< Backend transactions started. */
+	uint64_t txn_committed;   /**< Backend transactions committed. */
+	uint64_t txn_aborted;     /**< Backend transactions aborted. */
+	uint64_t txn_closed;      /**< Backend transactions closed. */
+	uint64_t pk_ops;          /**< Primary-key operations. */
+	uint64_t uk_ops;          /**< Unique-key operations. */
+	uint64_t table_scans;     /**< Full table scans. */
+	uint64_t range_scans;     /**< Index range scans. */
+	uint64_t read_rows;       /**< Rows returned to the API. */
+	uint64_t client_objects;  /**< Client objects aggregated. */
+};
+
+/**
+ * Fill @p out with the backend's client-side counters.
+ *
+ * @return MDS_OK on success; MDS_ERR_NOSUPPORT when the backend has
+ *         no client instrumentation (e.g. the in-memory test backend);
+ *         MDS_ERR_INVAL on NULL arguments.
+ */
+enum mds_status mds_cat_backend_client_stats(
+	struct mds_catalogue *cat,
+	struct mds_cat_backend_client_stats *out);
+
 /* -----------------------------------------------------------------------
  * Transaction control
  *

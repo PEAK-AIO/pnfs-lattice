@@ -1356,6 +1356,22 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
     return cat->auth_ops->gc_count(cat, count);
 }
 
+enum mds_status mds_cat_backend_client_stats(
+    struct mds_catalogue *cat,
+    struct mds_cat_backend_client_stats *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (cat == NULL || cat->auth_ops == NULL || out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->backend_client_stats == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->backend_client_stats(cat, out);
+}
+
 /* -----------------------------------------------------------------------
  * Authority ops dispatch -- DS prealloc pool (optional)
  * ----------------------------------------------------------------------- */
@@ -1629,6 +1645,38 @@ enum mds_status mds_coord_layout_grant(struct mds_catalogue *cat,
         cat->coord_ops->layout_grant(cat, txn, clientid, fileid,
                                      iomode, offset, length,
                                      stateid, ds_ids, ds_count));
+}
+
+enum mds_status mds_coord_layout_grant_union(struct mds_catalogue *cat,
+                                             struct mds_cat_txn *txn,
+                                             uint64_t clientid,
+                                             uint64_t fileid,
+                                             uint32_t iomode,
+                                             uint64_t offset,
+                                             uint64_t length,
+                                             const struct nfs4_stateid *stateid,
+                                             const uint32_t *ds_ids,
+                                             uint32_t ds_count)
+{
+    if (cat == NULL || cat->coord_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (ds_count > COMMIT_OP_LAYOUT_MAX_DS ||
+        (ds_count > 0 && ds_ids == NULL)) {
+        return MDS_ERR_INVAL;
+    }
+    /* Portable fallback: backends without a native union slot keep
+     * the plain overwrite (pre-change behaviour, used by the memdb
+     * test fixture). */
+    if (cat->coord_ops->layout_grant_union == NULL) {
+        return mds_coord_layout_grant(cat, txn, clientid, fileid,
+                                      iomode, offset, length,
+                                      stateid, ds_ids, ds_count);
+    }
+    return CAT_TIMED(MDS_CATOP_LAYOUT_GRANT,
+        cat->coord_ops->layout_grant_union(cat, txn, clientid, fileid,
+                                           iomode, offset, length,
+                                           stateid, ds_ids, ds_count));
 }
 
 enum mds_status mds_coord_layout_return(struct mds_catalogue *cat,

@@ -102,6 +102,47 @@ int rondb_shim_cleanup(void *handle, const char *schema);
 void rondb_shim_disconnect(void *handle);
 
 /**
+ * Aggregated NDB API client-side behaviour counters.
+ *
+ * The NDB client library maintains these per Ndb object at zero extra
+ * cost to the hot path; this struct is the sum across every Ndb object
+ * the shim has created (thread-local pool + async connection contexts).
+ * All values are cumulative since object creation and monotonically
+ * non-decreasing, so callers can compute round-trips-per-operation by
+ * sampling before/after a workload phase and dividing the delta by the
+ * operation count -- hardware-independent and reproducible.
+ *
+ * exec_waits is the number of times a client thread blocked waiting
+ * for a data-node response to an execute() -- i.e. the NDB round-trip
+ * count the metadata paths are tuned against.
+ */
+struct rondb_client_stats {
+    uint64_t exec_waits;      /**< Execute round trips (PK/UK/scan requests). */
+    uint64_t scan_waits;      /**< Waits for the next scan result batch. */
+    uint64_t meta_waits;      /**< Waits for dictionary/meta operations. */
+    uint64_t wait_nanos;      /**< Nanoseconds spent blocked on the kernel. */
+    uint64_t bytes_sent;      /**< Bytes sent to data nodes. */
+    uint64_t bytes_recvd;     /**< Bytes received from data nodes. */
+    uint64_t txn_started;     /**< Transactions started. */
+    uint64_t txn_committed;   /**< Transactions committed. */
+    uint64_t txn_aborted;     /**< Transactions aborted. */
+    uint64_t txn_closed;      /**< Transactions closed. */
+    uint64_t pk_ops;          /**< Primary-key operations. */
+    uint64_t uk_ops;          /**< Unique-key operations. */
+    uint64_t table_scans;     /**< Full table scans. */
+    uint64_t range_scans;     /**< Ordered-index range scans. */
+    uint64_t read_rows;       /**< Rows returned to the API. */
+    uint64_t client_objects;  /**< Ndb objects aggregated into the sums. */
+};
+
+/** Sum the NDB API client counters across every Ndb object owned by
+ *  @p handle.  Counter reads are relaxed (no locking against concurrent
+ *  mutators beyond the pool registry lock): values may lag in-flight
+ *  operations by a few counts, which is acceptable for monitoring and
+ *  before/after workload sampling.  Returns 0 on success, -1 on error. */
+int rondb_shim_client_stats(void *handle, struct rondb_client_stats *out);
+
+/**
  * Phase 4 feature flag plumbing.  Toggle whether ns_create and
  * ns_remove should route through the rondb_async_exec batch
  * pipeline (executeAsynchPrepare + sendPreparedTransactions driven
@@ -602,6 +643,26 @@ int rondb_shim_layout_state_put(void *handle,
                                 uint32_t iomode, uint64_t offset,
                                 uint64_t length, uint32_t seqid,
                                 const uint32_t *ds_ids, uint32_t ds_count);
+
+/** Renewal union-put for mds_layout_state.
+ *
+ *  One NDB transaction: reads the row under an exclusive lock, unions
+ *  the byte range with (offset, length) via
+ *  layout_range_union_saturating, keeps the seqid monotonic
+ *  (max(row, new)), and updates in place -- so concurrent renewals
+ *  cannot lose ranges or regress the seqid, and the row stays a
+ *  superset of every range granted under the stateid (recall-coverage
+ *  invariant).  When the row is absent (first grant with this stateid,
+ *  or post-restart renewal), falls back internally to the full
+ *  rondb_shim_layout_state_put insert.
+ *  Returns 0 on success, -1 on error, -2 transient-exhausted. */
+int rondb_shim_layout_state_union_put(void *handle,
+                                      const uint8_t stateid_other[12],
+                                      uint64_t clientid, uint64_t fileid,
+                                      uint32_t iomode, uint64_t offset,
+                                      uint64_t length, uint32_t seqid,
+                                      const uint32_t *ds_ids,
+                                      uint32_t ds_count);
 
 /** Phase 2: Fused stripe_get + layout_grant in one NDB transaction.
  *  Reads stripe map header+entries, then writes layout_state + indexes,

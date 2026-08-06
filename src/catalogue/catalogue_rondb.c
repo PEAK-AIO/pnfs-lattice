@@ -2343,6 +2343,41 @@ static enum mds_status catalogue_rondb_gc_peek_batch(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
+/* Backend client-side counters: 1:1 copy from the NDB API per-object
+ * statistics summed by the shim.  Zero hot-path cost -- the client
+ * library maintains the counters on every operation anyway. */
+static enum mds_status catalogue_rondb_backend_client_stats(
+	struct mds_catalogue *cat,
+	struct mds_cat_backend_client_stats *out)
+{
+	void *h = rondb_handle(cat);
+	struct rondb_client_stats cs;
+
+	if (h == NULL || out == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	if (rondb_shim_client_stats(h, &cs) != 0) {
+		return MDS_ERR_IO;
+	}
+	out->exec_waits     = cs.exec_waits;
+	out->scan_waits     = cs.scan_waits;
+	out->meta_waits     = cs.meta_waits;
+	out->wait_nanos     = cs.wait_nanos;
+	out->bytes_sent     = cs.bytes_sent;
+	out->bytes_recvd    = cs.bytes_recvd;
+	out->txn_started    = cs.txn_started;
+	out->txn_committed  = cs.txn_committed;
+	out->txn_aborted    = cs.txn_aborted;
+	out->txn_closed     = cs.txn_closed;
+	out->pk_ops         = cs.pk_ops;
+	out->uk_ops         = cs.uk_ops;
+	out->table_scans    = cs.table_scans;
+	out->range_scans    = cs.range_scans;
+	out->read_rows      = cs.read_rows;
+	out->client_objects = cs.client_objects;
+	return MDS_OK;
+}
+
 /* -----------------------------------------------------------------------
  * DS prealloc pool wrappers
  * ----------------------------------------------------------------------- */
@@ -2562,6 +2597,32 @@ static enum mds_status catalogue_rondb_layout_grant(
 					 iomode, offset, length,
 					 stateid->seqid,
 					 ds_ids, ds_count);
+	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
+}
+
+/* Renewal union-put: keeps the persisted row a superset of every
+ * range granted under the stateid (recall-coverage invariant).  See
+ * rondb_shim_layout_state_union_put for the transaction shape. */
+static enum mds_status catalogue_rondb_layout_grant_union(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t clientid, uint64_t fileid, uint32_t iomode,
+	uint64_t offset, uint64_t length,
+	const struct nfs4_stateid *stateid,
+	const uint32_t *ds_ids, uint32_t ds_count)
+{
+	void *h = rondb_handle(cat);
+	int rc;
+
+	(void)txn;
+	if (h == NULL || stateid == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	rc = rondb_shim_layout_state_union_put(h, stateid->other,
+					       clientid, fileid,
+					       iomode, offset, length,
+					       stateid->seqid,
+					       ds_ids, ds_count);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -3958,6 +4019,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
 	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
 	.prealloc_pool_scan   = catalogue_rondb_prealloc_pool_scan,
+	.backend_client_stats = catalogue_rondb_backend_client_stats,
 };
 
 /* -----------------------------------------------------------------------
@@ -4052,6 +4114,7 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.prealloc_pool_insert = catalogue_rondb_prealloc_pool_insert,
 	.prealloc_pool_delete = catalogue_rondb_prealloc_pool_delete,
 	.prealloc_pool_scan   = catalogue_rondb_prealloc_pool_scan,
+	.backend_client_stats = catalogue_rondb_backend_client_stats,
 	.ns_parent_touch         = rondb_auth_ns_parent_touch,
 	.remove_pending_enqueue    = catalogue_rondb_remove_pending_enqueue,
 	.remove_pending_enqueue_unlink = catalogue_rondb_remove_pending_enqueue_unlink,
@@ -4280,6 +4343,7 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 	.journal_del             = catalogue_rondb_journal_del,
 	.journal_scan            = catalogue_rondb_journal_scan,
 	.layout_grant            = catalogue_rondb_layout_grant,
+	.layout_grant_union      = catalogue_rondb_layout_grant_union,
 	.layout_return           = catalogue_rondb_layout_return,
 	.layout_get_by_stateid   = catalogue_rondb_layout_get_by_stateid,
 	.layout_scan_for_file    = catalogue_rondb_layout_scan_for_file,

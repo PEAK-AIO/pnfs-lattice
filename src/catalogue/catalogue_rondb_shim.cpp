@@ -20,6 +20,8 @@
 
 #include <ndbapi/NdbApi.hpp>
 
+#include "layout_range.h"  /* layout_range_union_saturating */
+
 #include <algorithm>
 #include <condition_variable>
 #include <unordered_map>
@@ -991,6 +993,63 @@ void rondb_shim_set_async_writes(void *handle, int enabled)
     }
     state->async_writes.store(enabled != 0,
                               std::memory_order_release);
+}
+
+/* Accumulate one Ndb object's client counters into *out.  getClientStat
+ * reads plain per-object counters the NDB client library maintains on
+ * every operation anyway; reading them from the metrics thread while
+ * the owning worker thread mutates them is a benign monitoring race
+ * (values may lag by in-flight operations). */
+static void rondb_accumulate_client_stats(const Ndb *ndb,
+                                          struct rondb_client_stats *out)
+{
+    if (ndb == nullptr) {
+        return;
+    }
+    out->exec_waits    += ndb->getClientStat(Ndb::WaitExecCompleteCount);
+    out->scan_waits    += ndb->getClientStat(Ndb::WaitScanResultCount);
+    out->meta_waits    += ndb->getClientStat(Ndb::WaitMetaRequestCount);
+    out->wait_nanos    += ndb->getClientStat(Ndb::WaitNanosCount);
+    out->bytes_sent    += ndb->getClientStat(Ndb::BytesSentCount);
+    out->bytes_recvd   += ndb->getClientStat(Ndb::BytesRecvdCount);
+    out->txn_started   += ndb->getClientStat(Ndb::TransStartCount);
+    out->txn_committed += ndb->getClientStat(Ndb::TransCommitCount);
+    out->txn_aborted   += ndb->getClientStat(Ndb::TransAbortCount);
+    out->txn_closed    += ndb->getClientStat(Ndb::TransCloseCount);
+    out->pk_ops        += ndb->getClientStat(Ndb::PkOpCount);
+    out->uk_ops        += ndb->getClientStat(Ndb::UkOpCount);
+    out->table_scans   += ndb->getClientStat(Ndb::TableScanCount);
+    out->range_scans   += ndb->getClientStat(Ndb::RangeScanCount);
+    out->read_rows     += ndb->getClientStat(Ndb::ReadRowCount);
+    out->client_objects++;
+}
+
+int rondb_shim_client_stats(void *handle, struct rondb_client_stats *out)
+{
+    rondb_shim_handle *state =
+        static_cast<rondb_shim_handle *>(handle);
+
+    if (state == nullptr || out == nullptr) {
+        return -1;
+    }
+    std::memset(out, 0, sizeof(*out));
+
+    /* Thread-local worker Ndb objects.  The registry lock only guards
+     * the vector itself; see rondb_accumulate_client_stats for the
+     * counter-read race rationale. */
+    {
+        std::lock_guard<std::mutex> lock(state->pool_mutex);
+        for (const Ndb *ndb : state->pool_all) {
+            rondb_accumulate_client_stats(ndb, out);
+        }
+    }
+
+    /* Async pipeline Ndb objects (one per connection when armed). */
+    for (int ci = 0; ci < state->conn_count; ci++) {
+        rondb_accumulate_client_stats(state->conn_ctxs[ci].ndb, out);
+    }
+
+    return 0;
 }
 
 /* -----------------------------------------------------------------------
@@ -11007,6 +11066,168 @@ layout_put_once_err:
     rondb_get_ndb(state)->closeTransaction(tx);
     if (err.code == 266 || err.code == 274) { return err.code; }
     return rondb_report_error(err, "layout_put op");
+}
+
+/*
+ * Renewal union-put (single NDB transaction).
+ *
+ * Reads the layout_state row under an exclusive lock, unions the byte
+ * range with the caller's window, keeps the seqid monotonic and the
+ * iomode RW-dominant, then updates in place.  The exclusive read makes
+ * concurrent renewals of the same stateid serialize at the data node,
+ * so no interleaving can lose a range or regress the seqid.
+ *
+ * Returns 0 on success, 3 when the row is absent (caller falls back to
+ * the full insert), 266/274 on retryable NDB errors, -1 on hard error.
+ */
+static int rondb_shim_layout_state_union_once(
+    void *handle,
+    const uint8_t sid_enc[14], uint32_t sid_enc_len,
+    uint64_t clientid, uint64_t fileid,
+    uint32_t iomode, uint64_t offset, uint64_t length, uint32_t seqid)
+{
+    rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
+    NdbDictionary::Dictionary *dict;
+    const NdbDictionary::Table *ls_tbl;
+    NdbTransaction *tx;
+    NdbOperation *op;
+    NdbRecAttr *a_off, *a_len, *a_seq, *a_mode;
+    NdbError err;
+    uint64_t u_off = 0;
+    uint64_t u_len = 0;
+    uint32_t u_seq;
+    uint32_t u_mode;
+
+    if (state == nullptr) { return -1; }
+    dict = rondb_get_dictionary(state);
+    if (dict == nullptr) { return -1; }
+    ls_tbl = dict->getTable(RONDB_TBL_LAYOUT_STATE);
+    if (ls_tbl == nullptr) { return -1; }
+
+    {
+        uint8_t pk_buf[8];
+        fdb_put_u64(pk_buf, fileid);
+        tx = rondb_get_ndb(state)->startTransaction(
+            ls_tbl, (const char *)pk_buf, 8);
+    }
+    if (tx == nullptr) {
+        err = rondb_get_ndb(state)->getNdbError();
+        if (err.code == 266 || err.code == 274) { return err.code; }
+        return rondb_report_error(err, "layout_union startTx");
+    }
+
+    op = tx->getNdbOperation(ls_tbl);
+    if (op == nullptr) { goto layout_union_err; }
+    op->readTuple(NdbOperation::LM_Exclusive);
+    (void)rondb_equal_u64(op, RONDB_LS_COL_FILEID, fileid);
+    op->equal(RONDB_LS_COL_STATEID, (const char *)sid_enc, sid_enc_len);
+    a_off  = op->getValue(RONDB_LS_COL_OFFSET, nullptr);
+    a_len  = op->getValue(RONDB_LS_COL_LENGTH, nullptr);
+    a_seq  = op->getValue(RONDB_LS_COL_SEQID, nullptr);
+    a_mode = op->getValue(RONDB_LS_COL_IOMODE, nullptr);
+    if (a_off == nullptr || a_len == nullptr ||
+        a_seq == nullptr || a_mode == nullptr) {
+        goto layout_union_err;
+    }
+
+    if (tx->execute(NdbTransaction::NoCommit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 626) { return 3; } /* row absent: full insert */
+        if (err.code == 266 || err.code == 274) { return err.code; }
+        return rondb_report_error(err, "layout_union read");
+    }
+    if (op->getNdbError().code == 626) {
+        rondb_get_ndb(state)->closeTransaction(tx);
+        return 3;
+    }
+
+    layout_range_union_saturating(a_off->u_64_value(),
+                                  a_len->u_64_value(),
+                                  offset, length,
+                                  &u_off, &u_len);
+    u_seq = rondb_u32_max(a_seq->u_32_value(), seqid);
+    /* RW dominates: a stateid ever granted RW must keep advertising
+     * RW coverage to the recall scanner.  2 == LAYOUTIOMODE4_RW
+     * (compound.h / layout_types.h; both are C-only headers this
+     * C++ TU cannot include). */
+    {
+        const uint32_t k_iomode_rw = 2U;
+
+        u_mode = (a_mode->u_32_value() == k_iomode_rw ||
+                  iomode == k_iomode_rw)
+                 ? k_iomode_rw : iomode;
+    }
+
+    op = tx->getNdbOperation(ls_tbl);
+    if (op == nullptr) { goto layout_union_err; }
+    op->updateTuple();
+    (void)rondb_equal_u64(op, RONDB_LS_COL_FILEID, fileid);
+    op->equal(RONDB_LS_COL_STATEID, (const char *)sid_enc, sid_enc_len);
+    (void)rondb_set_value_u64(op, RONDB_LS_COL_CLIENTID, clientid);
+    op->setValue(RONDB_LS_COL_IOMODE, u_mode);
+    (void)rondb_set_value_u64(op, RONDB_LS_COL_OFFSET, u_off);
+    (void)rondb_set_value_u64(op, RONDB_LS_COL_LENGTH, u_len);
+    op->setValue(RONDB_LS_COL_SEQID, u_seq);
+
+    if (tx->execute(NdbTransaction::Commit) == -1) {
+        err = tx->getNdbError();
+        rondb_get_ndb(state)->closeTransaction(tx);
+        if (err.code == 266 || err.code == 274) { return err.code; }
+        return rondb_report_error(err, "layout_union commit");
+    }
+    rondb_get_ndb(state)->closeTransaction(tx);
+    return 0;
+
+layout_union_err:
+    err = tx->getNdbError();
+    rondb_get_ndb(state)->closeTransaction(tx);
+    if (err.code == 266 || err.code == 274) { return err.code; }
+    return rondb_report_error(err, "layout_union op");
+}
+
+int rondb_shim_layout_state_union_put(void *handle,
+                                      const uint8_t stateid_other[12],
+                                      uint64_t clientid, uint64_t fileid,
+                                      uint32_t iomode, uint64_t offset,
+                                      uint64_t length, uint32_t seqid,
+                                      const uint32_t *ds_ids,
+                                      uint32_t ds_count)
+{
+    uint8_t sid_enc[14];
+    uint32_t sid_enc_len = 0;
+    int rc = -1;
+
+    if (handle == nullptr || stateid_other == nullptr) { return -1; }
+    if (rondb_encode_varbinary_value(stateid_other, 12, 1U,
+                                     sid_enc, sizeof(sid_enc),
+                                     &sid_enc_len) != 0) {
+        return -1;
+    }
+
+    for (int attempt = 0; attempt < NDB_RETRY_MAX; attempt++) {
+        rc = rondb_shim_layout_state_union_once(
+                handle, sid_enc, sid_enc_len,
+                clientid, fileid, iomode, offset, length, seqid);
+        if (rc == 0) { return 0; }
+        if (rc == 3) {
+            /* Row absent (first grant with this stateid, or a
+             * post-restart renewal): full insert, which also lays
+             * down the layout_by_file row and the best-effort
+             * ds_layout_idx rows. */
+            return rondb_shim_layout_state_put(handle, stateid_other,
+                                               clientid, fileid,
+                                               iomode, offset, length,
+                                               seqid, ds_ids, ds_count);
+        }
+        if (rc != 266 && rc != 274) { return rc; }
+        struct timespec _ts;
+        _ts.tv_sec  = 0;
+        _ts.tv_nsec = (long)(NDB_RETRY_DELAY_US * (attempt + 1)
+                             + rondb_retry_jitter_us()) * 1000L;
+        nanosleep(&_ts, nullptr);
+    }
+    return -2;  /* exhausted retries */
 }
 
 /* Best-effort post-commit write of ds_layout_idx rows.  Decoupled from

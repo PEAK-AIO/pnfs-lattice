@@ -360,6 +360,14 @@ struct mds_authority_ops {
         const char *name);
     enum mds_status (*link_anchor_del)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t anchor_id);
+
+    /** Optional: backend client-side behaviour counters (cumulative
+     * round trips, transactions, bytes -- see
+     * struct mds_cat_backend_client_stats).  Leave NULL when the
+     * backend has no client instrumentation; the dispatch wrapper
+     * then returns MDS_ERR_NOSUPPORT. */
+    enum mds_status (*backend_client_stats)(struct mds_catalogue *cat,
+        struct mds_cat_backend_client_stats *out);
 };
 
 /* -----------------------------------------------------------------------
@@ -383,6 +391,18 @@ struct mds_coordination_ops {
         mds_coord_journal_scan_cb cb, void *ctx);
     /* Layout state */
     enum mds_status (*layout_grant)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t clientid,
+        uint64_t fileid, uint32_t iomode,
+        uint64_t offset, uint64_t length,
+        const struct nfs4_stateid *stateid,
+        const uint32_t *ds_ids, uint32_t ds_count);
+    /** Optional renewal variant: persist the saturating UNION of the
+     * existing row's byte range and the new window (monotonic seqid)
+     * so the row stays a superset of every range granted under the
+     * stateid (recall-coverage invariant).  Leave NULL when the
+     * backend has no read-modify-write path; the dispatch wrapper
+     * then falls back to the plain layout_grant overwrite. */
+    enum mds_status (*layout_grant_union)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t clientid,
         uint64_t fileid, uint32_t iomode,
         uint64_t offset, uint64_t length,
