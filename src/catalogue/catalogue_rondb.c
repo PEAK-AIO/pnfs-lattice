@@ -844,6 +844,111 @@ enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
+enum mds_status catalogue_rondb_ns_remove_known_gc(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid, const char *name,
+	const struct mds_inode *child, uint32_t stripe_count,
+	const struct mds_ds_map_entry *gc_entries,
+	uint32_t gc_entry_count,
+	bool *gc_folded)
+{
+	void *h = rondb_handle(cat);
+	struct mds_inode child_ino;
+	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
+	struct rondb_gc_row *rows;
+	int delete_child;
+	int32_t parent_nlink_delta;
+	struct timespec now;
+	int rc;
+
+	if (gc_folded != NULL) {
+		*gc_folded = false;
+	}
+	if (h == NULL || name == NULL || child == NULL ||
+	    gc_folded == NULL ||
+	    (gc_entry_count > 0 && gc_entries == NULL)) {
+		return MDS_ERR_INVAL;
+	}
+
+	/* Same nlink/timestamp preparation as the plain known-remove. */
+	child_ino = *child;
+	clock_gettime(CLOCK_REALTIME, &now);
+	if (child_ino.nlink > 0) {
+		child_ino.nlink--;
+	}
+	child_ino.ctime = now;
+	child_ino.change++;
+	delete_child = (child_ino.nlink == 0) ? 1 : 0;
+	parent_nlink_delta =
+		(child_ino.type == MDS_FTYPE_DIR) ? -1 : 0;
+
+	/* A fold is only meaningful on a final unlink with DS objects
+	 * to reclaim; otherwise the plain known-remove is exactly
+	 * equivalent (and skips the row plumbing). */
+	if (!delete_child || gc_entry_count == 0) {
+		return catalogue_rondb_ns_remove_known(cat, parent_fileid,
+						       name, child,
+						       stripe_count);
+	}
+
+	if (rondb_inode_serialize(&child_ino, 0,
+				  child_buf, sizeof(child_buf)) < 0) {
+		return MDS_ERR_IO;
+	}
+
+	rows = calloc(gc_entry_count, sizeof(*rows));
+	if (rows == NULL) {
+		return MDS_ERR_NOMEM;
+	}
+	for (uint32_t i = 0; i < gc_entry_count; i++) {
+		uint64_t seq = 0;
+
+		if (rondb_shim_gc_seq_alloc(h, &seq) != 0) {
+			/* Seq minting failed (block refill hit the
+			 * counter row and errored).  Report NOSUPPORT so
+			 * the caller transparently degrades to the legacy
+			 * split path -- the remove itself must not fail
+			 * because the fold was unavailable. */
+			free(rows);
+			return MDS_ERR_NOSUPPORT;
+		}
+		rows[i].gc_seq = seq;
+		rows[i].ds_id = gc_entries[i].ds_id;
+		rows[i].fh_len =
+			(gc_entries[i].nfs_fh_len > MDS_NFS_FH_MAX)
+			? MDS_NFS_FH_MAX : gc_entries[i].nfs_fh_len;
+		rows[i].nfs_fh = gc_entries[i].nfs_fh;
+	}
+
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_remove_gc(h, parent_fileid, name,
+					     child_ino.fileid,
+					     child_buf,
+					     RONDB_INODE_FIXED_SIZE,
+					     delete_child,
+					     parent_nlink_delta,
+					     stripe_count,
+					     rows, gc_entry_count,
+					     rondb_self_mds_id(cat));
+		if (rc != -2) { break; }
+		rondb_transient_backoff(attempt);
+	}
+	free(rows);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc == -2) {
+		return MDS_ERR_DELAY;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	*gc_folded = true;
+	catalog_stat_inc(&cat->stats.authority_writes);
+	return MDS_OK;
+}
+
 enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
 					   uint64_t fileid,
 					   const struct mds_inode *attrs,
@@ -2907,6 +3012,19 @@ static enum mds_status rondb_auth_ns_remove_known(
 					       stripe_count);
 }
 
+static enum mds_status rondb_auth_ns_remove_known_gc(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t parent, const char *name,
+	const struct mds_inode *child, uint32_t stripe_count,
+	const struct mds_ds_map_entry *gc_entries,
+	uint32_t gc_entry_count, bool *gc_folded)
+{
+	(void)txn;
+	return catalogue_rondb_ns_remove_known_gc(cat, parent, name, child,
+						  stripe_count, gc_entries,
+						  gc_entry_count, gc_folded);
+}
+
 
 /* parent_touch flush: one interpreted update on the parent inode row
  * (change += delta, mtime/ctime = stamp).  rc==1 (row gone: the
@@ -3699,6 +3817,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
+	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
 	.ns_parent_touch         = rondb_auth_ns_parent_touch,
 	.ns_rename         = rondb_auth_ns_rename,
 	.remove_pending_enqueue    = catalogue_rondb_remove_pending_enqueue,
@@ -3801,6 +3920,7 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
+	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
 	.ns_rename         = rondb_locked_ns_rename,
 	.ns_link           = rondb_auth_ns_link,
 	.ns_lookup         = catalogue_rondb_ns_lookup,

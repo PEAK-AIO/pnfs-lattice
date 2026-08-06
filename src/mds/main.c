@@ -1248,6 +1248,10 @@ if (s_pt != NULL) {
 			       &session_tbl) == 0) {
 
 		session_table_set_cat(session_tbl, cat);
+		if (cfg.session_fore_slots > 0) {
+			session_table_set_max_fore_slots(
+				session_tbl, cfg.session_fore_slots);
+		}
 		if (cq != NULL) {
 			session_table_set_cq(session_tbl, cq);
 		}

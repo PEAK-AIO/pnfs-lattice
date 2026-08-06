@@ -253,6 +253,34 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
         cat->auth_ops->ns_remove(cat, txn, parent_fileid, name));
 }
 
+enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
+                                           struct mds_cat_txn *txn,
+                                           uint64_t parent_fileid,
+                                           const char *name,
+                                           const struct mds_inode *child,
+                                           uint32_t stripe_count,
+                                           const struct mds_ds_map_entry *gc_entries,
+                                           uint32_t gc_entry_count,
+                                           bool *gc_folded)
+{
+    if (gc_folded != NULL) {
+        *gc_folded = false;
+    }
+    if (cat == NULL || cat->auth_ops == NULL || child == NULL ||
+        gc_folded == NULL ||
+        (gc_entry_count > 0 && gc_entries == NULL)) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->ns_remove_known_gc == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return CAT_TIMED(MDS_CATOP_NS_REMOVE,
+        cat->auth_ops->ns_remove_known_gc(cat, txn, parent_fileid,
+                                          name, child, stripe_count,
+                                          gc_entries, gc_entry_count,
+                                          gc_folded));
+}
+
 enum mds_status mds_cat_ns_parent_touch(struct mds_catalogue *cat,
                                         uint64_t fileid,
                                         uint64_t change_delta,

@@ -332,6 +332,42 @@ int rondb_shim_ns_remove_full(void *handle,
                               uint8_t *out_child_type,
                               uint32_t *out_old_nlink);
 
+/** One pre-minted mds_gc_queue row for the fused REMOVE+GC path.
+ *  gc_seq must come from rondb_shim_gc_seq_alloc (block-cached, so
+ *  minting is an in-memory operation in steady state). */
+struct rondb_gc_row {
+    uint64_t       gc_seq;
+    uint32_t       ds_id;
+    uint32_t       fh_len;   /**< 0..MDS_NFS_FH_MAX */
+    const uint8_t *nfs_fh;   /**< May be NULL when fh_len == 0. */
+};
+
+/** Atomic REMOVE + GC enqueue.
+ *
+ *  Identical to rondb_shim_ns_remove, but additionally inserts the
+ *  caller's mds_gc_queue rows in the SAME NDB transaction as the
+ *  namespace remove.  A committed final unlink therefore always has
+ *  its DS objects queued for collection: the separate gc_enqueue
+ *  commit (one NDB round-trip per unique DS) and the crash window
+ *  between the remove commit and the enqueue commit are both gone.
+ *
+ *  On the duplicate-REMOVE race (dirent already deleted, NDB 626)
+ *  the transaction is a no-op success and no rows are inserted --
+ *  the earlier winning remove already queued them.
+ *
+ *  Returns 0 on success, -1 on error, -2 transient-exhausted. */
+int rondb_shim_ns_remove_gc(void *handle,
+                            uint64_t parent_fileid, const char *name,
+                            uint64_t child_fileid,
+                            const uint8_t *child_inode_buf,
+                            uint32_t child_ino_len,
+                            int delete_child,
+                            int32_t parent_nlink_delta,
+                            uint32_t stripe_count,
+                            const struct rondb_gc_row *gc_rows,
+                            uint32_t gc_row_count,
+                            uint32_t owner_mds_id);
+
 /** Readdir callback for shim -- called per dirent found.
  *  Return 0 to continue, non-zero to stop. */
 typedef int (*rondb_readdir_cb)(uint64_t child_fileid,
@@ -936,6 +972,22 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
     uint32_t layout_mds_id,
     bool *layout_ok,
     struct mds_ds_map_entry *layout_entry_out);
+
+/** Fused final-unlink: ns_remove_known semantics PLUS the caller's
+ *  unique-DS mds_gc_queue rows committed in the same NDB transaction.
+ *  On success *gc_folded reports whether the rows were folded in
+ *  (false when the remove degenerated to a plain known-remove, e.g.
+ *  hardlink nlink > 1).  Falls back internally to the plain
+ *  known-remove when there is nothing to fold.  Returns
+ *  MDS_ERR_NOSUPPORT when the fold cannot be attempted (e.g. gc_seq
+ *  minting failed) so the caller can run the legacy split path. */
+enum mds_status catalogue_rondb_ns_remove_known_gc(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid, const char *name,
+    const struct mds_inode *child, uint32_t stripe_count,
+    const struct mds_ds_map_entry *gc_entries,
+    uint32_t gc_entry_count,
+    bool *gc_folded);
 
 /**
  * Run RonDB bootstrap via the catalogue handle.

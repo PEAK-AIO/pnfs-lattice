@@ -763,6 +763,14 @@ struct mds_config {
      * values let clients with few connections but many session slots
      * use more of the worker pool. */
     uint32_t            max_inflight_per_conn;
+    /* Forechannel slot negotiation cap for CREATE_SESSION (RFC 8881
+     * §18.36.4 ca_maxrequests).  0 = session-layer default (64).
+     * Each session slot admits one in-flight COMPOUND, so this caps
+     * per-client metadata concurrency; hosts running many I/O
+     * processes over a single mount need more slots.  Clamped by the
+     * session layer to its hard ceiling (512); per-slot memory notes
+     * live on SESSION_FORE_SLOTS_CEILING in session.h. */
+    uint32_t            session_fore_slots;
     uint32_t            ds_heartbeat_ms;
     uint32_t            stripe_unit_bytes;
     bool                auto_widen_lease_on_4k;

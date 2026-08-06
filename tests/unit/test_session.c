@@ -342,6 +342,83 @@ static void test_create_session_slot_cap(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Test: CREATE_SESSION — configurable forechannel slot cap
+ * (session_fore_slots / session_table_set_max_fore_slots)
+ * ----------------------------------------------------------------------- */
+
+static void test_create_session_slot_cap_configured(void)
+{
+	struct session_table *st = NULL;
+	uint64_t clientid = 0;
+	uint32_t seqid = 0;
+	uint8_t session_id[SESSION_ID_SIZE];
+	uint32_t fore = 0, back = 0;
+
+	/* Raised cap: an over-asking client is clamped to the cap. */
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	session_table_set_max_fore_slots(st, 512);
+
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
+	ASSERT_EQ(session_create_session(st, clientid, seqid,
+					 9999, 4,
+					 0, 0,
+					 0, 0,
+					 0, 0,
+					 1, /* minorversion */
+					 0, 0, 0,
+					 session_id, &fore, &back, NULL, NULL), 0);
+	ASSERT_EQ(fore, 512);
+	session_table_destroy(st);
+
+	/* Ceiling clamp + reset-to-default: values above
+	 * SESSION_FORE_SLOTS_CEILING clamp to the ceiling, and 0
+	 * restores the built-in default.  A modest client request
+	 * under a high cap is honoured verbatim. */
+	st = NULL;
+	clientid = 0;
+	seqid = 0;
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	session_table_set_max_fore_slots(st, 4096); /* clamps to 512 */
+
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
+	ASSERT_EQ(session_create_session(st, clientid, seqid,
+					 32, 4,
+					 0, 0,
+					 0, 0,
+					 0, 0,
+					 1, /* minorversion */
+					 0, 0, 0,
+					 session_id, &fore, &back, NULL, NULL), 0);
+	ASSERT_EQ(fore, 32);
+	session_table_destroy(st);
+
+	st = NULL;
+	clientid = 0;
+	seqid = 0;
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st), 0);
+	session_table_set_max_fore_slots(st, 512);
+	session_table_set_max_fore_slots(st, 0); /* reset to default */
+
+	ASSERT_EQ(session_exchange_id(st, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &clientid, &seqid, NULL, 0, 0, 0), 0);
+	ASSERT_EQ(session_create_session(st, clientid, seqid,
+					 9999, 4,
+					 0, 0,
+					 0, 0,
+					 0, 0,
+					 1, /* minorversion */
+					 0, 0, 0,
+					 session_id, &fore, &back, NULL, NULL), 0);
+	ASSERT_EQ(fore, SESSION_MAX_SLOTS);
+	session_table_destroy(st);
+}
+
+/* -----------------------------------------------------------------------
  * Test: DESTROY_SESSION — success
  * ----------------------------------------------------------------------- */
 
@@ -1326,6 +1403,7 @@ int main(void)
 	RUN_TEST(test_create_session_stale_clientid);
 	RUN_TEST(test_create_session_bad_seqid);
 	RUN_TEST(test_create_session_slot_cap);
+	RUN_TEST(test_create_session_slot_cap_configured);
 	RUN_TEST(test_destroy_session);
 	RUN_TEST(test_sequence_valid);
 	RUN_TEST(test_sequence_replay);

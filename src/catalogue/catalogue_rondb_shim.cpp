@@ -7974,12 +7974,16 @@ static int rondb_shim_ns_remove_once(void *handle,
                          const uint8_t *child_inode_buf, uint32_t child_ino_len,
                          int delete_child,
                          int32_t parent_nlink_delta,
-                         uint32_t stripe_count)
+                         uint32_t stripe_count,
+                         const struct rondb_gc_row *gc_rows,
+                         uint32_t gc_row_count,
+                         uint32_t owner_mds_id)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
     const NdbDictionary::Table *ino_tbl, *dir_tbl;
     const NdbDictionary::Table *sm_hdr_tbl, *sm_ent_tbl;
+    const NdbDictionary::Table *gc_tbl = nullptr;
     NdbTransaction *tx;
     NdbOperation *op_dirent, *op_child;
     NdbError err;
@@ -7993,6 +7997,18 @@ static int rondb_shim_ns_remove_once(void *handle,
     if (state == nullptr || name == nullptr ||
         child_inode_buf == nullptr) {
         return -1;
+    }
+    /* Validate the fused GC rows BEFORE the transaction starts so a
+     * malformed row can never abort a half-built remove txn. */
+    if (gc_row_count > 0) {
+        if (gc_rows == nullptr) { return -1; }
+        for (uint32_t gi = 0; gi < gc_row_count; gi++) {
+            if (gc_rows[gi].fh_len > MDS_NFS_FH_MAX ||
+                (gc_rows[gi].fh_len > 0 &&
+                 gc_rows[gi].nfs_fh == nullptr)) {
+                return -1;
+            }
+        }
     }
     if (rondb_encode_varbinary_string(name, 1U,
                                       name_value, sizeof(name_value),
@@ -8012,6 +8028,10 @@ static int rondb_shim_ns_remove_once(void *handle,
     if (ino_tbl == nullptr || dir_tbl == nullptr) { return -1; }
     sm_hdr_tbl = dict->getTable(RONDB_TBL_STRIPE_MAPS);
     sm_ent_tbl = dict->getTable(RONDB_TBL_STRIPE_ENTRIES);
+    if (gc_row_count > 0) {
+        gc_tbl = dict->getTable(RONDB_TBL_GC_QUEUE);
+        if (gc_tbl == nullptr) { return -1; }
+    }
 
     /* v9: a single-stripe inode carries its DS entry inline -- there are no
      * mds_stripe_maps/entries rows to read the count from or to delete, so
@@ -8112,6 +8132,47 @@ static int rondb_shim_ns_remove_once(void *handle,
         }
     }
 
+    /* 4. Fused GC enqueue: insert the caller's pre-minted
+     * mds_gc_queue rows in the SAME transaction as the namespace
+     * remove.  A committed final unlink therefore always has its DS
+     * objects queued -- the separate gc_enqueue commit (one NDB
+     * round-trip per unique DS) and its crash window are gone.
+     * Rows were validated before the transaction started; the same
+     * varbinary encoding as rondb_shim_gc_enqueue applies.  NDB
+     * copies attribute values at setValue() time, so the loop-local
+     * encode buffer does not need to outlive the iteration. */
+    for (uint32_t gi = 0; gi < gc_row_count; gi++) {
+        uint8_t fh_enc[MDS_NFS_FH_MAX + 2];
+        uint32_t fh_enc_len = 0;
+        uint32_t fh_len = gc_rows[gi].fh_len;
+        NdbOperation *gop;
+
+        if (fh_len > 0) {
+            if (rondb_encode_varbinary_value(gc_rows[gi].nfs_fh,
+                                             fh_len, 1U,
+                                             fh_enc, sizeof(fh_enc),
+                                             &fh_enc_len) != 0) {
+                goto ns_remove_err;
+            }
+        } else {
+            fh_enc[0] = 0;
+            fh_enc_len = 1;
+        }
+
+        gop = tx->getNdbOperation(gc_tbl);
+        if (gop == nullptr) { goto ns_remove_err; }
+        gop->insertTuple();
+        (void)rondb_set_value_u64(gop, RONDB_GC_COL_SEQ,
+                                  gc_rows[gi].gc_seq);
+        (void)rondb_set_value_u64(gop, RONDB_GC_COL_FILEID,
+                                  child_fileid);
+        gop->setValue(RONDB_GC_COL_DS_ID, (Uint32)gc_rows[gi].ds_id);
+        gop->setValue(RONDB_GC_COL_NFS_FH_LEN, (Uint32)fh_len);
+        gop->setValue(RONDB_GC_COL_NFS_FH,
+                      (const char *)fh_enc, fh_enc_len);
+        gop->setValue(RONDB_GC_COL_OWNER_MDS, (Uint32)owner_mds_id);
+    }
+
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
         rondb_get_ndb(state)->closeTransaction(tx);
@@ -8124,7 +8185,9 @@ static int rondb_shim_ns_remove_once(void *handle,
          * condition (name absent) already holds, so this is an
          * idempotent success, not an I/O error. Mirrors the idempotency
          * ds_gc already relies on and stops the client-visible
-         * "unlink() failed" reports without leaving orphaned state. */
+         * "unlink() failed" reports without leaving orphaned state.
+         * Fused GC rows (if any) were aborted with the transaction;
+         * the earlier winning remove already queued its own. */
         if (err.code == 626) { return 0; }
         return rondb_report_error(err, "ns_remove commit");
     }
@@ -8148,11 +8211,31 @@ int rondb_shim_ns_remove(void *handle,
                          int32_t parent_nlink_delta,
                          uint32_t stripe_count)
 {
+    return rondb_shim_ns_remove_gc(handle, parent_fileid, name,
+                                   child_fileid, child_inode_buf,
+                                   child_ino_len, delete_child,
+                                   parent_nlink_delta, stripe_count,
+                                   nullptr, 0, 0);
+}
+
+int rondb_shim_ns_remove_gc(void *handle,
+                            uint64_t parent_fileid, const char *name,
+                            uint64_t child_fileid,
+                            const uint8_t *child_inode_buf,
+                            uint32_t child_ino_len,
+                            int delete_child,
+                            int32_t parent_nlink_delta,
+                            uint32_t stripe_count,
+                            const struct rondb_gc_row *gc_rows,
+                            uint32_t gc_row_count,
+                            uint32_t owner_mds_id)
+{
     for (int attempt = 0; attempt < NDB_RETRY_MAX; attempt++) {
         int rc = rondb_shim_ns_remove_once(
                 handle, parent_fileid, name,
                 child_fileid, child_inode_buf, child_ino_len,
-                delete_child, parent_nlink_delta, stripe_count);
+                delete_child, parent_nlink_delta, stripe_count,
+                gc_rows, gc_row_count, owner_mds_id);
         if (rc == 0) { return 0; }
         if (rc != 266 && rc != 274) { return rc; }
         struct timespec _ts;

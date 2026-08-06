@@ -203,6 +203,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->catalogue_backend = MDS_BACKEND_RONDB;
     cfg->worker_threads = 16;
     cfg->max_inflight_per_conn = 0;  /* 0 = RPC_DEFAULT_MAX_INFLIGHT (8) */
+    cfg->session_fore_slots = 0;     /* 0 = session-layer default (64) */
     cfg->repl_mode = MDS_REPL_SYNC;
     cfg->self_role = 0;                 /* NODE_ACTIVE */
     cfg->self_failover_partner_id = 0;  /* no failover partner */
@@ -586,6 +587,16 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 (void)fprintf(stderr,
                     "WARN: max_inflight_per_conn=%lu out of range "
                     "(1..1024); using default\n", v);
+            }
+        } else if (strcmp(key, "session_fore_slots") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            /* 512 mirrors SESSION_FORE_SLOTS_CEILING (session.h). */
+            if (v >= 1 && v <= 512) {
+                cfg->session_fore_slots = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_fore_slots=%lu out of range "
+                    "(1..512); using default\n", v);
             }
         } else if (strcmp(key, "ds_heartbeat_ms") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
