@@ -24,6 +24,8 @@
 #include "test_helpers.h"
 #include "mds_shard.h"
 #include "subtree_map.h"
+#include "ds_cache.h"
+#include "xdr_codec.h"
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -1631,6 +1633,72 @@ static void test_putfh_invalid(void)
 	ASSERT_EQ(n, (uint32_t)2);
 	ASSERT_EQ(res[1].status, NFS4ERR_STALE);
 
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_getattr_space_gated_on_bitmap -- the SPACE_AVAIL/FREE/TOTAL
+ * sources (quota + ds_cache capacity aggregation) are consulted ONLY
+ * when the client's requested bitmap carries one of the three bits.
+ *
+ * A GETATTR that does not request SPACE_* must leave has_fs_space
+ * false even with a populated ds_cache wired in (the encoder would
+ * ignore the values anyway, so computing them is pure overhead on
+ * stat()-heavy workloads).  A GETATTR that requests SPACE_AVAIL gets
+ * the aggregated capacity as before.
+ * ----------------------------------------------------------------------- */
+
+static void test_getattr_space_gated_on_bitmap(void)
+{
+	struct mds_catalogue *db;
+	struct ds_cache *dsc = NULL;
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+
+	/* ds_id 1 is registered by seed_test_ds(); load it into a DS
+	 * cache and stamp fresh capacity so the aggregate is eligible
+	 * (passes the staleness gate). */
+	VERIFY(ds_cache_create(g_test_cat, &dsc) == 0);
+	VERIFY(ds_cache_set_capacity(dsc, 1, 1000000, 250000) == 0);
+
+	/* No SPACE_* bit requested: sources must not populate the
+	 * result. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.ds_cache = dsc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_getattr();
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.getattr.has_fs_space, false);
+
+	/* SPACE_AVAIL requested: aggregation runs and reports the
+	 * stamped DS capacity. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.ds_cache = dsc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_getattr();
+	nfs4_bitmap_set(ops[2].arg.getattr.requested, FATTR4_SPACE_AVAIL);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(res[2].res.getattr.has_fs_space, true);
+	ASSERT_EQ(res[2].res.getattr.space_total, (uint64_t)1000000);
+	ASSERT_EQ(res[2].res.getattr.space_avail, (uint64_t)750000);
+	ASSERT_EQ(res[2].res.getattr.space_free, (uint64_t)750000);
+
+	ds_cache_destroy(dsc);
 	close_test_db(db, path);
 }
 
@@ -4867,6 +4935,7 @@ int main(void)
 	fprintf(stdout, "Running compound dispatch tests:\n");
 
 	RUN_TEST(test_root_getattr);
+	RUN_TEST(test_getattr_space_gated_on_bitmap);
 	RUN_TEST(test_putrootfh_discards_stale_snapshot);
 	RUN_TEST(test_lookupp_discards_child_snapshot);
 	RUN_TEST(test_lookup_snapshot_cached_parent);

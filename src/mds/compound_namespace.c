@@ -751,7 +751,6 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	enum nfs4_status nst;
 	enum mds_status st;
 
-	(void)op;
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -807,8 +806,22 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	 * the probe has not produced a non-zero total yet) the
 	 * values stay at UINT64_MAX and the encoder takes over
 	 * (see encode_attr_vals SPACE_* clamping).
+	 *
+	 * Gated on the client's requested bitmap: the encoder only
+	 * serialises SPACE_AVAIL/FREE/TOTAL when the corresponding
+	 * bit was requested, so when none of the three bits are set
+	 * the quota lookup and the whole-fleet ds_cache capacity
+	 * aggregation below are pure waste.  stat()-heavy workloads
+	 * (mdtest, find) never request SPACE_*; skipping the
+	 * computation for them is wire-identical and removes a
+	 * per-GETATTR walk over every registered DS.
 	 */
-	{
+	if (nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_AVAIL) ||
+	    nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_FREE) ||
+	    nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_TOTAL)) {
 		uint64_t avail = UINT64_MAX;
 		uint64_t sfree = UINT64_MAX;
 		uint64_t total = UINT64_MAX;
