@@ -3,6 +3,28 @@
 All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **Async NDB write pipeline (Phase 4)** — setting
+  `ndb_async_writes = true` now routes single-commit creates
+  (`ns_create` and the fused create+layout) through the
+  per-connection async batch pipeline (`executeAsynchPrepare` +
+  `sendPreparedTransactions` + `pollNdb` driven by a flush thread),
+  so concurrent worker threads share NDB send/poll cycles instead of
+  serializing one `execute(Commit)` round trip each.  Per-request
+  semantics are unchanged: each caller still blocks until its own
+  transaction commits, and error mapping (EXISTS / retryable /
+  permanent) is identical to the synchronous path.
+
+### Changed
+- Per-connection NDB flush threads are now created lazily, only when
+  `ndb_async_writes = true` is set at startup.  With the flag off
+  (the default) no flush threads exist, removing the idle
+  send/poll cycle that previously ran every 10 ms per connection.
+  Armed flush threads also skip NDB API calls entirely while no
+  transaction is in flight.
+
 ## [v0.1.1-community] — 2026-05-02
 
 ### Added
