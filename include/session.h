@@ -35,7 +35,16 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
  * ----------------------------------------------------------------------- */
 
 #define SESSION_ID_SIZE      16
-#define SESSION_MAX_SLOTS    64   /* Max forechannel slots per session */
+#define SESSION_MAX_SLOTS    64   /* Default max forechannel slots per session */
+/*
+ * Hard ceiling for the configurable forechannel slot cap
+ * (session_fore_slots INI key -> session_table_set_max_fore_slots).
+ * Bounds per-session memory: the slot table costs
+ * num_slots * sizeof(struct nfs4_slot) up front, and each slot may
+ * lazily cache one DRC reply of up to ca_maxresponsesize_cached
+ * bytes.  The backchannel cap stays at SESSION_MAX_SLOTS.
+ */
+#define SESSION_FORE_SLOTS_CEILING 512
 #define CO_OWNERID_MAX       1024 /* RFC 8881 §18.35: co_ownerid<NFS4_OPAQUE_LIMIT> */
 #define NFS4_VERIFIER_SIZE   8
 
@@ -282,6 +291,28 @@ struct mds_shard;
 void session_table_set_shard(struct session_table *st,
 			     const struct mds_shard *shard);
 
+/**
+ * Set the forechannel slot negotiation cap for NEW sessions.
+ *
+ * CREATE_SESSION grants MIN(client_request, cap) forechannel slots.
+ * Raising the cap lets a single client session run more concurrent
+ * COMPOUNDs (hosts driving many I/O processes over one mount funnel
+ * all their metadata ops through one session's slot table).
+ *
+ * Memory: each granted slot costs sizeof(struct nfs4_slot) up front
+ * plus, lazily, one cached DRC reply of up to
+ * ca_maxresponsesizecached bytes.
+ *
+ * Call at startup before the table serves traffic; sessions that
+ * already exist are not resized.
+ *
+ * @param st         Session table (NULL tolerated).
+ * @param max_slots  New cap, clamped to [1, SESSION_FORE_SLOTS_CEILING].
+ *                   0 resets to the default SESSION_MAX_SLOTS.
+ */
+void session_table_set_max_fore_slots(struct session_table *st,
+				      uint32_t max_slots);
+
 /* -----------------------------------------------------------------------
  * API — EXCHANGE_ID (RFC 8881 §18.35)
  * ----------------------------------------------------------------------- */
@@ -350,7 +381,8 @@ int session_exchange_id(struct session_table *st,
  * @param st               Session table.
  * @param clientid         From EXCHANGE_ID result.
  * @param seqid            Must match client's create_seq.
- * @param fore_slots       Requested forechannel slots (capped at SESSION_MAX_SLOTS).
+ * @param fore_slots       Requested forechannel slots (capped at the
+ *                         table's configured cap; default SESSION_MAX_SLOTS).
  * @param back_slots       Requested backchannel slots (capped at SESSION_MAX_SLOTS).
  * @param cb_prog          Callback program number from CREATE_SESSION.
  * @param cb_sec_flavor    Callback security flavor (AUTH_NONE / AUTH_SYS).

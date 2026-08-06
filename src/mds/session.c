@@ -59,6 +59,14 @@ struct session_table {
 	uint32_t             mds_id;
 	uint32_t             lease_time_sec;
 	/*
+	 * Forechannel slot negotiation cap for new sessions (RFC 8881
+	 * §18.36.4).  Initialised to SESSION_MAX_SLOTS; operators raise
+	 * it via the session_fore_slots INI key (wired through
+	 * session_table_set_max_fore_slots at startup).  Bounded by
+	 * SESSION_FORE_SLOTS_CEILING.
+	 */
+	uint32_t             max_fore_slots;
+	/*
 	 * Stripe-lock protocol:
 	 *   - Per-slot ops on a live session (session_sequence_check,
 	 *     session_slot_cache_reply, session_slot_get_cached_reply)
@@ -405,6 +413,7 @@ int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
 	st->next_session_seq = 1;
 	st->lease_time_sec = (lease_time_sec > 0)
 		? lease_time_sec : SESSION_DEFAULT_LEASE_SEC;
+	st->max_fore_slots = SESSION_MAX_SLOTS;
 	for (uint32_t li = 0; li < 16; li++) {
 		pthread_mutex_init(&st->locks[li], NULL);
 	}
@@ -439,6 +448,22 @@ void session_table_set_shard(struct session_table *st,
 	} else {
 		st->cq = NULL;
 	}
+}
+
+void session_table_set_max_fore_slots(struct session_table *st,
+				      uint32_t max_slots)
+{
+	if (st == NULL) {
+		return;
+	}
+	if (max_slots == 0) {
+		st->max_fore_slots = SESSION_MAX_SLOTS;
+		return;
+	}
+	if (max_slots > SESSION_FORE_SLOTS_CEILING) {
+		max_slots = SESSION_FORE_SLOTS_CEILING;
+	}
+	st->max_fore_slots = max_slots;
 }
 
 void session_table_destroy(struct session_table *st)
@@ -952,9 +977,16 @@ int session_create_session(struct session_table *st,
 		goto out;
 	}
 
-	/* Negotiate slot counts. */
-	actual_fore = (fore_slots > SESSION_MAX_SLOTS)
-		? SESSION_MAX_SLOTS : fore_slots;
+	/* Negotiate slot counts.  The forechannel cap is per-table
+	 * (session_fore_slots); fall back to the compile-time default
+	 * defensively if the field was never initialised. */
+	{
+		uint32_t fore_cap = (st->max_fore_slots > 0)
+			? st->max_fore_slots : SESSION_MAX_SLOTS;
+
+		actual_fore = (fore_slots > fore_cap)
+			? fore_cap : fore_slots;
+	}
 	if (actual_fore == 0) {
 		actual_fore = 1;
 }

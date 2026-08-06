@@ -2066,12 +2066,18 @@ proxy_read:
 	{
 		uint32_t count = a->count;
 		enum mds_status st;
+		struct mds_inode proxy_inode;
 
 		if (count > MDS_XATTR_VAL_MAX) {
 			count = MDS_XATTR_VAL_MAX;
 }
+		st = cat_getattr(cd, cd->current_fh.fileid, &proxy_inode);
+		if (st != MDS_OK) {
+			return mds_status_to_nfs4(st);
+		}
 
 		st = mds_proxy_read(cd->proxy, cd->cat, cd->current_fh.fileid,
+				    proxy_inode.size,
 				    a->offset, count,
 				    r->data, &r->data_len, &r->eof);
 		if (st != MDS_OK) {

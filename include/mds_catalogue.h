@@ -216,6 +216,39 @@ enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
 					const struct mds_inode *child,
 					uint32_t stripe_count);
 
+struct mds_ds_map_entry;
+
+/**
+ * Fused final-unlink: remove-known semantics PLUS the caller's GC
+ * rows committed in the same backend transaction.
+ *
+ * For the final unlink of a regular file, the caller passes the
+ * de-duplicated per-DS entries of the file's stripe map; the backend
+ * commits the namespace remove and the GC-queue rows atomically.
+ * This removes the separate per-DS gc_enqueue commit from the REMOVE
+ * hot path and closes the crash window where the name is gone but
+ * the DS objects are not yet queued for collection.
+ *
+ * @param gc_entries      Unique-DS entries to enqueue (ds_id + FH).
+ * @param gc_entry_count  Number of entries (> 0 for a real fold).
+ * @param gc_folded       Receives true when the rows were committed
+ *                        with the remove; false when the remove
+ *                        degenerated to a plain known-remove.
+ * @return MDS_OK on success.  MDS_ERR_NOSUPPORT when the backend has
+ *         no fused path (caller must run the legacy split path).
+ *         MDS_ERR_STALE when the dirent no longer resolves to @child
+ *         (concurrent replace; caller falls back and re-resolves).
+ */
+enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
+					   struct mds_cat_txn *txn,
+					   uint64_t parent_fileid,
+					   const char *name,
+					   const struct mds_inode *child,
+					   uint32_t stripe_count,
+					   const struct mds_ds_map_entry *gc_entries,
+					   uint32_t gc_entry_count,
+					   bool *gc_folded);
+
 /** Atomic rename: src dirent -> dst dirent + parent touches. */
 enum mds_status mds_cat_ns_parent_touch(struct mds_catalogue *cat,
                                         uint64_t fileid,

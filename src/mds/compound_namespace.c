@@ -751,7 +751,6 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	enum nfs4_status nst;
 	enum mds_status st;
 
-	(void)op;
 	nst = require_current_fh(cd);
 	if (nst != NFS4_OK) {
 		return nst;
@@ -807,8 +806,22 @@ enum nfs4_status op_getattr(struct compound_data *cd,
 	 * the probe has not produced a non-zero total yet) the
 	 * values stay at UINT64_MAX and the encoder takes over
 	 * (see encode_attr_vals SPACE_* clamping).
+	 *
+	 * Gated on the client's requested bitmap: the encoder only
+	 * serialises SPACE_AVAIL/FREE/TOTAL when the corresponding
+	 * bit was requested, so when none of the three bits are set
+	 * the quota lookup and the whole-fleet ds_cache capacity
+	 * aggregation below are pure waste.  stat()-heavy workloads
+	 * (mdtest, find) never request SPACE_*; skipping the
+	 * computation for them is wire-identical and removes a
+	 * per-GETATTR walk over every registered DS.
 	 */
-	{
+	if (nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_AVAIL) ||
+	    nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_FREE) ||
+	    nfs4_bitmap_test(op->arg.getattr.requested,
+			     FATTR4_SPACE_TOTAL)) {
 		uint64_t avail = UINT64_MAX;
 		uint64_t sfree = UINT64_MAX;
 		uint64_t total = UINT64_MAX;
@@ -1520,7 +1533,103 @@ enum nfs4_status op_create(struct compound_data *cd,
  * Caller contract: invoke ONLY after cat_remove() returns MDS_OK,
  * and ONLY when the looked-up inode held nlink == 1 and is a
  * regular file (i.e. this remove was the last name for the inode).
+ *
+ * The fused REMOVE+GC path (cat_remove_known_gc) supersedes this
+ * helper when the backend supports it: the GC rows commit inside the
+ * remove transaction itself and only final_unlink_cache_drop() below
+ * still runs.  This helper remains the fallback for backends without
+ * the fused op and for removes whose stripe map could not be
+ * prefetched.
  */
+/*
+ * Post-final-unlink cache coherence, shared by the fused REMOVE+GC
+ * path and the legacy split path below.
+ *
+ * Phase D of docs/hpc-nto1-plan.md — keep the per-MDS HPC layout
+ * cache coherent with the catalogue (NULL-safe; the cache only holds
+ * entries for HPC-Shared inodes, so for plain inodes this is a cheap
+ * shard-mutex hash miss).
+ *
+ * Phase F of docs/hpc-nto1-plan.md — the file is gone, so any pending
+ * size/mtime aggregate is meaningless.  Drop the bucket without
+ * flushing so the timer thread does not race the unlink and try to
+ * setattr a deleted fileid.  NULL-safe.
+ */
+static void final_unlink_cache_drop(struct compound_data *cd,
+				    uint64_t fileid)
+{
+	layout_cache_invalidate(cd->lcache, fileid);
+	layout_commit_aggregator_drop(cd->lcommit_agg, fileid);
+}
+
+/*
+ * Compact a stripe map's stripe_count x mirror_count entry array into
+ * one entry per unique ds_id, with nfs_fh_len clamped to
+ * MDS_NFS_FH_MAX (a malformed catalogue row must not drive an OOB
+ * read downstream).  The GC worker unlinks per (ds_id, fileid) with a
+ * stripe/mirror sweep, so one row per DS suffices; a fh_len of 0 is
+ * legitimate (DS file never came online) and kept.
+ *
+ * On success *out receives a heap array the caller must free() and
+ * *out_n its length.  Returns 0 on success, -1 on invalid geometry or
+ * allocation failure (*out stays NULL).
+ */
+static int collect_unique_ds_gc_entries(const struct mds_ds_map_entry *entries,
+					uint32_t stripe_count,
+					uint32_t mirror_count,
+					struct mds_ds_map_entry **out,
+					uint32_t *out_n)
+{
+	struct mds_ds_map_entry *uniq;
+	uint32_t total;
+	uint32_t n = 0;
+	uint32_t i;
+
+	if (out == NULL || out_n == NULL) {
+		return -1;
+	}
+	*out = NULL;
+	*out_n = 0;
+	if (entries == NULL || stripe_count == 0 || mirror_count == 0 ||
+	    stripe_count > MDS_MAX_STRIPES ||
+	    mirror_count > MDS_MAX_MIRRORS) {
+		/* Bounds checked BEFORE the multiply so the product
+		 * cannot wrap. */
+		return -1;
+	}
+	total = stripe_count * mirror_count;
+
+	uniq = calloc(total, sizeof(*uniq));
+	if (uniq == NULL) {
+		return -1;
+	}
+
+	for (i = 0; i < total; i++) {
+		uint32_t ds_id = entries[i].ds_id;
+		bool seen = false;
+		uint32_t k;
+
+		for (k = 0; k < n; k++) {
+			if (uniq[k].ds_id == ds_id) {
+				seen = true;
+				break;
+			}
+		}
+		if (seen) {
+			continue;
+		}
+		uniq[n] = entries[i];
+		if (uniq[n].nfs_fh_len > MDS_NFS_FH_MAX) {
+			uniq[n].nfs_fh_len = MDS_NFS_FH_MAX;
+		}
+		n++;
+	}
+
+	*out = uniq;
+	*out_n = n;
+	return 0;
+}
+
 static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 					uint64_t fileid,
 					struct mds_ds_map_entry *entries_prefetch,
@@ -1532,18 +1641,10 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 	uint32_t stripe_unit = 0;
 	uint32_t mirror_count = mirror_count_prefetch;
 	enum mds_status st;
-	uint32_t total;
 	uint32_t i;
 	bool entries_owned = false;
-	/* De-dup buffer: at most stripe_count*mirror_count unique IDs.
-	 * Heap-allocated (Phase A of docs/hpc-nto1-plan.md): with
-	 * MDS_MAX_STRIPES at 1024 the worst-case 4096-uint32 buffer is
-	 * 16 KiB — still OK on the stack, but tomorrow's MDS_MAX_MIRRORS
-	 * bump or a future structurally larger entry would push it past
-	 * the 64 KiB stack-safety threshold.  Keep it on the heap so the
-	 * scaling axis is never load-bearing on the stack again. */
-	uint32_t *seen = NULL;
-	uint32_t seen_count = 0;
+	struct mds_ds_map_entry *uniq = NULL;
+	uint32_t n_uniq = 0;
 
 	if (cd == NULL || cd->cat == NULL) {
 		return;
@@ -1566,70 +1667,28 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 		return;
 	}
 
-	total = stripe_count * mirror_count;
-	if (total > (uint32_t)(MDS_MAX_STRIPES * MDS_MAX_MIRRORS)) {
-		/* Defensive: catalogue invariant violated. */
-		free(entries);
-		return;
-	}
-
-	seen = calloc(total, sizeof(*seen));
-	if (seen == NULL) {
-		/* Out of memory — skip GC scheduling for this unlink.
-		 * The stripe_map row stays around; a later cleanup pass
-		 * (admin or restart-time scan) will pick it up. */
-		free(entries);
-		return;
-	}
-
-	for (i = 0; i < total; i++) {
-		uint32_t ds_id = entries[i].ds_id;
-		uint32_t fh_len = entries[i].nfs_fh_len;
-		bool already_enqueued = false;
-		uint32_t k;
-
-		for (k = 0; k < seen_count; k++) {
-			if (seen[k] == ds_id) {
-				already_enqueued = true;
-				break;
-			}
+	/* One GC row per unique DS.  On geometry/allocation failure we
+	 * skip GC scheduling for this unlink; the stripe_map row stays
+	 * around and a later cleanup pass (admin or restart-time scan)
+	 * picks it up. */
+	if (collect_unique_ds_gc_entries(entries, stripe_count,
+					 mirror_count, &uniq,
+					 &n_uniq) == 0) {
+		for (i = 0; i < n_uniq; i++) {
+			(void)mds_cat_gc_enqueue(cd->cat, NULL, fileid,
+						 uniq[i].ds_id,
+						 uniq[i].nfs_fh,
+						 uniq[i].nfs_fh_len);
 		}
-		if (already_enqueued) {
-			continue;
-		}
-		seen[seen_count++] = ds_id;
-
-		/* fh_len may legitimately be 0 (DS file never came
-		 * online — the create raced with a layout-pending
-		 * client).  We still enqueue: the worker uses ds_id
-		 * + fileid + stripe/mirror sweep to drive the
-		 * unlink, so the FH is informational only.  Clamp
-		 * to MDS_NFS_FH_MAX so a malformed catalogue row
-		 * cannot drive an OOB read on the GC enqueue. */
-		if (fh_len > MDS_NFS_FH_MAX) {
-			fh_len = MDS_NFS_FH_MAX;
-		}
-		(void)mds_cat_gc_enqueue(cd->cat, NULL, fileid, ds_id,
-					 entries[i].nfs_fh, fh_len);
 	}
+	free(uniq);
 
 	/* Stripe catalogue rows are deleted inside the ns_remove NDB
 	 * transaction on final unlink.  Any orphaned stripe_map rows are
 	 * dropped asynchronously by ds_gc after DS file cleanup. */
 
-	/* Phase D of docs/hpc-nto1-plan.md — keep the per-MDS HPC
-	 * layout cache coherent with the catalogue.  NULL-safe; the
-	 * cache itself only holds entries for HPC-Shared inodes, so
-	 * for plain inodes this is a cheap shard-mutex hash miss. */
-	layout_cache_invalidate(cd->lcache, fileid);
+	final_unlink_cache_drop(cd, fileid);
 
-	/* Phase F of docs/hpc-nto1-plan.md — the file is gone, so any
-	 * pending size/mtime aggregate is meaningless.  Drop the
-	 * bucket without flushing so the timer thread does not race
-	 * the unlink and try to setattr a deleted fileid.  NULL-safe. */
-	layout_commit_aggregator_drop(cd->lcommit_agg, fileid);
-
-	free(seen);
 	if (entries_owned) {
 		free(entries);
 	}
@@ -1916,12 +1975,56 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		parent_touch_abort_prepared(cd->pt, cd->current_fh.fileid);
 	}
 
-	st = (st == MDS_OK)
-		? cat_remove_known(cd, cd->current_fh.fileid,
-				   op->arg.remove.name, &rm_inode,
-				   rm_sm_sc)
-		: cat_remove(cd, cd->current_fh.fileid,
-			     op->arg.remove.name);
+	/*
+	 * Fused REMOVE+GC fast path: on the final unlink of a regular
+	 * file with a prefetched stripe map, commit the namespace
+	 * remove and the GC-queue rows in ONE catalogue transaction.
+	 * This removes the separate gc_enqueue commit per unique DS
+	 * from the REMOVE hot path and closes the crash window where
+	 * the name is gone but the DS objects are not yet queued.
+	 *
+	 * Fallback ladder: NOSUPPORT (backend has no fused op, or the
+	 * fold was momentarily unavailable) and STALE (dirent no
+	 * longer resolves to the looked-up child) drop to the legacy
+	 * split path below, which re-resolves and enqueues exactly as
+	 * before.  Any other status is the authoritative outcome of
+	 * the remove and is returned as-is.
+	 */
+	bool rm_gc_folded = false;
+	{
+		enum mds_status fused_st = MDS_ERR_NOSUPPORT;
+
+		if (st == MDS_OK && rm_final_data_unlink &&
+		    rm_fileid != 0 && rm_sm_entries != NULL) {
+			struct mds_ds_map_entry *uniq = NULL;
+			uint32_t n_uniq = 0;
+
+			if (collect_unique_ds_gc_entries(rm_sm_entries,
+							 rm_sm_sc, rm_sm_mc,
+							 &uniq,
+							 &n_uniq) == 0 &&
+			    n_uniq > 0) {
+				fused_st = cat_remove_known_gc(
+					cd, cd->current_fh.fileid,
+					op->arg.remove.name, &rm_inode,
+					rm_sm_sc, uniq, n_uniq,
+					&rm_gc_folded);
+			}
+			free(uniq);
+		}
+		if (fused_st == MDS_ERR_NOSUPPORT ||
+		    fused_st == MDS_ERR_STALE) {
+			rm_gc_folded = false;
+			st = (st == MDS_OK)
+				? cat_remove_known(cd, cd->current_fh.fileid,
+						   op->arg.remove.name,
+						   &rm_inode, rm_sm_sc)
+				: cat_remove(cd, cd->current_fh.fileid,
+					     op->arg.remove.name);
+		} else {
+			st = fused_st;
+		}
+	}
 	if (st == MDS_OK && rm_quota) {
 		quota_submit_adjust(cd, rm_inode.uid, rm_inode.gid,
 				    -(int64_t)rm_inode.size, -1);
@@ -1961,12 +2064,19 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		 * data cleanup via the GC queue.  Best-effort --
 		 * failures here do not affect the client-visible
 		 * remove status; the next pass picks up any rows
-		 * we miss. */
+		 * we miss.  When the fused path already committed the
+		 * rows with the remove, only the cache coherence step
+		 * remains. */
 		if (rm_final_data_unlink && rm_fileid != 0) {
-			enqueue_gc_for_final_unlink(cd, rm_fileid,
-						    rm_sm_entries,
-						    rm_sm_sc, rm_sm_mc);
-			rm_sm_entries = NULL;
+			if (rm_gc_folded) {
+				final_unlink_cache_drop(cd, rm_fileid);
+			} else {
+				enqueue_gc_for_final_unlink(cd, rm_fileid,
+							    rm_sm_entries,
+							    rm_sm_sc,
+							    rm_sm_mc);
+				rm_sm_entries = NULL;
+			}
 		}
 	}
 	free(rm_sm_entries);

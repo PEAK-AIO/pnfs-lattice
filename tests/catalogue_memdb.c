@@ -1520,6 +1520,85 @@ static enum mds_status mem_gc_count(struct mds_catalogue *cat,
     return MDS_OK;
 }
 
+/*
+ * Fused final-unlink (ns_remove_known_gc vtable slot).
+ *
+ * Mirrors mem_ns_remove but enqueues exactly the CALLER's GC rows
+ * instead of re-deriving them from the stripe map, so the fused
+ * contract (rows land with the remove, no duplicates) holds on the
+ * test backend too.  Guard: the dirent must still resolve to
+ * child->fileid, otherwise MDS_ERR_STALE tells the caller to fall
+ * back to the legacy split path.  memdb is a single-lock test
+ * fixture; the post-unlock cleanup below is not atomic with the
+ * namespace mutation, matching mem_ns_remove's existing behaviour.
+ */
+static enum mds_status mem_ns_remove_known_gc(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t parent, const char *name,
+    const struct mds_inode *child, uint32_t stripe_count,
+    const struct mds_ds_map_entry *gc_entries,
+    uint32_t gc_entry_count, bool *gc_folded)
+{
+    struct memdb *m = cat->backend_private;
+    bool nlink_zero = false;
+    uint64_t child_fid;
+
+    (void)stripe_count;
+    if (child == NULL || gc_folded == NULL ||
+        (gc_entry_count > 0 && gc_entries == NULL)) {
+        return MDS_ERR_INVAL;
+    }
+    *gc_folded = false;
+
+    pthread_mutex_lock(&m->lock);
+    int didx = memdb_find_dirent(m, parent, name);
+    if (didx < 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    child_fid = m->dirents[didx].child_fileid;
+    if (child_fid != child->fileid) {
+        /* Concurrent replace: legacy fallback re-resolves. */
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_STALE;
+    }
+    m->dirents[didx].used = 0;
+    int cidx = memdb_find_inode(m, child_fid);
+    if (cidx >= 0) {
+        m->inodes[cidx].nlink--;
+        if (m->inodes[cidx].nlink == 0) {
+            nlink_zero = true;
+            m->inode_used[cidx] = 0;
+        }
+    }
+    pthread_mutex_unlock(&m->lock);
+
+    if (nlink_zero) {
+        for (uint32_t gi = 0; gi < gc_entry_count; gi++) {
+            (void)mem_gc_enqueue(cat, txn, child_fid,
+                                 gc_entries[gi].ds_id,
+                                 gc_entries[gi].nfs_fh,
+                                 gc_entries[gi].nfs_fh_len);
+        }
+        (void)mds_cat_stripe_map_del(cat, txn, child_fid);
+        pthread_mutex_lock(&m->lock);
+        for (uint32_t i = 0; i < MEMDB_MAX_INLINE; i++) {
+            if (m->inlines[i].used &&
+                m->inlines[i].fileid == child_fid) {
+                m->inlines[i].used = 0;
+            }
+        }
+        for (uint32_t i = 0; i < MEMDB_MAX_XATTRS; i++) {
+            if (m->xattrs[i].used &&
+                m->xattrs[i].fileid == child_fid) {
+                m->xattrs[i].used = 0;
+            }
+        }
+        pthread_mutex_unlock(&m->lock);
+        *gc_folded = true;
+    }
+    return MDS_OK;
+}
+
 /* Stubs for operations not commonly used in unit tests */
 static enum mds_status mem_stub_notfound(void) { return MDS_ERR_NOTFOUND; }
 static enum mds_status mem_stub_ok(void) { return MDS_OK; }
@@ -2147,6 +2226,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .ns_create       = mem_ns_create,
     .ns_create_wide  = mem_ns_create_wide,
     .ns_remove       = mem_ns_remove,
+    .ns_remove_known_gc = mem_ns_remove_known_gc,
     .ns_parent_touch       = mem_ns_parent_touch,
     .ns_rename       = mem_ns_rename,
     .remove_pending_enqueue    = mem_remove_pending_enqueue,
