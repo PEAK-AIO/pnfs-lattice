@@ -446,6 +446,112 @@ static enum mds_status mem_ns_create(struct mds_catalogue *cat,
     *out = child;
     return MDS_OK;
 }
+static enum mds_status mem_ns_create_wide(
+    struct mds_catalogue *cat,
+    uint64_t parent_fileid,
+    const char *name,
+    const struct mds_inode *child,
+    uint32_t stripe_count,
+    uint32_t stripe_unit,
+    uint32_t mirror_count,
+    const struct mds_ds_map_entry *entries)
+{
+    struct memdb *memdb;
+    struct mds_ds_map_entry *copied_entries;
+    struct timespec now;
+    uint64_t entry_count;
+    int child_index;
+    int dirent_index;
+    int parent_index;
+    int stripe_index;
+
+    if (cat == NULL || name == NULL || child == NULL || entries == NULL ||
+        child->fileid == 0 || child->parent_fileid != parent_fileid ||
+        child->type != MDS_FTYPE_REG || stripe_count == 0 ||
+        stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS ||
+        (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+        return MDS_ERR_INVAL;
+    }
+
+    entry_count = (uint64_t)stripe_count * mirror_count;
+    if (entry_count > UINT32_MAX) {
+        return MDS_ERR_INVAL;
+    }
+
+    copied_entries = calloc((size_t)entry_count, sizeof(*copied_entries));
+    if (copied_entries == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    memcpy(copied_entries, entries,
+           (size_t)entry_count * sizeof(*copied_entries));
+
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        free(copied_entries);
+        return MDS_ERR_IO;
+    }
+
+    memdb = cat->backend_private;
+    pthread_mutex_lock(&memdb->lock);
+    parent_index = memdb_find_inode(memdb, parent_fileid);
+    if (parent_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOTFOUND;
+    }
+    if (memdb->inodes[parent_index].type != MDS_FTYPE_DIR) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOTDIR;
+    }
+    if (memdb_find_dirent(memdb, parent_fileid, name) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_EXISTS;
+    }
+    if (memdb_find_inode(memdb, child->fileid) >= 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_EXISTS;
+    }
+
+    child_index = memdb_alloc_inode_slot(memdb);
+    dirent_index = memdb_alloc_dirent_slot(memdb);
+    stripe_index = -1;
+    for (uint32_t stripe_slot = 0; stripe_slot < MEMDB_MAX_STRIPE;
+         stripe_slot++) {
+        if (!memdb->stripes[stripe_slot].used) {
+            stripe_index = (int)stripe_slot;
+            break;
+        }
+    }
+    if (child_index < 0 || dirent_index < 0 || stripe_index < 0) {
+        pthread_mutex_unlock(&memdb->lock);
+        free(copied_entries);
+        return MDS_ERR_NOSPC;
+    }
+
+    memdb->inodes[child_index] = *child;
+    memdb->inode_used[child_index] = true;
+    memdb->dirents[dirent_index].used = true;
+    memdb->dirents[dirent_index].parent = parent_fileid;
+    (void)snprintf(memdb->dirents[dirent_index].name,
+                   sizeof(memdb->dirents[dirent_index].name), "%s", name);
+    memdb->dirents[dirent_index].child_fileid = child->fileid;
+    memdb->dirents[dirent_index].child_type = (uint8_t)child->type;
+    memdb->stripes[stripe_index].used = true;
+    memdb->stripes[stripe_index].fileid = child->fileid;
+    memdb->stripes[stripe_index].stripe_count = stripe_count;
+    memdb->stripes[stripe_index].stripe_unit = stripe_unit;
+    memdb->stripes[stripe_index].mirror_count = mirror_count;
+    memdb->stripes[stripe_index].entries = copied_entries;
+    memdb->stripes[stripe_index].entries_cap = (uint32_t)entry_count;
+    memdb->inodes[parent_index].mtime = now;
+    memdb->inodes[parent_index].ctime = now;
+    memdb->inodes[parent_index].change++;
+    pthread_mutex_unlock(&memdb->lock);
+    return MDS_OK;
+}
 
 static enum mds_status mem_ns_remove(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent, const char *name)
@@ -2004,6 +2110,7 @@ static const struct mds_catalogue_ops memdb_lifecycle_ops = {
 
 static const struct mds_authority_ops memdb_auth_ops = {
     .ns_create       = mem_ns_create,
+    .ns_create_wide  = mem_ns_create_wide,
     .ns_remove       = mem_ns_remove,
     .ns_parent_touch       = mem_ns_parent_touch,
     .ns_rename       = mem_ns_rename,

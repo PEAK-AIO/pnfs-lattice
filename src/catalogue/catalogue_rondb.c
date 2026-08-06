@@ -652,6 +652,89 @@ enum mds_status catalogue_rondb_ns_create(
 	return MDS_OK;
 }
 
+static enum mds_status catalogue_rondb_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries)
+{
+	void *handle = rondb_handle(cat);
+	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
+	uint8_t *stripe_buf;
+	size_t stripe_buf_len;
+	size_t stripe_offset;
+	int rc = -1;
+
+	if (handle == NULL || name == NULL || child == NULL || entries == NULL ||
+	    child->fileid == 0 || child->parent_fileid != parent_fileid ||
+	    child->type != MDS_FTYPE_REG || stripe_count == 0 ||
+	    stripe_count > MDS_MAX_STRIPES || stripe_unit == 0 ||
+	    mirror_count != 1 ||
+	    (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
+		return MDS_ERR_INVAL;
+	}
+	if (rondb_inode_serialize(child, 0, child_buf, sizeof(child_buf)) < 0) {
+		return MDS_ERR_IO;
+	}
+
+	stripe_buf_len = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
+		    entries[stripe_index].nfs_fh_len >
+		    SIZE_MAX - stripe_buf_len - 8U) {
+			return MDS_ERR_INVAL;
+		}
+		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
+	}
+	if (stripe_buf_len > UINT32_MAX) {
+		return MDS_ERR_INVAL;
+	}
+
+	stripe_buf = malloc(stripe_buf_len);
+	if (stripe_buf == NULL) {
+		return MDS_ERR_NOMEM;
+	}
+	stripe_offset = 0;
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		const struct mds_ds_map_entry *entry = &entries[stripe_index];
+
+		fdb_put_u32(stripe_buf + stripe_offset, entry->ds_id);
+		fdb_put_u32(stripe_buf + stripe_offset + 4U, entry->nfs_fh_len);
+		if (entry->nfs_fh_len > 0) {
+			memcpy(stripe_buf + stripe_offset + 8U, entry->nfs_fh,
+			       entry->nfs_fh_len);
+		}
+		stripe_offset += 8U + entry->nfs_fh_len;
+	}
+
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_create_wide(
+			handle, parent_fileid, name, child_buf,
+			RONDB_INODE_FIXED_SIZE, stripe_count, stripe_unit,
+			mirror_count, stripe_buf, (uint32_t)stripe_buf_len);
+		if (rc != -2) {
+			break;
+		}
+		rondb_transient_backoff(attempt);
+	}
+	free(stripe_buf);
+	if (rc == 1) {
+		return MDS_ERR_EXISTS;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	catalog_stat_inc(&cat->stats.authority_writes);
+	return MDS_OK;
+}
+
 enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 						uint64_t parent_fileid,
 						const char *name,
@@ -2433,13 +2516,23 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		return MDS_ERR_INVAL;
 	}
 
-	/* Placement inputs -- all derived from the single prealloc pop
-	 * below so the fused transaction commits ONE consistent choice. */
+	/*
+	 * Pop once and derive every placement input from that entry.
+	 *
+	 * A prior peek followed by a separate pop could select different
+	 * entries under concurrent CREATEs.  That persisted one DS in the
+	 * stripe map while granting a layout for another DS.
+	 */
 	uint32_t layout_ds_id = 0;
 	uint32_t layout_ds_count = 0;
 	uint8_t stripe_buf[256];
 	uint32_t stripe_buf_len = 0;
 	uint32_t stripe_count_for_create = 0;
+	/* Stripe unit persisted with the 1x1 map.  Defaults to the
+	 * historical 65536 and is replaced by the popped prealloc
+	 * entry's configured unit below, so the durable header matches
+	 * the ring's (config-derived) geometry. */
+	uint32_t create_stripe_unit = 65536;
 	/* v8: synth owner carried out of the pop block onto the child inode. */
 	uint32_t child_synth_suid = 0;
 	uint32_t child_synth_sgid = 0;
@@ -2540,6 +2633,7 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			parent_nlink_delta,
 			stripe_count_for_create > 0 ? stripe_buf : NULL,
 			stripe_buf_len, stripe_count_for_create,
+			create_stripe_unit, 1,
 			layout_clientid, layout_iomode,
 			layout_offset, layout_length,
 			layout_stateid ? layout_stateid->other : NULL,
@@ -2778,6 +2872,21 @@ static enum mds_status rondb_auth_ns_create(
 	(void)txn;
 	return catalogue_rondb_ns_create(cat, parent, name, type,
 					mode, uid, gid, prealloc, out);
+}
+
+static enum mds_status rondb_auth_ns_create_wide(
+	struct mds_catalogue *cat,
+	uint64_t parent,
+	const char *name,
+	const struct mds_inode *child,
+	uint32_t stripe_count,
+	uint32_t stripe_unit,
+	uint32_t mirror_count,
+	const struct mds_ds_map_entry *entries)
+{
+	return catalogue_rondb_ns_create_wide(
+		cat, parent, name, child, stripe_count, stripe_unit,
+		mirror_count, entries);
 }
 
 static enum mds_status rondb_auth_ns_remove(
@@ -3587,6 +3696,7 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
 
 static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_parent_touch         = rondb_auth_ns_parent_touch,
@@ -3688,6 +3798,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 
 static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
+	.ns_create_wide    = rondb_auth_ns_create_wide,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_rename         = rondb_locked_ns_rename,
