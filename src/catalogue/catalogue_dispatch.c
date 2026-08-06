@@ -1356,6 +1356,22 @@ enum mds_status mds_cat_gc_count(struct mds_catalogue *cat,
     return cat->auth_ops->gc_count(cat, count);
 }
 
+enum mds_status mds_cat_backend_client_stats(
+    struct mds_catalogue *cat,
+    struct mds_cat_backend_client_stats *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (cat == NULL || cat->auth_ops == NULL || out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->backend_client_stats == NULL) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return cat->auth_ops->backend_client_stats(cat, out);
+}
+
 /* -----------------------------------------------------------------------
  * Authority ops dispatch -- DS prealloc pool (optional)
  * ----------------------------------------------------------------------- */

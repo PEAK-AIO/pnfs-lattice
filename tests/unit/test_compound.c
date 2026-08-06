@@ -1703,6 +1703,32 @@ static void test_getattr_space_gated_on_bitmap(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_backend_client_stats_dispatch -- the optional backend counters
+ * surface: the in-memory test backend has no client instrumentation
+ * (NOSUPPORT), and NULL arguments are rejected without touching the
+ * output struct contract (zeroed on entry).
+ * ----------------------------------------------------------------------- */
+
+static void test_backend_client_stats_dispatch(void)
+{
+	struct mds_catalogue *db;
+	struct mds_cat_backend_client_stats bs;
+	char *path;
+
+	db = open_test_db(&path);
+
+	memset(&bs, 0xAA, sizeof(bs));
+	ASSERT_EQ(mds_cat_backend_client_stats(db, &bs), MDS_ERR_NOSUPPORT);
+	ASSERT_EQ(bs.exec_waits, (uint64_t)0);      /* zeroed on entry */
+	ASSERT_EQ(bs.client_objects, (uint64_t)0);
+
+	ASSERT_EQ(mds_cat_backend_client_stats(db, NULL), MDS_ERR_INVAL);
+	ASSERT_EQ(mds_cat_backend_client_stats(NULL, &bs), MDS_ERR_INVAL);
+
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
  * Seed a DS in the registry (needed for LAYOUTGET)
  * ----------------------------------------------------------------------- */
 
@@ -5028,6 +5054,7 @@ int main(void)
 
 	RUN_TEST(test_root_getattr);
 	RUN_TEST(test_getattr_space_gated_on_bitmap);
+	RUN_TEST(test_backend_client_stats_dispatch);
 	RUN_TEST(test_putrootfh_discards_stale_snapshot);
 	RUN_TEST(test_lookupp_discards_child_snapshot);
 	RUN_TEST(test_lookup_snapshot_cached_parent);

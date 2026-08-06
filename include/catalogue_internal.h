@@ -360,6 +360,14 @@ struct mds_authority_ops {
         const char *name);
     enum mds_status (*link_anchor_del)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t anchor_id);
+
+    /** Optional: backend client-side behaviour counters (cumulative
+     * round trips, transactions, bytes -- see
+     * struct mds_cat_backend_client_stats).  Leave NULL when the
+     * backend has no client instrumentation; the dispatch wrapper
+     * then returns MDS_ERR_NOSUPPORT. */
+    enum mds_status (*backend_client_stats)(struct mds_catalogue *cat,
+        struct mds_cat_backend_client_stats *out);
 };
 
 /* -----------------------------------------------------------------------

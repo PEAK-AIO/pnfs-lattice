@@ -993,6 +993,63 @@ void rondb_shim_set_async_writes(void *handle, int enabled)
                               std::memory_order_release);
 }
 
+/* Accumulate one Ndb object's client counters into *out.  getClientStat
+ * reads plain per-object counters the NDB client library maintains on
+ * every operation anyway; reading them from the metrics thread while
+ * the owning worker thread mutates them is a benign monitoring race
+ * (values may lag by in-flight operations). */
+static void rondb_accumulate_client_stats(const Ndb *ndb,
+                                          struct rondb_client_stats *out)
+{
+    if (ndb == nullptr) {
+        return;
+    }
+    out->exec_waits    += ndb->getClientStat(Ndb::WaitExecCompleteCount);
+    out->scan_waits    += ndb->getClientStat(Ndb::WaitScanResultCount);
+    out->meta_waits    += ndb->getClientStat(Ndb::WaitMetaRequestCount);
+    out->wait_nanos    += ndb->getClientStat(Ndb::WaitNanosCount);
+    out->bytes_sent    += ndb->getClientStat(Ndb::BytesSentCount);
+    out->bytes_recvd   += ndb->getClientStat(Ndb::BytesRecvdCount);
+    out->txn_started   += ndb->getClientStat(Ndb::TransStartCount);
+    out->txn_committed += ndb->getClientStat(Ndb::TransCommitCount);
+    out->txn_aborted   += ndb->getClientStat(Ndb::TransAbortCount);
+    out->txn_closed    += ndb->getClientStat(Ndb::TransCloseCount);
+    out->pk_ops        += ndb->getClientStat(Ndb::PkOpCount);
+    out->uk_ops        += ndb->getClientStat(Ndb::UkOpCount);
+    out->table_scans   += ndb->getClientStat(Ndb::TableScanCount);
+    out->range_scans   += ndb->getClientStat(Ndb::RangeScanCount);
+    out->read_rows     += ndb->getClientStat(Ndb::ReadRowCount);
+    out->client_objects++;
+}
+
+int rondb_shim_client_stats(void *handle, struct rondb_client_stats *out)
+{
+    rondb_shim_handle *state =
+        static_cast<rondb_shim_handle *>(handle);
+
+    if (state == nullptr || out == nullptr) {
+        return -1;
+    }
+    std::memset(out, 0, sizeof(*out));
+
+    /* Thread-local worker Ndb objects.  The registry lock only guards
+     * the vector itself; see rondb_accumulate_client_stats for the
+     * counter-read race rationale. */
+    {
+        std::lock_guard<std::mutex> lock(state->pool_mutex);
+        for (const Ndb *ndb : state->pool_all) {
+            rondb_accumulate_client_stats(ndb, out);
+        }
+    }
+
+    /* Async pipeline Ndb objects (one per connection when armed). */
+    for (int ci = 0; ci < state->conn_count; ci++) {
+        rondb_accumulate_client_stats(state->conn_ctxs[ci].ndb, out);
+    }
+
+    return 0;
+}
+
 /* -----------------------------------------------------------------------
  * Stage B -- metadata table DDL + row-level CRUD + atomic helpers.
  *

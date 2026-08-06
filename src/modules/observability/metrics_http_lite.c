@@ -62,6 +62,85 @@ struct metrics_http_ctx {
     uint16_t              port;
 };
 
+/* Append the backend client-side counters (round trips, transactions,
+ * bytes) as Prometheus lines after the v2 body.  Best-effort: when the
+ * backend has no instrumentation (NOSUPPORT) or the lines would not
+ * fit, the base body is served unchanged -- a scrape must never fail
+ * because the optional NDB block did not fit. */
+static int append_backend_client_stats(struct mds_catalogue *cat,
+                                       char *out, size_t cap, int used)
+{
+    struct mds_cat_backend_client_stats bs;
+    int n;
+
+    if (cat == NULL || used < 0 || (size_t)used >= cap) {
+        return used;
+    }
+    if (mds_cat_backend_client_stats(cat, &bs) != MDS_OK) {
+        return used;
+    }
+
+    n = snprintf(out + used, cap - (size_t)used,
+        "# HELP pnfs_mds_ndb_exec_roundtrips_total Times a request thread blocked on an NDB execute round trip.\n"
+        "# TYPE pnfs_mds_ndb_exec_roundtrips_total counter\n"
+        "pnfs_mds_ndb_exec_roundtrips_total %llu\n"
+        "# HELP pnfs_mds_ndb_scan_batch_waits_total Waits for the next NDB scan result batch.\n"
+        "# TYPE pnfs_mds_ndb_scan_batch_waits_total counter\n"
+        "pnfs_mds_ndb_scan_batch_waits_total %llu\n"
+        "# HELP pnfs_mds_ndb_meta_waits_total Waits for NDB dictionary/meta operations.\n"
+        "# TYPE pnfs_mds_ndb_meta_waits_total counter\n"
+        "pnfs_mds_ndb_meta_waits_total %llu\n"
+        "# HELP pnfs_mds_ndb_wait_nanoseconds_total Nanoseconds spent blocked on NDB responses.\n"
+        "# TYPE pnfs_mds_ndb_wait_nanoseconds_total counter\n"
+        "pnfs_mds_ndb_wait_nanoseconds_total %llu\n"
+        "# HELP pnfs_mds_ndb_txn_started_total NDB transactions started.\n"
+        "# TYPE pnfs_mds_ndb_txn_started_total counter\n"
+        "pnfs_mds_ndb_txn_started_total %llu\n"
+        "# HELP pnfs_mds_ndb_txn_committed_total NDB transactions committed.\n"
+        "# TYPE pnfs_mds_ndb_txn_committed_total counter\n"
+        "pnfs_mds_ndb_txn_committed_total %llu\n"
+        "# HELP pnfs_mds_ndb_txn_aborted_total NDB transactions aborted.\n"
+        "# TYPE pnfs_mds_ndb_txn_aborted_total counter\n"
+        "pnfs_mds_ndb_txn_aborted_total %llu\n"
+        "# HELP pnfs_mds_ndb_bytes_sent_total Bytes sent to NDB data nodes.\n"
+        "# TYPE pnfs_mds_ndb_bytes_sent_total counter\n"
+        "pnfs_mds_ndb_bytes_sent_total %llu\n"
+        "# HELP pnfs_mds_ndb_bytes_received_total Bytes received from NDB data nodes.\n"
+        "# TYPE pnfs_mds_ndb_bytes_received_total counter\n"
+        "pnfs_mds_ndb_bytes_received_total %llu\n"
+        "# HELP pnfs_mds_ndb_pk_ops_total NDB primary-key operations.\n"
+        "# TYPE pnfs_mds_ndb_pk_ops_total counter\n"
+        "pnfs_mds_ndb_pk_ops_total %llu\n"
+        "# HELP pnfs_mds_ndb_range_scans_total NDB ordered-index range scans.\n"
+        "# TYPE pnfs_mds_ndb_range_scans_total counter\n"
+        "pnfs_mds_ndb_range_scans_total %llu\n"
+        "# HELP pnfs_mds_ndb_read_rows_total Rows returned by NDB to this MDS.\n"
+        "# TYPE pnfs_mds_ndb_read_rows_total counter\n"
+        "pnfs_mds_ndb_read_rows_total %llu\n"
+        "# HELP pnfs_mds_ndb_client_objects Ndb client objects aggregated into these counters.\n"
+        "# TYPE pnfs_mds_ndb_client_objects gauge\n"
+        "pnfs_mds_ndb_client_objects %llu\n",
+        (unsigned long long)bs.exec_waits,
+        (unsigned long long)bs.scan_waits,
+        (unsigned long long)bs.meta_waits,
+        (unsigned long long)bs.wait_nanos,
+        (unsigned long long)bs.txn_started,
+        (unsigned long long)bs.txn_committed,
+        (unsigned long long)bs.txn_aborted,
+        (unsigned long long)bs.bytes_sent,
+        (unsigned long long)bs.bytes_recvd,
+        (unsigned long long)bs.pk_ops,
+        (unsigned long long)bs.range_scans,
+        (unsigned long long)bs.read_rows,
+        (unsigned long long)bs.client_objects);
+    if (n < 0 || (size_t)n >= cap - (size_t)used) {
+        /* Does not fit: serve the base body unchanged. */
+        out[used] = '\0';
+        return used;
+    }
+    return used + n;
+}
+
 /* Build a metrics snapshot and feed the v2 renderer into `out`.
  * Returns the number of bytes written (excluding NUL) or -1 on
  * truncation.  Buffer cap must be > 0. */
@@ -69,6 +148,7 @@ static int render_metrics_body(struct mds_catalogue *cat,
                                char *out, size_t cap)
 {
     struct mds_metrics_snapshot snap = mds_metrics_snapshot();
+    int n;
 
     if (cat != NULL) {
         struct catalog_stats *cs = mds_catalogue_stats(cat);
@@ -77,7 +157,11 @@ static int render_metrics_body(struct mds_catalogue *cat,
         }
     }
 
-    return mds_metrics_prometheus_v2(&snap, &g_branch_metrics, out, cap);
+    n = mds_metrics_prometheus_v2(&snap, &g_branch_metrics, out, cap);
+    if (n >= 0) {
+        n = append_backend_client_stats(cat, out, cap, n);
+    }
+    return n;
 }
 
 /* Write all bytes of `buf` (n bytes) to `fd`, ignoring partial
