@@ -20,9 +20,9 @@
 #include "test_helpers.h"
 #include "proxy_io.h"
 
-/* -----------------------------------------------------------------------
- * Minimal test framework (same as other test files)
- * ----------------------------------------------------------------------- */
+/* ----------------------------------------------------------------------- */
+/* Minimal test framework (same as other test files). */
+/* ----------------------------------------------------------------------- */
 
 static int tests_run    = 0;
 static int tests_passed = 0;
@@ -248,8 +248,8 @@ static void test_proxy_read_write(void)
 
     /* Read back. */
     memset(buf, 0, sizeof(buf));
-    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid, 0, data_len,
-              buf, &bytes, &eof), MDS_OK);
+    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid,
+              data_len, 0, data_len, buf, &bytes, &eof), MDS_OK);
     ASSERT_EQ(bytes, data_len);
     ASSERT_EQ(memcmp(buf, test_data, data_len), 0);
 
@@ -290,15 +290,15 @@ static void test_proxy_read_eof(void)
 
     /* Read 256 bytes -- should get 5 + eof. */
     memset(buf, 0, sizeof(buf));
-    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid, 0, 256,
-              buf, &bytes, &eof), MDS_OK);
+    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid,
+              data_len, 0, 256, buf, &bytes, &eof), MDS_OK);
     ASSERT_EQ(bytes, data_len);
     ASSERT_TRUE(eof);
     ASSERT_EQ(memcmp(buf, test_data, data_len), 0);
 
     /* Read at offset past end -- 0 bytes + eof. */
-    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid, 1000, 64,
-              buf, &bytes, &eof), MDS_OK);
+    ASSERT_EQ(mds_proxy_read(proxy, (struct mds_catalogue *)db, fileid,
+              data_len, 1000, 64, buf, &bytes, &eof), MDS_OK);
     ASSERT_EQ(bytes, (uint32_t)0);
     ASSERT_TRUE(eof);
 
@@ -432,8 +432,103 @@ static void test_proxy_sparse_stripe_addr(void)
     rm_ds_dir(ds1_path);
 }
 
-/* -----------------------------------------------------------------------
- * test_extract_server_fh_formats -- the opaque default accepts knfsd
+/* ----------------------------------------------------------------------- */
+/* test_proxy_read_sparse_holes -- short DS reads are in-range holes that
+ * do not hide data stored in a later stripe unit. */
+/* ----------------------------------------------------------------------- */
+
+static void test_proxy_read_sparse_holes(void)
+{
+    struct mds_catalogue *db;
+    struct mds_proxy_ctx *proxy;
+    char *db_path, *ds0_path, *ds1_path;
+    const uint64_t fileid = 450;
+    const uint32_t stripe_unit = 16;
+    const uint64_t read_offset = 8;
+    const uint64_t data_offset = (uint64_t)stripe_unit * 3;
+    const char *payload = "later";
+    const uint32_t payload_len = (uint32_t)strlen(payload);
+    const uint64_t logical_size = data_offset + payload_len;
+    uint8_t buf[64];
+    uint32_t bytes;
+    uint64_t index;
+    bool eof;
+
+    db = open_test_db(&db_path);
+    ds0_path = make_ds_dir();
+    ds1_path = make_ds_dir();
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds0_path), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 2, ds1_path), MDS_OK);
+    setup_wide_stripe(db, 1, 2, fileid, stripe_unit);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, fileid, 0, 0), MDS_OK);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 2, fileid, 1, 0), MDS_OK);
+    ASSERT_EQ(mds_proxy_write(proxy, db, fileid, data_offset,
+              payload, payload_len, &bytes), MDS_OK);
+
+    memset(buf, 0xFF, sizeof(buf));
+    ASSERT_EQ(mds_proxy_read(proxy, db, fileid, logical_size, read_offset,
+              (uint32_t)(logical_size - read_offset), buf, &bytes, &eof),
+              MDS_OK);
+    ASSERT_EQ(bytes, (uint32_t)(logical_size - read_offset));
+    ASSERT_TRUE(eof);
+    for (index = 0; index < data_offset - read_offset; index++) {
+        ASSERT_EQ(buf[index], (uint8_t)0);
+    }
+    ASSERT_EQ(memcmp(buf + data_offset - read_offset, payload, payload_len), 0);
+
+    mds_proxy_ctx_destroy(proxy);
+    close_test_db(db, db_path);
+    rm_ds_dir(ds0_path);
+    rm_ds_dir(ds1_path);
+}
+
+/* ----------------------------------------------------------------------- */
+/* test_proxy_read_mirror_failover -- an unreadable primary mirror does not
+ * prevent a logical-size-bounded read from a healthy mirror. */
+/* ----------------------------------------------------------------------- */
+
+static void test_proxy_read_mirror_failover(void)
+{
+    struct mds_catalogue *db;
+    struct mds_proxy_ctx *proxy;
+    char *db_path, *ds_a_path, *ds_b_path;
+    const uint64_t fileid = 460;
+    const uint32_t stripe_unit = 4096;
+    const char *payload = "healthy mirror";
+    const uint32_t payload_len = (uint32_t)strlen(payload);
+    uint8_t buf[32];
+    uint32_t bytes;
+    bool eof;
+
+    db = open_test_db(&db_path);
+    ds_a_path = make_ds_dir();
+    ds_b_path = make_ds_dir();
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 10, ds_a_path), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 20, ds_b_path), MDS_OK);
+    setup_mirrored_stripe(db, 10, 20, fileid, stripe_unit);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 20, fileid, 0, 1), MDS_OK);
+    ASSERT_EQ(mds_proxy_write_direct(proxy, 20, fileid, 0, 1, 0,
+              payload, payload_len), MDS_OK);
+
+    memset(buf, 0, sizeof(buf));
+    ASSERT_EQ(mds_proxy_read(proxy, db, fileid, payload_len, 0, payload_len,
+              buf, &bytes, &eof), MDS_OK);
+    ASSERT_EQ(bytes, payload_len);
+    ASSERT_TRUE(eof);
+    ASSERT_EQ(memcmp(buf, payload, payload_len), 0);
+
+    mds_proxy_ctx_destroy(proxy);
+    close_test_db(db, db_path);
+    rm_ds_dir(ds_a_path);
+    rm_ds_dir(ds_b_path);
+}
+
+/* ----------------------------------------------------------------------- */
+/* test_extract_server_fh_formats -- the opaque default accepts knfsd
  * AND NetApp ONTAP server FHs (RFC 8435: DS FHs are opaque); strict
  * knfsd mode pins the legacy 0x01 first byte.
  * ----------------------------------------------------------------------- */
@@ -516,15 +611,12 @@ int main(void)
     fprintf(stdout, "Running proxy I/O tests:\n");
 
     RUN_TEST(test_extract_server_fh_formats);
+    RUN_TEST(test_proxy_read_write);
+    RUN_TEST(test_proxy_read_eof);
+    RUN_TEST(test_proxy_mirror_write);
     RUN_TEST(test_proxy_sparse_stripe_addr);
-
-    /* Remaining proxy I/O read/write tests require DS stripe maps
-     * created via patched-DS synthetic FH derivation, which was
-     * removed.  Generic-only DS mode needs live NFS proxy mounts
-     * for FH capture.  Skip until an integration harness provides
-     * actual DS mounts. */
-    fprintf(stdout,
-            "  (other read/write tests skipped -- require DS proxy mounts)\n");
+    RUN_TEST(test_proxy_read_sparse_holes);
+    RUN_TEST(test_proxy_read_mirror_failover);
 
     fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

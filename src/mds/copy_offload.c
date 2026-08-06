@@ -97,19 +97,29 @@ static void *copy_worker(void *arg)
     struct copy_job *j = (struct copy_job *)arg;
     static const uint32_t chunk = 1024 * 1024; /* 1 MiB */
     uint8_t *buf = NULL;
+    struct mds_inode src_inode;
     uint64_t total = 0;
+    uint64_t copy_count;
     enum mds_status st = MDS_OK;
+    st = mds_cat_ns_getattr(j->cat, j->src_fileid, &src_inode);
+    if (st != MDS_OK) {
+        goto done;
+    }
+    if (j->src_offset >= src_inode.size) {
+        goto done;
+    }
+    copy_count = j->count;
+    if (copy_count > src_inode.size - j->src_offset) {
+        copy_count = src_inode.size - j->src_offset;
+    }
 
     buf = malloc(chunk);
     if (buf == NULL) {
-        pthread_mutex_lock(&j->mtx);
-        j->state = COPY_JOB_ERROR;
-        j->error = MDS_ERR_NOMEM;
-        pthread_mutex_unlock(&j->mtx);
-        return NULL;
+        st = MDS_ERR_NOMEM;
+        goto done;
     }
 
-    while (total < j->count) {
+    while (total < copy_count) {
         uint32_t want = chunk;
         uint32_t nr = 0;
         uint32_t nw = 0;
@@ -123,11 +133,12 @@ static void *copy_worker(void *arg)
             break;
         }
 
-        if (j->count - total < want) {
-            want = (uint32_t)(j->count - total);
+        if (copy_count - total < want) {
+            want = (uint32_t)(copy_count - total);
         }
 
         st = mds_proxy_read(j->proxy, j->cat, j->src_fileid,
+                            src_inode.size,
                             j->src_offset + total, want,
                             buf, &nr, &eof_flag);
         if (st != MDS_OK || nr == 0) {
@@ -138,6 +149,10 @@ static void *copy_worker(void *arg)
                              j->dst_offset + total,
                              buf, nr, &nw);
         if (st != MDS_OK) {
+            break;
+        }
+        if (nw != nr) {
+            st = MDS_ERR_IO;
             break;
         }
 
@@ -152,6 +167,7 @@ static void *copy_worker(void *arg)
         }
     }
 
+done:
     free(buf);
 
     /* Finalise metadata BEFORE marking the job complete so that
