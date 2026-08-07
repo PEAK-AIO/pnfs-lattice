@@ -39,12 +39,17 @@
 #include <stdbool.h>
 
 /* -----------------------------------------------------------------------
- * Hash table sizing
+ * Hash table sizing (Wave 4 T4.2)
+ *
+ * Bucket counts are per-table fields configured at init time
+ * (session_table_init_ex); the defaults live in session.h
+ * (SESSION_DEFAULT_*_BUCKETS).  The stripe-lock count deliberately
+ * stays at the fixed 16 (locks[16] + session_id_shard % 16): every
+ * unhash/free path acquires ALL stripes in order, so the protocol
+ * cost scales with the stripe count while client/session cardinality
+ * is orders of magnitude below open-state cardinality -- a deliberate
+ * deviation from pmds's configurable session stripes.
  * ----------------------------------------------------------------------- */
-
-#define CLIENT_HASH_BUCKETS   256
-#define SESSION_HASH_BUCKETS  256
-#define OWNER_HASH_BUCKETS    256
 
 /* -----------------------------------------------------------------------
  * Session table (opaque type from session.h)
@@ -54,6 +59,9 @@ struct session_table {
 	struct nfs4_client  **client_hash;
 	struct nfs4_client  **owner_hash;  /* Secondary: by co_ownerid */
 	struct nfs4_session **session_hash;
+	uint32_t             client_buckets;
+	uint32_t             owner_buckets;
+	uint32_t             session_buckets;
 	uint64_t             next_clientid;
 	uint64_t             next_session_seq;
 	uint32_t             mds_id;
@@ -135,17 +143,19 @@ static void session_table_unlock_all(struct session_table *st)
  * session_hash: index by first 8 bytes of session_id
  * ----------------------------------------------------------------------- */
 
-static uint32_t hash_clientid(uint64_t clientid)
+static uint32_t hash_clientid(const struct session_table *st,
+			      uint64_t clientid)
 {
 	uint64_t h = clientid;
 
 	h ^= h >> 33;
 	h *= 0xff51afd7ed558ccdULL;
 	h ^= h >> 33;
-	return (uint32_t)(h % CLIENT_HASH_BUCKETS);
+	return (uint32_t)(h % st->client_buckets);
 }
 
-static uint32_t hash_session_id(const uint8_t sid[SESSION_ID_SIZE])
+static uint32_t hash_session_id(const struct session_table *st,
+				const uint8_t sid[SESSION_ID_SIZE])
 {
 	uint64_t v;
 
@@ -153,18 +163,19 @@ static uint32_t hash_session_id(const uint8_t sid[SESSION_ID_SIZE])
 	v ^= v >> 33;
 	v *= 0xff51afd7ed558ccdULL;
 	v ^= v >> 33;
-	return (uint32_t)(v % SESSION_HASH_BUCKETS);
+	return (uint32_t)(v % st->session_buckets);
 }
 
 /** FNV-1a hash of co_ownerid for O(1) owner lookup. */
-static uint32_t hash_ownerid(const uint8_t *data, uint32_t len)
+static uint32_t hash_ownerid(const struct session_table *st,
+			     const uint8_t *data, uint32_t len)
 {
 	uint32_t h = 2166136261u;
 	for (uint32_t i = 0; i < len; i++) {
 		h ^= data[i];
 		h *= 16777619u;
 	}
-	return h % OWNER_HASH_BUCKETS;
+	return h % st->owner_buckets;
 }
 
 /* -----------------------------------------------------------------------
@@ -174,7 +185,7 @@ static uint32_t hash_ownerid(const uint8_t *data, uint32_t len)
 static struct nfs4_client *find_client_by_id(const struct session_table *st,
 					     uint64_t clientid)
 {
-	uint32_t idx = hash_clientid(clientid);
+	uint32_t idx = hash_clientid(st, clientid);
 	struct nfs4_client *c;
 
 	for (c = st->client_hash[idx]; c != NULL; c = c->hash_next) {
@@ -193,7 +204,7 @@ static struct nfs4_client *find_client_by_owner(const struct session_table *st,
 						const uint8_t *co_ownerid,
 						uint32_t co_ownerid_len)
 {
-	uint32_t idx = hash_ownerid(co_ownerid, co_ownerid_len);
+	uint32_t idx = hash_ownerid(st, co_ownerid, co_ownerid_len);
 	struct nfs4_client *c;
 
 	for (c = st->owner_hash[idx]; c != NULL;
@@ -214,7 +225,7 @@ static struct nfs4_client *find_client_by_owner(const struct session_table *st,
 static struct nfs4_session *find_session(const struct session_table *st,
 					 const uint8_t sid[SESSION_ID_SIZE])
 {
-	uint32_t idx = hash_session_id(sid);
+	uint32_t idx = hash_session_id(st, sid);
 	struct nfs4_session *s;
 
 	for (s = st->session_hash[idx]; s != NULL; s = s->hash_next) {
@@ -259,7 +270,7 @@ static void unhash_client(struct session_table *st, struct nfs4_client *c)
 {
 	/* Remove from clientid hash. */
 	{
-		uint32_t idx = hash_clientid(c->clientid);
+		uint32_t idx = hash_clientid(st, c->clientid);
 		struct nfs4_client **pp;
 
 		for (pp = &st->client_hash[idx]; *pp != NULL;
@@ -272,8 +283,8 @@ static void unhash_client(struct session_table *st, struct nfs4_client *c)
 	}
 	/* Remove from owner hash. */
 	{
-		uint32_t idx = hash_ownerid(c->co_ownerid,
-					   c->co_ownerid_len);
+		uint32_t idx = hash_ownerid(st, c->co_ownerid,
+					    c->co_ownerid_len);
 		struct nfs4_client **pp;
 
 		for (pp = &st->owner_hash[idx]; *pp != NULL;
@@ -292,7 +303,7 @@ static void unhash_client(struct session_table *st, struct nfs4_client *c)
 
 static void unhash_session(struct session_table *st, struct nfs4_session *s)
 {
-	uint32_t idx = hash_session_id(s->session_id);
+	uint32_t idx = hash_session_id(st, s->session_id);
 	struct nfs4_session **pp;
 
 	for (pp = &st->session_hash[idx]; *pp != NULL;
@@ -367,8 +378,11 @@ static void make_session_id(struct session_table *st,
  * Public API
  * ----------------------------------------------------------------------- */
 
-int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
-		       struct session_table **out)
+int session_table_init_ex(uint32_t mds_id, uint32_t lease_time_sec,
+			  uint32_t client_buckets,
+			  uint32_t session_buckets,
+			  uint32_t owner_buckets,
+			  struct session_table **out)
 {
 	struct session_table *st;
 
@@ -376,16 +390,30 @@ int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
 		return -1;
 }
 
+	if (client_buckets == 0) {
+		client_buckets = SESSION_DEFAULT_CLIENT_BUCKETS;
+	}
+	if (session_buckets == 0) {
+		session_buckets = SESSION_DEFAULT_SESSION_BUCKETS;
+	}
+	if (owner_buckets == 0) {
+		owner_buckets = SESSION_DEFAULT_OWNER_BUCKETS;
+	}
+
 	st = calloc(1, sizeof(*st));
 	if (st == NULL) {
 		return -1;
 }
 
+	st->client_buckets = client_buckets;
+	st->owner_buckets = owner_buckets;
+	st->session_buckets = session_buckets;
+
 	/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-	st->client_hash = calloc(CLIENT_HASH_BUCKETS,
+	st->client_hash = calloc(client_buckets,
 				 sizeof(struct nfs4_client *));
 	/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-	st->owner_hash = calloc(OWNER_HASH_BUCKETS,
+	st->owner_hash = calloc(owner_buckets,
 				 sizeof(struct nfs4_client *));
 	if (st->client_hash == NULL || st->owner_hash == NULL) {
 		/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
@@ -397,7 +425,7 @@ int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
 	}
 
 	/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-	st->session_hash = calloc(SESSION_HASH_BUCKETS,
+	st->session_hash = calloc(session_buckets,
 				  sizeof(struct nfs4_session *));
 	if (st->session_hash == NULL) {
 		/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
@@ -420,6 +448,13 @@ int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
 
 	*out = st;
 	return 0;
+}
+
+int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
+		       struct session_table **out)
+{
+	return session_table_init_ex(mds_id, lease_time_sec,
+				     0, 0, 0, out);
 }
 
 void session_table_set_cq(struct session_table *st, struct commit_queue *cq)
@@ -477,7 +512,7 @@ void session_table_destroy(struct session_table *st)
 	/* Frees every session: exclude any in-flight shard-locked slot
 	 * readers first (see the locks[] protocol comment). */
 	session_table_lock_all(st);
-	for (i = 0; i < CLIENT_HASH_BUCKETS; i++) {
+	for (i = 0; i < st->client_buckets; i++) {
 		struct nfs4_client *c = st->client_hash[i];
 		struct nfs4_client *next;
 
@@ -636,12 +671,13 @@ static int session_alloc_new_client(struct session_table *st,
 	c->owner_hash_next = NULL;
 
 	{
-		uint32_t idx = hash_clientid(c->clientid);
+		uint32_t idx = hash_clientid(st, c->clientid);
 		c->hash_next = st->client_hash[idx];
 		st->client_hash[idx] = c;
 	}
 	{
-		uint32_t idx = hash_ownerid(c->co_ownerid, c->co_ownerid_len);
+		uint32_t idx = hash_ownerid(st, c->co_ownerid,
+					    c->co_ownerid_len);
 		c->owner_hash_next = st->owner_hash[idx];
 		st->owner_hash[idx] = c;
 	}
@@ -808,8 +844,8 @@ int session_exchange_id(struct session_table *st,
 
 		if (defer_old) {
 			/* Case 5: remove from owner_hash only. */
-			uint32_t oidx = hash_ownerid(c->co_ownerid,
-						    c->co_ownerid_len);
+			uint32_t oidx = hash_ownerid(st, c->co_ownerid,
+						     c->co_ownerid_len);
 			struct nfs4_client **pp;
 			for (pp = &st->owner_hash[oidx]; *pp != NULL;
 			     pp = &(*pp)->owner_hash_next) {
@@ -1066,7 +1102,7 @@ int session_create_session(struct session_table *st,
 
 	/* Insert into session hash. */
 	{
-		uint32_t idx = hash_session_id(s->session_id);
+		uint32_t idx = hash_session_id(st, s->session_id);
 
 		s->hash_next = st->session_hash[idx];
 		st->session_hash[idx] = s;
@@ -1630,7 +1666,7 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
 }
 
 	pthread_mutex_lock(&st->locks[0]);
-	for (i = 0; i < SESSION_HASH_BUCKETS; i++) {
+	for (i = 0; i < st->session_buckets; i++) {
 		struct nfs4_session *s;
 
 		for (s = st->session_hash[i]; s != NULL; s = s->hash_next) {
@@ -1701,7 +1737,7 @@ int session_for_each_with_cb(struct session_table *st,
     }
 
     pthread_mutex_lock(&st->locks[0]);
-    for (i = 0; i < SESSION_HASH_BUCKETS && rc == 0; i++) {
+    for (i = 0; i < st->session_buckets && rc == 0; i++) {
         struct nfs4_session *s;
 
         for (s = st->session_hash[i]; s != NULL && rc == 0;
@@ -1841,14 +1877,19 @@ static void *lease_reaper_thread(void *arg)
         }
 
         time_t now = time(NULL);
-        struct nfs4_client *orphans[CLIENT_HASH_BUCKETS];
+        /* Fixed-size deferred-cleanup batch: bucket counts are now
+         * configurable (T4.2), so the scratch array keeps its own
+         * bound instead of scaling with the table.  Overflow falls
+         * back to inline cleanup below, exactly as before. */
+#define REAPER_ORPHAN_MAX 256U
+        struct nfs4_client *orphans[REAPER_ORPHAN_MAX];
         uint32_t orphan_count = 0;
 
         /* Identify and unlink expired clients under ALL stripe locks,
          * but defer RonDB / open-state cleanup until after unlock so
          * SEQUENCE handlers are not blocked for seconds. */
         session_table_lock_all(st);
-        for (uint32_t b = 0; b < CLIENT_HASH_BUCKETS; b++) {
+        for (uint32_t b = 0; b < st->client_buckets; b++) {
             struct nfs4_client **pp = &st->client_hash[b];
             while (*pp != NULL) {
                 struct nfs4_client *c = *pp;
@@ -1871,10 +1912,10 @@ static void *lease_reaper_thread(void *arg)
                     unhash_client(st, c);
                     destroy_client_sessions(st, c);
                     c->sessions = NULL;
-                    if (orphan_count < CLIENT_HASH_BUCKETS) {
+                    if (orphan_count < REAPER_ORPHAN_MAX) {
                         orphans[orphan_count++] = c;
                     } else {
-                        /* Table unexpectedly full; finish inline. */
+                        /* Batch full; finish inline. */
                         session_finish_expired_client(st, c);
                     }
                 } else {

@@ -275,6 +275,11 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->open_state_file_buckets = 0;
     cfg->open_state_stateid_buckets = 0;
     cfg->open_state_lock_stripes = 0;
+    /* Session table bucket sizing (Wave 4 T4.2): 0 = library
+     * defaults (65,536 each; see session.h). */
+    cfg->session_client_buckets = 0;
+    cfg->session_session_buckets = 0;
+    cfg->session_owner_buckets = 0;
     /* Deferred parent-dir attr maintenance (parent_touch). */
     cfg->parent_touch_deferred = false;
     cfg->parent_touch_flush_ms = 50;
@@ -881,6 +886,33 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                 (void)fprintf(stderr,
                     "WARN: open_state_lock_stripes=%lu out of range "
                     "(16..4096); using default\n", v);
+            }
+        } else if (strcmp(key, "session_client_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_client_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_client_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
+            }
+        } else if (strcmp(key, "session_session_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_session_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_session_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
+            }
+        } else if (strcmp(key, "session_owner_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_owner_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_owner_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
             }
         } else if (strcmp(key, "parent_touch_deferred") == 0) {
             cfg->parent_touch_deferred =

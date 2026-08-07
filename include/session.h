@@ -228,8 +228,17 @@ struct session_table;  /* Opaque — defined in session.c */
  * API — Lifecycle
  * ----------------------------------------------------------------------- */
 
+/* Bucket-count defaults (Wave 4 T4.2).  Used by session_table_init()
+ * and by session_table_init_ex() arguments of 0; tuned via the
+ * session_client_buckets / session_session_buckets /
+ * session_owner_buckets INI keys.  The pre-Wave-4 value was 256. */
+#define SESSION_DEFAULT_CLIENT_BUCKETS   65536U
+#define SESSION_DEFAULT_SESSION_BUCKETS  65536U
+#define SESSION_DEFAULT_OWNER_BUCKETS    65536U
+
 /**
- * Initialise the session/clientid manager.
+ * Initialise the session/clientid manager with default bucket sizing
+ * (SESSION_DEFAULT_*_BUCKETS above).
  *
  * @param mds_id         This MDS node's numeric ID (0-based).
  * @param lease_time_sec Lease duration in seconds (0 = default 90s).
@@ -242,6 +251,28 @@ struct session_table;  /* Opaque — defined in session.c */
  */
 int session_table_init(uint32_t mds_id, uint32_t lease_time_sec,
 		       struct session_table **out);
+
+/**
+ * Initialise the session/clientid manager with explicit bucket sizing.
+ *
+ * @param mds_id          This MDS node's numeric ID (0-based).
+ * @param lease_time_sec  Lease duration in seconds (0 = default 90s).
+ * @param client_buckets  Clientid hash bucket count (0 = default).
+ * @param session_buckets Session-id hash bucket count (0 = default).
+ * @param owner_buckets   co_ownerid hash bucket count (0 = default).
+ * @param out             Receives the session table handle.
+ * @return 0 on success, -1 on allocation failure.
+ *
+ * The stripe-lock count is fixed at 16 (see session.c): every
+ * unhash/free path acquires all stripes, so the lock-all protocol
+ * cost scales with stripe count while client/session cardinality
+ * stays low -- a deliberate deviation from configurable stripes.
+ */
+int session_table_init_ex(uint32_t mds_id, uint32_t lease_time_sec,
+			  uint32_t client_buckets,
+			  uint32_t session_buckets,
+			  uint32_t owner_buckets,
+			  struct session_table **out);
 
 /**
  * Destroy the session table and free all client/session state.

@@ -1246,8 +1246,11 @@ if (s_pt != NULL) {
 	/* 6b. Create session table.
 	 *     For RonDB the catalogue vtable handles recovery
 	 *     persistence directly (cq stays NULL). */
-	if (session_table_init(cfg.self.id, cfg.lease_time_sec,
-			       &session_tbl) == 0) {
+	if (session_table_init_ex(cfg.self.id, cfg.lease_time_sec,
+				  cfg.session_client_buckets,
+				  cfg.session_session_buckets,
+				  cfg.session_owner_buckets,
+				  &session_tbl) == 0) {
 
 		session_table_set_cat(session_tbl, cat);
 		if (cfg.session_fore_slots > 0) {

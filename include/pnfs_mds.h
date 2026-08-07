@@ -991,6 +991,14 @@ struct mds_config {
     uint32_t            open_state_file_buckets;    /**< 0 = default. */
     uint32_t            open_state_stateid_buckets; /**< 0 = default. */
     uint32_t            open_state_lock_stripes;    /**< 0 = default. */
+
+    /* Session table bucket sizing (Wave 4 T4.2).  0 selects the
+     * built-in defaults (SESSION_DEFAULT_*_BUCKETS in session.h:
+     * 65,536 each; pre-Wave-4 value was 256).  The session stripe-
+     * lock count is intentionally NOT configurable (see session.h). */
+    uint32_t            session_client_buckets;     /**< 0 = default. */
+    uint32_t            session_session_buckets;    /**< 0 = default. */
+    uint32_t            session_owner_buckets;      /**< 0 = default. */
     /* Deferred parent-dir attr maintenance (parent_touch). */
     bool     parent_touch_deferred;
     uint32_t parent_touch_flush_ms;
