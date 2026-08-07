@@ -170,6 +170,14 @@ struct nfs4_open_state {
      * through the stripe free list; false for plain calloc records
      * (reload path, chunk-allocation fallback), which are free()d. */
     bool                   pooled;
+    /* Durable-write window (internal, Wave 4 T4.3): true while
+     * open_state_open() runs the NDB persist for this record
+     * OUTSIDE the file-stripe lock.  The record is visible for
+     * share-conflict purposes but immutable: same-owner re-OPEN,
+     * CLOSE, and OPEN_DOWNGRADE return a retryable DELAY code
+     * until the persist commits (flag cleared) or fails (record
+     * unwound / rolled back). */
+    bool                   persist_pending;
 };
 
 /* -----------------------------------------------------------------------
@@ -289,11 +297,14 @@ void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
  *         -1 = NFS4ERR_SHARE_DENIED (share conflict).
  *         -2 = allocation failure (NFS4ERR_RESOURCE).
  *         -3 = invalid parameters.
- *         -5 = durable persist of the open state failed
- *              (NFS4ERR_DELAY).  The in-memory mutation has been
- *              fully unwound: a fresh open is removed again, an
- *              upgrade has its previous seqid/share bits restored.
- *              No stateid is published to the client.
+ *         -5 = retry shortly (NFS4ERR_DELAY).  Either the durable
+ *              persist of the open state failed -- the in-memory
+ *              mutation has been fully unwound (a fresh open is
+ *              removed again, an upgrade has its previous
+ *              seqid/share bits restored) and no stateid reaches
+ *              the client -- or the same-owner state targeted by
+ *              an upgrade has a durable write still in flight on
+ *              another thread (T4.3 pending window).
  */
 int open_state_open(struct open_state_table *ot,
                     uint64_t clientid,
@@ -323,6 +334,9 @@ int open_state_open(struct open_state_table *ot,
  * @return 0 on success.
  *         -1 = NFS4ERR_BAD_STATEID (not found, seqid mismatch, or
  *              wrong owner).
+ *         -4 = NFS4ERR_OLD_STATEID (stale seqid).
+ *         -6 = NFS4ERR_DELAY: the state's durable write is still in
+ *              flight (T4.3 pending window); retry shortly.
  */
 int open_state_close(struct open_state_table *ot,
                      uint64_t clientid,

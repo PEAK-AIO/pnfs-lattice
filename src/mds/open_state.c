@@ -17,6 +17,26 @@
  *   - Stateid hash lookups are protected by striped RW locks.
  *
  * Open state may optionally be persisted to the catalogue for recovery.
+ *
+ * Publication ordering (Wave 4 T4.3): when durable persistence is
+ * active, open_state_open() publishes the new/upgraded state with
+ * persist_pending=true, releases the file-stripe mutex, runs the NDB
+ * round-trip, then relocks to commit (clear the flag) or roll back.
+ * While pending:
+ *   - the state IS visible to share-reservation conflict checks
+ *     (conservative -- its reservation counts immediately);
+ *   - it is NOT mutable by other operations: a same-owner re-OPEN,
+ *     CLOSE, or OPEN_DOWNGRADE against it returns a retryable DELAY
+ *     code.  The client cannot legitimately reference the stateid
+ *     anyway -- the OPEN reply is not sent until the persist
+ *     completes;
+ *   - revoke paths (lease expiry, client teardown) may still free
+ *     it; the relock phase detects that by re-looking the stateid
+ *     up and fails the OPEN without touching freed memory.
+ * The OPEN reply stays synchronous with durability; only the lock
+ * scope shrank, so unrelated files on the same stripe -- and other
+ * owners on the same file -- no longer serialise behind the
+ * round-trip.
  */
 
 #include <stdlib.h>
@@ -683,6 +703,16 @@ int open_state_open(struct open_state_table *ot,
         }
     }
 
+    /* T4.3: the matched state's durable write is still in flight on
+     * another thread.  Its seqid/share bits may yet be rolled back,
+     * so stacking a second mutation would corrupt the undo; the
+     * client retries after a short backoff.  (Rare: a same-owner
+     * OPEN storm inside one persist round-trip.) */
+    if (existing != NULL && existing->persist_pending) {
+        rc = -5; /* NFS4ERR_DELAY */
+        goto out_unlock;
+    }
+
     if (existing != NULL) {
         uint32_t merged_access =
             existing->share_access | share_access;
@@ -691,6 +721,9 @@ int open_state_open(struct open_state_table *ot,
         uint32_t prev_seqid;
         uint32_t prev_access;
         uint32_t prev_deny;
+        uint32_t new_seqid;
+        struct mds_coord_open_row row;
+        enum mds_status pst;
 
         /* Re-validate share reservations against every OTHER open on
          * the file using the upgraded (merged) modes.  Skipping
@@ -715,70 +748,85 @@ int open_state_open(struct open_state_table *ot,
 
         /* RFC 8881 S8.2.2: bump seqid by one; the value 0 is
          * reserved, so 0xFFFFFFFF wraps to 1 (not 0). */
-        uint32_t next_seqid = existing->stateid.seqid + 1U;
-        if (next_seqid == 0U) {
-            next_seqid = 1U;
+        new_seqid = existing->stateid.seqid + 1U;
+        if (new_seqid == 0U) {
+            new_seqid = 1U;
         }
-        existing->stateid.seqid = next_seqid;
+        existing->stateid.seqid = new_seqid;
         existing->share_access = merged_access;
         existing->share_deny = merged_deny;
 
         *out_stateid = existing->stateid;
 
-        pthread_rwlock_unlock(
-            &ot->stateid_locks[stateid_lock_idx]);
-
-        /* Persist updated row (same primary key as the original
-         * insert, so this is an in-place update).
-         *
-         * T4.1 persist-failure policy: fail the OPEN.  Under the
-         * any-MDS routing contract the durable row is what makes
-         * this open's share reservation visible to peer MDSes;
-         * publishing in-memory state whose persist failed would
-         * let a peer grant a conflicting open.  The RonDB layer
-         * already retries transient NDB errors internally, so a
-         * failure surfacing here is treated as real: restore the
-         * pre-upgrade state and return -5 (mapped to
-         * NFS4ERR_DELAY -- the client retries once NDB heals). */
-        if (ot->cat != NULL && !ot->skip_ndb_persist) {
-            struct mds_coord_open_row row;
-            enum mds_status pst;
-
-            memset(&row, 0, sizeof(row));
-            memcpy(row.stateid_other, existing->stateid.other,
-                   NFS4_OTHER_SIZE);
-            row.seqid = existing->stateid.seqid;
-            row.clientid = clientid;
-            row.fileid = fileid;
-            row.share_access = merged_access;
-            row.share_deny = merged_deny;
-            if (open_owner != NULL && open_owner_len > 0) {
-                memcpy(row.open_owner, open_owner,
-                       open_owner_len);
-            }
-            row.open_owner_len = open_owner_len;
-            row.owner_mds_id = ot->mds_id;
-            row.owner_boot_epoch = ot->boot_epoch;
-            pst = mds_coord_open_put(ot->cat, &row);
-            /* NOSUPPORT = the backend has no shared open-state
-             * table at all; nothing durable was expected, so it
-             * is not a persist failure (same effective contract
-             * as cat == NULL). */
-            if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
-                pthread_rwlock_wrlock(
-                    &ot->stateid_locks[stateid_lock_idx]);
-                existing->stateid.seqid = prev_seqid;
-                existing->share_access = prev_access;
-                existing->share_deny = prev_deny;
-                pthread_rwlock_unlock(
-                    &ot->stateid_locks[stateid_lock_idx]);
-                rc = -5; /* NFS4ERR_DELAY */
-                goto out_unlock;
-            }
+        /* Fast path: no durable write follows -- the upgrade is
+         * complete under the locks, exactly as before T4.3. */
+        if (ot->cat == NULL || ot->skip_ndb_persist) {
+            pthread_rwlock_unlock(
+                &ot->stateid_locks[stateid_lock_idx]);
+            pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+            return 0;
         }
 
+        /* T4.3: durable path.  Build the row and capture the
+         * stateid PK while the state is still locked -- after the
+         * locks drop, `existing` may be freed by a concurrent
+         * revoke and must not be dereferenced again. */
+        existing->persist_pending = true;
+        memset(&row, 0, sizeof(row));
+        memcpy(row.stateid_other, existing->stateid.other,
+               NFS4_OTHER_SIZE);
+        row.seqid = new_seqid;
+        row.clientid = clientid;
+        row.fileid = fileid;
+        row.share_access = merged_access;
+        row.share_deny = merged_deny;
+        if (open_owner != NULL && open_owner_len > 0) {
+            memcpy(row.open_owner, open_owner, open_owner_len);
+        }
+        row.open_owner_len = open_owner_len;
+        row.owner_mds_id = ot->mds_id;
+        row.owner_boot_epoch = ot->boot_epoch;
+
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
-        return 0;
+
+        /* NDB round-trip with NO open-state locks held (T4.3).
+         * T4.1 failure policy applies below; NOSUPPORT = backend
+         * without a shared open-state table = nothing to persist. */
+        pst = mds_coord_open_put(ot->cat, &row);
+
+        pthread_mutex_lock(&ot->locks[file_lock_idx]);
+        pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
+        {
+            struct nfs4_open_state *cur =
+                find_by_other(ot, row.stateid_other);
+
+            if (cur == NULL) {
+                /* Revoked while unlocked (lease expiry / client
+                 * teardown).  The row follows the owner-reap
+                 * lifecycle like any other revoked open; the OPEN
+                 * itself fails -- the client never saw the bumped
+                 * stateid. */
+                rc = -5; /* NFS4ERR_DELAY */
+            } else if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+                /* Roll back.  Guards keep the state immutable
+                 * while pending, so our bump is still the latest;
+                 * the seqid check is defensive only. */
+                if (cur->stateid.seqid == new_seqid) {
+                    cur->stateid.seqid = prev_seqid;
+                    cur->share_access = prev_access;
+                    cur->share_deny = prev_deny;
+                }
+                cur->persist_pending = false;
+                rc = -5; /* NFS4ERR_DELAY */
+            } else {
+                cur->persist_pending = false;
+                rc = 0;
+            }
+        }
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return rc;
     }
 
     /* No prior open by this {clientid, open_owner}: allocate fresh
@@ -817,6 +865,13 @@ int open_state_open(struct open_state_table *ot,
     os->file_next = fo->head;
     fo->head = os;
 
+    /* T4.3: mark the state pending BEFORE it becomes findable when
+     * a durable write will follow, so no other operation can mutate
+     * it during the unlocked persist window. */
+    if (ot->cat != NULL && !ot->skip_ndb_persist) {
+        os->persist_pending = true;
+    }
+
     /* Insert into stateid hash. */
     pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
     idx = hash_other(ot, os->stateid.other);
@@ -830,16 +885,20 @@ int open_state_open(struct open_state_table *ot,
     /* Persist to RonDB if catalogue is set (shared-attr)
      * and transient caching is off.
      *
-     * T4.1 persist-failure policy: fail the OPEN.  A stateid whose
-     * durable row was never written must not be handed to the
-     * client -- peer MDSes would miss its share reservation and a
-     * restart would forget it entirely.  Unwind the in-memory
-     * insert (stateid hash + file chain) and return -5 (mapped to
-     * NFS4ERR_DELAY so the client retries once NDB heals). */
+     * T4.1 failure policy: fail the OPEN and unwind -- a stateid
+     * whose durable row was never written must not be handed to
+     * the client (peer MDSes would miss its share reservation and
+     * a restart would forget it).  T4.3 lock scope: the NDB round-
+     * trip runs with NO open-state locks held; the state was
+     * published pending above and is committed or unwound under
+     * the relocked stripe below. */
     if (ot->cat != NULL && !ot->skip_ndb_persist) {
         struct mds_coord_open_row row;
         enum mds_status pst;
 
+        /* Build the row before dropping the lock -- `os` must not
+         * be dereferenced once the stripe unlocks (a concurrent
+         * revoke may free it). */
         memset(&row, 0, sizeof(row));
         memcpy(row.stateid_other, os->stateid.other, NFS4_OTHER_SIZE);
         row.seqid = os->stateid.seqid;
@@ -853,18 +912,46 @@ int open_state_open(struct open_state_table *ot,
         row.open_owner_len = open_owner_len;
         row.owner_mds_id = ot->mds_id;
         row.owner_boot_epoch = ot->boot_epoch;
+
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+
         pst = mds_coord_open_put(ot->cat, &row);
-        /* NOSUPPORT = no shared open-state table on this backend;
-         * treated as "nothing to persist", same as cat == NULL. */
-        if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
-            pthread_rwlock_wrlock(
-                &ot->stateid_locks[stateid_lock_idx]);
-            unhash_stateid(ot, os);
-            pthread_rwlock_unlock(
-                &ot->stateid_locks[stateid_lock_idx]);
-            unlink_from_file(ot, os);
-            rc = -5; /* NFS4ERR_DELAY */
-            goto out_unlock_free;
+
+        pthread_mutex_lock(&ot->locks[file_lock_idx]);
+        pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
+        {
+            struct nfs4_open_state *cur =
+                find_by_other(ot, row.stateid_other);
+
+            if (cur == NULL) {
+                /* Revoked while unlocked (lease expiry / client
+                 * teardown).  On persist success the fresh row is
+                 * an orphan no client ever saw -- delete it (rare
+                 * race; the extra round-trip under the lock is
+                 * acceptable here). */
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                if (pst == MDS_OK) {
+                    (void)mds_coord_open_del(ot->cat,
+                                             row.stateid_other);
+                }
+                rc = -5; /* NFS4ERR_DELAY */
+            } else if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+                /* NOSUPPORT = no shared open-state table on this
+                 * backend; treated as "nothing to persist".  Any
+                 * other failure: unwind (T4.1). */
+                unhash_stateid(ot, cur);
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                unlink_from_file(ot, cur);
+                os_free(ot, file_lock_idx, cur);
+                rc = -5; /* NFS4ERR_DELAY */
+            } else {
+                cur->persist_pending = false;
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                rc = 0;
+            }
         }
     }
 
@@ -922,6 +1009,15 @@ int open_state_close(struct open_state_table *ot,
     }
     if (os->clientid != clientid) {
         rc = -1;  /* NFS4ERR_BAD_STATEID -- not owner */
+        goto out;
+    }
+
+    /* T4.3: the state's durable write is still in flight -- it may
+     * yet be unwound, so it cannot be closed.  The client cannot
+     * legitimately hold this stateid (the OPEN reply has not been
+     * sent); retransmission races retry via DELAY. */
+    if (os->persist_pending) {
+        rc = -6;  /* NFS4ERR_DELAY */
         goto out;
     }
 
@@ -1123,6 +1219,13 @@ int open_state_downgrade(struct open_state_table *ot,
         pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
         return -2;
+    }
+    /* T4.3: durable write in flight -- immutable until it commits
+     * or unwinds (see the pending-window notes at the file head). */
+    if (os->persist_pending) {
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return -6; /* NFS4ERR_DELAY */
     }
     /*
      * Zero-seqid: per RFC 5661 S8.2.2 the server MUST treat a

@@ -798,6 +798,135 @@ static void test_api_init_ex_sizing_and_pool_reuse(void)
 	open_state_table_destroy(ot);
 }
 
+/* -----------------------------------------------------------------------
+ * T4.3 (wave 4) -- pending-window guards
+ *
+ * A probing vtable whose open_put calls BACK into the open-state
+ * table.  open_put now runs with NO open-state locks held (that is
+ * T4.3); if the stripe mutex were still held these re-entrant calls
+ * would self-deadlock, so the probes double as proof of the
+ * lock-free persist window.  While inside the persist, the freshly
+ * published (pending) state must be visible for share conflicts but
+ * immutable for same-owner re-OPEN / CLOSE / OPEN_DOWNGRADE.
+ * ----------------------------------------------------------------------- */
+
+static struct open_state_table *pending_probe_ot;
+static struct nfs4_stateid pending_probe_sid;
+static uint64_t pending_probe_clientid;
+static uint64_t pending_probe_fileid;
+static const uint8_t pending_probe_owner[] = "own-pend";
+static bool pending_probe_armed;
+static int pending_probe_open_rc;
+static int pending_probe_close_rc;
+static int pending_probe_downgrade_rc;
+static int pending_probe_conflict_rc;
+
+static enum mds_status probing_open_put(struct mds_catalogue *cat,
+					const struct mds_coord_open_row *row)
+{
+	struct nfs4_stateid sid2;
+	struct nfs4_stateid out2;
+
+	(void)cat;
+	if (!pending_probe_armed) {
+		return MDS_OK;
+	}
+	pending_probe_armed = false;
+
+	memcpy(pending_probe_sid.other, row->stateid_other,
+	       NFS4_OTHER_SIZE);
+	pending_probe_sid.seqid = row->seqid;
+
+	/* Same-owner re-OPEN during the window -> -5 (DELAY). */
+	pending_probe_open_rc = open_state_open(pending_probe_ot,
+		pending_probe_clientid, pending_probe_owner,
+		sizeof(pending_probe_owner) - 1, pending_probe_fileid,
+		OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE, &sid2);
+
+	/* CLOSE during the window -> -6 (DELAY). */
+	pending_probe_close_rc = open_state_close(pending_probe_ot,
+		pending_probe_clientid, &pending_probe_sid, &out2);
+
+	/* OPEN_DOWNGRADE during the window -> -6 (DELAY). */
+	pending_probe_downgrade_rc = open_state_downgrade(
+		pending_probe_ot, pending_probe_clientid,
+		&pending_probe_sid,
+		OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE, &out2);
+
+	/* A DIFFERENT owner conflicting with the pending reservation
+	 * is denied: the pending state counts for share conflicts
+	 * immediately (conservative publication ordering). */
+	pending_probe_conflict_rc = open_state_open(pending_probe_ot,
+		999 /* other client */, NULL, 0, pending_probe_fileid,
+		OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE, &sid2);
+
+	return MDS_OK;
+}
+
+static const struct mds_coordination_ops probing_coord_ops = {
+	.open_put = probing_open_put,
+};
+
+/** T4.3 -- during the unlocked persist window the pending state is
+ * conflict-visible but immutable; afterwards it is fully usable. */
+static void test_api_persist_window_guards(void)
+{
+	struct open_state_table *ot = NULL;
+	struct mds_catalogue probe_cat;
+	struct nfs4_stateid sid, sid2, csid;
+	struct nfs4_open_state found;
+	int rc;
+
+	memset(&probe_cat, 0, sizeof(probe_cat));
+	probe_cat.coord_ops = &probing_coord_ops;
+
+	ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+	open_state_table_set_cat(ot, &probe_cat, 1);
+
+	pending_probe_ot = ot;
+	pending_probe_clientid = 100;
+	pending_probe_fileid = 4242;
+	pending_probe_open_rc = 99;
+	pending_probe_close_rc = 99;
+	pending_probe_downgrade_rc = 99;
+	pending_probe_conflict_rc = 99;
+	pending_probe_armed = true;
+
+	/* Fresh OPEN with DENY_BOTH; the probes run inside open_put. */
+	rc = open_state_open(ot, 100, pending_probe_owner,
+			     sizeof(pending_probe_owner) - 1, 4242,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_BOTH, &sid);
+	ASSERT_EQ(rc, 0);
+
+	/* In-window observations. */
+	ASSERT_EQ(pending_probe_open_rc, -5);      /* same-owner re-OPEN */
+	ASSERT_EQ(pending_probe_close_rc, -6);     /* CLOSE */
+	ASSERT_EQ(pending_probe_downgrade_rc, -6); /* OPEN_DOWNGRADE */
+	ASSERT_EQ(pending_probe_conflict_rc, -1);  /* other-owner conflict */
+
+	/* After the window: flag cleared, state fully usable. */
+	ASSERT_EQ(open_state_find(ot, &sid, &found), 0);
+	ASSERT_EQ(found.persist_pending, false);
+
+	/* Same-owner upgrade now succeeds (probe disarmed; the put
+	 * returns MDS_OK): seqid bumps and pending clears again. */
+	rc = open_state_open(ot, 100, pending_probe_owner,
+			     sizeof(pending_probe_owner) - 1, 4242,
+			     OPEN4_SHARE_ACCESS_WRITE,
+			     OPEN4_SHARE_DENY_BOTH, &sid2);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid2.seqid, (uint32_t)2);
+	ASSERT_EQ(memcmp(sid2.other, sid.other, NFS4_OTHER_SIZE), 0);
+	ASSERT_EQ(open_state_find(ot, &sid2, &found), 0);
+	ASSERT_EQ(found.persist_pending, false);
+
+	/* CLOSE succeeds once nothing is pending. */
+	ASSERT_EQ(open_state_close(ot, 100, &sid2, &csid), 0);
+
+	open_state_table_destroy(ot);
+}
+
 /** T4.1 -- MDS_ERR_NOSUPPORT from the persist (backend without a
  * shared open-state table) is NOT a failure: same contract as no
  * catalogue at all. */
@@ -1337,6 +1466,7 @@ int main(void)
 	RUN_TEST(test_api_persist_fail_upgrade_restored);
 	RUN_TEST(test_api_persist_nosupport_tolerated);
 	RUN_TEST(test_api_init_ex_sizing_and_pool_reuse);
+	RUN_TEST(test_api_persist_window_guards);
 
 	/* Part 2: Compound integration tests */
 	RUN_TEST(test_compound_open_create_close);
