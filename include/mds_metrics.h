@@ -208,6 +208,32 @@ struct mds_branch_metrics {
     _Atomic uint64_t ds_iolimit_capability_recalls;
     _Atomic uint64_t ds_iolimit_min_read;
     _Atomic uint64_t ds_iolimit_min_write;
+
+    /*
+     * RonDB transient-retry pressure (Wave 6 T6.3 decision
+     * instrumentation).  Retry tuning is data-driven only -- it must
+     * be judged against failure rate, worker occupancy and p99 -- so
+     * the wrapper's transient-error retry loops expose how often they
+     * back off, how long workers sleep, and how often every attempt
+     * is exhausted.  Wrapper-level by design: shim-internal retries
+     * surface to the wrapper as transient failures anyway, and the
+     * C++ shim cannot reference this C11-atomics struct.
+     */
+    _Atomic uint64_t cat_transient_retries;        /**< Backoff sleeps taken. */
+    _Atomic uint64_t cat_transient_backoff_us;     /**< Total us slept in backoff. */
+    _Atomic uint64_t cat_transient_retry_exhausted;/**< Loops that gave up transient. */
+
+    /*
+     * DS filehandle-capture cache (Wave 6 T6.4 decision
+     * instrumentation).  ds_nfs_rpc.c caches one "data/" directory FH
+     * per (host, export) in a 16-entry global table; a hit turns the
+     * capture into a single LOOKUP RPC, a miss pays portmapper +
+     * MOUNT + path walk.  Per-DS indexing is gated on evidence of
+     * capture bursts or DS counts beyond the table size -- this hit
+     * ratio IS that evidence.
+     */
+    _Atomic uint64_t ds_fh_cache_hits;
+    _Atomic uint64_t ds_fh_cache_misses;
 };
 
 extern struct mds_branch_metrics g_branch_metrics;

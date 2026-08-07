@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Wave-6 decision instrumentation** — the profile-gated wave 6 items
+  are closed as "decision pending lab numbers" (see
+  `docs/perf-wave6-findings.md` for every disposition), and the three
+  items whose deciding numbers could not previously be produced are
+  now measurable from `/metrics` deltas:
+  `pnfs_mds_cat_transient_retries` / `_backoff_us` /
+  `_retry_exhausted` (RonDB wrapper transient-retry pressure, T6.3);
+  `pnfs_mds_ds_fh_cache_hits` / `_misses` (DS filehandle-capture
+  cache hit ratio, T6.4); and a `cat_op="unlink_recall"` latency
+  histogram timing the client-visible final-unlink layout recall so
+  all four REMOVE-path cost classes are separable (T6.5).  No
+  request-path behaviour changes; relaxed-atomic counters and one
+  timed scope on an existing call.
 - **Per-DS I/O limit prober (Wave 5)** — new `ds_io_limits` module +
   `ds_iolimit_probe_ms` config key (default 60000; 0 disables).  Each
   ONLINE generic DS is probed with NFSv3 FSINFO for its real
@@ -180,6 +193,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   every referral submount to the owner's root); and
   test_layout_recall's assertions match the documented grant-time
   revoke and no-CB-on-unlink recall contracts.
+- **Corrupted `/metrics` output window (Wave 6)** — the v2 Prometheus
+  render advanced its output offset TWICE after the OPEN-create
+  phase block (a stray duplicate guard), leaving an ~1.6 KB window of
+  unrendered bytes in the middle of every scrape and over-reporting
+  the rendered length.  The full v2 render path is now exercised by
+  the unit suite, which had never called it.
 - **GETDEVICEINFO advertised I/O sizes the DS may reject (Wave 5)** —
   the flex-files `ffdv_rsize`/`ffdv_wsize` fields were hardcoded to
   1 MiB.  Clients write DIRECTLY to the DS at the advertised size, so

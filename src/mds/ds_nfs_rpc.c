@@ -32,6 +32,7 @@
 #include <pthread.h>
 
 #include "ds_nfs_rpc.h"
+#include "mds_metrics.h"   /* FH-cache hit/miss counters (Wave 6 T6.4) */
 
 /* -----------------------------------------------------------------------
  * RPC / NFS constants
@@ -818,6 +819,12 @@ int ds_nfs3_lookup_fh(const char *host, uint16_t port,
             memcpy(cur_fh, ce->data_dir_fh, ce->data_dir_fh_len);
             cur_fh_len = ce->data_dir_fh_len;
             pthread_mutex_unlock(&g_fh_cache_lock);
+            /* Wave 6 T6.4: hit ratio decides whether per-DS
+             * indexing is warranted (capture bursts / DS counts
+             * beyond the 16-entry table). */
+            atomic_fetch_add_explicit(
+                &g_branch_metrics.ds_fh_cache_hits, 1,
+                memory_order_relaxed);
 
             /* Single TCP connection: LOOKUP the file name. */
             fd = tcp_connect(host, port, timeout_ms);
@@ -844,6 +851,9 @@ int ds_nfs3_lookup_fh(const char *host, uint16_t port,
             goto out;
         }
         pthread_mutex_unlock(&g_fh_cache_lock);
+        atomic_fetch_add_explicit(
+            &g_branch_metrics.ds_fh_cache_misses, 1,
+            memory_order_relaxed);
     }
 
     /* Slow path: portmapper + MOUNT + LOOKUP("data") + LOOKUP(file).
