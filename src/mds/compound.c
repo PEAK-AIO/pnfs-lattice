@@ -2033,6 +2033,64 @@ void nfs4_result_scratch_release(struct nfs4_result *r)
 	memset(&r->scratch, 0, sizeof(r->scratch));
 }
 
+/* Op-side (decode) scratch -- see struct nfs4_op_scratch. */
+
+uint8_t *nfs4_op_ensure_write_data(struct nfs4_op *op)
+{
+	if (op == NULL) {
+		return NULL;
+	}
+	if (op->scratch.write_data == NULL) {
+		op->scratch.write_data = malloc(MDS_XATTR_VAL_MAX);
+		if (op->scratch.write_data == NULL) {
+			return NULL;
+		}
+	}
+	op->arg.write.data = op->scratch.write_data;
+	return op->scratch.write_data;
+}
+
+uint8_t *nfs4_op_ensure_ws_data(struct nfs4_op *op)
+{
+	if (op == NULL) {
+		return NULL;
+	}
+	if (op->scratch.ws_data == NULL) {
+		op->scratch.ws_data = malloc(MDS_XATTR_VAL_MAX);
+		if (op->scratch.ws_data == NULL) {
+			return NULL;
+		}
+	}
+	op->arg.write_same.data = op->scratch.ws_data;
+	return op->scratch.ws_data;
+}
+
+uint8_t *nfs4_op_ensure_sx_value(struct nfs4_op *op)
+{
+	if (op == NULL) {
+		return NULL;
+	}
+	if (op->scratch.sx_value == NULL) {
+		op->scratch.sx_value = malloc(MDS_XATTR_VAL_MAX);
+		if (op->scratch.sx_value == NULL) {
+			return NULL;
+		}
+	}
+	op->arg.setxattr.value = op->scratch.sx_value;
+	return op->scratch.sx_value;
+}
+
+void nfs4_op_scratch_release(struct nfs4_op *op)
+{
+	if (op == NULL) {
+		return;
+	}
+	free(op->scratch.write_data);
+	free(op->scratch.ws_data);
+	free(op->scratch.sx_value);
+	memset(&op->scratch, 0, sizeof(op->scratch));
+}
+
 /* -----------------------------------------------------------------------
  * Public API
  * ----------------------------------------------------------------------- */

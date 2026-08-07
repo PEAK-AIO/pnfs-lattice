@@ -692,16 +692,21 @@ static int process_rpc_record(struct rpc_server *srv, struct rpc_conn *c,
      * thread bring-up, which costs one mmap-backed memset and
      * removes the entire class of bug.
      *
-     * tl_reply_buf and tl_ops do not own heap state, so plain
-     * malloc is still safe for them.  Kept as-is to minimise the
-     * surface of this fix. */
+     * tl_reply_buf owns no heap state, so plain malloc remains safe
+     * for it.  tl_ops DID become heap-owning with the Wave-2 op
+     * scratch block and is calloc'd below for the same reason as
+     * tl_results. */
     static __thread char *tl_reply_buf = NULL;
     static __thread struct nfs4_op *tl_ops = NULL;
     static __thread struct nfs4_result *tl_results = NULL;
 
     if (tl_reply_buf == NULL) {
         tl_reply_buf = malloc(REPLY_BUF_SIZE);
-        tl_ops = malloc((size_t)NFS4_MAX_OPS * sizeof(struct nfs4_op));
+        /* Wave 2: tl_ops must be calloc'd too -- struct nfs4_op now
+         * carries a scratch block (decode payload ownership) whose
+         * NULL-pointer zero state is load-bearing, exactly like the
+         * results' fresh-thread guarantee described above. */
+        tl_ops = calloc((size_t)NFS4_MAX_OPS, sizeof(struct nfs4_op));
         tl_results = calloc((size_t)NFS4_MAX_OPS,
                             sizeof(struct nfs4_result));
         if (tl_reply_buf == NULL || tl_ops == NULL ||

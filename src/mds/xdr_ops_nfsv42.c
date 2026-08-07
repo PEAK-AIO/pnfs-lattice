@@ -112,7 +112,11 @@ bool decode_op_write_same(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &a->data_len)) { return false; }
     if (a->data_len > MDS_XATTR_VAL_MAX) { return false; }
     if (a->data_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->data, a->data_len)) {
+        /* Decode into the op's scratch buffer (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_ws_data(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, a->data_len)) {
             return false;
         }
     }
@@ -318,7 +322,11 @@ bool decode_op_setxattr(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &val_len)) { return false; }
     if (val_len > MDS_XATTR_VAL_MAX) { return false; }
     if (val_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->value, val_len)) {
+        /* Decode into the op's scratch buffer (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_sx_value(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, val_len)) {
             return false;
         }
     }

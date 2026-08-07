@@ -707,7 +707,11 @@ struct nfs4_arg_write_same {
 	uint64_t            offset;
 	uint64_t            length;    /**< Total byte range to fill. */
 	uint32_t            data_len;  /**< Pattern block size. */
-	uint8_t             data[MDS_XATTR_VAL_MAX]; /**< Pattern data. */
+	/* Borrowed pattern bytes: the RPC decoder points this at the
+	 * op's scratch block (nfs4_op_ensure_ws_data); direct callers
+	 * (tests) may point it at their own storage, which must
+	 * outlive the compound.  Sized <= MDS_XATTR_VAL_MAX. */
+	const uint8_t      *data;
 };
 
 /** Device ID size (RFC 8881 §3.3.14 — 16 bytes). */
@@ -798,7 +802,8 @@ struct nfs4_arg_setxattr {
 	uint32_t option;  /**< SETXATTR4_EITHER/CREATE/REPLACE */
 	char     name[MDS_XATTR_NAME_MAX + 1];
 	uint32_t value_len;
-	uint8_t  value[MDS_XATTR_VAL_MAX];
+	/* Borrowed value bytes (see nfs4_arg_write_same.data). */
+	const uint8_t *value;
 };
 
 /** RFC 8276 §4.2.4 — LISTXATTRS arguments. */
@@ -822,7 +827,8 @@ struct nfs4_arg_write {
 	struct nfs4_stateid stateid;
 	uint64_t            offset;
 	uint32_t            data_len;
-	uint8_t             data[MDS_XATTR_VAL_MAX];
+	/* Borrowed payload bytes (see nfs4_arg_write_same.data). */
+	const uint8_t      *data;
 };
 
 struct nfs4_arg_layoutget {
@@ -955,9 +961,28 @@ struct nfs4_res_locku {
 	struct nfs4_stateid     stateid;
 };
 
+/*
+ * Op payload scratch (Wave 2) -- decode-side twin of
+ * nfs4_result_scratch.  Owns the buffers the RPC decoder fills for
+ * WRITE / WRITE_SAME / SETXATTR payloads; the arg union carries only
+ * borrowed const pointers, so an arg-union memset between requests
+ * (decode_one_op clears op->arg only) can never leak the buffers.
+ * Direct op builders (unit tests, benches) bypass the scratch
+ * entirely by pointing the arg at their own storage.  A zeroed
+ * struct is the valid initial state.
+ */
+struct nfs4_op_scratch {
+	uint8_t *write_data;   /* MDS_XATTR_VAL_MAX */
+	uint8_t *ws_data;      /* MDS_XATTR_VAL_MAX */
+	uint8_t *sx_value;     /* MDS_XATTR_VAL_MAX */
+};
+
 /* Tagged union of operation arguments. */
 struct nfs4_op {
 	enum nfs_opnum4 opnum;
+	/* Decode payload ownership -- deliberately OUTSIDE the arg
+	 * union; see struct nfs4_op_scratch above. */
+	struct nfs4_op_scratch scratch;
 	union {
 		/* NFSv4.1 */
 		struct nfs4_arg_access          access;
@@ -1643,6 +1668,16 @@ int nfs4_result_ensure_listxattrs(struct nfs4_result *r);
 /** Ensure the three READDIR page arrays (NFS4_READDIR_MAX rows each)
  *  and re-zero entry_attrs_valid.  0 / -1. */
 int nfs4_result_ensure_readdir(struct nfs4_result *r);
+
+/* Op-side (decode) scratch helpers -- same contract as the result
+ * helpers: lazily allocate the fixed maximum, re-point the arg
+ * mirror, return the WRITABLE buffer (the arg keeps a const view). */
+uint8_t *nfs4_op_ensure_write_data(struct nfs4_op *op);
+uint8_t *nfs4_op_ensure_ws_data(struct nfs4_op *op);
+uint8_t *nfs4_op_ensure_sx_value(struct nfs4_op *op);
+
+/** Free the op's scratch buffers and zero the block.  NULL-safe. */
+void nfs4_op_scratch_release(struct nfs4_op *op);
 
 /** Free every scratch buffer and zero the block.  NULL-safe.  For
  *  test/bench teardown; the daemon's thread-local slots never call

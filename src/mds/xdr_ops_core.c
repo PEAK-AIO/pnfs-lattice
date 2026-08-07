@@ -824,7 +824,12 @@ bool decode_op_write(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
     if (data_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->data, data_len)) {
+        /* Decode into the op's scratch buffer; a->data becomes a
+         * borrowed const view of it (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_write_data(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, data_len)) {
             return false;
 }
     }
