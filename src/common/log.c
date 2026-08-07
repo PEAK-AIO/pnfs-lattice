@@ -28,7 +28,25 @@ static const char *comp_names[] = {
     "MDS", "FSAL", "CLUSTER", "REPL", "CAT", "BPF", "NFS",
 };
 
-static enum log_level component_levels[LOG_COMP_COUNT];
+/*
+ * Per-component verbosity, exported for the MDS_LOG_* macro gate in
+ * mds_log.h.  All writes go through LOG_LEVEL_STORE (relaxed atomic)
+ * so the concurrent relaxed loads in the macros stay data-race-free
+ * when verbosity is adjusted at runtime.  Static-zero initial state
+ * is LOG_FATAL for every component, so pre-init call sites stay
+ * quiet just as they did when mds_log() dropped them on the NULL
+ * log_file check.
+ */
+int mds_log_component_levels[LOG_COMP_COUNT];
+
+#if defined(__GNUC__) || defined(__clang__)
+# define LOG_LEVEL_STORE(idx, v) \
+    __atomic_store_n(&mds_log_component_levels[(idx)], (v), \
+                     __ATOMIC_RELAXED)
+#else
+# define LOG_LEVEL_STORE(idx, v) (mds_log_component_levels[(idx)] = (v))
+#endif
+
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 static FILE *log_file;
 
@@ -41,7 +59,7 @@ void mds_log_init(const char *path)
         log_file = stderr;
     }
     for (int i = 0; i < LOG_COMP_COUNT; i++) {
-        component_levels[i] = LOG_INFO;
+        LOG_LEVEL_STORE(i, LOG_INFO);
     }
 }
 
@@ -49,7 +67,7 @@ void mds_log_set_level(int component, int level)
 {
     if (component >= 0 && component < LOG_COMP_COUNT &&
         level >= LOG_FATAL && level <= LOG_TRACE) {
-        component_levels[component] = (enum log_level)level;
+        LOG_LEVEL_STORE(component, level);
     }
 }
 
@@ -102,7 +120,9 @@ void mds_log(int component, int level, const char *fmt, ...)
     if (component < 0 || component >= LOG_COMP_COUNT) {
         return;
     }
-    if (level > (int)component_levels[component]) {
+    /* Redundant with the MDS_LOG_* macro gate, kept for direct
+     * mds_log() callers. */
+    if (level > MDS_LOG_LEVEL_LOAD_(component)) {
         return;
     }
 

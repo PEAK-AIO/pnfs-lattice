@@ -18,6 +18,12 @@
  * `_Atomic uint64_t` and are read by `threadpool_stats()`.  All
  * observability writes are relaxed-order: the mutex around the
  * queue itself provides whatever ordering callers need.
+ *
+ * The queue-wait sampling (one clock_gettime at submit, one at
+ * dequeue, plus the histogram observe) is gated on
+ * mds_op_metrics_enabled(): disabling op metrics removes both
+ * clock reads from the dispatch path.  The plain counters stay
+ * always-on -- each is a single relaxed add.
  */
 
 #include <stdlib.h>
@@ -28,6 +34,7 @@
 
 #include "pnfs_mds.h"
 #include "mds_histogram.h"
+#include "mds_op_metrics.h"
 
 
 struct tp_work_item {
@@ -129,15 +136,22 @@ static void *worker_loop(void *arg)
          * "time the request sat queued" rather than "time spent
          * acquiring the lock to dequeue", which is what operators
          * actually want when chasing dispatcher saturation.
+         *
+         * enqueue_ns == 0 means the submit side skipped the stamp
+         * (op metrics disabled, or a clock failure): skip the whole
+         * observation so a disabled-metrics dispatch path performs
+         * no clock_gettime calls at all.
          */
-        uint64_t now_ns = monotonic_ns();
-        uint64_t wait_ns = (enqueue_ns != 0 && now_ns >= enqueue_ns)
-            ? (now_ns - enqueue_ns) : 0;
-        atomic_fetch_add_explicit(&tp->queue_wait_ns_sum, wait_ns,
-                                  memory_order_relaxed);
-        atomic_fetch_add_explicit(&tp->queue_wait_count, 1U,
-                                  memory_order_relaxed);
-        mds_histogram_observe(&tp->queue_wait_hist, wait_ns);
+        if (enqueue_ns != 0) {
+            uint64_t now_ns = monotonic_ns();
+            uint64_t wait_ns = (now_ns >= enqueue_ns)
+                ? (now_ns - enqueue_ns) : 0;
+            atomic_fetch_add_explicit(&tp->queue_wait_ns_sum, wait_ns,
+                                      memory_order_relaxed);
+            atomic_fetch_add_explicit(&tp->queue_wait_count, 1U,
+                                      memory_order_relaxed);
+            mds_histogram_observe(&tp->queue_wait_hist, wait_ns);
+        }
 
         atomic_fetch_add_explicit(&tp->active_workers, 1U,
                                   memory_order_relaxed);
@@ -240,7 +254,9 @@ int threadpool_submit(struct threadpool *tp, tp_work_fn fn, void *arg)
     }
     item->fn = fn;
     item->arg = arg;
-    item->enqueue_ns = monotonic_ns();
+    /* Queue-wait sampling is gated: a zero stamp tells the dequeue
+     * side to skip its clock read + histogram observe entirely. */
+    item->enqueue_ns = mds_op_metrics_enabled() ? monotonic_ns() : 0;
     item->next = NULL;
 
     if (tp->tail != NULL) {
