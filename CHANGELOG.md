@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Wave 7 mutation-path design document** —
+  `docs/perf-wave7-mutation-design.md` records the mutation-rate
+  design study: the decomposition plan for the ~0.78 ms fused-create
+  commit; the as-built async batch pipeline's semantics (per-caller
+  blocking, NFSv4-invisible) and its previously undocumented
+  `Ndb::init()` default cap of 4 concurrent transactions per
+  connection; the evidence that file delegations are disabled as a
+  measured performance trade rather than for correctness, and that
+  NFSv4.1 offers no write-back namespace mutation (directory
+  delegations relieve ancillary traffic only); the crash-consistency
+  budget of each deferred-durability knob, including the open parent
+  change-attribute monotonicity question for `parent_touch_deferred`;
+  and the cross-MDS serialisation inventory.  Design only — no
+  behaviour, config-default, or test changes.
 - **Wave-6 decision instrumentation** — the profile-gated wave 6 items
   are closed as "decision pending lab numbers" (see
   `docs/perf-wave6-findings.md` for every disposition), and the three
