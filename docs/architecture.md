@@ -286,10 +286,18 @@ with `NFS4ERR_MOVED`.  That is topology enforcement plus a locality
 optimisation — it is NOT load-bearing for correctness, and no code may
 assume a given file's requests reach only its "owning" MDS.
 ### Locking primitives
-- **Striped mutexes.**  16-stripe `pthread_mutex_t` arrays are the default
+- **Striped mutexes.**  Striped `pthread_mutex_t` arrays are the default
   pattern (`open_state`, `delegation`, `lock_state`, `inode_cache`,
-  `dirent_cache`).  Hash on the natural key (clientid, fileid, or
-  parent+name) selects the stripe.
+  `dirent_cache`, `session`).  Hash on the natural key (clientid, fileid,
+  or parent+name) selects the stripe.  Most tables use 16 stripes; the
+  open-state table defaults to 1,024 (configurable via
+  `open_state_lock_stripes`) because its cardinality tracks live opens.
+  The open-state NDB persist runs OUTSIDE the stripe lock: the state is
+  published with a persist-pending flag (conflict-visible, immutable,
+  operations against it answer NFS4ERR_DELAY), then committed or unwound
+  under the relocked stripe.  A failed persist fails the OPEN — in-memory
+  state is never published as durable when its row was lost, which the
+  any-MDS contract depends on.
 - **NDB exclusive row locks.**  Used for `setattr` and a handful of other
   read-modify-write paths that must serialise with concurrent MDSes.
 - **Read-mostly hot configs** — `_Atomic` pointers + RCU-style swap on
