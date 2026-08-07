@@ -459,26 +459,21 @@ enum nfs4_status op_open(struct compound_data *cd,
 			}
 
 			/*
-			 * Capture DS ID before create consumes prealloc.
-			 * Skipped for the HPC wide path -- that path bypasses
-			 * the per-DS prealloc rings entirely (it issues a
-			 * synchronous batch placement) and the
-			 * stripe_cached LAYOUTGET fast-path is irrelevant
-			 * because the wide stripe map is already persisted
-			 * by the helper before op_open returns.
+			 * Pop-once placement feedback from the fused create.
+			 * The direct fused path surfaces the entry its
+			 * internal ds_prealloc_pop landed on (plus the
+			 * popped stripe unit as the "a pop happened"
+			 * indicator), so every stripe-cache fill below uses
+			 * the SAME placement decision the transaction
+			 * persisted.  The previous pre-create
+			 * ds_prealloc_peek made a second, independent pick
+			 * that could diverge from the pop under concurrent
+			 * CREATEs -- and cost one ring-mutex acquisition
+			 * per CREATE even when nothing consumed it.
 			 */
-			uint32_t pre_create_ds_id = 0;
-			uint32_t pre_create_stripe_unit = 0;
-			bool pre_create_have_ds = false;
-			if (!hpc_wide_path && cd->prealloc != NULL) {
-				struct mds_ds_map_entry peek_e;
-				if (ds_prealloc_peek(cd->prealloc,
-						     &peek_e,
-						     &pre_create_stripe_unit) == 0) {
-					pre_create_ds_id = peek_e.ds_id;
-					pre_create_have_ds = true;
-				}
-			}
+			struct mds_ds_map_entry pre_entry;
+			uint32_t pre_pop_stripe_unit = 0;
+			memset(&pre_entry, 0, sizeof(pre_entry));
 
 			/* Create the file. */
 			clock_gettime(CLOCK_MONOTONIC, &t_mark);
@@ -517,7 +512,33 @@ enum nfs4_status op_open(struct compound_data *cd,
 				 * Scoped to single-shard CQ path only:
 				 * root_db == db (layout_state goes to same
 				 * catalogue transaction as the CREATE).
+				 *
+				 * Placement note: cq is pinned NULL under
+				 * the RonDB daemon (src/mds/main.c), so this
+				 * branch is exercised only by harnesses that
+				 * build their own commit queue.  The peek
+				 * below is a second placement decision
+				 * (the CQ writer's CREATE pops
+				 * independently) and can diverge from the
+				 * persisted stripe map under concurrent
+				 * CREATEs; it stays here, off the live
+				 * path, until the CQ pregrant either plumbs
+				 * the popped entry through commit_op or is
+				 * retired.
 				 */
+				uint32_t cq_peek_ds_id = 0;
+				bool cq_have_ds = false;
+				if (cd->prealloc != NULL) {
+					struct mds_ds_map_entry peek_e;
+					uint32_t peek_unit = 0;
+
+					if (ds_prealloc_peek(cd->prealloc,
+							     &peek_e,
+							     &peek_unit) == 0) {
+						cq_peek_ds_id = peek_e.ds_id;
+						cq_have_ds = true;
+					}
+				}
 				if (cd->prealloc != NULL &&
 				    cd->ops != NULL) {
 					uint32_t scan;
@@ -544,14 +565,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 							cop.args.create.layout_length = lg->length;
 							cop.args.create.skip_transient_ndb =
 								cd->skip_transient_ndb;
-							if (pre_create_have_ds) {
-								/* Borrow the stack-local pre_create_ds_id
+							if (cq_have_ds) {
+								/* Borrow the stack-local cq_peek_ds_id
 								 * for the synchronous commit_queue_submit
 								 * below -- see the lifetime contract
 								 * comment on commit_queue_submit().
 								 * ds_id 0 is a valid DS (0-based). */
 								cop.args.create.layout_ds_ids =
-									&pre_create_ds_id;
+									&cq_peek_ds_id;
 								cop.args.create.layout_ds_count = 1;
 							}
 							make_layout_stateid(cd->mds_id,
@@ -629,15 +650,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 					/*
 					 * Receive back the DS entry the fused
 					 * create's internal ds_prealloc_pop
-					 * landed on, so the following LAYOUTGET
-					 * fast path below can populate
+					 * landed on (declared at the CREATE-
+					 * branch prologue), so the following
+					 * LAYOUTGET fast path can populate
 					 * entries[0] from this cache and skip
 					 * `cat_stripe_map_get`'s NDB round-trip
 					 * entirely (Fix 3 of the May-13 perf
 					 * pass).
 					 */
-					struct mds_ds_map_entry pre_entry;
-					memset(&pre_entry, 0, sizeof(pre_entry));
 					st = catalogue_rondb_ns_create_with_layout(
 						cd->cat, cd->current_fh.fileid,
 						a->name, MDS_FTYPE_REG,
@@ -646,7 +666,8 @@ enum nfs4_status op_open(struct compound_data *cd,
 						lg_clientid, lg_iomode,
 						lg_offset, lg_length,
 						&lg_sid, cd->mds_id,
-						&layout_ok, &pre_entry);
+						&layout_ok, &pre_entry,
+						&pre_pop_stripe_unit);
 					if (st == MDS_OK && layout_ok) {
 						cd->layout_pregranted = true;
 						cd->layout_pregrant_fileid =
@@ -680,8 +701,11 @@ enum nfs4_status op_open(struct compound_data *cd,
 							inode.fileid;
 						cd->stripe_cached_ds_id =
 							pre_entry.ds_id;
+						/* Unit from the SAME pop that placed
+						 * the entry -- matches the persisted
+						 * stripe-map header exactly. */
 						cd->stripe_cached_stripe_unit =
-							pre_create_stripe_unit;
+							pre_pop_stripe_unit;
 						cd->stripe_cached_nfs_fh_len =
 							pre_entry.nfs_fh_len;
 						memcpy(cd->stripe_cached_nfs_fh,
@@ -799,17 +823,24 @@ enum nfs4_status op_open(struct compound_data *cd,
 			atomic_fetch_add(
 				&g_branch_metrics.open_create_ds_prepare_count, 1);
 
-			/* Stash stripe info for LAYOUTGET fast path.
-			 * The DS ID was captured before create consumed
-			 * the prealloc entry (see pre_create_have_ds above).
+			/* Stash stripe info for LAYOUTGET fast path
+			 * (DS_PENDING case: the pop carried no FH).  The
+			 * values come from the entry the fused create
+			 * actually popped -- a LAYOUTGET later in this
+			 * compound implies the fused branch ran, so a
+			 * separately-peeked placement is never needed
+			 * here.  pre_pop_stripe_unit == 0 means no pop
+			 * happened (or a non-fused branch ran); the
+			 * cache stays unset and LAYOUTGET reads the
+			 * stripe map from the backend as before.
 			 * ds_id 0 is a valid placement. */
-			if (pre_create_have_ds &&
+			if (pre_pop_stripe_unit != 0 &&
 			    (inode.flags & MDS_IFLAG_DS_PENDING)) {
 				cd->stripe_cached = true;
 				cd->stripe_cached_fileid = inode.fileid;
-				cd->stripe_cached_ds_id = pre_create_ds_id;
+				cd->stripe_cached_ds_id = pre_entry.ds_id;
 				cd->stripe_cached_stripe_unit =
-					pre_create_stripe_unit;
+					pre_pop_stripe_unit;
 			}
 
 			/* Invalidate dirent cache for the new entry. */

@@ -242,6 +242,22 @@ move on.
 - **Cross-MDS invalidation** — best-effort, over the cluster transport.
   Caches are tolerant of staleness because every fast-path read validates
   against the catalogue's `change` counter or row generation.
+### Any-MDS routing contract
+Traffic for any file handle may arrive at ANY MDS, and every MDS must
+serve identical state.  Two mechanisms make this hold without relying on
+request routing:
+- The parent_touch overlay is raise-only: a peer MDS that bumps a
+  directory row synchronously can never be masked by a stale deferred
+  view on the owning node (`src/mds/parent_touch.c`), so `change_info`
+  never regresses and clients cannot pin negative dentries.
+- Delete-at-ack corpses are dead on every node: fh-based access to a
+  DELETE_PENDING inode returns ESTALE from the shared fh→inode
+  resolution (`src/mds/compound.c`), exactly as after a synchronous
+  remove.
+`referral_strict` (default true) rejects operations on foreign-shard FHs
+with `NFS4ERR_MOVED`.  That is topology enforcement plus a locality
+optimisation — it is NOT load-bearing for correctness, and no code may
+assume a given file's requests reach only its "owning" MDS.
 ### Locking primitives
 - **Striped mutexes.**  16-stripe `pthread_mutex_t` arrays are the default
   pattern (`open_state`, `delegation`, `lock_state`).  Hash on the natural

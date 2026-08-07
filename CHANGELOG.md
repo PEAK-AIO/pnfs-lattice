@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **mk/rm scale benchmark** — `bench_mk_rm_scale` (tests/integration)
+  measures create, synchronous-remove, and delete-at-ack (ack-path)
+  throughput at 1/4/8/16 threads in shared-directory vs
+  directory-per-thread modes, directly exposing the parent-row
+  serialisation wall at the catalogue API level.  Runs against memdb
+  (CI smoke) or a live RonDB cluster (`--rondb CONF`).
+- **`scripts/mds-metrics-diff`** — read-only helper that snapshots the
+  Prometheus `/metrics` endpoint before/after a workload burst and
+  prints the largest counter and histogram `_sum`/`_count` deltas;
+  the fastest way to attribute burst milliseconds to a code region.
 - **`rpc_listener_threads` config key** — makes the TCP RPC listener
   (SO_REUSEPORT epoll loop) count operator-tunable (range 0..32).
   `0` (the default) keeps the historical auto rule
@@ -25,6 +35,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- The stripe-entry serialisation buffers in `stripe_map_get` and the
+  fused LAYOUTGET (~136 KiB / ~544 KiB worst case) now come from a
+  grow-once thread-local scratch instead of a per-call `malloc`/`free`.
+  Both sizes exceeded glibc's 128 KiB mmap threshold, so every call
+  previously paid an mmap + page-fault + munmap cycle on the LAYOUTGET
+  hot path.  Buffers are released at thread exit via a pthread key
+  destructor.
+- CREATE placement is now pop-once on the live path: the pre-create
+  `ds_prealloc_peek` was removed and every per-compound stripe-cache
+  fill derives from the entry the fused create actually popped
+  (including its stripe unit, surfaced via a new out-parameter).  The
+  peek remains only in the commit-queue pregrant branch, which is
+  test-only under the RonDB daemon (`cq` is pinned NULL) and documented
+  as such.  Saves one prealloc ring-mutex acquisition per CREATE and
+  removes the last two-source placement pattern.
 - Logging level checks moved from inside `mds_log()` into the
   `MDS_LOG_*` macros: a suppressed DEBUG/TRACE call site now costs one
   relaxed atomic load and a predicted branch instead of a varargs
@@ -44,6 +69,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- The fused CREATE+layout path now persists the popped prealloc
+  entry's configured stripe unit in the durable stripe-map header.  It
+  previously hardcoded 65536 (despite a comment claiming otherwise), a
+  latent geometry mismatch whenever `stripe_unit_bytes` was configured
+  differently (e.g. 1 MiB lab profiles).
 - README and configuration docs no longer overstate the cache
   subsystem: the inode cache is a global LRU under a single mutex
   (not striped) and both the inode and dirent caches default to
