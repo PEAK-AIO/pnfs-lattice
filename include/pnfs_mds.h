@@ -981,6 +981,24 @@ struct mds_config {
      * skipped -- in-memory tables are authoritative.  Safe for
      * single-MDS deployments.  Default: false (RonDB write-through). */
     bool                transient_state_cache;
+
+    /* Open-state table sizing (Wave 4 T4.2).  0 selects the built-in
+     * defaults (OPEN_STATE_DEFAULT_* in open_state.h: 1,048,576
+     * buckets per hash and 1,024 lock stripes).  Lower them on
+     * memory-constrained hosts; the pre-Wave-4 values were 256
+     * buckets and 16 stripes, which serialised 1/16 of the fileid
+     * space behind each OPEN's synchronous NDB persist. */
+    uint32_t            open_state_file_buckets;    /**< 0 = default. */
+    uint32_t            open_state_stateid_buckets; /**< 0 = default. */
+    uint32_t            open_state_lock_stripes;    /**< 0 = default. */
+
+    /* Session table bucket sizing (Wave 4 T4.2).  0 selects the
+     * built-in defaults (SESSION_DEFAULT_*_BUCKETS in session.h:
+     * 65,536 each; pre-Wave-4 value was 256).  The session stripe-
+     * lock count is intentionally NOT configurable (see session.h). */
+    uint32_t            session_client_buckets;     /**< 0 = default. */
+    uint32_t            session_session_buckets;    /**< 0 = default. */
+    uint32_t            session_owner_buckets;      /**< 0 = default. */
     /* Deferred parent-dir attr maintenance (parent_touch). */
     bool     parent_touch_deferred;
     uint32_t parent_touch_flush_ms;

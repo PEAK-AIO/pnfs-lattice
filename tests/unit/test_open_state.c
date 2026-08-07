@@ -27,6 +27,8 @@
 #include "compound.h"
 #include "session.h"
 #include "open_state.h"
+#include "mds_coordination.h"
+#include "catalogue_internal.h"
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -622,6 +624,335 @@ static void test_api_reopen_same_owner_bumps_seqid(void)
 }
 
 /* -----------------------------------------------------------------------
+ * T4.1 (wave 4) -- injected persist failure
+ *
+ * A minimal coordination vtable whose open_put always fails, wrapped
+ * in a bare struct mds_catalogue (catalogue_internal.h).  The
+ * open_state_open path dispatches only open_put through the vtable,
+ * so every other member can stay NULL.
+ * ----------------------------------------------------------------------- */
+
+static int fail_open_put_calls;
+
+static enum mds_status failing_open_put(struct mds_catalogue *cat,
+					const struct mds_coord_open_row *row)
+{
+	(void)cat;
+	(void)row;
+	fail_open_put_calls++;
+	return MDS_ERR_IO;
+}
+
+static const struct mds_coordination_ops failing_coord_ops = {
+	.open_put = failing_open_put,
+};
+
+/* Every op NULL: mds_coord_open_put() reports MDS_ERR_NOSUPPORT,
+ * which open_state_open must treat as "nothing to persist". */
+static const struct mds_coordination_ops nosupport_coord_ops = {
+	.open_put = NULL,
+};
+
+/** T4.1 -- a failed open-state persist must fail the OPEN (-5 ->
+ * NFS4ERR_DELAY) and leave no residual in-memory state (fresh path). */
+static void test_api_persist_fail_fresh_open_unwound(void)
+{
+	struct open_state_table *ot = NULL;
+	struct mds_catalogue fail_cat;
+	struct nfs4_stateid sid;
+	struct nfs4_open_state found;
+	int rc;
+
+	memset(&fail_cat, 0, sizeof(fail_cat));
+	fail_cat.coord_ops = &failing_coord_ops;
+
+	ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+	open_state_table_set_cat(ot, &fail_cat, 1 /* boot_epoch */);
+
+	fail_open_put_calls = 0;
+	memset(&sid, 0, sizeof(sid));
+	rc = open_state_open(ot, 100, NULL, 0, 42,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid);
+	ASSERT_EQ(rc, -5); /* NFS4ERR_DELAY */
+	ASSERT_EQ(fail_open_put_calls, 1);
+
+	/* Fully unwound: the stateid is not findable and the file has
+	 * no opens registered. */
+	ASSERT_EQ(open_state_find(ot, &sid, &found), -1);
+	ASSERT_EQ(open_state_file_has_writers(ot, 42), 0);
+
+	/* A retry with persistence detached mints a FRESH seqid-1
+	 * stateid -- an upgrade of a leaked leftover would show 2. */
+	open_state_table_set_cat(ot, NULL, 0);
+	rc = open_state_open(ot, 100, NULL, 0, 42,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid.seqid, (uint32_t)1);
+
+	open_state_table_destroy(ot);
+}
+
+/** T4.1 -- a failed persist on the same-owner upgrade path must
+ * restore the pre-upgrade seqid and share bits. */
+static void test_api_persist_fail_upgrade_restored(void)
+{
+	struct open_state_table *ot = NULL;
+	struct mds_catalogue fail_cat;
+	static const uint8_t owner[] = "owner-P";
+	struct nfs4_stateid sid1, sid2;
+	struct nfs4_open_state found;
+	int rc;
+
+	memset(&fail_cat, 0, sizeof(fail_cat));
+	fail_cat.coord_ops = &failing_coord_ops;
+
+	ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+
+	/* Baseline open with persistence detached. */
+	rc = open_state_open(ot, 100, owner, sizeof(owner) - 1, 42,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid1);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid1.seqid, (uint32_t)1);
+
+	/* Upgrade attempt with a failing persist. */
+	open_state_table_set_cat(ot, &fail_cat, 1);
+	rc = open_state_open(ot, 100, owner, sizeof(owner) - 1, 42,
+			     OPEN4_SHARE_ACCESS_WRITE,
+			     OPEN4_SHARE_DENY_WRITE, &sid2);
+	ASSERT_EQ(rc, -5);
+
+	/* Restored: original seqid and share bits; stateid stays valid. */
+	ASSERT_EQ(open_state_find(ot, &sid1, &found), 0);
+	ASSERT_EQ(found.stateid.seqid, (uint32_t)1);
+	ASSERT_EQ(found.share_access, (uint32_t)OPEN4_SHARE_ACCESS_READ);
+	ASSERT_EQ(found.share_deny, (uint32_t)OPEN4_SHARE_DENY_NONE);
+
+	/* Retry with persistence detached: the upgrade succeeds with
+	 * the same `other`, seqid 2, and merged share bits. */
+	open_state_table_set_cat(ot, NULL, 0);
+	rc = open_state_open(ot, 100, owner, sizeof(owner) - 1, 42,
+			     OPEN4_SHARE_ACCESS_WRITE,
+			     OPEN4_SHARE_DENY_WRITE, &sid2);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid2.seqid, (uint32_t)2);
+	ASSERT_EQ(memcmp(sid2.other, sid1.other, NFS4_OTHER_SIZE), 0);
+	ASSERT_EQ(open_state_find(ot, &sid2, &found), 0);
+	ASSERT_EQ(found.share_access,
+		  (uint32_t)(OPEN4_SHARE_ACCESS_READ |
+			     OPEN4_SHARE_ACCESS_WRITE));
+	ASSERT_EQ(found.share_deny, (uint32_t)OPEN4_SHARE_DENY_WRITE);
+
+	open_state_table_destroy(ot);
+}
+
+/** T4.2 -- explicit sizing via init_ex + allocation-pool recycling.
+ * Open/close cycles on one file exercise free-list reuse (the loop
+ * count exceeds the 64-entry pool chunk), a fan-out over distinct
+ * files exercises chunk growth across stripes, and a stripes>buckets
+ * init exercises the clamp. */
+static void test_api_init_ex_sizing_and_pool_reuse(void)
+{
+	struct open_state_table *ot = NULL;
+	struct nfs4_stateid sid, close_sid;
+	uint32_t i;
+	int rc;
+
+	/* Tiny sizing (the pre-Wave-4 geometry). */
+	ASSERT_EQ(open_state_table_init_ex(TEST_MDS_ID, 256, 256, 16, &ot),
+		  0);
+
+	/* 3x the pool chunk of open/close cycles on ONE file: every
+	 * cycle after the first must recycle the freed entry. */
+	for (i = 0; i < 192; i++) {
+		rc = open_state_open(ot, 100, NULL, 0, 42,
+				     OPEN4_SHARE_ACCESS_READ,
+				     OPEN4_SHARE_DENY_NONE, &sid);
+		ASSERT_EQ(rc, 0);
+		ASSERT_EQ(sid.seqid, (uint32_t)1);
+		rc = open_state_close(ot, 100, &sid, &close_sid);
+		ASSERT_EQ(rc, 0);
+	}
+
+	/* Fan out over distinct files, then bulk client cleanup
+	 * (returns every record to its own stripe's pool). */
+	for (i = 0; i < 300; i++) {
+		rc = open_state_open(ot, 200, NULL, 0, 1000 + i,
+				     OPEN4_SHARE_ACCESS_READ,
+				     OPEN4_SHARE_DENY_NONE, &sid);
+		ASSERT_EQ(rc, 0);
+	}
+	open_state_close_all_for_client(ot, 200);
+	ASSERT_EQ(open_state_file_has_writers(ot, 1000), 0);
+	open_state_table_destroy(ot);
+
+	/* Stripe count above the bucket count is clamped, not fatal. */
+	ASSERT_EQ(open_state_table_init_ex(TEST_MDS_ID, 64, 64, 4096, &ot),
+		  0);
+	rc = open_state_open(ot, 100, NULL, 0, 7,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid);
+	ASSERT_EQ(rc, 0);
+	open_state_table_destroy(ot);
+}
+
+/* -----------------------------------------------------------------------
+ * T4.3 (wave 4) -- pending-window guards
+ *
+ * A probing vtable whose open_put calls BACK into the open-state
+ * table.  open_put now runs with NO open-state locks held (that is
+ * T4.3); if the stripe mutex were still held these re-entrant calls
+ * would self-deadlock, so the probes double as proof of the
+ * lock-free persist window.  While inside the persist, the freshly
+ * published (pending) state must be visible for share conflicts but
+ * immutable for same-owner re-OPEN / CLOSE / OPEN_DOWNGRADE.
+ * ----------------------------------------------------------------------- */
+
+static struct open_state_table *pending_probe_ot;
+static struct nfs4_stateid pending_probe_sid;
+static uint64_t pending_probe_clientid;
+static uint64_t pending_probe_fileid;
+static const uint8_t pending_probe_owner[] = "own-pend";
+static bool pending_probe_armed;
+static int pending_probe_open_rc;
+static int pending_probe_close_rc;
+static int pending_probe_downgrade_rc;
+static int pending_probe_conflict_rc;
+
+static enum mds_status probing_open_put(struct mds_catalogue *cat,
+					const struct mds_coord_open_row *row)
+{
+	struct nfs4_stateid sid2;
+	struct nfs4_stateid out2;
+
+	(void)cat;
+	if (!pending_probe_armed) {
+		return MDS_OK;
+	}
+	pending_probe_armed = false;
+
+	memcpy(pending_probe_sid.other, row->stateid_other,
+	       NFS4_OTHER_SIZE);
+	pending_probe_sid.seqid = row->seqid;
+
+	/* Same-owner re-OPEN during the window -> -5 (DELAY). */
+	pending_probe_open_rc = open_state_open(pending_probe_ot,
+		pending_probe_clientid, pending_probe_owner,
+		sizeof(pending_probe_owner) - 1, pending_probe_fileid,
+		OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE, &sid2);
+
+	/* CLOSE during the window -> -6 (DELAY). */
+	pending_probe_close_rc = open_state_close(pending_probe_ot,
+		pending_probe_clientid, &pending_probe_sid, &out2);
+
+	/* OPEN_DOWNGRADE during the window -> -6 (DELAY). */
+	pending_probe_downgrade_rc = open_state_downgrade(
+		pending_probe_ot, pending_probe_clientid,
+		&pending_probe_sid,
+		OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE, &out2);
+
+	/* A DIFFERENT owner conflicting with the pending reservation
+	 * is denied: the pending state counts for share conflicts
+	 * immediately (conservative publication ordering). */
+	pending_probe_conflict_rc = open_state_open(pending_probe_ot,
+		999 /* other client */, NULL, 0, pending_probe_fileid,
+		OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE, &sid2);
+
+	return MDS_OK;
+}
+
+static const struct mds_coordination_ops probing_coord_ops = {
+	.open_put = probing_open_put,
+};
+
+/** T4.3 -- during the unlocked persist window the pending state is
+ * conflict-visible but immutable; afterwards it is fully usable. */
+static void test_api_persist_window_guards(void)
+{
+	struct open_state_table *ot = NULL;
+	struct mds_catalogue probe_cat;
+	struct nfs4_stateid sid, sid2, csid;
+	struct nfs4_open_state found;
+	int rc;
+
+	memset(&probe_cat, 0, sizeof(probe_cat));
+	probe_cat.coord_ops = &probing_coord_ops;
+
+	ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+	open_state_table_set_cat(ot, &probe_cat, 1);
+
+	pending_probe_ot = ot;
+	pending_probe_clientid = 100;
+	pending_probe_fileid = 4242;
+	pending_probe_open_rc = 99;
+	pending_probe_close_rc = 99;
+	pending_probe_downgrade_rc = 99;
+	pending_probe_conflict_rc = 99;
+	pending_probe_armed = true;
+
+	/* Fresh OPEN with DENY_BOTH; the probes run inside open_put. */
+	rc = open_state_open(ot, 100, pending_probe_owner,
+			     sizeof(pending_probe_owner) - 1, 4242,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_BOTH, &sid);
+	ASSERT_EQ(rc, 0);
+
+	/* In-window observations. */
+	ASSERT_EQ(pending_probe_open_rc, -5);      /* same-owner re-OPEN */
+	ASSERT_EQ(pending_probe_close_rc, -6);     /* CLOSE */
+	ASSERT_EQ(pending_probe_downgrade_rc, -6); /* OPEN_DOWNGRADE */
+	ASSERT_EQ(pending_probe_conflict_rc, -1);  /* other-owner conflict */
+
+	/* After the window: flag cleared, state fully usable. */
+	ASSERT_EQ(open_state_find(ot, &sid, &found), 0);
+	ASSERT_EQ(found.persist_pending, false);
+
+	/* Same-owner upgrade now succeeds (probe disarmed; the put
+	 * returns MDS_OK): seqid bumps and pending clears again. */
+	rc = open_state_open(ot, 100, pending_probe_owner,
+			     sizeof(pending_probe_owner) - 1, 4242,
+			     OPEN4_SHARE_ACCESS_WRITE,
+			     OPEN4_SHARE_DENY_BOTH, &sid2);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid2.seqid, (uint32_t)2);
+	ASSERT_EQ(memcmp(sid2.other, sid.other, NFS4_OTHER_SIZE), 0);
+	ASSERT_EQ(open_state_find(ot, &sid2, &found), 0);
+	ASSERT_EQ(found.persist_pending, false);
+
+	/* CLOSE succeeds once nothing is pending. */
+	ASSERT_EQ(open_state_close(ot, 100, &sid2, &csid), 0);
+
+	open_state_table_destroy(ot);
+}
+
+/** T4.1 -- MDS_ERR_NOSUPPORT from the persist (backend without a
+ * shared open-state table) is NOT a failure: same contract as no
+ * catalogue at all. */
+static void test_api_persist_nosupport_tolerated(void)
+{
+	struct open_state_table *ot = NULL;
+	struct mds_catalogue nosup_cat;
+	struct nfs4_stateid sid;
+	int rc;
+
+	memset(&nosup_cat, 0, sizeof(nosup_cat));
+	nosup_cat.coord_ops = &nosupport_coord_ops;
+
+	ASSERT_EQ(open_state_table_init(TEST_MDS_ID, &ot), 0);
+	open_state_table_set_cat(ot, &nosup_cat, 1);
+
+	rc = open_state_open(ot, 100, NULL, 0, 42,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid);
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(sid.seqid, (uint32_t)1);
+
+	open_state_table_destroy(ot);
+}
+
+/* -----------------------------------------------------------------------
  * Part 2: Compound integration tests
  * ----------------------------------------------------------------------- */
 
@@ -1131,6 +1462,11 @@ int main(void)
 	RUN_TEST(test_api_close_wrong_owner);
 	RUN_TEST(test_api_different_open_owners);
 	RUN_TEST(test_api_reopen_same_owner_bumps_seqid);
+	RUN_TEST(test_api_persist_fail_fresh_open_unwound);
+	RUN_TEST(test_api_persist_fail_upgrade_restored);
+	RUN_TEST(test_api_persist_nosupport_tolerated);
+	RUN_TEST(test_api_init_ex_sizing_and_pool_reuse);
+	RUN_TEST(test_api_persist_window_guards);
 
 	/* Part 2: Compound integration tests */
 	RUN_TEST(test_compound_open_create_close);

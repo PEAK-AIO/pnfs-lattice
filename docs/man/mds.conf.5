@@ -326,6 +326,34 @@ have layout holders, so the scan is a guaranteed-miss catalogue
 round-trip on the create hot path.  Pre-existing files always keep
 the full scan and byte-range recall behaviour.
 .TP
+.BR open_state_file_buckets ", " open_state_stateid_buckets
+.IR uint ,
+range
+.I "256..16777216"
+(default
+.BR 1048576 ).
+Hash bucket counts for the per-file and stateid open-state tables.
+.TP
+.B open_state_lock_stripes
+.IR uint ,
+range
+.I "16..4096"
+(default
+.BR 1024 ).
+Mutex/rwlock stripe count over the open-state tables (clamped to the
+bucket counts).  The pre-Wave-4 value of 16 made each per-file mutex
+cover 1/16 of the fileid space.
+.TP
+.BR session_client_buckets ", " session_session_buckets ", " session_owner_buckets
+.IR uint ,
+range
+.I "256..1048576"
+(default
+.BR 65536 ).
+Session-table hash bucket counts (clientid / session-id /
+co_ownerid).  The session stripe-lock count is fixed at 16 by
+design.
+.TP
 .B inline_enabled
 .I bool
 (default

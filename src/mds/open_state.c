@@ -17,6 +17,26 @@
  *   - Stateid hash lookups are protected by striped RW locks.
  *
  * Open state may optionally be persisted to the catalogue for recovery.
+ *
+ * Publication ordering (Wave 4 T4.3): when durable persistence is
+ * active, open_state_open() publishes the new/upgraded state with
+ * persist_pending=true, releases the file-stripe mutex, runs the NDB
+ * round-trip, then relocks to commit (clear the flag) or roll back.
+ * While pending:
+ *   - the state IS visible to share-reservation conflict checks
+ *     (conservative -- its reservation counts immediately);
+ *   - it is NOT mutable by other operations: a same-owner re-OPEN,
+ *     CLOSE, or OPEN_DOWNGRADE against it returns a retryable DELAY
+ *     code.  The client cannot legitimately reference the stateid
+ *     anyway -- the OPEN reply is not sent until the persist
+ *     completes;
+ *   - revoke paths (lease expiry, client teardown) may still free
+ *     it; the relock phase detects that by re-looking the stateid
+ *     up and fails the OPEN without touching freed memory.
+ * The OPEN reply stays synchronous with durability; only the lock
+ * scope shrank, so unrelated files on the same stripe -- and other
+ * owners on the same file -- no longer serialise behind the
+ * round-trip.
  */
 
 #include <stdlib.h>
@@ -35,12 +55,17 @@
 #include "mds_op_metrics.h"
 
 /* -----------------------------------------------------------------------
- * Hash table sizing
+ * Hash table sizing (Wave 4 T4.2)
+ *
+ * Bucket and stripe counts are per-table fields configured at init
+ * time (open_state_table_init_ex); the defaults live in open_state.h
+ * (OPEN_STATE_DEFAULT_*).  OPEN_STATE_POOL_CHUNK is the growth unit
+ * of the per-stripe open-state allocation pool: entries are handed
+ * out and recycled under the already-held file-stripe mutex, so the
+ * hot path performs no malloc/free per OPEN/CLOSE.
  * ----------------------------------------------------------------------- */
 
-#define STATEID_HASH_BUCKETS  256
-#define FILE_HASH_BUCKETS     256
-#define OPEN_STATE_LOCK_STRIPES 16
+#define OPEN_STATE_POOL_CHUNK 64U
 
 /* -----------------------------------------------------------------------
  * Per-file head node -- tracks all opens on a given fileid
@@ -56,60 +81,84 @@ struct file_opens {
  * Open state table (opaque type from open_state.h)
  * ----------------------------------------------------------------------- */
 
+/** Growth unit of the per-stripe allocation pool. */
+struct os_pool_chunk {
+    struct os_pool_chunk  *next;
+    struct nfs4_open_state entries[OPEN_STATE_POOL_CHUNK];
+};
+
+/** Per-stripe open-state pool.  Guarded by the stripe's file mutex
+ *  (ot->locks[i]); free entries are linked through ->hash_next. */
+struct os_stripe_pool {
+    struct nfs4_open_state *free_head;
+    struct os_pool_chunk   *chunks;
+};
+
 struct open_state_table {
-    struct nfs4_open_state **stateid_hash;  /* [STATEID_HASH_BUCKETS] */
-    struct file_opens      **file_hash;     /* [FILE_HASH_BUCKETS] */
+    struct nfs4_open_state **stateid_hash;  /* [stateid_buckets] */
+    struct file_opens      **file_hash;     /* [file_buckets] */
+    uint32_t                stateid_buckets;
+    uint32_t                file_buckets;
+    uint32_t                lock_stripes;
     atomic_uint_fast64_t    next_other_seq;
     uint32_t                mds_id;
     struct mds_catalogue   *cat;  /**< RonDB catalogue (shared-attr). */
     uint64_t                boot_epoch; /**< For fencing (shared-attr). */
     bool                    skip_ndb_persist; /**< Skip NDB writes for perf. */
-    pthread_mutex_t         locks[OPEN_STATE_LOCK_STRIPES];
-    pthread_rwlock_t        stateid_locks[OPEN_STATE_LOCK_STRIPES];
+    pthread_mutex_t        *locks;          /* [lock_stripes] */
+    pthread_rwlock_t       *stateid_locks;  /* [lock_stripes] */
+    struct os_stripe_pool  *pools;          /* [lock_stripes] */
 };
 
 
-static uint32_t hash_fileid(uint64_t fileid);
+static uint32_t hash_fileid(const struct open_state_table *ot,
+                            uint64_t fileid);
 
 /* Stripe lock index from fileid.
- * MUST use the same hash as hash_fileid() to ensure all operations
- * on the same hash bucket are serialized by the same lock stripe.
- * Using raw fileid % 16 allowed two fileids in the same bucket to
- * hold different locks, corrupting the hash chain under concurrency. */
-static inline uint32_t lock_stripe(uint64_t fileid)
+ * MUST derive from the same bucket index as hash_fileid() to ensure
+ * all operations on the same hash bucket are serialized by the same
+ * lock stripe.  Using an independent hash allowed two fileids in the
+ * same bucket to hold different locks, corrupting the hash chain
+ * under concurrency. */
+static inline uint32_t lock_stripe(const struct open_state_table *ot,
+                                   uint64_t fileid)
 {
-    return hash_fileid(fileid) % OPEN_STATE_LOCK_STRIPES;
+    return hash_fileid(ot, fileid) % ot->lock_stripes;
 }
 
 /* -----------------------------------------------------------------------
  * Hash functions
  * ----------------------------------------------------------------------- */
 
-static uint32_t hash_other(const uint8_t other[NFS4_OTHER_SIZE])
+/** fmix64 finaliser shared by both hash tables. */
+static uint64_t os_mix64(uint64_t v)
+{
+    v ^= v >> 33;
+    v *= 0xff51afd7ed558ccdULL;
+    v ^= v >> 33;
+    return v;
+}
+
+static uint32_t hash_other(const struct open_state_table *ot,
+                           const uint8_t other[NFS4_OTHER_SIZE])
 {
     uint64_t v;
 
     memcpy(&v, other + 4, sizeof(v));  /* counter portion */
-    v ^= v >> 33;
-    v *= 0xff51afd7ed558ccdULL;
-    v ^= v >> 33;
-    return (uint32_t)(v % STATEID_HASH_BUCKETS);
+    return (uint32_t)(os_mix64(v) % ot->stateid_buckets);
 }
 
-static uint32_t hash_fileid(uint64_t fileid)
+static uint32_t hash_fileid(const struct open_state_table *ot,
+                            uint64_t fileid)
 {
-    uint64_t h = fileid;
-
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccdULL;
-    h ^= h >> 33;
-    return (uint32_t)(h % FILE_HASH_BUCKETS);
+    return (uint32_t)(os_mix64(fileid) % ot->file_buckets);
 }
 
 static inline uint32_t stateid_lock_stripe(
+    const struct open_state_table *ot,
     const uint8_t other[NFS4_OTHER_SIZE])
 {
-    return hash_other(other) % OPEN_STATE_LOCK_STRIPES;
+    return hash_other(ot, other) % ot->lock_stripes;
 }
 
 /* -----------------------------------------------------------------------
@@ -138,7 +187,7 @@ static void make_stateid_other(struct open_state_table *ot,
 static struct nfs4_open_state *find_by_other(const struct open_state_table *ot,
                                              const uint8_t other[NFS4_OTHER_SIZE])
 {
-    uint32_t idx = hash_other(other);
+    uint32_t idx = hash_other(ot, other);
     struct nfs4_open_state *os;
 
     for (os = ot->stateid_hash[idx]; os != NULL; os = os->hash_next) {
@@ -156,7 +205,7 @@ static struct nfs4_open_state *find_by_other(const struct open_state_table *ot,
 static struct file_opens *find_file_opens(const struct open_state_table *ot,
                                           uint64_t fileid)
 {
-    uint32_t idx = hash_fileid(fileid);
+    uint32_t idx = hash_fileid(ot, fileid);
     struct file_opens *fo;
 
     for (fo = ot->file_hash[idx]; fo != NULL; fo = fo->hash_next) {
@@ -186,7 +235,7 @@ static struct file_opens *get_or_create_file_opens(
     fo->fileid = fileid;
     fo->head = NULL;
 
-    idx = hash_fileid(fileid);
+    idx = hash_fileid(ot, fileid);
     fo->hash_next = ot->file_hash[idx];
     ot->file_hash[idx] = fo;
     return fo;
@@ -199,7 +248,7 @@ static struct file_opens *get_or_create_file_opens(
 static void maybe_free_file_opens(struct open_state_table *ot,
                                   uint64_t fileid)
 {
-    uint32_t idx = hash_fileid(fileid);
+    uint32_t idx = hash_fileid(ot, fileid);
     struct file_opens **pp;
 
     for (pp = &ot->file_hash[idx]; *pp != NULL; pp = &(*pp)->hash_next) {
@@ -284,7 +333,7 @@ static bool share_conflict_excluding(const struct file_opens *fo,
 static void unhash_stateid(struct open_state_table *ot,
                            struct nfs4_open_state *os)
 {
-    uint32_t idx = hash_other(os->stateid.other);
+    uint32_t idx = hash_other(ot, os->stateid.other);
     struct nfs4_open_state **pp;
 
     for (pp = &ot->stateid_hash[idx]; *pp != NULL;
@@ -321,10 +370,66 @@ static void unlink_from_file(struct open_state_table *ot,
 }
 
 /* -----------------------------------------------------------------------
+ * Per-stripe open-state allocation pool (Wave 4 T4.2)
+ *
+ * Callers hold ot->locks[stripe] (or every stripe lock on the bulk
+ * cleanup paths), so the free list needs no locking of its own.
+ * Chunk allocation failure degrades to a plain calloc entry
+ * (pooled == false), which os_free() releases with free().
+ * ----------------------------------------------------------------------- */
+
+/** Allocate a zeroed open-state record from the stripe pool. */
+static struct nfs4_open_state *os_alloc(struct open_state_table *ot,
+                                        uint32_t stripe)
+{
+    struct os_stripe_pool *pool = &ot->pools[stripe];
+    struct nfs4_open_state *os;
+
+    if (pool->free_head == NULL) {
+        struct os_pool_chunk *chunk = calloc(1, sizeof(*chunk));
+        uint32_t i;
+
+        if (chunk == NULL) {
+            /* Degrade to a plain heap entry (pooled stays false). */
+            return calloc(1, sizeof(struct nfs4_open_state));
+        }
+        chunk->next = pool->chunks;
+        pool->chunks = chunk;
+        for (i = 0; i < OPEN_STATE_POOL_CHUNK; i++) {
+            chunk->entries[i].hash_next = pool->free_head;
+            pool->free_head = &chunk->entries[i];
+        }
+    }
+
+    os = pool->free_head;
+    pool->free_head = os->hash_next;
+    memset(os, 0, sizeof(*os));
+    os->pooled = true;
+    return os;
+}
+
+/** Return a record to its stripe pool (or the heap).  The caller has
+ *  already unhashed and unlinked it. */
+static void os_free(struct open_state_table *ot, uint32_t stripe,
+                    struct nfs4_open_state *os)
+{
+    if (!os->pooled) {
+        free(os);
+        return;
+    }
+    os->hash_next = ot->pools[stripe].free_head;
+    ot->pools[stripe].free_head = os;
+}
+
+/* -----------------------------------------------------------------------
  * Public API
  * ----------------------------------------------------------------------- */
 
-int open_state_table_init(uint32_t mds_id, struct open_state_table **out)
+int open_state_table_init_ex(uint32_t mds_id,
+                             uint32_t file_buckets,
+                             uint32_t stateid_buckets,
+                             uint32_t lock_stripes,
+                             struct open_state_table **out)
 {
     struct open_state_table *ot;
 
@@ -332,25 +437,53 @@ int open_state_table_init(uint32_t mds_id, struct open_state_table **out)
         return -1;
 }
 
+    if (file_buckets == 0) {
+        file_buckets = OPEN_STATE_DEFAULT_FILE_BUCKETS;
+    }
+    if (stateid_buckets == 0) {
+        stateid_buckets = OPEN_STATE_DEFAULT_STATEID_BUCKETS;
+    }
+    if (lock_stripes == 0) {
+        lock_stripes = OPEN_STATE_DEFAULT_LOCK_STRIPES;
+    }
+    /* lock_stripe() maps bucket -> stripe, so more stripes than
+     * buckets would leave stripes uncovered; clamp to the smaller
+     * bucket count. */
+    if (lock_stripes > file_buckets) {
+        lock_stripes = file_buckets;
+    }
+    if (lock_stripes > stateid_buckets) {
+        lock_stripes = stateid_buckets;
+    }
+
     ot = calloc(1, sizeof(*ot));
     if (ot == NULL) {
         return -1;
 }
 
-    /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-    ot->stateid_hash = calloc(STATEID_HASH_BUCKETS,
-                              sizeof(struct nfs4_open_state *));
-    if (ot->stateid_hash == NULL) {
-        free(ot);
-        return -1;
-    }
+    ot->file_buckets = file_buckets;
+    ot->stateid_buckets = stateid_buckets;
+    ot->lock_stripes = lock_stripes;
 
     /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-    ot->file_hash = calloc(FILE_HASH_BUCKETS,
+    ot->stateid_hash = calloc(stateid_buckets,
+                              sizeof(struct nfs4_open_state *));
+    /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
+    ot->file_hash = calloc(file_buckets,
                            sizeof(struct file_opens *));
-    if (ot->file_hash == NULL) {
+    ot->locks = calloc(lock_stripes, sizeof(pthread_mutex_t));
+    ot->stateid_locks = calloc(lock_stripes, sizeof(pthread_rwlock_t));
+    ot->pools = calloc(lock_stripes, sizeof(struct os_stripe_pool));
+    if (ot->stateid_hash == NULL || ot->file_hash == NULL ||
+        ot->locks == NULL || ot->stateid_locks == NULL ||
+        ot->pools == NULL) {
         /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
         free(ot->stateid_hash);
+        /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
+        free(ot->file_hash);
+        free(ot->locks);
+        free(ot->stateid_locks);
+        free(ot->pools);
         free(ot);
         return -1;
     }
@@ -378,13 +511,18 @@ int open_state_table_init(uint32_t mds_id, struct open_state_table **out)
         if (seed == 0) { seed = 1; }
         atomic_init(&ot->next_other_seq, seed);
     }
-    for (uint32_t li = 0; li < OPEN_STATE_LOCK_STRIPES; li++) {
+    for (uint32_t li = 0; li < ot->lock_stripes; li++) {
         pthread_mutex_init(&ot->locks[li], NULL);
         pthread_rwlock_init(&ot->stateid_locks[li], NULL);
     }
 
     *out = ot;
     return 0;
+}
+
+int open_state_table_init(uint32_t mds_id, struct open_state_table **out)
+{
+    return open_state_table_init_ex(mds_id, 0, 0, 0, out);
 }
 
 void open_state_table_destroy(struct open_state_table *ot)
@@ -395,20 +533,23 @@ void open_state_table_destroy(struct open_state_table *ot)
         return;
 }
 
-    /* Free all open states via the stateid hash. */
-    for (i = 0; i < STATEID_HASH_BUCKETS; i++) {
+    /* Free all non-pooled open states via the stateid hash; pooled
+     * entries are chunk memory released wholesale below. */
+    for (i = 0; i < ot->stateid_buckets; i++) {
         struct nfs4_open_state *os = ot->stateid_hash[i];
         struct nfs4_open_state *next;
 
         while (os != NULL) {
             next = os->hash_next;
-            free(os);
+            if (!os->pooled) {
+                free(os);
+            }
             os = next;
         }
     }
 
     /* Free all file_opens heads. */
-    for (i = 0; i < FILE_HASH_BUCKETS; i++) {
+    for (i = 0; i < ot->file_buckets; i++) {
         struct file_opens *fo = ot->file_hash[i];
         struct file_opens *next;
 
@@ -419,10 +560,26 @@ void open_state_table_destroy(struct open_state_table *ot)
         }
     }
 
-    for (uint32_t li = 0; li < OPEN_STATE_LOCK_STRIPES; li++) {
+    for (uint32_t li = 0; li < ot->lock_stripes; li++) {
         pthread_mutex_destroy(&ot->locks[li]);
         pthread_rwlock_destroy(&ot->stateid_locks[li]);
     }
+
+    /* Release the per-stripe pool chunks. */
+    for (i = 0; i < ot->lock_stripes; i++) {
+        struct os_pool_chunk *chunk = ot->pools[i].chunks;
+
+        while (chunk != NULL) {
+            struct os_pool_chunk *next = chunk->next;
+
+            free(chunk);
+            chunk = next;
+        }
+    }
+
+    free(ot->pools);
+    free(ot->locks);
+    free(ot->stateid_locks);
     /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
     free(ot->file_hash);
     /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
@@ -517,7 +674,7 @@ int open_state_open(struct open_state_table *ot,
 
     MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
 
     /* RFC 8881 S8.2.2 + S9.1.4 + S18.16.4: a subsequent OPEN by the
@@ -546,11 +703,27 @@ int open_state_open(struct open_state_table *ot,
         }
     }
 
+    /* T4.3: the matched state's durable write is still in flight on
+     * another thread.  Its seqid/share bits may yet be rolled back,
+     * so stacking a second mutation would corrupt the undo; the
+     * client retries after a short backoff.  (Rare: a same-owner
+     * OPEN storm inside one persist round-trip.) */
+    if (existing != NULL && existing->persist_pending) {
+        rc = -5; /* NFS4ERR_DELAY */
+        goto out_unlock;
+    }
+
     if (existing != NULL) {
         uint32_t merged_access =
             existing->share_access | share_access;
         uint32_t merged_deny =
             existing->share_deny | share_deny;
+        uint32_t prev_seqid;
+        uint32_t prev_access;
+        uint32_t prev_deny;
+        uint32_t new_seqid;
+        struct mds_coord_open_row row;
+        enum mds_status pst;
 
         /* Re-validate share reservations against every OTHER open on
          * the file using the upgraded (merged) modes.  Skipping
@@ -563,58 +736,103 @@ int open_state_open(struct open_state_table *ot,
         }
 
         stateid_lock_idx =
-            stateid_lock_stripe(existing->stateid.other);
+            stateid_lock_stripe(ot, existing->stateid.other);
         pthread_rwlock_wrlock(
             &ot->stateid_locks[stateid_lock_idx]);
 
+        /* Snapshot the pre-upgrade values so a failed persist can
+         * restore them (T4.1 persist-failure policy below). */
+        prev_seqid = existing->stateid.seqid;
+        prev_access = existing->share_access;
+        prev_deny = existing->share_deny;
+
         /* RFC 8881 S8.2.2: bump seqid by one; the value 0 is
          * reserved, so 0xFFFFFFFF wraps to 1 (not 0). */
-        uint32_t next_seqid = existing->stateid.seqid + 1U;
-        if (next_seqid == 0U) {
-            next_seqid = 1U;
+        new_seqid = existing->stateid.seqid + 1U;
+        if (new_seqid == 0U) {
+            new_seqid = 1U;
         }
-        existing->stateid.seqid = next_seqid;
+        existing->stateid.seqid = new_seqid;
         existing->share_access = merged_access;
         existing->share_deny = merged_deny;
 
         *out_stateid = existing->stateid;
 
-        pthread_rwlock_unlock(
-            &ot->stateid_locks[stateid_lock_idx]);
-
-        /* Persist updated row (same primary key as the original
-         * insert, so this is an in-place update). */
-        if (ot->cat != NULL && !ot->skip_ndb_persist) {
-            struct mds_coord_open_row row;
-            memset(&row, 0, sizeof(row));
-            memcpy(row.stateid_other, existing->stateid.other,
-                   NFS4_OTHER_SIZE);
-            row.seqid = existing->stateid.seqid;
-            row.clientid = clientid;
-            row.fileid = fileid;
-            row.share_access = merged_access;
-            row.share_deny = merged_deny;
-            if (open_owner != NULL && open_owner_len > 0) {
-                memcpy(row.open_owner, open_owner,
-                       open_owner_len);
-            }
-            row.open_owner_len = open_owner_len;
-            row.owner_mds_id = ot->mds_id;
-            row.owner_boot_epoch = ot->boot_epoch;
-            (void)mds_coord_open_put(ot->cat, &row);
+        /* Fast path: no durable write follows -- the upgrade is
+         * complete under the locks, exactly as before T4.3. */
+        if (ot->cat == NULL || ot->skip_ndb_persist) {
+            pthread_rwlock_unlock(
+                &ot->stateid_locks[stateid_lock_idx]);
+            pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+            return 0;
         }
 
+        /* T4.3: durable path.  Build the row and capture the
+         * stateid PK while the state is still locked -- after the
+         * locks drop, `existing` may be freed by a concurrent
+         * revoke and must not be dereferenced again. */
+        existing->persist_pending = true;
+        memset(&row, 0, sizeof(row));
+        memcpy(row.stateid_other, existing->stateid.other,
+               NFS4_OTHER_SIZE);
+        row.seqid = new_seqid;
+        row.clientid = clientid;
+        row.fileid = fileid;
+        row.share_access = merged_access;
+        row.share_deny = merged_deny;
+        if (open_owner != NULL && open_owner_len > 0) {
+            memcpy(row.open_owner, open_owner, open_owner_len);
+        }
+        row.open_owner_len = open_owner_len;
+        row.owner_mds_id = ot->mds_id;
+        row.owner_boot_epoch = ot->boot_epoch;
+
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
-        return 0;
+
+        /* NDB round-trip with NO open-state locks held (T4.3).
+         * T4.1 failure policy applies below; NOSUPPORT = backend
+         * without a shared open-state table = nothing to persist. */
+        pst = mds_coord_open_put(ot->cat, &row);
+
+        pthread_mutex_lock(&ot->locks[file_lock_idx]);
+        pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
+        {
+            struct nfs4_open_state *cur =
+                find_by_other(ot, row.stateid_other);
+
+            if (cur == NULL) {
+                /* Revoked while unlocked (lease expiry / client
+                 * teardown).  The row follows the owner-reap
+                 * lifecycle like any other revoked open; the OPEN
+                 * itself fails -- the client never saw the bumped
+                 * stateid. */
+                rc = -5; /* NFS4ERR_DELAY */
+            } else if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+                /* Roll back.  Guards keep the state immutable
+                 * while pending, so our bump is still the latest;
+                 * the seqid check is defensive only. */
+                if (cur->stateid.seqid == new_seqid) {
+                    cur->stateid.seqid = prev_seqid;
+                    cur->share_access = prev_access;
+                    cur->share_deny = prev_deny;
+                }
+                cur->persist_pending = false;
+                rc = -5; /* NFS4ERR_DELAY */
+            } else {
+                cur->persist_pending = false;
+                rc = 0;
+            }
+        }
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return rc;
     }
 
-    /* No prior open by this {clientid, open_owner}: allocate fresh.
-     *
-     * Allocation under the file-stripe lock is acceptable because
-     * calloc on a small struct does not block on I/O and the
-     * per-fileid stripe is only contended by other ops on the
-     * same fileid. */
-    os = calloc(1, sizeof(*os));
+    /* No prior open by this {clientid, open_owner}: allocate fresh
+     * from the stripe's pool (T4.2) -- the common case is a free-
+     * list pop under the already-held stripe mutex, no malloc. */
+    os = os_alloc(ot, file_lock_idx);
     if (os == NULL) {
         rc = -2; /* NFS4ERR_RESOURCE */
         goto out_unlock;
@@ -630,7 +848,7 @@ int open_state_open(struct open_state_table *ot,
         memcpy(os->open_owner, open_owner, open_owner_len);
         os->open_owner_len = open_owner_len;
     }
-    stateid_lock_idx = stateid_lock_stripe(os->stateid.other);
+    stateid_lock_idx = stateid_lock_stripe(ot, os->stateid.other);
 
     /* Check share conflicts against all existing opens for this file. */
     if (share_conflict(fo, share_access, share_deny)) {
@@ -647,9 +865,16 @@ int open_state_open(struct open_state_table *ot,
     os->file_next = fo->head;
     fo->head = os;
 
+    /* T4.3: mark the state pending BEFORE it becomes findable when
+     * a durable write will follow, so no other operation can mutate
+     * it during the unlocked persist window. */
+    if (ot->cat != NULL && !ot->skip_ndb_persist) {
+        os->persist_pending = true;
+    }
+
     /* Insert into stateid hash. */
     pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
-    idx = hash_other(os->stateid.other);
+    idx = hash_other(ot, os->stateid.other);
     os->hash_next = ot->stateid_hash[idx];
     ot->stateid_hash[idx] = os;
     pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
@@ -658,9 +883,22 @@ int open_state_open(struct open_state_table *ot,
     *out_stateid = os->stateid;
 
     /* Persist to RonDB if catalogue is set (shared-attr)
-     * and transient caching is off. */
+     * and transient caching is off.
+     *
+     * T4.1 failure policy: fail the OPEN and unwind -- a stateid
+     * whose durable row was never written must not be handed to
+     * the client (peer MDSes would miss its share reservation and
+     * a restart would forget it).  T4.3 lock scope: the NDB round-
+     * trip runs with NO open-state locks held; the state was
+     * published pending above and is committed or unwound under
+     * the relocked stripe below. */
     if (ot->cat != NULL && !ot->skip_ndb_persist) {
         struct mds_coord_open_row row;
+        enum mds_status pst;
+
+        /* Build the row before dropping the lock -- `os` must not
+         * be dereferenced once the stripe unlocks (a concurrent
+         * revoke may free it). */
         memset(&row, 0, sizeof(row));
         memcpy(row.stateid_other, os->stateid.other, NFS4_OTHER_SIZE);
         row.seqid = os->stateid.seqid;
@@ -674,15 +912,56 @@ int open_state_open(struct open_state_table *ot,
         row.open_owner_len = open_owner_len;
         row.owner_mds_id = ot->mds_id;
         row.owner_boot_epoch = ot->boot_epoch;
-        (void)mds_coord_open_put(ot->cat, &row);
+
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+
+        pst = mds_coord_open_put(ot->cat, &row);
+
+        pthread_mutex_lock(&ot->locks[file_lock_idx]);
+        pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
+        {
+            struct nfs4_open_state *cur =
+                find_by_other(ot, row.stateid_other);
+
+            if (cur == NULL) {
+                /* Revoked while unlocked (lease expiry / client
+                 * teardown).  On persist success the fresh row is
+                 * an orphan no client ever saw -- delete it (rare
+                 * race; the extra round-trip under the lock is
+                 * acceptable here). */
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                if (pst == MDS_OK) {
+                    (void)mds_coord_open_del(ot->cat,
+                                             row.stateid_other);
+                }
+                rc = -5; /* NFS4ERR_DELAY */
+            } else if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+                /* NOSUPPORT = no shared open-state table on this
+                 * backend; treated as "nothing to persist".  Any
+                 * other failure: unwind (T4.1). */
+                unhash_stateid(ot, cur);
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                unlink_from_file(ot, cur);
+                os_free(ot, file_lock_idx, cur);
+                rc = -5; /* NFS4ERR_DELAY */
+            } else {
+                cur->persist_pending = false;
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                rc = 0;
+            }
+        }
     }
 
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);
     return rc;
 
 out_unlock_free:
+    /* Recycle under the still-held stripe lock (pool contract). */
+    os_free(ot, file_lock_idx, os);
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);
-    free(os);
     return rc;
 
 out_unlock:
@@ -709,7 +988,7 @@ int open_state_close(struct open_state_table *ot,
 
     MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
-    stateid_lock_idx = stateid_lock_stripe(stateid->other);
+    stateid_lock_idx = stateid_lock_stripe(ot, stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
     os = find_by_other(ot, stateid->other);
     if (os == NULL) {
@@ -719,7 +998,7 @@ int open_state_close(struct open_state_table *ot,
     fileid = os->fileid;
     pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
 
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
     pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
 
@@ -730,6 +1009,15 @@ int open_state_close(struct open_state_table *ot,
     }
     if (os->clientid != clientid) {
         rc = -1;  /* NFS4ERR_BAD_STATEID -- not owner */
+        goto out;
+    }
+
+    /* T4.3: the state's durable write is still in flight -- it may
+     * yet be unwound, so it cannot be closed.  The client cannot
+     * legitimately hold this stateid (the OPEN reply has not been
+     * sent); retransmission races retry via DELAY. */
+    if (os->persist_pending) {
+        rc = -6;  /* NFS4ERR_DELAY */
         goto out;
     }
 
@@ -767,7 +1055,7 @@ int open_state_close(struct open_state_table *ot,
         (void)mds_coord_open_del(ot->cat, stateid->other);
     }
 
-    free(os);
+    os_free(ot, file_lock_idx, os);
 
 out:
     pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
@@ -791,7 +1079,7 @@ int open_state_find(struct open_state_table *ot,
 
     MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
-    stateid_lock_idx = stateid_lock_stripe(stateid->other);
+    stateid_lock_idx = stateid_lock_stripe(ot, stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
     os = find_by_other(ot, stateid->other);
     if (os != NULL) {
@@ -813,7 +1101,7 @@ int open_state_file_has_writers(struct open_state_table *ot, uint64_t fileid)
     if (ot == NULL) {
         return 0;
     }
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
     fo = find_file_opens(ot, fileid);
     has_writers = (fo != NULL && fo->head != NULL) ? 1 : 0;
@@ -833,7 +1121,7 @@ bool open_state_has_other_writer(struct open_state_table *ot,
     if (ot == NULL) {
         return false;
     }
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
     fo = find_file_opens(ot, fileid);
     if (fo != NULL) {
@@ -857,31 +1145,33 @@ void open_state_close_all_for_client(struct open_state_table *ot,
     if (ot == NULL) { return; }
 
     /* Lock all stripes to prevent races during bulk cleanup. */
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_mutex_lock(&ot->locks[s]);
     }
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_rwlock_wrlock(&ot->stateid_locks[s]);
     }
 
-    for (b = 0; b < STATEID_HASH_BUCKETS; b++) {
+    for (b = 0; b < ot->stateid_buckets; b++) {
         struct nfs4_open_state **pp = &ot->stateid_hash[b];
         while (*pp != NULL) {
             struct nfs4_open_state *os = *pp;
             if (os->clientid == clientid) {
                 *pp = os->hash_next;
                 unlink_from_file(ot, os);
-                free(os);
+                /* Every stripe lock is held, so recycling into
+                 * the record's own stripe pool is safe. */
+                os_free(ot, lock_stripe(ot, os->fileid), os);
             } else {
                 pp = &os->hash_next;
             }
         }
     }
 
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_rwlock_unlock(&ot->stateid_locks[s]);
     }
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_mutex_unlock(&ot->locks[s]);
     }
 }
@@ -904,7 +1194,7 @@ int open_state_downgrade(struct open_state_table *ot,
 
     MDS_PHASE_SCOPE(MDS_PHASE_STATE);
 
-    stateid_lock_idx = stateid_lock_stripe(stateid->other);
+    stateid_lock_idx = stateid_lock_stripe(ot, stateid->other);
     pthread_rwlock_rdlock(&ot->stateid_locks[stateid_lock_idx]);
 
     os = find_by_other(ot, stateid->other);
@@ -915,7 +1205,7 @@ int open_state_downgrade(struct open_state_table *ot,
     fileid = os->fileid;
     pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
 
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
     pthread_rwlock_wrlock(&ot->stateid_locks[stateid_lock_idx]);
 
@@ -929,6 +1219,13 @@ int open_state_downgrade(struct open_state_table *ot,
         pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
         return -2;
+    }
+    /* T4.3: durable write in flight -- immutable until it commits
+     * or unwinds (see the pending-window notes at the file head). */
+    if (os->persist_pending) {
+        pthread_rwlock_unlock(&ot->stateid_locks[stateid_lock_idx]);
+        pthread_mutex_unlock(&ot->locks[file_lock_idx]);
+        return -6; /* NFS4ERR_DELAY */
     }
     /*
      * Zero-seqid: per RFC 5661 S8.2.2 the server MUST treat a
@@ -983,7 +1280,7 @@ static int reload_cb(const uint8_t *other,
         memcpy(os->open_owner, owner, os->open_owner_len);
     }
 
-    idx = hash_other(os->stateid.other);
+    idx = hash_other(ot, os->stateid.other);
     os->hash_next = ot->stateid_hash[idx];
     ot->stateid_hash[idx] = os;
 
@@ -1043,7 +1340,7 @@ int open_state_revoke_expired_for_file(struct open_state_table *ot,
         return 0;
     }
 
-    file_lock_idx = lock_stripe(fileid);
+    file_lock_idx = lock_stripe(ot, fileid);
 
     /* ---- Phase 1: collect unique clientids (open-state lock only) ---- */
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
@@ -1084,7 +1381,7 @@ int open_state_revoke_expired_for_file(struct open_state_table *ot,
 
     /* ---- Phase 3: remove expired entries (open-state locks only) ---- */
     pthread_mutex_lock(&ot->locks[file_lock_idx]);
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_rwlock_wrlock(&ot->stateid_locks[s]);
     }
 
@@ -1104,7 +1401,9 @@ int open_state_revoke_expired_for_file(struct open_state_table *ot,
                 if (is_expired) {
                     *pp = os->file_next;
                     unhash_stateid(ot, os);
-                    free(os);
+                    /* All states on this chain share the file's
+                     * stripe, whose mutex is held. */
+                    os_free(ot, file_lock_idx, os);
                     revoked++;
                 } else {
                     pp = &os->file_next;
@@ -1116,7 +1415,7 @@ int open_state_revoke_expired_for_file(struct open_state_table *ot,
         }
     }
 
-    for (s = 0; s < OPEN_STATE_LOCK_STRIPES; s++) {
+    for (s = 0; s < ot->lock_stripes; s++) {
         pthread_rwlock_unlock(&ot->stateid_locks[s]);
     }
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);

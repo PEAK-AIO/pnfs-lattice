@@ -1044,6 +1044,7 @@ open_existing:
 	case 0:  break;
 	case -1: return NFS4ERR_SHARE_DENIED;
 	case -2: return NFS4ERR_RESOURCE;
+	case -5: return NFS4ERR_DELAY; /* open-state persist failed (T4.1) */
 	default: return NFS4ERR_SERVERFAULT;
 	}
 
@@ -1367,6 +1368,7 @@ enum nfs4_status op_close(struct compound_data *cd,
 	switch (rc) {
 	case 0:  break;
 	case -4: return NFS4ERR_OLD_STATEID;
+	case -6: return NFS4ERR_DELAY; /* persist in flight (T4.3) */
 	default: return NFS4ERR_BAD_STATEID;
 	}
 
@@ -1491,6 +1493,7 @@ enum nfs4_status op_open_downgrade(struct compound_data *cd,
 		}
 		switch (rc) {
 		case -4: return NFS4ERR_OLD_STATEID;
+		case -6: return NFS4ERR_DELAY; /* persist in flight (T4.3) */
 		default: return NFS4ERR_BAD_STATEID;
 		}
 	}

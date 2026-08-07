@@ -165,6 +165,19 @@ struct nfs4_open_state {
     uint32_t               open_owner_len;
     struct nfs4_open_state *hash_next;  /* stateid hash chain */
     struct nfs4_open_state *file_next;  /* per-fileid chain (share checks) */
+    /* Allocation provenance (internal, Wave 4 T4.2): true when the
+     * record lives inside a per-stripe pool chunk and is recycled
+     * through the stripe free list; false for plain calloc records
+     * (reload path, chunk-allocation fallback), which are free()d. */
+    bool                   pooled;
+    /* Durable-write window (internal, Wave 4 T4.3): true while
+     * open_state_open() runs the NDB persist for this record
+     * OUTSIDE the file-stripe lock.  The record is visible for
+     * share-conflict purposes but immutable: same-owner re-OPEN,
+     * CLOSE, and OPEN_DOWNGRADE return a retryable DELAY code
+     * until the persist commits (flag cleared) or fails (record
+     * unwound / rolled back). */
+    bool                   persist_pending;
 };
 
 /* -----------------------------------------------------------------------
@@ -175,20 +188,55 @@ struct open_state_table;  /* Opaque -- defined in open_state.c */
 struct mds_catalogue;     /* Forward for open_state_table_set_cat() */
 
 /* -----------------------------------------------------------------------
+ * Table sizing defaults (Wave 4 T4.2)
+ *
+ * Used when open_state_table_init() is called or when a size argument
+ * of open_state_table_init_ex() is 0.  Operators tune them via the
+ * open_state_file_buckets / open_state_stateid_buckets /
+ * open_state_lock_stripes INI keys.  The pre-Wave-4 values (256
+ * buckets, 16 stripes) produced multi-hundred-entry chains and
+ * 1/16th-of-fileid-space lock stripes at realistic open counts.
+ * ----------------------------------------------------------------------- */
+
+#define OPEN_STATE_DEFAULT_FILE_BUCKETS     1048576U
+#define OPEN_STATE_DEFAULT_STATEID_BUCKETS  1048576U
+#define OPEN_STATE_DEFAULT_LOCK_STRIPES     1024U
+
+/* -----------------------------------------------------------------------
  * API -- Lifecycle
  * ----------------------------------------------------------------------- */
 
 /**
- * Initialise the open state manager.
+ * Initialise the open state manager with default table sizing
+ * (OPEN_STATE_DEFAULT_* above).
  *
  * @param mds_id  This MDS node's numeric ID (for stateid generation).
  * @param out     Receives the open state table handle.
  * @return 0 on success, -1 on allocation failure.
  *
- * Thread safety: the returned handle is safe to share; all operations
- * are serialised internally via pthread_mutex.
+ * Thread safety: the returned handle is safe to share; operations are
+ * serialised internally via per-stripe mutexes and rwlocks.
  */
 int open_state_table_init(uint32_t mds_id, struct open_state_table **out);
+
+/**
+ * Initialise the open state manager with explicit table sizing.
+ *
+ * @param mds_id           This MDS node's numeric ID.
+ * @param file_buckets     Per-file hash bucket count (0 = default).
+ * @param stateid_buckets  Stateid hash bucket count (0 = default).
+ * @param lock_stripes     Mutex/rwlock stripe count (0 = default).
+ *                         Clamped to file_buckets when larger, so a
+ *                         hash bucket is always covered by exactly
+ *                         one stripe.
+ * @param out              Receives the open state table handle.
+ * @return 0 on success, -1 on allocation failure or invalid args.
+ */
+int open_state_table_init_ex(uint32_t mds_id,
+                             uint32_t file_buckets,
+                             uint32_t stateid_buckets,
+                             uint32_t lock_stripes,
+                             struct open_state_table **out);
 
 /**
  * Destroy the open state table and free all state.
@@ -249,6 +297,14 @@ void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
  *         -1 = NFS4ERR_SHARE_DENIED (share conflict).
  *         -2 = allocation failure (NFS4ERR_RESOURCE).
  *         -3 = invalid parameters.
+ *         -5 = retry shortly (NFS4ERR_DELAY).  Either the durable
+ *              persist of the open state failed -- the in-memory
+ *              mutation has been fully unwound (a fresh open is
+ *              removed again, an upgrade has its previous
+ *              seqid/share bits restored) and no stateid reaches
+ *              the client -- or the same-owner state targeted by
+ *              an upgrade has a durable write still in flight on
+ *              another thread (T4.3 pending window).
  */
 int open_state_open(struct open_state_table *ot,
                     uint64_t clientid,
@@ -278,6 +334,9 @@ int open_state_open(struct open_state_table *ot,
  * @return 0 on success.
  *         -1 = NFS4ERR_BAD_STATEID (not found, seqid mismatch, or
  *              wrong owner).
+ *         -4 = NFS4ERR_OLD_STATEID (stale seqid).
+ *         -6 = NFS4ERR_DELAY: the state's durable write is still in
+ *              flight (T4.3 pending window); retry shortly.
  */
 int open_state_close(struct open_state_table *ot,
                      uint64_t clientid,

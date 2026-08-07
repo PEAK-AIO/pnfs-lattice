@@ -270,6 +270,16 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Transient state caching (default: off -- open/layout state
      * write-through to RonDB for cross-MDS correctness). */
     cfg->transient_state_cache = false;
+    /* Open-state table sizing (Wave 4 T4.2): 0 = library defaults
+     * (1,048,576 buckets x2, 1,024 stripes; see open_state.h). */
+    cfg->open_state_file_buckets = 0;
+    cfg->open_state_stateid_buckets = 0;
+    cfg->open_state_lock_stripes = 0;
+    /* Session table bucket sizing (Wave 4 T4.2): 0 = library
+     * defaults (65,536 each; see session.h). */
+    cfg->session_client_buckets = 0;
+    cfg->session_session_buckets = 0;
+    cfg->session_owner_buckets = 0;
     /* Deferred parent-dir attr maintenance (parent_touch). */
     cfg->parent_touch_deferred = false;
     cfg->parent_touch_flush_ms = 50;
@@ -850,6 +860,60 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "transient_state_cache") == 0) {
             cfg->transient_state_cache = (strcmp(val, "true") == 0 ||
                                           strcmp(val, "1") == 0);
+        } else if (strcmp(key, "open_state_file_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 16777216) {
+                cfg->open_state_file_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: open_state_file_buckets=%lu out of range "
+                    "(256..16777216); using default\n", v);
+            }
+        } else if (strcmp(key, "open_state_stateid_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 16777216) {
+                cfg->open_state_stateid_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: open_state_stateid_buckets=%lu out of range "
+                    "(256..16777216); using default\n", v);
+            }
+        } else if (strcmp(key, "open_state_lock_stripes") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 16 && v <= 4096) {
+                cfg->open_state_lock_stripes = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: open_state_lock_stripes=%lu out of range "
+                    "(16..4096); using default\n", v);
+            }
+        } else if (strcmp(key, "session_client_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_client_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_client_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
+            }
+        } else if (strcmp(key, "session_session_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_session_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_session_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
+            }
+        } else if (strcmp(key, "session_owner_buckets") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v >= 256 && v <= 1048576) {
+                cfg->session_owner_buckets = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: session_owner_buckets=%lu out of range "
+                    "(256..1048576); using default\n", v);
+            }
         } else if (strcmp(key, "parent_touch_deferred") == 0) {
             cfg->parent_touch_deferred =
                 (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);

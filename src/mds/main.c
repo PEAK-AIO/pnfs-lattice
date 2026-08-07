@@ -1246,8 +1246,11 @@ if (s_pt != NULL) {
 	/* 6b. Create session table.
 	 *     For RonDB the catalogue vtable handles recovery
 	 *     persistence directly (cq stays NULL). */
-	if (session_table_init(cfg.self.id, cfg.lease_time_sec,
-			       &session_tbl) == 0) {
+	if (session_table_init_ex(cfg.self.id, cfg.lease_time_sec,
+				  cfg.session_client_buckets,
+				  cfg.session_session_buckets,
+				  cfg.session_owner_buckets,
+				  &session_tbl) == 0) {
 
 		session_table_set_cat(session_tbl, cat);
 		if (cfg.session_fore_slots > 0) {
@@ -1312,9 +1315,29 @@ if (s_pt != NULL) {
 		return EXIT_FAILURE;
 	}
 
-	if (open_state_table_init(cfg.self.id, &ot) != 0) {
+	if (open_state_table_init_ex(cfg.self.id,
+				     cfg.open_state_file_buckets,
+				     cfg.open_state_stateid_buckets,
+				     cfg.open_state_lock_stripes,
+				     &ot) != 0) {
 		MDS_LOG_WARN(LOG_COMP_MDS, "open_state_table_init failed");
 		ot = NULL;
+	} else {
+		/* Chain depth is workload-dependent -- log the effective
+		 * sizing so operators can correlate it with measurements
+		 * instead of trusting arithmetic (Wave 4 T4.2). */
+		MDS_LOG_INFO(LOG_COMP_MDS,
+			"open-state table: file_buckets=%u "
+			"stateid_buckets=%u lock_stripes=%u",
+			cfg.open_state_file_buckets != 0
+				? cfg.open_state_file_buckets
+				: (unsigned)OPEN_STATE_DEFAULT_FILE_BUCKETS,
+			cfg.open_state_stateid_buckets != 0
+				? cfg.open_state_stateid_buckets
+				: (unsigned)OPEN_STATE_DEFAULT_STATEID_BUCKETS,
+			cfg.open_state_lock_stripes != 0
+				? cfg.open_state_lock_stripes
+				: (unsigned)OPEN_STATE_DEFAULT_LOCK_STRIPES);
 	}
 
 	/* shared-attr: wire RonDB catalogue into stateful subsystems

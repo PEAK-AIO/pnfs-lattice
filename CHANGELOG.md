@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Protocol state-table sizing keys (Wave 4)** —
+  `open_state_file_buckets`, `open_state_stateid_buckets`,
+  `open_state_lock_stripes`, `session_client_buckets`,
+  `session_session_buckets`, `session_owner_buckets`.  The open-state
+  tables move from compile-time 256+256 buckets / 16 stripes to
+  1,048,576 buckets per hash / 1,024 stripes by default, and the
+  session tables from 256 to 65,536 buckets; the keys tune them down
+  on constrained hosts.  Effective open-state sizing is logged at
+  startup so chain depth can be correlated with measurements.  The
+  session stripe-lock count stays fixed at 16 by design (lock-all
+  destroy protocol).  Per-open allocation now comes from per-stripe
+  64-entry chunk pools recycled under the already-held stripe mutex
+  instead of a calloc/free per OPEN/CLOSE.
 - **`layoutget_newfile_fastpath` config key (Wave 3)** — when enabled
   (default off), `op_layoutget` skips the byte-range conflict-recall
   holder scan for a file created earlier in the SAME compound (fused
@@ -51,6 +64,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- **OPEN-state persistence runs outside the stripe lock (Wave 4)** —
+  `open_state_open()` used to execute its synchronous NDB write while
+  holding the per-file stripe mutex, serialising every OPEN/CLOSE on
+  the stripe — and every other open owner on the same file — behind a
+  network round-trip.  The state is now published with a
+  persist-pending flag, the round-trip runs with no open-state locks
+  held, and the stripe is relocked to commit or unwind.  Pending
+  states are visible to share-reservation conflict checks immediately
+  but immutable until durable: a same-owner re-OPEN, CLOSE, or
+  OPEN_DOWNGRADE during the window answers NFS4ERR_DELAY (the client
+  cannot legitimately hold the stateid yet — the OPEN reply is not
+  sent until the persist completes).  Same-file OPEN concurrency
+  measurements are a lab follow-up per the wave's exit criteria.
 - **Striped inode cache (Wave 3)** — the global inode LRU is now
   partitioned into 16 independent stripes (per-stripe hash table, LRU
   list, mutex, and capacity `ceil(inode_cache_size / 16)`), mirroring
@@ -112,6 +138,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **Silently ignored OPEN-state persist failures (Wave 4)** — both
+  `mds_coord_open_put()` call sites discarded the return value, so a
+  failed NDB write published in-memory open state as though durable:
+  peer MDSes missed the share reservation (any-MDS contract
+  violation) and a restart forgot the open.  Policy is now
+  fail-the-OPEN: the in-memory mutation is fully unwound (fresh open
+  removed, upgrade's seqid/share bits restored) and the client gets
+  NFS4ERR_DELAY to retry once NDB heals.  `MDS_ERR_NOSUPPORT`
+  (backend without a shared open-state table) keeps the historical
+  nothing-to-persist contract.  Regression-tested with an injected
+  persist failure.
 - The fused CREATE+layout path now persists the popped prealloc
   entry's configured stripe unit in the durable stripe-map header.  It
   previously hardcoded 65536 (despite a comment claiming otherwise), a

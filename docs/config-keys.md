@@ -53,6 +53,12 @@ are logged as `WARN:` and the default is kept.
 - `inode_cache_size` (0..1000000).  Default: 0 (disabled; set e.g. 16384 to enable the previous lab default).
 - `dirent_cache_size` (0..1000000).  Default: 0 (disabled; set e.g. 32768 to enable the previous lab default).
 - `negative_cache_ttl_ms` (0..3600000).  Default: 5000.
+## Protocol state tables
+Sizing knobs for the in-memory NFSv4.1 state tables (Wave 4).  All default to 0 = built-in default; the effective open-state sizing is logged at startup.
+- `open_state_file_buckets` (256..16777216).  Default: 1048576.  Per-file open-chain hash buckets.
+- `open_state_stateid_buckets` (256..16777216).  Default: 1048576.  Stateid hash buckets.
+- `open_state_lock_stripes` (16..4096).  Default: 1024.  Mutex/rwlock stripes over the open-state tables; clamped to the bucket counts.  The pre-Wave-4 value (16) serialised 1/16 of the fileid space behind each OPEN's synchronous state persist.
+- `session_client_buckets` / `session_session_buckets` / `session_owner_buckets` (256..1048576).  Default: 65536 each.  Session-table hash buckets (clientid / session-id / co_ownerid).  The session stripe-lock count is intentionally fixed at 16 — every unhash path takes all stripes, so the protocol cost scales with stripe count while client cardinality stays low.
 ## Data servers
 - `ds_count` — number of configured DSes.
 - `ds[N]` — `host:/export` spec for DS index N.
