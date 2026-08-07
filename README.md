@@ -460,8 +460,8 @@ Key optimisations:
 - **NDB connection pool** — auto-sized to worker_threads (tunable to 32)
 - **NDB transaction retry** — 3 attempts with backoff for transient errors
 - **Inode cache warmup** — CREATE populates cache for immediate GETATTR
-- **Inode cache** — global LRU under a single mutex, off by default
-  (`inode_cache_size = 0`); root inode pre-warmed when enabled
+- **Striped inode cache** — 16-stripe LRU (per-stripe mutex), off by
+  default (`inode_cache_size = 0`); root inode pre-warmed when enabled
 - **Striped dirent cache** — 16-stripe LRU with negative TTL (5s), off
   by default (`dirent_cache_size = 0`)
 - **Striped lock table** — per-stripe hash + stateid-encoded stripe index
