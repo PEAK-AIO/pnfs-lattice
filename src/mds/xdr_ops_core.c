@@ -1164,6 +1164,14 @@ bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
     uint8_t cookieverf[8];
     bool have_requested = readdir_requested_any(rd->requested);
 
+    /* Borrowed scratch pages: NULL with a non-zero count means the
+     * producer skipped nfs4_result_ensure_readdir(). */
+    if (rd->count > 0 &&
+        (rd->entries == NULL || rd->entry_attrs == NULL ||
+         rd->entry_attrs_valid == NULL)) {
+        return false;
+    }
+
     /* R1.1: cookieverf = dir inode change attribute (8 bytes, BE). */
     {
         uint64_t cv = htobe64(rd->dir_change);

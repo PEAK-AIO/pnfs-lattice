@@ -1967,6 +1967,53 @@ int nfs4_result_ensure_listxattrs(struct nfs4_result *r)
 	return 0;
 }
 
+int nfs4_result_ensure_readdir(struct nfs4_result *r)
+{
+	if (r == NULL) {
+		return -1;
+	}
+	if (r->scratch.rd_entries == NULL) {
+		r->scratch.rd_entries =
+			calloc(NFS4_READDIR_MAX,
+			       sizeof(r->scratch.rd_entries[0]));
+		if (r->scratch.rd_entries == NULL) {
+			return -1;
+		}
+	}
+	if (r->scratch.rd_attrs == NULL) {
+		r->scratch.rd_attrs =
+			calloc(NFS4_READDIR_MAX,
+			       sizeof(r->scratch.rd_attrs[0]));
+		if (r->scratch.rd_attrs == NULL) {
+			return -1;
+		}
+	}
+	if (r->scratch.rd_valid == NULL) {
+		r->scratch.rd_valid =
+			calloc(NFS4_READDIR_MAX,
+			       sizeof(r->scratch.rd_valid[0]));
+		if (r->scratch.rd_valid == NULL) {
+			return -1;
+		}
+	}
+	/*
+	 * Re-zero the validity flags on every ensure: the encoder
+	 * consults entry_attrs_valid[i] for i < count, and the xattr
+	 * READDIR path never writes it, so a recycled slot could
+	 * otherwise leak a previous request's true flags (and with
+	 * them stale entry_attrs rows) onto the wire.  entries[] and
+	 * entry_attrs[] rows are fully written for every emitted
+	 * index, so they need no re-zero.
+	 */
+	memset(r->scratch.rd_valid, 0,
+	       NFS4_READDIR_MAX * sizeof(r->scratch.rd_valid[0]));
+
+	r->res.readdir.entries           = r->scratch.rd_entries;
+	r->res.readdir.entry_attrs       = r->scratch.rd_attrs;
+	r->res.readdir.entry_attrs_valid = r->scratch.rd_valid;
+	return 0;
+}
+
 void nfs4_result_scratch_release(struct nfs4_result *r)
 {
 	uint32_t i;
@@ -1980,6 +2027,9 @@ void nfs4_result_scratch_release(struct nfs4_result *r)
 	}
 	free(r->scratch.xattr_value);
 	free(r->scratch.listx_names);
+	free(r->scratch.rd_entries);
+	free(r->scratch.rd_attrs);
+	free(r->scratch.rd_valid);
 	memset(&r->scratch, 0, sizeof(r->scratch));
 }
 

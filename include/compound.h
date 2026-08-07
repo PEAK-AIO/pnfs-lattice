@@ -1071,9 +1071,15 @@ struct nfs4_res_create {
 };
 
 struct nfs4_res_readdir {
-	struct mds_cat_dirent entries[NFS4_READDIR_MAX];
-	struct mds_inode     entry_attrs[NFS4_READDIR_MAX];
-	bool                 entry_attrs_valid[NFS4_READDIR_MAX];
+	/* Borrowed page arrays from the result's scratch block, each
+	 * NFS4_READDIR_MAX rows; obtained via
+	 * nfs4_result_ensure_readdir(), which also re-zeroes
+	 * entry_attrs_valid so a recycled slot cannot leak stale
+	 * validity into the encoder.  entries/entry_attrs rows are
+	 * fully written per index <= count, so they need no re-zero. */
+	struct mds_cat_dirent *entries;
+	struct mds_inode      *entry_attrs;
+	bool                  *entry_attrs_valid;
 	uint32_t             requested[3];
 	uint32_t             count;
 	bool                 eof;
@@ -1556,6 +1562,10 @@ struct nfs4_result_scratch {
 	uint8_t *rp_data[NFS4_READ_PLUS_MAX_SEGS]; /* MDS_XATTR_VAL_MAX each */
 	uint8_t *xattr_value;                      /* MDS_XATTR_VAL_MAX      */
 	char    (*listx_names)[MDS_XATTR_NAME_MAX + 1]; /* LISTXATTRS rows   */
+	/* READDIR page (NFS4_READDIR_MAX rows each). */
+	struct mds_cat_dirent *rd_entries;
+	struct mds_inode      *rd_attrs;
+	bool                  *rd_valid;
 };
 
 /* Tagged union of operation results. */
@@ -1629,6 +1639,10 @@ uint8_t *nfs4_result_ensure_xattr_value(struct nfs4_result *r);
 
 /** Ensure res.listxattrs.names (NFS4_LISTXATTRS_MAX rows). 0 / -1. */
 int nfs4_result_ensure_listxattrs(struct nfs4_result *r);
+
+/** Ensure the three READDIR page arrays (NFS4_READDIR_MAX rows each)
+ *  and re-zero entry_attrs_valid.  0 / -1. */
+int nfs4_result_ensure_readdir(struct nfs4_result *r);
 
 /** Free every scratch buffer and zero the block.  NULL-safe.  For
  *  test/bench teardown; the daemon's thread-local slots never call

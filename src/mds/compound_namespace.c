@@ -3021,6 +3021,9 @@ enum nfs4_status op_readdir(struct compound_data *cd,
 }
 
 	memset(&res->res.readdir, 0, sizeof(res->res.readdir));
+	if (nfs4_result_ensure_readdir(res) != 0) {
+		return NFS4ERR_RESOURCE;
+	}
 	memcpy(res->res.readdir.requested, op->arg.readdir.requested,
 	       sizeof(res->res.readdir.requested));
 	res->res.readdir.fsid_major = referral_fsid_major(cd->mds_id);
