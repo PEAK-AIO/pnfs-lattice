@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "pnfs_mds.h"
 #include "mds_catalogue.h"
 #include "session.h"
@@ -1854,9 +1855,9 @@ struct layout_recall     *lr;
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */
 	bool                      sequence_done; /* Set by successful SEQUENCE */
 	bool                      replay_cached; /* DRC: cached reply available */
-	/* Path tracking for subtree ownership checks. */
-	char                      current_path[MDS_MAX_PATH];
-	char                      saved_path[MDS_MAX_PATH];
+	/* Path tracking for subtree ownership checks: current_path /
+	 * saved_path moved to the TAIL of the struct -- see the T2.4
+	 * note there. */
 	/* Xattr state — set by OPENATTR+LOOKUP for READ/WRITE on xattr objects. */
 	char                      xattr_name[MDS_XATTR_NAME_MAX + 1];
 	bool                      xattr_obj_set;  /* xattr_name is valid */
@@ -1979,7 +1980,32 @@ struct layout_recall     *lr;
 	const struct nfs4_op      *ops;
 	uint32_t                  op_count;
 	uint32_t                  op_index;
+
+	/*
+	 * T2.4 (Wave 2): path tracking for subtree ownership checks.
+	 * These two 4 KB buffers dominate sizeof(struct compound_data)
+	 * (~8 KB of ~9.8 KB), and their contents are only ever consumed
+	 * as NUL-terminated strings guarded by `path[0] == '\0'` empty
+	 * checks -- so per-request initialisation needs ONE byte each,
+	 * not 4 KB of stores.  They MUST remain the trailing members:
+	 * compound_init() zeroes only the prefix up to current_path and
+	 * then empties both strings explicitly; the _Static_asserts
+	 * below pin the layout so a reorder cannot silently break the
+	 * prefix-memset contract.
+	 */
+	char                      current_path[MDS_MAX_PATH];
+	char                      saved_path[MDS_MAX_PATH];
 };
+
+/* T2.4 layout pins -- see the tail comment inside the struct. */
+_Static_assert(offsetof(struct compound_data, saved_path) ==
+	       offsetof(struct compound_data, current_path) +
+	       sizeof(((struct compound_data *)0)->current_path),
+	       "current_path/saved_path must be contiguous");
+_Static_assert(offsetof(struct compound_data, saved_path) +
+	       sizeof(((struct compound_data *)0)->saved_path) ==
+	       sizeof(struct compound_data),
+	       "path buffers must be the trailing compound_data members");
 
 /* -----------------------------------------------------------------------
  * Public API

@@ -2266,7 +2266,18 @@ void nfs4_result_reset(struct nfs4_result *r, enum nfs_opnum4 opnum)
 
 void compound_init(struct compound_data *cd)
 {
-	memset(cd, 0, sizeof(*cd));
+	/*
+	 * T2.4 (Wave 2): the two trailing MDS_MAX_PATH buffers are
+	 * consumed only as NUL-terminated strings behind [0] == '\0'
+	 * emptiness checks, so clearing them costs one byte each --
+	 * the prefix memset shrinks per-request init from ~9.8 KB to
+	 * ~1.7 KB.  The _Static_asserts next to the struct pin the
+	 * two buffers as the trailing members, which makes the prefix
+	 * cover every other field.
+	 */
+	memset(cd, 0, offsetof(struct compound_data, current_path));
+	cd->current_path[0] = '\0';
+	cd->saved_path[0] = '\0';
 }
 
 
