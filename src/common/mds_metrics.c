@@ -368,6 +368,34 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
     }
     base += extra;
 
+    /* RonDB transient-retry pressure (Wave 6 T6.3). */
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# HELP pnfs_mds_cat_transient_retries "
+            "Transient-NDB retry backoffs taken by the RonDB "
+            "wrapper.\n"
+        "# TYPE pnfs_mds_cat_transient_retries counter\n"
+        "pnfs_mds_cat_transient_retries %lu\n"
+        "# HELP pnfs_mds_cat_transient_backoff_us "
+            "Total microseconds workers slept in transient-retry "
+            "backoff.\n"
+        "# TYPE pnfs_mds_cat_transient_backoff_us counter\n"
+        "pnfs_mds_cat_transient_backoff_us %lu\n"
+        "# HELP pnfs_mds_cat_transient_retry_exhausted "
+            "Retry loops that gave up with the error still "
+            "transient.\n"
+        "# TYPE pnfs_mds_cat_transient_retry_exhausted counter\n"
+        "pnfs_mds_cat_transient_retry_exhausted %lu\n",
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->cat_transient_retries),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->cat_transient_backoff_us),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->cat_transient_retry_exhausted));
+    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+        return -1;
+    }
+    base += extra;
+
     /* Append DS-prepare counters. */
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_ds_prepare_async_ok "
@@ -621,7 +649,11 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->open_create_state_open_count),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->open_create_total_count));
-    if (extra > 0 && (size_t)extra < cap - (size_t)base) { base += extra; }
+    /* Wave 6: this block previously advanced `base` TWICE (a stray
+     * duplicate guard), leaving an `extra`-sized window of
+     * unrendered bytes in the middle of every /metrics scrape and
+     * over-reporting the rendered length.  Single-advance like
+     * every other block. */
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
         return -1;
     }

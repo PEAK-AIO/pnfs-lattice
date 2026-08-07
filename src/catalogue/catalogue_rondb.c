@@ -26,6 +26,7 @@
 
 #include "mds_catalogue.h"
 #include "mds_log.h"
+#include "mds_metrics.h"
 #include "catalogue_internal.h"
 #include "catalogue_rondb.h"
 #include "catalog_image.h"
@@ -69,7 +70,27 @@ static void rondb_transient_backoff(int attempt)
 {
 	/* 500us .. 16ms exponential; mdtest parallel bursts need headroom. */
 	uint32_t us = 500U << (uint32_t)(attempt > 5 ? 5 : attempt);
+
+	/* Wave 6 T6.3: retry tuning is data-driven only.  Count every
+	 * backoff and the time slept so retry pressure is readable
+	 * from /metrics deltas under contention workloads. */
+	atomic_fetch_add_explicit(&g_branch_metrics.cat_transient_retries,
+				  1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&g_branch_metrics.cat_transient_backoff_us,
+				  us, memory_order_relaxed);
 	usleep(us);
+}
+
+/** Wave 6 T6.3: a retry loop surrendered with the error still
+ *  transient -- the client-visible outcome (DELAY or IO per call
+ *  site) is unchanged; this only records the give-up. */
+static void rondb_transient_note_exhausted(int rc)
+{
+	if (rc == -2) {
+		atomic_fetch_add_explicit(
+			&g_branch_metrics.cat_transient_retry_exhausted,
+			1, memory_order_relaxed);
+	}
 }
 
 static void catalogue_rondb_close_backend(struct mds_catalogue *cat);
@@ -641,6 +662,7 @@ enum mds_status catalogue_rondb_ns_create(
 		}
 		rondb_transient_backoff(attempt);
 	}
+	rondb_transient_note_exhausted(rc);
 	if (rc == 1) {
 		return MDS_ERR_EXISTS;
 	}
@@ -747,6 +769,7 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 		}
 		rondb_transient_backoff(attempt);
 	}
+	rondb_transient_note_exhausted(rc);
 	free(stripe_buf);
 
 	if (rc == 0) {
@@ -909,6 +932,7 @@ enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 		if (rc != -2) { break; }
 		rondb_transient_backoff(attempt);
 	}
+	rondb_transient_note_exhausted(rc);
 	if (rc == 1) {
 		/* TOCTOU: concurrent remove beat us; row already gone. */
 		return MDS_ERR_NOTFOUND;
@@ -1017,6 +1041,7 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
 		if (rc != -2) { break; }
 		rondb_transient_backoff(attempt);
 	}
+	rondb_transient_note_exhausted(rc);
 	free(rows);
 	if (rc == 1) {
 		return MDS_ERR_NOTFOUND;
@@ -2963,6 +2988,7 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 		}
 		rondb_transient_backoff(attempt);
 	}
+	rondb_transient_note_exhausted(rc);
 	if (rc == 1) {
 		return MDS_ERR_EXISTS;
 	}
