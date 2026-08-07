@@ -937,21 +937,22 @@ static void test_byte_range_recall_dedupes_clientid(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 13: Byte-range conflict recall — transient CB status skips
- * the preemptive revoke, leaving the layout-state row intact so the
- * client's natural LAYOUTRETURN cleans up.
+ * Test 13: Byte-range conflict recall — the CB_LAYOUTRECALL is
+ * fire-and-forget and the conflicting holder row is revoked at
+ * LAYOUTGET (grant) time, even when the client answers
+ * NFS4ERR_RECALLCONFLICT.
  *
- * RFC 5661 §20.4.2.1 / §15.1.10.10 — NFS4ERR_RECALLCONFLICT (10061)
- * means "client has I/O in flight, will return on completion";
- * NFS4ERR_DELAY (10008) is the equivalent generic "server please retry"
- * status.  The MDS MUST NOT revoke on either, or it will race the
- * incoming LAYOUTRETURN and produce NFS4ERR_BAD_STATEID.  This test
- * drives the path with NFS4ERR_RECALLCONFLICT and verifies the row
- * survives.  Reproduces the P05_disjoint_ranges hang in Mark's
- * harness and validates the fix.
+ * RFC 5661 §20.4.2.1 option (b): the server may revoke at grant
+ * time.  CB delivery is send-only (nfs4_cb_layoutrecall_fd does not
+ * wait for the reply), so the client's status is never observed.
+ * Waiting for voluntary LAYOUTRETURNs instead let rows accumulate in
+ * mds_layout_by_file under sustained create workloads until NDB
+ * scans starved the worker pool; Linux clears local state on the
+ * resulting NFS4ERR_BAD_STATEID without escalating (see
+ * layout_recall_byte_range_for_holders).
  * ----------------------------------------------------------------------- */
 
-static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
+static void test_byte_range_recall_revokes_on_recallconflict(void)
 {
     struct mds_catalogue *db = NULL;
     struct mds_catalogue *cat = NULL;
@@ -1022,11 +1023,11 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
     ASSERT_EQ(mock.layoutrecall_count, 1);
 
     /*
-     * Critical assertion: the layout-state row MUST still exist on
-     * the catalogue.  RFC 5661 §20.4.2.1 says the client will send
-     * LAYOUTRETURN once its I/O drains; if we revoked here the
-     * subsequent LAYOUTRETURN would hit NFS4ERR_BAD_STATEID and the
-     * client would spin retransmitting.
+     * The conflicting holder row is revoked at grant time
+     * (revoke_transient=true): the reply status is never observed on
+     * the send-only CB path, and deferring cleanup to the holder's
+     * voluntary LAYOUTRETURN let rows accumulate until slow NDB
+     * scans deadlocked the worker pool.
      */
     {
         bool has_layout = false;
@@ -1034,7 +1035,7 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
 
         mst = mds_coord_layout_scan_for_file(db, 700, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 1);
+        ASSERT_EQ(has_layout, 0);
     }
 
     close(sv[0]);
@@ -1043,16 +1044,16 @@ static void test_byte_range_recall_skip_revoke_on_recallconflict(void)
     session_table_destroy(st);
     mds_catalogue_close(db);
     cleanup_db(path);
-    printf("  PASS: test_byte_range_recall_skip_revoke_on_recallconflict\n");
+    printf("  PASS: test_byte_range_recall_revokes_on_recallconflict\n");
 }
 
 /* -----------------------------------------------------------------------
- * Test 14: Byte-range conflict recall — NFS4ERR_DELAY also skips
- * revoke (transient sibling of NFS4ERR_RECALLCONFLICT, RFC 5661
- * §20.4.2.1).
+ * Test 14: Byte-range conflict recall — same grant-time revoke with
+ * the client answering NFS4ERR_DELAY (transient sibling of
+ * NFS4ERR_RECALLCONFLICT); the reply is not observed either way.
  * ----------------------------------------------------------------------- */
 
-static void test_byte_range_recall_skip_revoke_on_delay(void)
+static void test_byte_range_recall_revokes_on_delay(void)
 {
     struct mds_catalogue *db = NULL;
     struct mds_catalogue *cat = NULL;
@@ -1116,14 +1117,14 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
     ASSERT_EQ(recalled, 1);
     ASSERT_EQ(mock.received, 1);
 
-    /* Layout MUST survive the recall — NFS4ERR_DELAY is transient. */
+    /* Revoked at grant time regardless of the (unobserved) reply. */
     {
         bool has_layout = false;
         enum mds_status mst;
 
         mst = mds_coord_layout_scan_for_file(db, 800, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 1);
+        ASSERT_EQ(has_layout, 0);
     }
 
     close(sv[0]);
@@ -1132,13 +1133,15 @@ static void test_byte_range_recall_skip_revoke_on_delay(void)
     session_table_destroy(st);
     mds_catalogue_close(db);
     cleanup_db(path);
-    printf("  PASS: test_byte_range_recall_skip_revoke_on_delay\n");
+    printf("  PASS: test_byte_range_recall_revokes_on_delay\n");
 }
 
 /* -----------------------------------------------------------------------
  * Test 15: Byte-range conflict recall — a TERMINAL CB error (e.g.
- * NFS4ERR_BADSESSION) still triggers the authoritative revoke.  This
- * is the negative complement of the two transient-skip tests above.
+ * NFS4ERR_BADSESSION) lands in the same grant-time revoke as the
+ * transient statuses in the two tests above: the send-only CB path
+ * never observes the reply, so every conflicting holder row is
+ * removed regardless of what the client answers.
  * ----------------------------------------------------------------------- */
 
 static void test_byte_range_recall_revokes_on_terminal_status(void)
@@ -1206,12 +1209,11 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     ASSERT_EQ(mock.received, 1);
 
     /*
-     * With the send-only CB model (no recv on the shared fd), the
-     * recall coordinator never sees the client's terminal status.
-     * cb_status == 0 ("send succeeded") is treated as transient,
-     * so the layout row is preserved — the client's natural
-     * LAYOUTRETURN cleans it up.  The unlink path has its own
-     * forced-revoke logic that does not depend on CB status.
+     * With the send-only CB model the client's terminal status is
+     * never observed; the row is revoked at grant time regardless
+     * (revoke_transient=true in layout_recall_byte_range_for_holders),
+     * so a terminal reply reaches the same end state as a transient
+     * one: the row is gone.
      */
     {
         bool has_layout = false;
@@ -1219,7 +1221,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
 
         mst = mds_coord_layout_scan_for_file(db, 900, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 1);
+        ASSERT_EQ(has_layout, 0);
     }
 
     close(sv[0]);
@@ -1304,8 +1306,9 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 
     /*
      * Send-only CB: NOMATCHING_LAYOUT is never observed by the
-     * server; cb_status == 0 keeps the row (transient).  Same
-     * rationale as test_byte_range_recall_revokes_on_terminal_status.
+     * server; the row is revoked at grant time like every other
+     * holder.  Same rationale as
+     * test_byte_range_recall_revokes_on_terminal_status.
      */
     {
         bool has_layout = false;
@@ -1313,7 +1316,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 
         mst = mds_coord_layout_scan_for_file(db, 901, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
-        ASSERT_EQ(has_layout, 1);
+        ASSERT_EQ(has_layout, 0);
     }
 
     close(sv[0]);
@@ -1326,12 +1329,19 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 }
 
 /* -----------------------------------------------------------------------
- * Test 17: Final-unlink recall forcibly revokes layout-state rows even
- * for callback statuses that ordinary byte-range conflict recall treats
- * as transient.  This prevents the P04_unlink_held deadlock where the
- * holder answers the CB by sending LAYOUTRETURN after the namespace
- * entry has already been removed; Linux then sees STALE on PUTFH and
- * enters migration recovery instead of completing the return.
+ * Test 17: Final-unlink recall forcibly revokes every layout-state
+ * row for the file and deliberately sends NO CB_LAYOUTRECALL.
+ *
+ * Blocking callbacks on the unlink path deadlocked the RPC worker
+ * pool under mass delete: every REMOVE worker waited on its CB while
+ * the LAYOUTRETURN compounds sent in reply needed a free worker.
+ * The revoke below is authoritative (rows deleted, DS files fenced);
+ * clients discover the revocation on their next SEQUENCE or DS I/O,
+ * and a late voluntary LAYOUTRETURN gets NFS4ERR_BAD_STATEID or
+ * NFS4ERR_STALE — both safe terminal outcomes on Linux (see
+ * layout_recall_revoke_all_for_unlink).  The helper is driven with
+ * several would-be reply statuses to pin that none of them can
+ * influence the outcome, since no CB is ever sent.
  * ----------------------------------------------------------------------- */
 
 static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
@@ -1398,9 +1408,12 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
     ASSERT_EQ(layout_recall_revoke_all_for_unlink(lr, fileid, &recalled), 0);
     pthread_join(tid, NULL);
 
+    /* recalled counts revoked holders, not callbacks sent. */
     ASSERT_EQ(recalled, 1);
-    ASSERT_EQ(mock.received, 1);
-    ASSERT_EQ(mock.layoutrecall_count, 1);
+    /* No CB_LAYOUTRECALL on the unlink path: the mock's 3s poll
+     * timing out with nothing received proves nothing was sent. */
+    ASSERT_EQ(mock.received, 0);
+    ASSERT_EQ(mock.layoutrecall_count, 0);
 
     {
         bool has_layout = false;
@@ -1440,8 +1453,8 @@ int main(void)
     test_byte_range_recall_uses_latest_seqid();
     test_byte_range_recall_sends_overlap_range();
     test_byte_range_recall_dedupes_clientid();
-    test_byte_range_recall_skip_revoke_on_recallconflict();
-    test_byte_range_recall_skip_revoke_on_delay();
+    test_byte_range_recall_revokes_on_recallconflict();
+    test_byte_range_recall_revokes_on_delay();
     test_byte_range_recall_revokes_on_terminal_status();
     test_byte_range_recall_revokes_on_nomatching_layout();
     test_unlink_revoke_forces_revoke(0, 1000, 15, 0xF2,
