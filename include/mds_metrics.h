@@ -99,6 +99,10 @@ struct mds_branch_metrics {
     _Atomic uint64_t layoutget_delay_count;   /**< LAYOUTGET returned NFS4ERR_DELAY
                                                   *  (reserved; used once
                                                   *  Component A lands). */
+    _Atomic uint64_t layoutget_newfile_scan_skipped; /**< Conflict-recall holder
+                                                         *  scans skipped by the
+                                                         *  new-file fast path
+                                                         *  (Wave 3 T3.1). */
 
     /* NFS operation counters. */
     _Atomic uint64_t nfs_ops_total;     /**< All COMPOUND operations. */

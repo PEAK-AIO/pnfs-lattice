@@ -2,7 +2,7 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * inode_cache.c -- In-memory inode LRU cache.
+ * inode_cache.c -- In-memory inode LRU cache (16-way striped).
  *
  * Hot inodes are cached to avoid catalogue reads on every operation.
  * Entries are dropped on write-through invalidation; an optional
@@ -10,9 +10,22 @@
  * long a stale inode can be served in active-active deployments, where
  * a peer MDS mutates the shared catalogue without notifying this cache.
  *
- * Implementation: chained hash table + doubly-linked LRU list.
- * Thread-safe via a single pthread_mutex (sufficient for the
- * expected contention level; shard later if profiling warrants).
+ * Implementation (Wave 3 T3.2): 16-stripe hash table + per-stripe
+ * doubly-linked LRU list, mirroring dirent_cache.c.  Each stripe has
+ * its own mutex, hash sub-table, LRU list, entry count, and capacity
+ * (ceil(max_entries / IC_STRIPES)), so concurrent operations on
+ * different stripes never contend.  Stripe selection hashes the fileid
+ * with splitmix64.  The pre-Wave-3 implementation serialized every
+ * lookup on one global mutex AND wrote the shared LRU list on every
+ * hit; per-stripe locking removes that hot-path contention without
+ * changing the write-through or TTL contract.
+ *
+ * Capacity note: the budget is divided across stripes, so a skewed
+ * fileid distribution can evict from a full stripe while another
+ * stripe has room -- total occupancy is bounded by
+ * IC_STRIPES * ceil(max_entries / IC_STRIPES).  Acceptable for a
+ * cache whose only correctness requirement is write-through
+ * consistency (same trade-off as dirent_cache.c / layout_cache.c).
  */
 
 #include <stdlib.h>
@@ -23,6 +36,8 @@
 
 #include "pnfs_mds.h"
 #include "inode_cache.h"
+
+#define IC_STRIPES 16
 
 /* -----------------------------------------------------------------------
  * Internal data structures
@@ -37,21 +52,23 @@ struct cache_entry {
 	struct cache_entry *hash_next; /* hash chain (singly linked) */
 };
 
-struct inode_cache {
+/** Per-stripe partition.  Each stripe is fully independent. */
+struct ic_stripe {
 	struct cache_entry **hash_table;
 	uint32_t             hash_size;
 	struct cache_entry  *lru_head; /* most recently used */
 	struct cache_entry  *lru_tail; /* least recently used */
 	uint32_t             count;
 	uint32_t             max_entries;
-	/* Positive-entry TTL in ms (0 = disabled).  Set once at startup
-	 * via inode_cache_set_ttl_ms(); read under ->lock in _get. */
-	uint32_t             ttl_ms;
-	/* Single global mutex: the LRU list and count are shared state
-	 * that cannot be protected by per-stripe locks without corruption.
-	 * Shard the entire cache (separate hash+LRU per stripe) for real
-	 * concurrency -- tracked as a future optimization. */
 	pthread_mutex_t      lock;
+};
+
+struct inode_cache {
+	struct ic_stripe stripes[IC_STRIPES];
+	/* Positive-entry TTL in ms (0 = disabled).  Set once at startup
+	 * via inode_cache_set_ttl_ms() (documented as not concurrent
+	 * with get/put); read under a stripe lock in _get. */
+	uint32_t         ttl_ms;
 };
 
 /* -----------------------------------------------------------------------
@@ -67,53 +84,64 @@ static uint64_t monotonic_ms(void)
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
-static uint32_t hash_fileid(uint64_t fileid, uint32_t size)
+/** splitmix64 -- same hash used in session.c and dirent_cache.c. */
+static uint64_t splitmix64(uint64_t x)
 {
-	/* splitmix64 -- same hash used in session.c and open_state.c. */
-	uint64_t h = fileid;
-
-	h ^= h >> 30;
-	h *= 0xbf58476d1ce4e5b9ULL;
-	h ^= h >> 27;
-	h *= 0x94d049bb133111ebULL;
-	h ^= h >> 31;
-	return (uint32_t)(h % size);
+	x ^= x >> 30;
+	x *= 0xbf58476d1ce4e5b9ULL;
+	x ^= x >> 27;
+	x *= 0x94d049bb133111ebULL;
+	x ^= x >> 31;
+	return x;
 }
 
-/**
- * Walk hash chain for @fileid.  Returns the entry or NULL.
- * Caller must hold ic->lock.
- */
-static struct cache_entry *hash_find(const struct inode_cache *ic,
-				     uint64_t fileid)
+/** Select stripe from the fileid hash. */
+static uint32_t ic_stripe_idx(uint64_t fileid)
 {
-	uint32_t bucket = hash_fileid(fileid, ic->hash_size);
+	return (uint32_t)(splitmix64(fileid) % IC_STRIPES);
+}
+
+/** Bucket within a stripe's hash table. */
+static uint32_t ic_bucket(uint64_t fileid, uint32_t hash_size)
+{
+	return (uint32_t)(splitmix64(fileid) % hash_size);
+}
+
+/* -----------------------------------------------------------------------
+ * Per-stripe helpers -- caller must hold the stripe lock
+ * ----------------------------------------------------------------------- */
+
+/** Walk hash chain for @fileid.  Returns the entry or NULL. */
+static struct cache_entry *ic_find(const struct ic_stripe *st,
+				   uint64_t fileid)
+{
+	uint32_t bucket = ic_bucket(fileid, st->hash_size);
 	struct cache_entry *e;
 
-	for (e = ic->hash_table[bucket]; e != NULL; e = e->hash_next) {
+	for (e = st->hash_table[bucket]; e != NULL; e = e->hash_next) {
 		if (e->fileid == fileid) {
 			return e;
-}
+		}
 	}
 	return NULL;
 }
 
-/** Insert @e at the head of its hash bucket.  Caller holds lock. */
-static void hash_insert(struct inode_cache *ic, struct cache_entry *e)
+/** Insert @e at the head of its hash bucket. */
+static void ic_hash_insert(struct ic_stripe *st, struct cache_entry *e)
 {
-	uint32_t bucket = hash_fileid(e->fileid, ic->hash_size);
+	uint32_t bucket = ic_bucket(e->fileid, st->hash_size);
 
-	e->hash_next = ic->hash_table[bucket];
-	ic->hash_table[bucket] = e;
+	e->hash_next = st->hash_table[bucket];
+	st->hash_table[bucket] = e;
 }
 
-/** Remove @e from its hash bucket.  Caller holds lock. */
-static void hash_remove(struct inode_cache *ic, struct cache_entry *e)
+/** Remove @e from its hash bucket. */
+static void ic_hash_remove(struct ic_stripe *st, struct cache_entry *e)
 {
-	uint32_t bucket = hash_fileid(e->fileid, ic->hash_size);
+	uint32_t bucket = ic_bucket(e->fileid, st->hash_size);
 	struct cache_entry **pp;
 
-	for (pp = &ic->hash_table[bucket]; *pp != NULL;
+	for (pp = &st->hash_table[bucket]; *pp != NULL;
 	     pp = &(*pp)->hash_next) {
 		if (*pp == e) {
 			*pp = e->hash_next;
@@ -123,73 +151,66 @@ static void hash_remove(struct inode_cache *ic, struct cache_entry *e)
 	}
 }
 
-/* -----------------------------------------------------------------------
- * LRU list helpers -- caller must hold ic->lock
- * ----------------------------------------------------------------------- */
-
-/** Unlink @e from the LRU doubly-linked list. */
-static void lru_unlink(struct inode_cache *ic, struct cache_entry *e)
+/** Unlink @e from the stripe's LRU doubly-linked list. */
+static void ic_lru_unlink(struct ic_stripe *st, struct cache_entry *e)
 {
 	if (e->next != NULL) {
 		e->next->prev = e->prev;
 	} else {
-		ic->lru_tail = e->prev;
-}
+		st->lru_tail = e->prev;
+	}
 
 	if (e->prev != NULL) {
 		e->prev->next = e->next;
 	} else {
-		ic->lru_head = e->next;
-}
+		st->lru_head = e->next;
+	}
 
 	e->prev = NULL;
 	e->next = NULL;
 }
 
 /** Push @e to the front (MRU position). */
-static void lru_push_front(struct inode_cache *ic, struct cache_entry *e)
+static void ic_lru_push_front(struct ic_stripe *st, struct cache_entry *e)
 {
 	e->prev = NULL;
-	e->next = ic->lru_head;
+	e->next = st->lru_head;
 
-	if (ic->lru_head != NULL) {
-		ic->lru_head->prev = e;
-}
-	ic->lru_head = e;
+	if (st->lru_head != NULL) {
+		st->lru_head->prev = e;
+	}
+	st->lru_head = e;
 
-	if (ic->lru_tail == NULL) {
-		ic->lru_tail = e;
-}
+	if (st->lru_tail == NULL) {
+		st->lru_tail = e;
+	}
 }
 
 /** Promote @e to MRU position (unlink + push front). */
-static void lru_promote(struct inode_cache *ic, struct cache_entry *e)
+static void ic_lru_promote(struct ic_stripe *st, struct cache_entry *e)
 {
-	if (ic->lru_head == e) {
+	if (st->lru_head == e) {
 		return; /* already at front */
-}
-	lru_unlink(ic, e);
-	lru_push_front(ic, e);
+	}
+	ic_lru_unlink(st, e);
+	ic_lru_push_front(st, e);
 }
 
-/**
- * Evict the LRU tail entry.  Removes from hash and LRU, frees memory.
- * Returns 0 on success, -1 if cache is empty.
- */
-static int lru_evict_tail(struct inode_cache *ic)
+/** Remove @e from hash + LRU and free it. */
+static void ic_evict_entry(struct ic_stripe *st, struct cache_entry *e)
 {
-	struct cache_entry *victim;
-
-	victim = ic->lru_tail;
-	if (victim == NULL) {
-		return -1;
+	ic_hash_remove(st, e);
+	ic_lru_unlink(st, e);
+	free(e);
+	st->count--;
 }
 
-	hash_remove(ic, victim);
-	lru_unlink(ic, victim);
-	free(victim);
-	ic->count--;
-	return 0;
+/** Evict the stripe's LRU tail entry (no-op on an empty stripe). */
+static void ic_evict_tail(struct ic_stripe *st)
+{
+	if (st->lru_tail != NULL) {
+		ic_evict_entry(st, st->lru_tail);
+	}
 }
 
 /* -----------------------------------------------------------------------
@@ -199,26 +220,50 @@ static int lru_evict_tail(struct inode_cache *ic)
 int inode_cache_init(uint32_t max_entries, struct inode_cache **out)
 {
 	struct inode_cache *ic;
+	uint32_t per_stripe;
+	uint32_t hash_per_stripe;
+	uint32_t i;
 
 	if (out == NULL || max_entries == 0) {
 		return -1;
-}
+	}
 
 	ic = calloc(1, sizeof(*ic));
 	if (ic == NULL) {
 		return -1;
-}
-
-	ic->max_entries = max_entries;
-	ic->hash_size   = max_entries * 2; /* load factor ~0.5 */
-	/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-	ic->hash_table  = calloc(ic->hash_size, sizeof(struct cache_entry *));
-	if (ic->hash_table == NULL) {
-		free(ic);
-		return -1;
 	}
 
-	pthread_mutex_init(&ic->lock, NULL);
+	/* Divide the budget across stripes (ceil so max_entries=1
+	 * still yields a usable one-entry stripe). */
+	per_stripe = (max_entries + IC_STRIPES - 1) / IC_STRIPES;
+	hash_per_stripe = per_stripe * 2; /* load factor ~0.5 */
+	if (hash_per_stripe == 0) {
+		hash_per_stripe = 1;
+	}
+
+	for (i = 0; i < IC_STRIPES; i++) {
+		struct ic_stripe *st = &ic->stripes[i];
+
+		st->max_entries = per_stripe;
+		st->hash_size = hash_per_stripe;
+		/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
+		st->hash_table = calloc(hash_per_stripe,
+					sizeof(struct cache_entry *));
+		if (st->hash_table == NULL) {
+			uint32_t j;
+
+			/* Rollback already-allocated stripes. */
+			for (j = 0; j < i; j++) {
+				/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
+				free(ic->stripes[j].hash_table);
+				pthread_mutex_destroy(&ic->stripes[j].lock);
+			}
+			free(ic);
+			return -1;
+		}
+		pthread_mutex_init(&st->lock, NULL);
+	}
+
 	*out = ic;
 	return 0;
 }
@@ -226,17 +271,19 @@ int inode_cache_init(uint32_t max_entries, struct inode_cache **out)
 int inode_cache_get(struct inode_cache *ic, uint64_t fileid,
 		    struct mds_inode *inode)
 {
+	struct ic_stripe *st;
 	struct cache_entry *e;
 
 	if (ic == NULL || inode == NULL) {
 		return -1;
 	}
 
-	pthread_mutex_lock(&ic->lock);
+	st = &ic->stripes[ic_stripe_idx(fileid)];
+	pthread_mutex_lock(&st->lock);
 
-	e = hash_find(ic, fileid);
+	e = ic_find(st, fileid);
 	if (e == NULL) {
-		pthread_mutex_unlock(&ic->lock);
+		pthread_mutex_unlock(&st->lock);
 		return -1; /* miss */
 	}
 
@@ -246,50 +293,49 @@ int inode_cache_get(struct inode_cache *ic, uint64_t fileid,
 	 * MDS may have mutated without invalidating this local cache). */
 	if (ic->ttl_ms != 0 &&
 	    (monotonic_ms() - e->insert_ms) > (uint64_t)ic->ttl_ms) {
-		hash_remove(ic, e);
-		lru_unlink(ic, e);
-		free(e);
-		ic->count--;
-		pthread_mutex_unlock(&ic->lock);
+		ic_evict_entry(st, e);
+		pthread_mutex_unlock(&st->lock);
 		return -1; /* expired -> miss */
 	}
 
 	*inode = e->inode;
-	lru_promote(ic, e);
+	ic_lru_promote(st, e);
 
-	pthread_mutex_unlock(&ic->lock);
+	pthread_mutex_unlock(&st->lock);
 	return 0; /* hit */
 }
 
 int inode_cache_put(struct inode_cache *ic, const struct mds_inode *inode)
 {
+	struct ic_stripe *st;
 	struct cache_entry *e;
 
 	if (ic == NULL || inode == NULL) {
 		return -1;
 	}
 
-	pthread_mutex_lock(&ic->lock);
+	st = &ic->stripes[ic_stripe_idx(inode->fileid)];
+	pthread_mutex_lock(&st->lock);
 
 	/* Check if already cached -- update + promote. */
-	e = hash_find(ic, inode->fileid);
+	e = ic_find(st, inode->fileid);
 	if (e != NULL) {
 		e->inode = *inode;
 		e->insert_ms = monotonic_ms();
-		lru_promote(ic, e);
-		pthread_mutex_unlock(&ic->lock);
+		ic_lru_promote(st, e);
+		pthread_mutex_unlock(&st->lock);
 		return 0;
 	}
 
-	/* Evict LRU tail if at capacity. */
-	if (ic->count >= ic->max_entries) {
-		lru_evict_tail(ic);
+	/* Evict the stripe's LRU tail if the stripe is at capacity. */
+	if (st->count >= st->max_entries) {
+		ic_evict_tail(st);
 	}
 
 	/* Allocate new entry. */
 	e = calloc(1, sizeof(*e));
 	if (e == NULL) {
-		pthread_mutex_unlock(&ic->lock);
+		pthread_mutex_unlock(&st->lock);
 		return -1;
 	}
 
@@ -297,33 +343,32 @@ int inode_cache_put(struct inode_cache *ic, const struct mds_inode *inode)
 	e->inode  = *inode;
 	e->insert_ms = monotonic_ms();
 
-	hash_insert(ic, e);
-	lru_push_front(ic, e);
-	ic->count++;
+	ic_hash_insert(st, e);
+	ic_lru_push_front(st, e);
+	st->count++;
 
-	pthread_mutex_unlock(&ic->lock);
+	pthread_mutex_unlock(&st->lock);
 	return 0;
 }
 
 void inode_cache_invalidate(struct inode_cache *ic, uint64_t fileid)
 {
+	struct ic_stripe *st;
 	struct cache_entry *e;
 
 	if (ic == NULL) {
 		return;
 	}
 
-	pthread_mutex_lock(&ic->lock);
+	st = &ic->stripes[ic_stripe_idx(fileid)];
+	pthread_mutex_lock(&st->lock);
 
-	e = hash_find(ic, fileid);
+	e = ic_find(st, fileid);
 	if (e != NULL) {
-		hash_remove(ic, e);
-		lru_unlink(ic, e);
-		free(e);
-		ic->count--;
+		ic_evict_entry(st, e);
 	}
 
-	pthread_mutex_unlock(&ic->lock);
+	pthread_mutex_unlock(&st->lock);
 }
 
 void inode_cache_set_ttl_ms(struct inode_cache *ic, uint32_t ttl_ms)
@@ -332,39 +377,51 @@ void inode_cache_set_ttl_ms(struct inode_cache *ic, uint32_t ttl_ms)
 		return;
 	}
 
-	pthread_mutex_lock(&ic->lock);
+	/* Startup-only by contract (see inode_cache.h): callers set the
+	 * TTL before the cache is shared with worker threads, so a plain
+	 * store is safe -- there is no single global lock to take in the
+	 * striped layout.  Readers observe it under their stripe lock. */
 	ic->ttl_ms = ttl_ms;
-	pthread_mutex_unlock(&ic->lock);
 }
 
 uint32_t inode_cache_count(const struct inode_cache *ic)
 {
+	uint32_t total = 0;
+	uint32_t i;
+
 	if (ic == NULL) {
 		return 0;
-}
-	/* count is only modified under lock; reading uint32_t is atomic
-	 * on all supported platforms (informational / test use only). */
-	return ic->count;
+	}
+	/* Per-stripe counts are only modified under the stripe lock;
+	 * the unlocked sum is a point-in-time approximation
+	 * (informational / test use only, as before). */
+	for (i = 0; i < IC_STRIPES; i++) {
+		total += ic->stripes[i].count;
+	}
+	return total;
 }
 
 void inode_cache_destroy(struct inode_cache *ic)
 {
-	struct cache_entry *e;
-	struct cache_entry *next;
+	uint32_t i;
 
 	if (ic == NULL) {
 		return;
-}
-
-	e = ic->lru_head;
-	while (e != NULL) {
-		next = e->next;
-		free(e);
-		e = next;
 	}
 
-	pthread_mutex_destroy(&ic->lock);
-	/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
-	free(ic->hash_table);
+	for (i = 0; i < IC_STRIPES; i++) {
+		struct ic_stripe *st = &ic->stripes[i];
+		struct cache_entry *e = st->lru_head;
+
+		while (e != NULL) {
+			struct cache_entry *next = e->next;
+
+			free(e);
+			e = next;
+		}
+		pthread_mutex_destroy(&st->lock);
+		/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
+		free(st->hash_table);
+	}
 	free(ic);
 }

@@ -44,6 +44,7 @@ are logged as `WARN:` and the default is kept.
 - `default_stripe_count` / `default_mirror_count` — geometry for new files.  Default: 1 / 1.
 - `lease_time_sec` / `grace_period_sec` — NFSv4 lease + grace.
 - `gpudirect_required` — bool.
+- `layoutget_newfile_fastpath` — bool.  Default: **false**.  Skip the LAYOUTGET byte-range conflict-recall holder scan when the target file was created earlier in the **same compound** (fused OPEN(CREATE)+LAYOUTGET).  A fileid that did not exist before the request cannot have layout holders, so the scan is a guaranteed-miss catalogue round-trip on the create hot path.  Pre-existing files always keep the full scan + recall behaviour regardless of this switch.  Skipped scans are counted in `pnfs_mds_layoutget_newfile_scan_skipped`.
 - `inline_enabled` — inline-data acceleration.  Default: true.
 - `inline_max_size` — max bytes stored inline (1..65536).  Default: 65536.
 ## Commit pipeline

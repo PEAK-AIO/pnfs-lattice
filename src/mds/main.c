@@ -1459,6 +1459,7 @@ if (s_pt != NULL) {
 		rpc_cfg.hpc_xdr_form = cfg.hpc_xdr_form;
 	rpc_cfg.hpc_serve_layouts = cfg.hpc_serve_layouts;
 	rpc_cfg.serve_layouts = cfg.serve_layouts;
+	rpc_cfg.layoutget_newfile_fastpath = cfg.layoutget_newfile_fastpath;
 		if (cfg.placement_policy_enabled) {
 			const char *pname =
 				(cfg.placement_policy == PLACEMENT_WEIGHTED_RR)

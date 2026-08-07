@@ -225,6 +225,14 @@ Both share the same in-MDS pipeline:
    against the active `mds_shard_map` / `ds_health_monitor` view.  The
    resulting stripe map is persisted to the `stripe_maps` table; the layout
    stateid is minted by `layout_state.c` and returned to the client.
+   Before granting, a byte-range conflict-recall scan
+   (`layout_recall_byte_range_for_holders`) recalls holders whose iomode
+   conflicts and whose range overlaps the request.
+   `layoutget_newfile_fastpath = true` (default off) skips that scan when
+   the target file was created earlier in the SAME compound — a
+   brand-new fileid cannot have layout holders, so for the fused
+   OPEN(CREATE)+LAYOUTGET pattern the scan is a guaranteed-miss catalogue
+   round-trip.  Pre-existing files always keep the full scan.
 3. **Client I/O**.  Client opens the DSes named in the layout and reads or
    writes directly.  The MDS sees nothing.
 4. **LAYOUTCOMMIT**.  Client tells the MDS the new file size and mtime; the
@@ -279,8 +287,9 @@ optimisation — it is NOT load-bearing for correctness, and no code may
 assume a given file's requests reach only its "owning" MDS.
 ### Locking primitives
 - **Striped mutexes.**  16-stripe `pthread_mutex_t` arrays are the default
-  pattern (`open_state`, `delegation`, `lock_state`).  Hash on the natural
-  key (clientid, fileid) selects the stripe.
+  pattern (`open_state`, `delegation`, `lock_state`, `inode_cache`,
+  `dirent_cache`).  Hash on the natural key (clientid, fileid, or
+  parent+name) selects the stripe.
 - **NDB exclusive row locks.**  Used for `setattr` and a handful of other
   read-modify-write paths that must serialise with concurrent MDSes.
 - **Read-mostly hot configs** — `_Atomic` pointers + RCU-style swap on

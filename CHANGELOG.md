@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`layoutget_newfile_fastpath` config key (Wave 3)** — when enabled
+  (default off), `op_layoutget` skips the byte-range conflict-recall
+  holder scan for a file created earlier in the SAME compound (fused
+  OPEN(CREATE)+LAYOUTGET): a fileid that did not exist before the
+  request cannot have layout holders, so the scan is a guaranteed-miss
+  catalogue round-trip on the create hot path.  Pre-existing files
+  keep the full scan + byte-range recall behaviour regardless of the
+  switch (regression-tested: a conflicting LAYOUTGET from a second
+  client on an existing file still triggers the recall with the
+  fastpath enabled).  Skipped scans are counted by the new
+  `pnfs_mds_layoutget_newfile_scan_skipped` metric.
 - **Build hygiene knobs** — `ENABLE_RELEASE_ASSERTS` (default ON keeps
   the historical `-UNDEBUG`; OFF makes the assertion cost measurable),
   `CMAKE_BUILD_TYPE` defaults to Release when unset (a bare cmake
@@ -40,6 +51,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- **Striped inode cache (Wave 3)** — the global inode LRU is now
+  partitioned into 16 independent stripes (per-stripe hash table, LRU
+  list, mutex, and capacity `ceil(inode_cache_size / 16)`), mirroring
+  the dirent cache.  The previous implementation serialized every
+  lookup on one global mutex and wrote a shared LRU list on every hit,
+  making the cache itself a contention point on GETATTR-heavy
+  multi-worker workloads.  Write-through, invalidation, and
+  positive-TTL semantics are unchanged; eviction is now stripe-local
+  (a skewed fileid distribution can evict from a full stripe while
+  another has room — same trade-off as the dirent and layout caches).
 - **Wave-2 heap scratch**: the compound op/result unions no longer
   inline worst-case payloads.  READ, READ_PLUS, GETXATTR, LISTXATTRS
   and the READDIR page arrays (results), plus WRITE, WRITE_SAME and
@@ -97,11 +118,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   latent geometry mismatch whenever `stripe_unit_bytes` was configured
   differently (e.g. 1 MiB lab profiles).
 - README and configuration docs no longer overstate the cache
-  subsystem: the inode cache is a global LRU under a single mutex
-  (not striped) and both the inode and dirent caches default to
-  disabled (`inode_cache_size = 0`, `dirent_cache_size = 0`).  The
-  stale 16384/32768 defaults in `docs/config-keys.md` and
-  `mds.conf(5)` were corrected to match the code.
+  subsystem: the inode cache was (at the time of this fix) a global
+  LRU under a single mutex — since striped 16-way, see Changed — and
+  both the inode and dirent caches default to disabled
+  (`inode_cache_size = 0`, `dirent_cache_size = 0`).  The stale
+  16384/32768 defaults in `docs/config-keys.md` and `mds.conf(5)`
+  were corrected to match the code.
 - `test_config` now actually fails when an assertion fails: the
   runner previously counted every test as passed because assertion
   macros only printed and returned.  This had been masking a stale

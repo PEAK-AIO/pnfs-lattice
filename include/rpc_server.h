@@ -123,6 +123,9 @@ struct rpc_server_config {
     enum mds_hpc_xdr_form hpc_xdr_form;
     bool hpc_serve_layouts;
     bool serve_layouts;
+    /* Wave 3 T3.1: skip the LAYOUTGET conflict-recall holder scan for
+     * files created earlier in the same compound.  Default false. */
+    bool layoutget_newfile_fastpath;
 
     struct mds_catalogue    *cat; /**< Catalogue handle (authoritative). */
     struct session_table    *st;  /**< Session/clientid manager. */

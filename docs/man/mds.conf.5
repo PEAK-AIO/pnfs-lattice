@@ -315,6 +315,17 @@ DS pre-alloc pool size.
 .BR false ).
 Reject I/O from clients lacking GPUDirect support.
 .TP
+.B layoutget_newfile_fastpath
+.I bool
+(default
+.BR false ).
+Skip the LAYOUTGET conflict-recall holder scan when the target file
+was created earlier in the same compound (fused OPEN(CREATE) +
+LAYOUTGET).  A fileid that did not exist before the request cannot
+have layout holders, so the scan is a guaranteed-miss catalogue
+round-trip on the create hot path.  Pre-existing files always keep
+the full scan and byte-range recall behaviour.
+.TP
 .B inline_enabled
 .I bool
 (default

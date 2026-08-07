@@ -27,6 +27,8 @@
 #include "ds_cache.h"
 #include "xdr_codec.h"
 #include "layout_range.h"
+#include "layout_recall.h"
+#include "mds_metrics.h"
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -2140,6 +2142,192 @@ static void test_layoutget_maxcount_toosmall_revokes_layout_state(void)
 	ASSERT_EQ(scan.hits, (uint32_t)0);
 	ASSERT_EQ(scan.saw_unexpected, false);
 
+	close_test_db(db, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_layoutget_newfile_fastpath -- Wave 3 T3.1
+ *
+ * layoutget_newfile_fastpath=on must ONLY skip the byte-range
+ * conflict-recall holder scan when the target file was created
+ * earlier in the SAME compound; pre-existing files keep the scan
+ * (and its recall/revoke side effects) unchanged, and the default
+ * (off) never skips.
+ * ----------------------------------------------------------------------- */
+
+#define FASTPATH_HOLDER_CLIENTID 0x111ULL
+
+struct fastpath_holder_scan_ctx {
+	uint64_t fileid;
+	uint32_t holder_hits;
+};
+
+static int fastpath_holder_scan_cb(uint64_t clientid, uint64_t fileid,
+				   void *ctx)
+{
+	struct fastpath_holder_scan_ctx *sc = ctx;
+
+	if (sc != NULL && clientid == FASTPATH_HOLDER_CLIENTID &&
+	    fileid == sc->fileid) {
+		sc->holder_hits++;
+	}
+	return 0;
+}
+
+/* Count layout rows still held by the conflicting holder client. */
+static uint32_t fastpath_count_holder_rows(uint64_t fileid)
+{
+	struct fastpath_holder_scan_ctx sc;
+
+	memset(&sc, 0, sizeof(sc));
+	sc.fileid = fileid;
+	VERIFY(mds_coord_ds_layout_idx_scan(g_test_cat, 1,
+					    fastpath_holder_scan_cb,
+					    &sc) == MDS_OK);
+	return sc.holder_hits;
+}
+
+/* Persist a conflicting whole-file RW layout row for another client. */
+static void fastpath_seed_holder_row(struct mds_catalogue *db,
+				     uint64_t fileid, uint8_t seed)
+{
+	struct mds_cat_txn *txn = NULL;
+	struct nfs4_stateid sid;
+	uint32_t ds_ids[1] = { 1 };
+	uint32_t i;
+
+	memset(&sid, 0, sizeof(sid));
+	sid.seqid = 1;
+	for (i = 0; i < NFS4_OTHER_SIZE; i++) {
+		sid.other[i] = (uint8_t)(seed + i);
+	}
+	VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
+	VERIFY(mds_coord_layout_grant(db, txn, FASTPATH_HOLDER_CLIENTID,
+				      fileid, LAYOUTIOMODE4_RW,
+				      0, UINT64_MAX,
+				      &sid, ds_ids, 1) == MDS_OK);
+	VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
+}
+
+static void test_layoutget_newfile_fastpath(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[4];
+	struct nfs4_result res[4];
+	struct layout_recall *lr = NULL;
+	uint64_t fid;
+	uint64_t skips_before;
+	uint32_t n;
+	char *path;
+
+	db = open_test_db(&path);
+	seed_patched_ready_ds(db, 1, "10.0.0.1:/export1");
+	seed_ds_provision(db, 1);
+
+	/* Recall coordinator without a session table: CB delivery is
+	 * skipped, but the byte-range scan's authoritative revoke of
+	 * conflicting holder rows still runs -- the observable proof
+	 * that the scan executed. */
+	VERIFY(layout_recall_init(g_test_cat, NULL, 0, &lr) == 0);
+
+	/* Create the target file in its OWN compound, so the LAYOUTGETs
+	 * below operate on a pre-existing file. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("fastpath_file", MDS_FTYPE_REG, 0644);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	fid = res[2].res.create.inode.fileid;
+	clear_inline_flag(db, fid);
+
+	/*
+	 * Case 1: fastpath ON, PRE-EXISTING file.  The conflict scan
+	 * must still run: the seeded holder row (another client,
+	 * overlapping RW range) is recalled + revoked at LAYOUTGET
+	 * time, and the skip counter must not move.
+	 */
+	fastpath_seed_holder_row(db, fid, 0xA0);
+	ASSERT_EQ(fastpath_count_holder_rows(fid), (uint32_t)1);
+
+	skips_before = atomic_load(
+		&g_branch_metrics.layoutget_newfile_scan_skipped);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.lr = lr;
+	cd.cfg_serve_layouts = true;
+	cd.cfg_layoutget_newfile_fastpath = true;
+	cd.clientid = 0x222;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_RW);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(fastpath_count_holder_rows(fid), (uint32_t)0);
+	ASSERT_EQ(atomic_load(&g_branch_metrics.layoutget_newfile_scan_skipped),
+		  skips_before);
+
+	/*
+	 * Case 2: fastpath ON, file created earlier in THIS compound.
+	 * Simulate op_open(CREATE)'s stripe-cache signal (the fused
+	 * RonDB create shim is unavailable on the memdb test backend);
+	 * the scan must be skipped: the holder row survives and the
+	 * skip counter increments.
+	 */
+	fastpath_seed_holder_row(db, fid, 0xB0);
+	ASSERT_EQ(fastpath_count_holder_rows(fid), (uint32_t)1);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.lr = lr;
+	cd.cfg_serve_layouts = true;
+	cd.cfg_layoutget_newfile_fastpath = true;
+	cd.clientid = 0x222;
+	cd.stripe_cached = true;
+	cd.stripe_cached_fileid = fid;
+	cd.stripe_cached_ds_id = 1;
+	cd.stripe_cached_stripe_unit = 65536;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_RW);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(fastpath_count_holder_rows(fid), (uint32_t)1);
+	ASSERT_EQ(atomic_load(&g_branch_metrics.layoutget_newfile_scan_skipped),
+		  skips_before + 1);
+
+	/*
+	 * Case 3: fastpath OFF (the default), same-compound create
+	 * signal.  Default behaviour is preserved: the scan runs and
+	 * revokes the holder row; the skip counter does not move.
+	 */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.lr = lr;
+	cd.cfg_serve_layouts = true;
+	cd.clientid = 0x222;
+	cd.stripe_cached = true;
+	cd.stripe_cached_fileid = fid;
+	cd.stripe_cached_ds_id = 1;
+	cd.stripe_cached_stripe_unit = 65536;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fid);
+	ops[2] = mk_layoutget(LAYOUTIOMODE4_RW);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(fastpath_count_holder_rows(fid), (uint32_t)0);
+	ASSERT_EQ(atomic_load(&g_branch_metrics.layoutget_newfile_scan_skipped),
+		  skips_before + 1);
+
+	layout_recall_destroy(lr);
 	close_test_db(db, path);
 }
 
@@ -5231,6 +5419,7 @@ int main(void)
 	RUN_TEST(test_putfh_invalid);
 	RUN_TEST(test_layoutget);
 	RUN_TEST(test_layoutget_maxcount_toosmall_revokes_layout_state);
+	RUN_TEST(test_layoutget_newfile_fastpath);
 	RUN_TEST(test_layoutget_ds_pending_without_proxy_unavailable);
 	RUN_TEST(test_layoutget_ds_pending_patched_ready_clears_pending);
 	RUN_TEST(test_layoutreturn);

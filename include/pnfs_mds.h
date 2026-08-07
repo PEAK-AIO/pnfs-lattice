@@ -965,6 +965,17 @@ struct mds_config {
      * only gates wide HPC-Shared layouts when this switch is on. */
     bool serve_layouts;                                    /**< Default true. */
 
+    /* New-file LAYOUTGET fast path (Wave 3, T3.1).  When true, the
+     * byte-range conflict-recall holder scan in op_layoutget is
+     * skipped for a LAYOUTGET whose target file was created earlier
+     * in the SAME compound (fused OPEN(CREATE) pregrant or stripe
+     * cache): no other client can hold a layout on a fileid that did
+     * not exist before this request, so the scan is a guaranteed-miss
+     * catalogue round-trip.  Pre-existing files always keep the full
+     * scan + recall behaviour regardless of this switch.
+     * INI key: layoutget_newfile_fastpath = true|false. */
+    bool layoutget_newfile_fastpath;                       /**< Default false. */
+
     /* Transient protocol state caching.
      * When true, open_state and layout_state NDB persistence is
      * skipped -- in-memory tables are authoritative.  Safe for
