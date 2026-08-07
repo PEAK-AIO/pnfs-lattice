@@ -690,9 +690,10 @@ struct mds_config {
      * `mds_op_observe_*`, and `mds_cat_op_observe` callers take an
      * early-return path on a single relaxed atomic load (~1-2 ns).
      *
-     * The dispatcher metrics in threadpool.c (worker saturation,
-     * queue depth, queue-wait histogram) are NOT gated by this
-     * flag; they remain cheap enough to leave always-on.
+     * The threadpool's plain dispatcher counters (submitted /
+     * completed / queue-full totals, active workers, queue depth)
+     * stay always-on; its queue-wait sampling (two clock_gettime
+     * calls per work item + histogram observe) follows this flag.
      *
      * Default: true.  Set `metrics_op_enabled = false` in mds.conf
      * to disable at startup without recompiling.  Toggle at runtime
@@ -758,6 +759,13 @@ struct mds_config {
 
     /* Tuning */
     uint32_t            worker_threads;
+    /* TCP RPC listener (SO_REUSEPORT epoll loop) count.  0 = auto:
+     * the historical rule min(worker_threads, 4).  Explicit values
+     * are bounded by MAX_RPC_LISTENERS (32, src/mds/main.c) and by
+     * online CPUs at startup.  At nconnect=8/16 four listeners can
+     * be the binding constraint before worker count -- raise this
+     * when a bandwidth sweep shows listener saturation. */
+    uint32_t            rpc_listener_threads;
     /* Bounded request pipelining: max COMPOUNDs processed concurrently
      * per TCP connection by the worker pool (0 = default 8).  Higher
      * values let clients with few connections but many session slots

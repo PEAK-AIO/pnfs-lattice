@@ -6547,6 +6547,8 @@ static void render_cfg_tuning_core(const struct mds_config *cfg,
 {
     size_t off = *offp;
     RENDER_KEY("worker_threads",       "%u", (unsigned)cfg->worker_threads);
+    RENDER_KEY("rpc_listener_threads", "%u",
+               (unsigned)cfg->rpc_listener_threads);
     RENDER_KEY("stripe_unit_bytes",    "%u", (unsigned)cfg->stripe_unit_bytes);
     RENDER_KEY("default_stripe_count", "%u", (unsigned)cfg->default_stripe_count);
     RENDER_KEY("default_mirror_count", "%u", (unsigned)cfg->default_mirror_count);

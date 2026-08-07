@@ -265,6 +265,17 @@ Applies a curated set of tuning defaults.
 .BR 16 ).
 COMPOUND dispatch thread count.
 .TP
+.B rpc_listener_threads
+.IR uint ,
+range
+.I "0..32"
+(default
+.BR 0 ,
+auto).
+TCP RPC listener (SO_REUSEPORT epoll loop) count.  0 applies the auto
+rule min(worker_threads, 4).  Explicit values are clamped to the
+number of online CPUs and to the compile-time maximum (32).
+.TP
 .B max_inflight_per_conn
 .IR uint ,
 range
@@ -341,8 +352,11 @@ to enable the previous lab default.
 range
 .I "0..1000000"
 (default
-.BR 32768 ).
-Entries in the dirent cache.
+.BR 0 ,
+disabled).
+Entries in the dirent cache.  Set to e.g.
+.BR 32768
+to enable the previous lab default.
 .TP
 .B negative_cache_ttl_ms
 .IR uint ,

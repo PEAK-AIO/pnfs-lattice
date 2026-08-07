@@ -364,7 +364,9 @@ int main(int argc, char *argv[])
 	/* 1a'. Apply the master kill-switch for the per-op latency,
 	 * per-catalogue-op latency, and per-op*phase histograms.  When
 	 * disabled, every observation site takes a one-load early-return
-	 * path; the dispatcher metrics in threadpool.c stay always-on. */
+	 * path.  The threadpool's queue-wait sampling (two clock_gettime
+	 * calls per work item + histogram) follows this switch too; its
+	 * plain counters/gauges stay always-on. */
 	mds_op_metrics_set_enabled(cfg.metrics_op_enabled);
 	compound_set_perf_threshold_us(cfg.compound_perf_threshold_us);
 	MDS_LOG_INFO(LOG_COMP_MDS,
@@ -1878,12 +1880,38 @@ if (s_pt != NULL) {
 		 *     This eliminates the single-epoll I/O bottleneck. */
 #ifdef SO_REUSEPORT
 		if (cfg.worker_threads > 1) {
-			uint32_t target = cfg.worker_threads;
+			uint32_t target;
+
+			if (cfg.rpc_listener_threads > 0) {
+				/* Explicit operator count (already bounded
+				 * to 1..32 by the parser).  Clamp to online
+				 * CPUs so a copy-pasted config cannot
+				 * oversubscribe a small node with idle epoll
+				 * loops. */
+				long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+
+				target = cfg.rpc_listener_threads;
+				if (ncpu > 0 && target > (uint32_t)ncpu) {
+					MDS_LOG_WARN(LOG_COMP_MDS,
+						"rpc_listener_threads=%u "
+						"exceeds online CPUs (%ld); "
+						"using %ld",
+						(unsigned)target, ncpu, ncpu);
+					target = (uint32_t)ncpu;
+				}
+			} else {
+				/* Auto (key absent or 0): the historical
+				 * rule min(worker_threads, 4).  The auto
+				 * value stays unchanged until a bandwidth
+				 * sweep (nconnect=8/16) measures where more
+				 * listeners pay off. */
+				target = cfg.worker_threads;
+				if (target > 4) {
+					target = 4;
+				}
+			}
 			if (target > MAX_RPC_LISTENERS) {
 				target = MAX_RPC_LISTENERS;
-			}
-			if (target > 4) {
-				target = 4; /* Cap listeners; workers handle concurrency */
 			}
 			rpc_cfg.port = rpc_server_port(rpc_srv[0]);
 			for (uint32_t li = 1; li < target; li++) {
