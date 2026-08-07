@@ -84,6 +84,7 @@ add_executable(test_coord_shared_state unit/test_coord_shared_state.c)
 add_executable(test_dir_delegation  unit/test_dir_delegation.c)
 add_executable(test_delegation      unit/test_delegation.c)
 add_executable(test_ds_capacity     unit/test_ds_capacity.c)
+add_executable(test_ds_io_limits    unit/test_ds_io_limits.c)
 if(ENABLE_DS_GC)
     add_executable(test_ds_gc       unit/test_ds_gc.c)
 endif()
@@ -149,6 +150,7 @@ foreach(test_target
     test_dir_delegation
     test_delegation
     test_ds_capacity
+    test_ds_io_limits
     test_ds_gc
     test_hpc_shared
     test_layout_cache

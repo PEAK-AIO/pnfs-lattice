@@ -298,6 +298,11 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     /* Live DS capacity probe interval (ms).  60s by default. */
     cfg->ds_capacity_poll_ms = 60000;
 
+    /* Per-DS I/O limit (FSINFO) probe interval (ms).  60s by
+     * default; 0 disables and restores the legacy 1 MiB wire
+     * constants. */
+    cfg->ds_iolimit_probe_ms = 60000;
+
     /* Phase B2: capacity-derived auto-weighting defaults OFF so a
      * fresh upgrade reproduces today's placement behaviour. */
     cfg->placement_capacity_weighting = CAP_WEIGHT_OFF;
@@ -1035,6 +1040,17 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             } else {
                 (void)fprintf(stderr,
                     "WARN: ds_capacity_poll_ms=%lu out of range "
+                    "(0..86400000)\n", v);
+            }
+        } else if (strcmp(key, "ds_iolimit_probe_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            /* Cap at 24h; 0 disables probing (legacy 1 MiB wire
+             * constants). */
+            if (v <= 86400000UL) {
+                cfg->ds_iolimit_probe_ms = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: ds_iolimit_probe_ms=%lu out of range "
                     "(0..86400000)\n", v);
             }
         } else if (strcmp(key, "ds_gc_workers") == 0) {
