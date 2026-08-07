@@ -1019,6 +1019,14 @@ enum mds_status catalogue_rondb_layoutget_fused(
  *  out's nfs_fh_len stays 0; the caller treats that as "no cache,
  *  fall back to NDB" and the legacy DS_PENDING flow takes over.
  *  Pass NULL for layout_entry_out to opt out (older callers).
+ *
+ *  `layout_pop_stripe_unit_out` (optional) reports the pop-once
+ *  placement decision: 0 when no prealloc entry was popped; else the
+ *  popped entry's stripe unit exactly as persisted in the fused
+ *  stripe-map header.  Callers use it both as the "a pop happened"
+ *  indicator and as the authoritative stripe unit for their
+ *  per-compound stripe cache -- never a separately-peeked value,
+ *  which can diverge from the pop under concurrent CREATEs.
  */
 enum mds_status catalogue_rondb_ns_create_with_layout(
     struct mds_catalogue *cat,
@@ -1032,7 +1040,8 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
     const struct nfs4_stateid *layout_stateid,
     uint32_t layout_mds_id,
     bool *layout_ok,
-    struct mds_ds_map_entry *layout_entry_out);
+    struct mds_ds_map_entry *layout_entry_out,
+    uint32_t *layout_pop_stripe_unit_out);
 
 /** Fused final-unlink: ns_remove_known semantics PLUS the caller's
  *  unique-DS mds_gc_queue rows committed in the same NDB transaction.

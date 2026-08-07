@@ -1759,6 +1759,63 @@ static enum mds_status catalogue_rondb_stripe_map_scan(
  * thing keeping this in sync today; do NOT remove the guard until
  * this serialization is widened and tested.
  */
+
+/* -----------------------------------------------------------------------
+ * Thread-local stripe-entry scratch buffer.
+ *
+ * catalogue_rondb_stripe_map_get and catalogue_rondb_layoutget_fused
+ * must hand the shim a worst-case serialisation buffer (~136 KiB and
+ * ~544 KiB respectively; MDS_MAX_STRIPES [* MDS_MAX_MIRRORS] entries
+ * of RONDB_STRIPE_ENTRY_SIZE).  Both sizes exceed glibc's default
+ * 128 KiB mmap threshold, so a per-call malloc/free paid an mmap +
+ * page-fault + munmap cycle on the LAYOUTGET hot path.  Each worker
+ * thread instead keeps ONE grow-once buffer for its lifetime,
+ * released by a pthread key destructor at thread exit (keeps
+ * valgrind clean for short-lived test threads).
+ *
+ * Usage contract: the returned buffer stays valid until the SAME
+ * thread calls stripe_scratch_get() again, so callers must finish
+ * consuming it before returning.  Both call sites deserialize into a
+ * separately-allocated result array, satisfying that trivially.
+ * ----------------------------------------------------------------------- */
+static pthread_key_t  stripe_scratch_key;
+static pthread_once_t stripe_scratch_once = PTHREAD_ONCE_INIT;
+static __thread uint8_t *stripe_scratch_buf;
+static __thread size_t   stripe_scratch_cap;
+
+static void stripe_scratch_dtor(void *p)
+{
+	free(p);
+}
+
+static void stripe_scratch_key_init(void)
+{
+	(void)pthread_key_create(&stripe_scratch_key, stripe_scratch_dtor);
+}
+
+/**
+ * Return this thread's scratch buffer, grown to at least @need bytes.
+ * NULL on allocation failure (caller maps to MDS_ERR_NOMEM).  If the
+ * one-time key creation failed, the buffer still works; only the
+ * exit-time cleanup is lost (leak bounded to one buffer per thread).
+ */
+static uint8_t *stripe_scratch_get(size_t need)
+{
+	(void)pthread_once(&stripe_scratch_once, stripe_scratch_key_init);
+	if (stripe_scratch_cap < need) {
+		uint8_t *nb = realloc(stripe_scratch_buf, need);
+
+		if (nb == NULL) {
+			return NULL;
+		}
+		stripe_scratch_buf = nb;
+		stripe_scratch_cap = need;
+		(void)pthread_setspecific(stripe_scratch_key,
+					  stripe_scratch_buf);
+	}
+	return stripe_scratch_buf;
+}
+
 enum mds_status catalogue_rondb_stripe_map_get(
 	struct mds_catalogue *cat, uint64_t fileid,
 	uint32_t *stripe_count, uint32_t *stripe_unit,
@@ -1777,11 +1834,13 @@ enum mds_status catalogue_rondb_stripe_map_get(
 		return MDS_ERR_INVAL;
 	}
 
-	/* Allocate buffer for worst case (MDS_MAX_STRIPES entries).
-	 * stripe_count entries, NOT stripe_count * mirror_count -- see
-	 * the file-level note above (QA review Blocker 6). */
+	/* Worst-case buffer (MDS_MAX_STRIPES entries) from the
+	 * thread-local scratch -- ~136 KiB, previously an mmap-backed
+	 * malloc/free per call.  stripe_count entries, NOT
+	 * stripe_count * mirror_count -- see the file-level note above
+	 * (QA review Blocker 6). */
 	buflen = MDS_MAX_STRIPES * RONDB_STRIPE_ENTRY_SIZE;
-	buf = malloc(buflen);
+	buf = stripe_scratch_get(buflen);
 	if (buf == NULL) {
 		return MDS_ERR_NOMEM;
 	}
@@ -1789,11 +1848,9 @@ enum mds_status catalogue_rondb_stripe_map_get(
 	rc = rondb_shim_stripe_get(h, fileid, &sc, &su, &mc,
 				   buf, buflen, &outlen);
 	if (rc == 1) {
-		free(buf);
 		return MDS_ERR_NOTFOUND;
 	}
 	if (rc != 0) {
-		free(buf);
 		return MDS_ERR_IO;
 	}
 
@@ -1803,7 +1860,6 @@ enum mds_status catalogue_rondb_stripe_map_get(
 
 	if (sc == 0) {
 		*entries = NULL;
-		free(buf);
 		return MDS_OK;
 	}
 
@@ -1814,7 +1870,6 @@ enum mds_status catalogue_rondb_stripe_map_get(
 
 		ents = calloc(sc, sizeof(*ents));
 		if (ents == NULL) {
-			free(buf);
 			return MDS_ERR_NOMEM;
 		}
 
@@ -1823,7 +1878,6 @@ enum mds_status catalogue_rondb_stripe_map_get(
 				buf + (i * RONDB_STRIPE_ENTRY_SIZE),
 				RONDB_STRIPE_ENTRY_SIZE, &ents[i]) != 0) {
 				free(ents);
-				free(buf);
 				return MDS_ERR_IO;
 			}
 		}
@@ -1831,7 +1885,6 @@ enum mds_status catalogue_rondb_stripe_map_get(
 		*entries = ents;
 	}
 
-	free(buf);
 	return MDS_OK;
 }
 
@@ -2644,10 +2697,11 @@ enum mds_status catalogue_rondb_layoutget_fused(
 	 * The legacy stack array `uint8_t buf[MDS_MAX_LAYOUT_DS *
 	 * RONDB_STRIPE_ENTRY_SIZE]` only provisioned 16 entries; for a
 	 * 1024-stripe HPC layout the shim could not return the full map.
-	 * Mirror the pattern in catalogue_rondb_stripe_map_get (line
-	 * ~1298): allocate MDS_MAX_STRIPES * MDS_MAX_MIRRORS *
-	 * RONDB_STRIPE_ENTRY_SIZE bytes (~1 MiB worst case) on the
-	 * heap.  Allocation failure surfaces as MDS_ERR_NOMEM. */
+	 * Worst case is MDS_MAX_STRIPES * MDS_MAX_MIRRORS *
+	 * RONDB_STRIPE_ENTRY_SIZE bytes (~544 KiB), served from the
+	 * thread-local scratch (see stripe_scratch_get) -- previously a
+	 * per-call mmap-backed malloc/free on the LAYOUTGET hot path.
+	 * Allocation failure surfaces as MDS_ERR_NOMEM. */
 	uint8_t *buf = NULL;
 	size_t buf_cap = (size_t)MDS_MAX_STRIPES *
 			 (size_t)MDS_MAX_MIRRORS *
@@ -2662,7 +2716,7 @@ enum mds_status catalogue_rondb_layoutget_fused(
 		return MDS_ERR_INVAL;
 	}
 
-	buf = malloc(buf_cap);
+	buf = stripe_scratch_get(buf_cap);
 	if (buf == NULL) {
 		return MDS_ERR_NOMEM;
 	}
@@ -2680,15 +2734,12 @@ enum mds_status catalogue_rondb_layoutget_fused(
 		usleep(500 * (uint32_t)(attempt + 1));
 	}
 	if (rc == 1) {
-		free(buf);
 		return MDS_ERR_NOTFOUND;
 	}
 	if (rc == -2) {
-		free(buf);
 		return MDS_ERR_DELAY; /* caller falls back to non-fused path */
 	}
 	if (rc != 0) {
-		free(buf);
 		return MDS_ERR_IO;
 	}
 
@@ -2699,13 +2750,11 @@ enum mds_status catalogue_rondb_layoutget_fused(
 	total = sc * mc;
 	if (total == 0) {
 		*entries = NULL;
-		free(buf);
 		return MDS_OK;
 	}
 
 	*entries = calloc(total, sizeof(struct mds_ds_map_entry));
 	if (*entries == NULL) {
-		free(buf);
 		return MDS_ERR_NOMEM;
 	}
 
@@ -2716,12 +2765,10 @@ enum mds_status catalogue_rondb_layoutget_fused(
 			    &(*entries)[i]) != 0) {
 			free(*entries);
 			*entries = NULL;
-			free(buf);
 			return MDS_ERR_IO;
 		}
 	}
 
-	free(buf);
 	return MDS_OK;
 }
 
@@ -2746,7 +2793,8 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 	const struct nfs4_stateid *layout_stateid,
 	uint32_t layout_mds_id,
 	bool *layout_ok,
-	struct mds_ds_map_entry *layout_entry_out)
+	struct mds_ds_map_entry *layout_entry_out,
+	uint32_t *layout_pop_stripe_unit_out)
 {
 	void *h = rondb_handle(cat);
 	struct mds_inode child;
@@ -2761,6 +2809,9 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 	}
 	if (layout_entry_out != NULL) {
 		memset(layout_entry_out, 0, sizeof(*layout_entry_out));
+	}
+	if (layout_pop_stripe_unit_out != NULL) {
+		*layout_pop_stripe_unit_out = 0;
 	}
 	if (h == NULL || name == NULL || out == NULL) {
 		return MDS_ERR_INVAL;
@@ -2825,6 +2876,17 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			child_synth_sgid = ds_entry.synth_sgid;
 
 			/*
+			 * Persist the ring's configured unit, not the
+			 * 65536 fallback: the durable stripe-map header
+			 * must match the popped entry's geometry.  (The
+			 * fallback previously applied unconditionally --
+			 * a latent header mismatch whenever
+			 * stripe_unit_bytes != 64 KiB.)
+			 */
+			create_stripe_unit =
+				(stripe_unit != 0U) ? stripe_unit : 65536U;
+
+			/*
 			 * Surface the popped entry to the caller so a
 			 * follow-up LAYOUTGET in the same compound can
 			 * skip stripe_map_get's NDB read.  Only meaningful
@@ -2835,6 +2897,12 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			 */
 			if (layout_entry_out != NULL) {
 				*layout_entry_out = ds_entry;
+			}
+			/* Pop-once indicator + authoritative unit for the
+			 * caller's stripe cache (always nonzero on pop). */
+			if (layout_pop_stripe_unit_out != NULL) {
+				*layout_pop_stripe_unit_out =
+					create_stripe_unit;
 			}
 		}
 	}

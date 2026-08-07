@@ -46,7 +46,8 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
     const struct nfs4_stateid *layout_stateid,
     uint32_t layout_mds_id,
     bool *layout_ok,
-    struct mds_ds_map_entry *layout_entry_out)
+    struct mds_ds_map_entry *layout_entry_out,
+    uint32_t *layout_pop_stripe_unit_out)
 {
     (void)cat;
     (void)parent_fileid;
@@ -65,6 +66,9 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
     (void)layout_mds_id;
     if (layout_entry_out != NULL) {
         memset(layout_entry_out, 0, sizeof(*layout_entry_out));
+    }
+    if (layout_pop_stripe_unit_out != NULL) {
+        *layout_pop_stripe_unit_out = 0;
     }
 
     if (layout_ok != NULL) {
