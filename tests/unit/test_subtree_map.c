@@ -343,11 +343,15 @@ static void test_referral_build(void)
     struct mds_fs_location loc;
     memset(&loc, 0, sizeof(loc));
 
-    /* Build referral for /data/shared -> should resolve to MDS 1. */
+    /* Build referral for /data/shared -> should resolve to MDS 1.
+     * rootpath is the subtree path itself, not "/": every MDS
+     * exports the full shared namespace, and the old hard-coded "/"
+     * aliased every referral submount to the owner's global root
+     * (cross-subtree collisions; see referral_build). */
     st = referral_build(map, "/data/shared", &loc);
     ASSERT_EQ(st, MDS_OK);
     ASSERT_STREQ(loc.server, "mds1.remote");
-    ASSERT_STREQ(loc.rootpath, "/"); /* target serves at its root */
+    ASSERT_STREQ(loc.rootpath, "/data");
 
     /* Build referral for / -> should resolve to self (MDS 0). */
     st = referral_build(map, "/etc/foo", &loc);
