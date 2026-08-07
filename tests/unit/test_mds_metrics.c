@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 
 #include "mds_metrics.h"
+#include "mds_op_metrics.h"
 
 static int passed = 0;
 static int failed = 0;
@@ -126,6 +127,26 @@ static void test_metrics_prometheus_v2_wave6(void)
     passed++;
 }
 
+/* Every op/cat-op enum entry must have a name-table row: designated
+ * initializers silently leave gaps as NULL, which would put "(null)"
+ * into /metrics label values.  Also pins the Wave 6 addition. */
+static void test_op_metrics_name_tables_complete(void)
+{
+    fprintf(stdout, "  test_op_metrics_name_tables:       ");
+
+    for (int i = 0; i < (int)MDS_OPC__COUNT; i++) {
+        ASSERT_TRUE(mds_op_class_name((enum mds_op_class)i) != NULL);
+    }
+    for (int i = 0; i < (int)MDS_CATOP__COUNT; i++) {
+        ASSERT_TRUE(mds_cat_op_name((enum mds_cat_op)i) != NULL);
+    }
+    ASSERT_TRUE(strcmp(mds_cat_op_name(MDS_CATOP_UNLINK_RECALL),
+                       "unlink_recall") == 0);
+
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
 int main(void)
 {
     fprintf(stdout, "test_mds_metrics:\n");
@@ -135,6 +156,7 @@ int main(void)
     test_metrics_prometheus();
     test_metrics_prometheus_truncation();
     test_metrics_prometheus_v2_wave6();
+    test_op_metrics_name_tables_complete();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
