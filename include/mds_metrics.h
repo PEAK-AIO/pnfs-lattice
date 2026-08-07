@@ -222,6 +222,18 @@ struct mds_branch_metrics {
     _Atomic uint64_t cat_transient_retries;        /**< Backoff sleeps taken. */
     _Atomic uint64_t cat_transient_backoff_us;     /**< Total us slept in backoff. */
     _Atomic uint64_t cat_transient_retry_exhausted;/**< Loops that gave up transient. */
+
+    /*
+     * DS filehandle-capture cache (Wave 6 T6.4 decision
+     * instrumentation).  ds_nfs_rpc.c caches one "data/" directory FH
+     * per (host, export) in a 16-entry global table; a hit turns the
+     * capture into a single LOOKUP RPC, a miss pays portmapper +
+     * MOUNT + path walk.  Per-DS indexing is gated on evidence of
+     * capture bursts or DS counts beyond the table size -- this hit
+     * ratio IS that evidence.
+     */
+    _Atomic uint64_t ds_fh_cache_hits;
+    _Atomic uint64_t ds_fh_cache_misses;
 };
 
 extern struct mds_branch_metrics g_branch_metrics;

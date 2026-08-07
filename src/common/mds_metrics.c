@@ -384,13 +384,27 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             "Retry loops that gave up with the error still "
             "transient.\n"
         "# TYPE pnfs_mds_cat_transient_retry_exhausted counter\n"
-        "pnfs_mds_cat_transient_retry_exhausted %lu\n",
+        "pnfs_mds_cat_transient_retry_exhausted %lu\n"
+        "# HELP pnfs_mds_ds_fh_cache_hits "
+            "DS filehandle-capture cache hits (single-LOOKUP fast "
+            "path).\n"
+        "# TYPE pnfs_mds_ds_fh_cache_hits counter\n"
+        "pnfs_mds_ds_fh_cache_hits %lu\n"
+        "# HELP pnfs_mds_ds_fh_cache_misses "
+            "DS filehandle-capture cache misses (portmapper + MOUNT "
+            "+ path walk).\n"
+        "# TYPE pnfs_mds_ds_fh_cache_misses counter\n"
+        "pnfs_mds_ds_fh_cache_misses %lu\n",
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->cat_transient_retries),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->cat_transient_backoff_us),
         (unsigned long)atomic_load(
-            (_Atomic uint64_t *)&branch->cat_transient_retry_exhausted));
+            (_Atomic uint64_t *)&branch->cat_transient_retry_exhausted),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_fh_cache_hits),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_fh_cache_misses));
     if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
         return -1;
     }

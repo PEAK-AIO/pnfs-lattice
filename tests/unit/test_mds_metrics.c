@@ -113,6 +113,8 @@ static void test_metrics_prometheus_v2_wave6(void)
     atomic_fetch_add(&g_branch_metrics.cat_transient_retries, 3);
     atomic_fetch_add(&g_branch_metrics.cat_transient_backoff_us, 1500);
     atomic_fetch_add(&g_branch_metrics.cat_transient_retry_exhausted, 1);
+    atomic_fetch_add(&g_branch_metrics.ds_fh_cache_hits, 7);
+    atomic_fetch_add(&g_branch_metrics.ds_fh_cache_misses, 2);
 
     n = mds_metrics_prometheus_v2(&s, &g_branch_metrics,
                                   buf, sizeof(buf));
@@ -122,6 +124,8 @@ static void test_metrics_prometheus_v2_wave6(void)
         "pnfs_mds_cat_transient_backoff_us 1500") != NULL);
     ASSERT_TRUE(strstr(buf,
         "pnfs_mds_cat_transient_retry_exhausted 1") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_ds_fh_cache_hits 7") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_ds_fh_cache_misses 2") != NULL);
 
     fprintf(stdout, "PASS\n");
     passed++;
