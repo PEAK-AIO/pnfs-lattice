@@ -22,11 +22,13 @@
 
 static int tests_run;
 static int tests_passed;
+static int test_failed;   /* Set by ASSERT_* so RUN_TEST records it. */
 
 #define ASSERT_EQ(a, b) do {						\
 	if ((a) != (b)) {						\
 		fprintf(stderr, "  FAIL %s:%d: %s != %s\n",		\
 			__FILE__, __LINE__, #a, #b);			\
+		test_failed = 1;					\
 		return;							\
 	}								\
 } while (0)
@@ -37,6 +39,7 @@ static int tests_passed;
 	if (strcmp((a), (b)) != 0) {					\
 		fprintf(stderr, "  FAIL %s:%d: \"%s\" != \"%s\"\n",	\
 			__FILE__, __LINE__, (a), (b));			\
+		test_failed = 1;					\
 		return;							\
 	}								\
 } while (0)
@@ -45,17 +48,26 @@ static int tests_passed;
 	if (memcmp((a), (b), (n)) != 0) {				\
 		fprintf(stderr, "  FAIL %s:%d: memcmp != 0\n",		\
 			__FILE__, __LINE__);				\
+		test_failed = 1;					\
 		return;							\
 	}								\
 } while (0)
 
+/* A failed assertion must fail the suite: RUN_TEST previously
+ * counted every test as passed because the ASSERT_* macros only
+ * printed and returned, which let stale assertions rot silently. */
 #define RUN_TEST(fn) do {						\
 	tests_run++;							\
+	test_failed = 0;						\
 	fprintf(stdout, "  %-50s", #fn);				\
 	fflush(stdout);							\
 	fn();								\
-	tests_passed++;							\
-	fprintf(stdout, "PASS\n");					\
+	if (test_failed == 0) {						\
+		tests_passed++;						\
+		fprintf(stdout, "PASS\n");				\
+	} else {							\
+		fprintf(stdout, "FAILED\n");				\
+	}								\
 } while (0)
 
 #define BUF_SIZE 8192
@@ -870,7 +882,11 @@ static void test_fattr_encode_referral_fs_locations(void)
 
     xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
     ASSERT_TRUE(xdr_nfs4_bitmap_decode(&dec, actual, NFS4_BITMAP_WORDS, &words));
-    ASSERT_EQ(words, (uint32_t)NFS4_BITMAP_WORDS);
+    /* The encoder emits the minimal bitmap (trailing zero words
+     * trimmed): the requested bits span only words 0-1 (FSID=8,
+     * FILEID=20, FS_LOCATIONS=24; MODE=33), so 2 words are on the
+     * wire even though NFS4_BITMAP_WORDS is larger. */
+    ASSERT_EQ(words, (uint32_t)2);
     ASSERT_TRUE(nfs4_bitmap_test(actual, FATTR4_FSID));
     ASSERT_TRUE(nfs4_bitmap_test(actual, FATTR4_FILEID));
     ASSERT_TRUE(nfs4_bitmap_test(actual, FATTR4_FS_LOCATIONS));
@@ -965,10 +981,11 @@ static uint32_t build_rpc_compound(char *buf, size_t buflen,
             const struct nfs4_arg_sequence *a = &ops[i].arg.sequence;
             uint32_t cache = a->cache_this ? 1 : 0;
 
+            /* RFC 8881 S18.46.1: sa_sequenceid precedes sa_slotid. */
             assert(xdr_opaque_encode(&enc, (const char *)a->session_id,
                                      SESSION_ID_SIZE));
-            assert(xdr_uint32_t(&enc, (uint32_t *)&a->slot_id));
             assert(xdr_uint32_t(&enc, (uint32_t *)&a->seq_id));
+            assert(xdr_uint32_t(&enc, (uint32_t *)&a->slot_id));
             assert(xdr_uint32_t(&enc, (uint32_t *)&a->highest_slot_id));
             assert(xdr_uint32_t(&enc, &cache));
             break;
@@ -991,13 +1008,16 @@ static uint32_t build_rpc_compound(char *buf, size_t buflen,
             break;
         }
         case OP_GETATTR: {
-            /* bitmap: 2 words of 0xFF (all bits). */
+            /* bitmap: NFS4_BITMAP_WORDS words of 0xFF (all bits).
+             * The word count and the words actually written must
+             * match, or the decoder reads past the op boundary. */
             uint32_t words = NFS4_BITMAP_WORDS;
             uint32_t w = 0xFFFFFFFF;
 
             assert(xdr_uint32_t(&enc, &words));
-            assert(xdr_uint32_t(&enc, &w));
-            assert(xdr_uint32_t(&enc, &w));
+            for (uint32_t bw = 0; bw < words; bw++) {
+                assert(xdr_uint32_t(&enc, &w));
+            }
             break;
         }
         case OP_REMOVE: {
@@ -1374,10 +1394,11 @@ static void test_compound_result_encode(void)
 
         uint32_t v;
 
-        ASSERT_TRUE(xdr_uint32_t(&dec, &v)); /* slot_id */
-        ASSERT_EQ(v, (uint32_t)0);
+        /* RFC 8881 S18.46.3: sr_sequenceid precedes sr_slotid. */
         ASSERT_TRUE(xdr_uint32_t(&dec, &v)); /* seq_id */
         ASSERT_EQ(v, (uint32_t)1);
+        ASSERT_TRUE(xdr_uint32_t(&dec, &v)); /* slot_id */
+        ASSERT_EQ(v, (uint32_t)0);
         ASSERT_TRUE(xdr_uint32_t(&dec, &v)); /* highest_slot_id */
         ASSERT_EQ(v, (uint32_t)15);
         ASSERT_TRUE(xdr_uint32_t(&dec, &v)); /* target_highest_slot_id */
@@ -2142,10 +2163,16 @@ static void test_get_dir_delegation_decode_round_trip(void)
 }
 
 /**
- * Encode an NFS4ERR_DIRDELEG_UNAVAIL GDD result through
- * nfs4_encode_compound_res and verify the wire shape: after the
- * compound status + tag + resarray-count + opnum + per-op-status,
- * the non-fatal body contains a single bool (will_signal=false).
+ * Encode a delegation-unavailable GDD result through
+ * nfs4_encode_compound_res and verify the wire shape.
+ *
+ * GET_DIR_DELEGATION no longer returns the outer op status
+ * NFS4ERR_DIRDELEG_UNAVAIL + trailing bool: that halted the
+ * compound (RFC 8881 S2.6.3.1.1) and dropped bundled GETATTRs,
+ * producing EIO on Linux clients.  The op now returns NFS4_OK with
+ * the UNAVAIL state carried in the inner gddrnf_status
+ * discriminator (GDD4_UNAVAIL), followed by the will_signal bool
+ * (see encode_res_get_dir_delegation and encode_error_body).
  */
 static void test_get_dir_delegation_unavail_body(void)
 {
@@ -2153,21 +2180,22 @@ static void test_get_dir_delegation_unavail_body(void)
     XDR enc, dec;
     struct nfs4_result results[1];
     uint32_t compound_status, tag_len;
-    uint32_t res_count, op_val, op_status, will_signal;
+    uint32_t res_count, op_val, op_status, gddrnf_status, will_signal;
     char tag_out[64];
 
     memset(results, 0, sizeof(results));
     results[0].opnum = OP_GET_DIR_DELEGATION;
-    results[0].status = NFS4ERR_DIRDELEG_UNAVAIL;
+    results[0].status = NFS4_OK;
+    results[0].res.get_dir_delegation.gddrnf_status = GDD4_UNAVAIL;
     results[0].res.get_dir_delegation.will_signal_deleg_avail = false;
 
     xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
-    ASSERT_EQ(nfs4_encode_compound_res(&enc, NFS4ERR_DIRDELEG_UNAVAIL,
+    ASSERT_EQ(nfs4_encode_compound_res(&enc, NFS4_OK,
                                        "gdd", results, 1), 0);
 
     xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
     ASSERT_TRUE(xdr_uint32_t(&dec, &compound_status));
-    ASSERT_EQ(compound_status, (uint32_t)NFS4ERR_DIRDELEG_UNAVAIL);
+    ASSERT_EQ(compound_status, (uint32_t)NFS4_OK);
     ASSERT_TRUE(xdr_uint32_t(&dec, &tag_len));
     ASSERT_EQ(tag_len, (uint32_t)3);
     ASSERT_TRUE(xdr_opaque_decode(&dec, tag_out, tag_len));
@@ -2179,8 +2207,10 @@ static void test_get_dir_delegation_unavail_body(void)
     ASSERT_TRUE(xdr_uint32_t(&dec, &op_val));
     ASSERT_EQ(op_val, (uint32_t)OP_GET_DIR_DELEGATION);
     ASSERT_TRUE(xdr_uint32_t(&dec, &op_status));
-    ASSERT_EQ(op_status, (uint32_t)NFS4ERR_DIRDELEG_UNAVAIL);
-    /* Non-fatal body: a single bool (will_signal_deleg_avail=0). */
+    ASSERT_EQ(op_status, (uint32_t)NFS4_OK);
+    /* Inner discriminator: GDD4_UNAVAIL, then the will_signal bool. */
+    ASSERT_TRUE(xdr_uint32_t(&dec, &gddrnf_status));
+    ASSERT_EQ(gddrnf_status, (uint32_t)GDD4_UNAVAIL);
     ASSERT_TRUE(xdr_uint32_t(&dec, &will_signal));
     ASSERT_EQ(will_signal, (uint32_t)0);
 }

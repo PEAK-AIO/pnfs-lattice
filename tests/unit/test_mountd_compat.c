@@ -20,12 +20,14 @@
 
 static int tests_run;
 static int tests_passed;
+static int test_failed;   /* Set by ASSERT_* so RUN_TEST records it. */
 
 #define ASSERT_EQ(a, b) do { \
     if ((a) != (b)) { \
         fprintf(stderr, "  FAIL %s:%d: %s (%lld) != %s (%lld)\n", \
                 __FILE__, __LINE__, #a, (long long)(a), \
                 #b, (long long)(b)); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
@@ -34,17 +36,29 @@ static int tests_passed;
     if (!(cond)) { \
         fprintf(stderr, "  FAIL %s:%d: !(%s)\n", \
                 __FILE__, __LINE__, #cond); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
 
+/* A failed assertion must fail the suite: RUN_TEST previously
+ * counted every test as passed because the ASSERT_* macros only
+ * printed and returned, which let stale assertions rot silently.
+ * Note: ASSERT_* in helper functions (e.g. check_accepted_header)
+ * return from the helper, not the test -- the flag still records
+ * the failure for RUN_TEST. */
 #define RUN_TEST(fn) do { \
     tests_run++; \
+    test_failed = 0; \
     fprintf(stdout, "  %-50s", #fn); \
     fflush(stdout); \
     fn(); \
-    tests_passed++; \
-    fprintf(stdout, "PASS\n"); \
+    if (test_failed == 0) { \
+        tests_passed++; \
+        fprintf(stdout, "PASS\n"); \
+    } else { \
+        fprintf(stdout, "FAILED\n"); \
+    } \
 } while (0)
 
 /* ------------------------------------------------------------------- */

@@ -177,6 +177,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **Test-suite debt retired: zero known failures** — every
+  long-carried known test failure was test-side; `ctest` now passes
+  60/60 with no exceptions and no product code changed.  Twenty
+  unit-test runners counted a test as passed even when its assertions
+  failed (the defect previously fixed in test_config/test_compound);
+  they now record failures and exit non-zero, which had been hiding
+  five stale test_xdr_codec assertions (minimal-bitmap trimming,
+  SEQUENCE argument/result field order per RFC 8881 §18.46, and
+  GET_DIR_DELEGATION's NFS4_OK + `gddrnf_status` wire shape).  Nine
+  test_compound LAYOUTGET tests now opt in to the `serve_layouts`
+  master switch they predated (they failed with LAYOUTUNAVAILABLE
+  instead of their DELAY/TOOSMALL contracts); the referral tests
+  expect the subtree-path rootpath (the old hardcoded "/" aliased
+  every referral submount to the owner's root); and
+  test_layout_recall's assertions match the documented grant-time
+  revoke and no-CB-on-unlink recall contracts.
 - **Corrupted `/metrics` output window (Wave 6)** — the v2 Prometheus
   render advanced its output offset TWICE after the OPEN-create
   phase block (a stray duplicate guard), leaving an ~1.6 KB window of

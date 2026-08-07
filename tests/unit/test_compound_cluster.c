@@ -309,8 +309,11 @@ static void test_lookup_junction_getattr_fs_locations(void)
     ASSERT_EQ(results[2].res.getattr.fsid_major, 3u);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_server,
                        "10.10.10.51") == 0);
+    /* rootpath is the subtree path on the owner, not "/": the old
+     * hard-coded "/" aliased every referral submount to the owner's
+     * global root (see referral_build in subtree_map.c). */
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_rootpath,
-                       "/") == 0);
+                       "/foreign") == 0);
     ASSERT_TRUE(strcmp(results[2].res.getattr.referral_fs_root,
                        "/foreign") == 0);
 

@@ -570,6 +570,7 @@ static void test_layoutget_ds_pending_without_proxy_unavailable(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("pending_no_proxy");
@@ -633,6 +634,7 @@ static void test_layoutget_ds_pending_patched_ready_clears_pending(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("pending_patched_ready");
@@ -2081,6 +2083,7 @@ static void test_layoutget(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("datafile");
@@ -2144,6 +2147,7 @@ static void test_layoutget_maxcount_toosmall_revokes_layout_state(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	cd.clientid = 1234;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putfh(fileid);
@@ -2399,6 +2403,7 @@ static void test_layoutreturn(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("retfile");
@@ -2856,6 +2861,7 @@ static void test_proxy_read_write_compound(void)
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
 	cd.proxy = proxy;
+	cd.cfg_serve_layouts = true;
 	ops[0] = mk_sequence();
 	ops[1] = mk_putrootfh();
 	ops[2] = mk_lookup("proxyfile");
@@ -3607,6 +3613,7 @@ static void test_layoutget_flex_files(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 	memset(ops, 0, sizeof(ops));
 	ops[0].opnum = OP_PUTROOTFH;
 	ops[1].opnum = OP_LOOKUP;
@@ -3650,6 +3657,7 @@ static void test_layoutget_flex_patched_unready_unavailable(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 
 	/* Seed a PATCHED DS without patch-ready provisioning or proxy I/O. */
 	struct mds_ds_info ds;
@@ -3790,6 +3798,7 @@ static void test_layoutget_flex_patched_creds(void)
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
+	cd.cfg_serve_layouts = true;
 
 	/* Seed a PATCHED DS with provisioning secret. */
 	struct mds_ds_info ds;
