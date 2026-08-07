@@ -512,6 +512,54 @@ static void test_fattr_space_attrs_clamped_when_fs_space_unlimited(void)
     ASSERT_EQ(total, (uint64_t)INT64_MAX);
 }
 
+/*
+ * Wave 5 T5.2: FATTR4_MAXREAD / FATTR4_MAXWRITE advertise
+ * min(NFS4_PROXY_IO_MAX, weakest probed DS limit).  With the
+ * ds_io_limits module disabled (this process), the DS term is the
+ * legacy 1 MiB, so the proxy per-op ceiling (64 KiB) binds.  The
+ * historical hardcoded 1 MiB promised READ/WRITE sizes the MDS's
+ * 64 KiB proxy scratch always short-served.
+ */
+static void test_fattr_maxread_maxwrite_proxy_cap(void)
+{
+    char buf[BUF_SIZE];
+    char attr_buf[BUF_SIZE];
+    XDR enc, dec, attr_dec;
+    struct mds_inode inode;
+    uint32_t requested[NFS4_BITMAP_WORDS] = {0, 0, 0};
+    uint32_t actual[NFS4_BITMAP_WORDS] = {0, 0, 0};
+    uint32_t words = 0;
+    uint32_t attr_len = 0;
+    uint64_t maxrd = 0;
+    uint64_t maxwr = 0;
+
+    memset(&inode, 0, sizeof(inode));
+    inode.fileid = 44;
+    inode.type = MDS_FTYPE_REG;
+
+    nfs4_bitmap_set(requested, FATTR4_MAXREAD);
+    nfs4_bitmap_set(requested, FATTR4_MAXWRITE);
+
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    ASSERT_TRUE(xdr_nfs4_fattr_encode(&enc, &inode, requested));
+    ASSERT_TRUE(xdr_getpos(&enc) > 0);
+
+    xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+    ASSERT_TRUE(xdr_nfs4_bitmap_decode(&dec, actual,
+                                       NFS4_BITMAP_WORDS, &words));
+    ASSERT_TRUE(nfs4_bitmap_test(actual, FATTR4_MAXREAD));
+    ASSERT_TRUE(nfs4_bitmap_test(actual, FATTR4_MAXWRITE));
+    ASSERT_TRUE(xdr_uint32_t(&dec, &attr_len));
+    ASSERT_EQ(attr_len, (uint32_t)16);
+    ASSERT_TRUE(xdr_opaque_decode(&dec, attr_buf, attr_len));
+
+    xdrmem_ncreate(&attr_dec, attr_buf, attr_len, XDR_DECODE);
+    ASSERT_TRUE(xdr_uint64_t(&attr_dec, &maxrd));
+    ASSERT_EQ(maxrd, (uint64_t)NFS4_PROXY_IO_MAX);
+    ASSERT_TRUE(xdr_uint64_t(&attr_dec, &maxwr));
+    ASSERT_EQ(maxwr, (uint64_t)NFS4_PROXY_IO_MAX);
+}
+
 static void test_fattr_empty_request(void)
 {
     char buf[BUF_SIZE];
@@ -1668,11 +1716,40 @@ static void test_exchange_id_result_encode(void)
  * Create session result encode test
  * ----------------------------------------------------------------------- */
 
+/* Walk the encoded CREATE_SESSION reply to the fore_chan_attrs and
+ * return ca_maxresponsesize / ca_maxresponsesizecached. */
+static void decode_create_session_resp_caps(char *buf, uint32_t len,
+                                            uint32_t *maxresp_out,
+                                            uint32_t *maxcached_out)
+{
+    XDR dec;
+    char tag[NFS4_TAG_MAXLEN];
+    char sid[SESSION_ID_SIZE];
+    uint32_t v = 0;
+
+    xdrmem_ncreate(&dec, buf, len, XDR_DECODE);
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* compound status */
+    ASSERT_TRUE(decode_test_counted_string(&dec, tag, sizeof(tag)));
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* resarray count */
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* opnum */
+    ASSERT_EQ(v, (uint32_t)OP_CREATE_SESSION);
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* op status */
+    ASSERT_TRUE(xdr_opaque_decode(&dec, sid, SESSION_ID_SIZE));
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* csr_sequence */
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* csr_flags */
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* fore pad */
+    ASSERT_TRUE(xdr_uint32_t(&dec, &v));   /* fore maxreq */
+    ASSERT_TRUE(xdr_uint32_t(&dec, maxresp_out));
+    ASSERT_TRUE(xdr_uint32_t(&dec, maxcached_out));
+}
+
 static void test_create_session_result_encode(void)
 {
     char buf[BUF_SIZE];
     XDR enc;
     struct nfs4_result result;
+    uint32_t maxresp = 0;
+    uint32_t maxcached = 0;
 
     memset(&result, 0, sizeof(result));
     result.opnum = OP_CREATE_SESSION;
@@ -1682,10 +1759,30 @@ static void test_create_session_result_encode(void)
     result.res.create_session.fore_slots = 16;
     result.res.create_session.back_slots = 2;
 
+    /* Zero-valued response caps -> server capability defaults on the
+     * wire: the 256 KiB reply buffer + the 64 KiB cached default
+     * (Wave 5 T5.2 -- the historical hardcoded 1 MiB maxresp
+     * promised replies the encode buffer could never emit). */
     xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
     ASSERT_EQ(nfs4_encode_compound_res(&enc, NFS4_OK, "cs",
                                        &result, 1), 0);
     ASSERT_TRUE(xdr_getpos(&enc) > 0);
+    decode_create_session_resp_caps(buf, xdr_getpos(&enc),
+                                    &maxresp, &maxcached);
+    ASSERT_EQ(maxresp, (uint32_t)NFS4_REPLY_BUF_SIZE);
+    ASSERT_EQ(maxcached, (uint32_t)65536);
+
+    /* Negotiated values from the session record are emitted
+     * verbatim. */
+    result.res.create_session.fore_max_response_size = 200000;
+    result.res.create_session.fore_max_response_size_cached = 4096;
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    ASSERT_EQ(nfs4_encode_compound_res(&enc, NFS4_OK, "cs",
+                                       &result, 1), 0);
+    decode_create_session_resp_caps(buf, xdr_getpos(&enc),
+                                    &maxresp, &maxcached);
+    ASSERT_EQ(maxresp, (uint32_t)200000);
+    ASSERT_EQ(maxcached, (uint32_t)4096);
 }
 
 /* -----------------------------------------------------------------------
@@ -2154,6 +2251,7 @@ int main(void)
     RUN_TEST(test_fattr_word2_bitmap_order);
     RUN_TEST(test_fattr_space_attrs_unlimited_when_no_fs_space);
     RUN_TEST(test_fattr_space_attrs_clamped_when_fs_space_unlimited);
+    RUN_TEST(test_fattr_maxread_maxwrite_proxy_cap);
     RUN_TEST(test_fattr_empty_request);
     RUN_TEST(test_fattr_decode_layout_hint_after_mode);
     RUN_TEST(test_fattr_decode_unsupported_layout_hint_absent);

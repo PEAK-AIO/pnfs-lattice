@@ -194,6 +194,20 @@ struct mds_branch_metrics {
     _Atomic uint64_t remove_async_tombstone_hit;
     _Atomic uint64_t remove_async_tombstone_scrubbed;
     _Atomic uint64_t remove_async_depth;
+
+    /*
+     * Per-DS I/O limit prober (Wave 5 T5.1, ds_io_limits.c).
+     * probe_failures counts FSINFO sweeps that could not reach a DS
+     * (last-known-good values were kept); capability_recalls counts
+     * layout recalls issued because a DS's effective limits DECREASED
+     * (or it became ineligible).  The two gauges mirror the current
+     * min-across-eligible-DSes read/write limits that defend the
+     * MDS's own MAXREAD/MAXWRITE advertisement.
+     */
+    _Atomic uint64_t ds_iolimit_probe_failures;
+    _Atomic uint64_t ds_iolimit_capability_recalls;
+    _Atomic uint64_t ds_iolimit_min_read;
+    _Atomic uint64_t ds_iolimit_min_write;
 };
 
 extern struct mds_branch_metrics g_branch_metrics;

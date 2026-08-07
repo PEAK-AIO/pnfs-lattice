@@ -40,6 +40,7 @@ add_library(pnfs_mds_core STATIC
     mountd_compat.c
     ds_cache.c
     ds_capacity.c
+    ds_io_limits.c
     # ds_gc.c moved to src/modules/ds_gc/ (gated by ENABLE_DS_GC)
     layout_recall.c
     # resilver.c moved to src/modules/resilver/ (gated by ENABLE_RESILVER)

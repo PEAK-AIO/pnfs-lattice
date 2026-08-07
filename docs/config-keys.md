@@ -68,6 +68,7 @@ Sizing knobs for the in-memory NFSv4.1 state tables (Wave 4).  All default to 0 
 - `ds_health_fail_threshold` — consecutive failures before OFFLINE (1..1024).  Default: 6.
 - `ds_weight.<id>` — per-DS WRR weight (any uint32).  Default: 0 (unset ⇒ free-bytes fallback).
 - `ds_capacity_poll_ms` — statvfs() sweep interval (0..86400000).  Default: 60000.  0 disables.
+- `ds_iolimit_probe_ms` — per-DS I/O limit (NFSv3 FSINFO) probe interval (0..86400000).  Default: 60000.  0 disables probing and restores the legacy hardcoded 1 MiB wire constants.  The prober asks each ONLINE generic DS for its real `rtmax`/`wtmax` so GETDEVICEINFO advertises per-DS `ffdv_rsize`/`ffdv_wsize` the DS actually accepts (probed values are capped at 1 MiB and rounded down to 4 KiB; an unprobed DS advertises a safe 64 KiB fallback; a failed probe keeps last-known-good; decoded limits below 4 KiB mark the DS ineligible for new layout placement).  Any effective change bumps the DS's device-ID generation so clients re-fetch device info; a DECREASE additionally recalls the DS's outstanding layouts — after the new values are published, never before.  Observability: `pnfs_mds_ds_iolimit_probe_failures`, `pnfs_mds_ds_iolimit_capability_recalls` (counters), `pnfs_mds_ds_iolimit_min_read`/`_write` (gauges).
 - `ds_prepare_queue_depth` (0..65536), `ds_prepare_workers` (0..64).
 ## Placement
 - `placement_policy` — `rr|wrr|weighted_rr|capacity`.  Default: rr.

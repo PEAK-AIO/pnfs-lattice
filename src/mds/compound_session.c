@@ -335,6 +335,17 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 			(void)session_bind_conn(cd->st, r->session_id,
 					       cd->conn);
 }
+		/* Wave 5 T5.2: surface the negotiated response-size caps
+		 * in the wire reply.  They are stored on the session at
+		 * create time; fetched here so the encoder emits the
+		 * values the SEQUENCE path actually enforces instead of
+		 * constants.  Best-effort: a miss leaves the fields 0 and
+		 * the encoder falls back to the server defaults the
+		 * negotiation would have produced anyway. */
+		(void)session_get_response_limits(
+			cd->st, r->session_id,
+			&r->fore_max_response_size,
+			&r->fore_max_response_size_cached);
 		return NFS4_OK;
 	case -1: return NFS4ERR_STALE_CLIENTID;
 	case -2: return NFS4ERR_SEQ_MISORDERED;

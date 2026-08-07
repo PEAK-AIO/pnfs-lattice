@@ -1323,6 +1323,37 @@ wrongsec:
             !cd.replay_cached && cd.st != NULL &&
             op_count > 0 && ops[0].opnum == OP_SEQUENCE);
 
+        /* RFC 8881 S2.10.6.1.3 (Wave 5 T5.3): a reply larger than the
+         * session's negotiated ca_maxresponsesizecached MUST NOT be
+         * slot-cached, and when the client asked for caching
+         * (sa_cachethis) the server MUST answer
+         * NFS4ERR_REP_TOO_BIG_TO_CACHE instead of the oversized
+         * results.  op_sequence's 56-byte floor check (pynfs CSESS27)
+         * rejects degenerate caps before execution; this gate
+         * measures the REAL encoded reply.  sa_cachethis=false
+         * replies keep the historical cache-always behaviour: an
+         * oversized entry only costs cache memory, and the RFC
+         * mandates the error only for the cachethis=true case.
+         *
+         * Measured length: the encoded COMPOUND payload plus, on the
+         * non-GSS path, the fixed RPC accepted-reply header -- the
+         * same bytes the DRC would cache.  Marginally conservative
+         * (header included), never permissive. */
+        if (drc_needs_cache && ops[0].arg.sequence.cache_this &&
+            cd.max_response_size_cached > 0) {
+            uint32_t reply_len = (gss_svc_eff > 0)
+                ? proc_res_len : xdr_getpos(&enc);
+
+            if (reply_len > cd.max_response_size_cached) {
+                free(proc_res_buf);
+                free(unwrapped_buf);
+                rc = send_compound_decode_failure(c, reply_buf, xid,
+                    tag, NFS4ERR_REP_TOO_BIG_TO_CACHE,
+                    NFS4ERR_REP_TOO_BIG_TO_CACHE);
+                goto cleanup;
+            }
+        }
+
         /* --- GSS data protection: reply path ---
          * RFC 2203: reply verifier = MIC(seq_num).
          * krb5i: body = databody_integ + checksum.

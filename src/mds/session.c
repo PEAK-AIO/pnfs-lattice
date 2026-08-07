@@ -924,6 +924,12 @@ int session_create_session(struct session_table *st,
 	 * to keep session.c free of XDR-layer header dependencies; if
 	 * NFS4_MAX_OPS ever changes, both sites must be updated. */
 	const uint32_t SERVER_MAX_OPERATIONS   = 64U;
+	/* Mirror NFS4_REPLY_BUF_SIZE from xdr_codec.h (256 KiB): the
+	 * entire COMPOUND reply is encoded into one buffer of that size,
+	 * so a larger ca_maxresponsesize would promise replies the
+	 * server can never produce (Wave 5 T5.2).  Same inline-literal
+	 * convention as SERVER_MAX_OPERATIONS. */
+	const uint32_t SERVER_MAX_RESPONSE_SIZE = 262144U;
 	int rc = 0;
 
 	if (st == NULL || out_session_id == NULL) {
@@ -1068,13 +1074,20 @@ int session_create_session(struct session_table *st,
 	s->minorversion = minorversion;
 	s->max_request_size = actual_max_req;
 	{
-		/* Negotiated ca_maxresponsesize / ca_maxresponsesizecached.
-		 * Use the raw arg values decoded from the wire.  Zero or
-		 * overlarge values default to 1 MiB / 64 KiB. */
+		/* Negotiated ca_maxresponsesize / ca_maxresponsesizecached
+		 * = MIN(client request, server capability).  A zero request
+		 * means "server default"; anything above what the reply
+		 * buffer can produce is clamped to it (Wave 5 T5.2 -- the
+		 * historical 1 MiB advertisement promised replies the
+		 * 256 KiB encode buffer could never emit).  The cached cap
+		 * defaults to 64 KiB and never exceeds the response cap. */
 		uint32_t mr = a_fore_max_response_size;
 		uint32_t mrc = a_fore_max_response_size_cached;
-		if (mr == 0U || mr > 1048576U) { mr = 1048576U; }
-		if (mrc == 0U || mrc > 1048576U) { mrc = 65536U; }
+		if (mr == 0U || mr > SERVER_MAX_RESPONSE_SIZE) {
+			mr = SERVER_MAX_RESPONSE_SIZE;
+		}
+		if (mrc == 0U) { mrc = 65536U; }
+		if (mrc > mr) { mrc = mr; }
 		s->max_response_size = mr;
 		s->max_response_size_cached = mrc;
 	}

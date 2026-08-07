@@ -242,6 +242,26 @@ Both share the same in-MDS pipeline:
 The DS pre-allocator (`ds_prealloc.c`) and ds_cache (`ds_cache.c`) exist to
 cut the LAYOUTGET fast path to a single in-memory lookup; on cache miss the
 fallback is a normal catalogue read.
+### Per-DS I/O limits (wire sizing)
+Flex-files clients write DIRECTLY to each DS at the sizes the MDS put
+in GETDEVICEINFO's `ffdv_rsize`/`ffdv_wsize`, so those fields must
+reflect what the DS actually accepts — an oversized constant against a
+DS with a smaller `wtmax` wedges hard-mounted clients in a retry loop.
+`ds_io_limits.c` probes every ONLINE generic DS with NFSv3 FSINFO on a
+configurable cadence (`ds_iolimit_probe_ms`, default 60 s; 0 disables
+and restores the legacy 1 MiB constants) and applies a safety policy:
+probed `rtmax`/`wtmax` are capped at 1 MiB and rounded down to 4 KiB;
+an unprobed DS advertises a 64 KiB fallback; a failed probe keeps
+last-known-good; limits below 4 KiB mark the DS ineligible for new
+placement (the LAYOUTGET placement fallback filters it out).  Device
+IDs carry the DS's limit generation in bytes [8..11], so an effective
+change mints a NEW device ID — new layouts force a fresh GETDEVICEINFO
+that observes the new sizes — and a DECREASE additionally recalls the
+DS's outstanding layouts, strictly after the safe values are
+published.  The MDS's own FATTR4_MAXREAD/MAXWRITE advertise
+`min(NFS4_PROXY_IO_MAX, weakest probed DS limit)`: the proxy READ/WRITE
+path serves at most 64 KiB per op, and the DS term is defence in depth.
+Values are process-local by design; nothing is persisted.
 ### Final-unlink GC
 When `op_remove` drops the last link of a regular file
 (`compound_namespace.c` → `enqueue_gc_for_final_unlink`), the MDS:
@@ -322,6 +342,14 @@ grace window after daemon start.
 - Auth: AUTH_SYS, AUTH_NULL.  RPCSEC_GSS (krb5/krb5i/krb5p) is gated on the
   `mds_gss` build option.
 - TLS: `mds_tls.c` provides per-listener TLS; configurable per export.
+- Session sizing: CREATE_SESSION negotiates `ca_maxresponsesize` as
+  MIN(client request, `NFS4_REPLY_BUF_SIZE` = 256 KiB — the encode
+  buffer a COMPOUND reply is actually built in) and echoes the
+  negotiated values in the reply; `ca_maxresponsesize_cached` defaults
+  to 64 KiB and never exceeds the response cap.  The reply path
+  enforces the cached cap post-encode: a reply that outgrew it is
+  answered with `NFS4ERR_REP_TOO_BIG_TO_CACHE` (when `sa_cachethis`
+  was set) instead of being slot-cached (RFC 8881 §2.10.6.1.3).
 ### Back-channel
 NFSv4.1 sessions carry an explicit back-channel.  Lattice uses it for:
 - `CB_RECALL` of file delegations.

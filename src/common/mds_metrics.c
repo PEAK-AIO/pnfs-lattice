@@ -337,6 +337,37 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
     }
     base += extra;
 
+    /* Per-DS I/O limit prober (Wave 5 T5.1). */
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# HELP pnfs_mds_ds_iolimit_probe_failures "
+            "FSINFO probe failures (last-known-good kept).\n"
+        "# TYPE pnfs_mds_ds_iolimit_probe_failures counter\n"
+        "pnfs_mds_ds_iolimit_probe_failures %lu\n"
+        "# HELP pnfs_mds_ds_iolimit_capability_recalls "
+            "Layout recalls issued on DS I/O-limit decreases.\n"
+        "# TYPE pnfs_mds_ds_iolimit_capability_recalls counter\n"
+        "pnfs_mds_ds_iolimit_capability_recalls %lu\n"
+        "# HELP pnfs_mds_ds_iolimit_min_read "
+            "Minimum effective DS read limit (bytes).\n"
+        "# TYPE pnfs_mds_ds_iolimit_min_read gauge\n"
+        "pnfs_mds_ds_iolimit_min_read %lu\n"
+        "# HELP pnfs_mds_ds_iolimit_min_write "
+            "Minimum effective DS write limit (bytes).\n"
+        "# TYPE pnfs_mds_ds_iolimit_min_write gauge\n"
+        "pnfs_mds_ds_iolimit_min_write %lu\n",
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_iolimit_probe_failures),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_iolimit_capability_recalls),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_iolimit_min_read),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->ds_iolimit_min_write));
+    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+        return -1;
+    }
+    base += extra;
+
     /* Append DS-prepare counters. */
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_ds_prepare_async_ok "

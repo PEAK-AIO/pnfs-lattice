@@ -47,6 +47,7 @@
 #include "mds_shard.h"
 #include "ds_cache.h"
 #include "ds_capacity.h"
+#include "ds_io_limits.h"
 #include "inode_cache.h"
 #include "parent_touch.h"
 #include "remove_manifest.h"
@@ -1309,6 +1310,26 @@ if (s_pt != NULL) {
 		MDS_LOG_WARN(LOG_COMP_MDS, "layout_recall_init failed");
 	}
 
+	/* 6c2. Per-DS I/O limit prober (Wave 5 T5.1).  Probes each
+	 *      ONLINE generic DS with NFSv3 FSINFO so the wire
+	 *      advertisements (GETDEVICEINFO ffdv_rsize/wsize,
+	 *      MAXREAD/MAXWRITE) reflect what the DS actually accepts.
+	 *      Disabled (0) keeps the legacy 1 MiB constants. */
+	if (cfg.ds_iolimit_probe_ms > 0 && cat != NULL) {
+		(void)ds_io_limits_enable();
+		ds_io_limits_set_recall(lr);
+		if (ds_io_limits_start(cat, cfg.ds_iolimit_probe_ms) != 0) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"ds_io_limits_start failed; "
+				"DS I/O limits stay at the unverified "
+				"fallback until probing is restored");
+		} else {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"DS I/O limit probe active (poll=%u ms)",
+				(unsigned)cfg.ds_iolimit_probe_ms);
+		}
+	}
+
 	/* 6d. Open state table (shared with resilver for writer fencing). */
 	if (lock_table_init(cfg.self.id, &lock_tbl) != 0) {
 		MDS_LOG_ERROR(LOG_COMP_MDS, "lock_table_init failed");
@@ -2162,6 +2183,10 @@ cleanup:
 		ds_health_stop(ds_hm);
 		ds_health_destroy(ds_hm);
 	}
+	/* Stop the I/O-limit prober before destroying the recall
+	 * coordinator its sweeps borrow.  ds_io_limits_stop joins the
+	 * prober thread; no-op when probing was never started. */
+	ds_io_limits_stop();
 	layout_recall_destroy(lr);
 	/* Stop the capacity probe before destroying the DS cache it
 	 * writes into.  ds_capacity_stop joins the worker thread. */

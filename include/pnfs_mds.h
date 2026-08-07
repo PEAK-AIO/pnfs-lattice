@@ -652,6 +652,16 @@ struct mds_config {
     uint32_t            ds_capacity_poll_ms;
 
     /*
+     * Per-DS I/O limit probe interval (milliseconds).  The prober
+     * asks each ONLINE generic DS for its real rtmax/wtmax via NFSv3
+     * FSINFO so GETDEVICEINFO/LAYOUTGET advertise sizes the DS
+     * actually accepts (see include/ds_io_limits.h for the policy).
+     * 0 disables probing entirely; the wire encoders then fall back
+     * to the legacy 1 MiB constants.  Default 60000 (60s).
+     */
+    uint32_t            ds_iolimit_probe_ms;
+
+    /*
      * DS-health probe: consecutive failure count before a DS is
      * marked OFFLINE.  0 = compile-time default (6).  Promoted
      * from hardcoded DS_HEALTH_DEFAULT_THRESHOLD so operators can
