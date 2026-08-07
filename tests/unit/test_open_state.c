@@ -748,6 +748,56 @@ static void test_api_persist_fail_upgrade_restored(void)
 	open_state_table_destroy(ot);
 }
 
+/** T4.2 -- explicit sizing via init_ex + allocation-pool recycling.
+ * Open/close cycles on one file exercise free-list reuse (the loop
+ * count exceeds the 64-entry pool chunk), a fan-out over distinct
+ * files exercises chunk growth across stripes, and a stripes>buckets
+ * init exercises the clamp. */
+static void test_api_init_ex_sizing_and_pool_reuse(void)
+{
+	struct open_state_table *ot = NULL;
+	struct nfs4_stateid sid, close_sid;
+	uint32_t i;
+	int rc;
+
+	/* Tiny sizing (the pre-Wave-4 geometry). */
+	ASSERT_EQ(open_state_table_init_ex(TEST_MDS_ID, 256, 256, 16, &ot),
+		  0);
+
+	/* 3x the pool chunk of open/close cycles on ONE file: every
+	 * cycle after the first must recycle the freed entry. */
+	for (i = 0; i < 192; i++) {
+		rc = open_state_open(ot, 100, NULL, 0, 42,
+				     OPEN4_SHARE_ACCESS_READ,
+				     OPEN4_SHARE_DENY_NONE, &sid);
+		ASSERT_EQ(rc, 0);
+		ASSERT_EQ(sid.seqid, (uint32_t)1);
+		rc = open_state_close(ot, 100, &sid, &close_sid);
+		ASSERT_EQ(rc, 0);
+	}
+
+	/* Fan out over distinct files, then bulk client cleanup
+	 * (returns every record to its own stripe's pool). */
+	for (i = 0; i < 300; i++) {
+		rc = open_state_open(ot, 200, NULL, 0, 1000 + i,
+				     OPEN4_SHARE_ACCESS_READ,
+				     OPEN4_SHARE_DENY_NONE, &sid);
+		ASSERT_EQ(rc, 0);
+	}
+	open_state_close_all_for_client(ot, 200);
+	ASSERT_EQ(open_state_file_has_writers(ot, 1000), 0);
+	open_state_table_destroy(ot);
+
+	/* Stripe count above the bucket count is clamped, not fatal. */
+	ASSERT_EQ(open_state_table_init_ex(TEST_MDS_ID, 64, 64, 4096, &ot),
+		  0);
+	rc = open_state_open(ot, 100, NULL, 0, 7,
+			     OPEN4_SHARE_ACCESS_READ,
+			     OPEN4_SHARE_DENY_NONE, &sid);
+	ASSERT_EQ(rc, 0);
+	open_state_table_destroy(ot);
+}
+
 /** T4.1 -- MDS_ERR_NOSUPPORT from the persist (backend without a
  * shared open-state table) is NOT a failure: same contract as no
  * catalogue at all. */
@@ -1286,6 +1336,7 @@ int main(void)
 	RUN_TEST(test_api_persist_fail_fresh_open_unwound);
 	RUN_TEST(test_api_persist_fail_upgrade_restored);
 	RUN_TEST(test_api_persist_nosupport_tolerated);
+	RUN_TEST(test_api_init_ex_sizing_and_pool_reuse);
 
 	/* Part 2: Compound integration tests */
 	RUN_TEST(test_compound_open_create_close);
