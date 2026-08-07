@@ -150,6 +150,28 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# A bare `cmake -S . -B build` used to produce an un-optimised (-O0)
+# tree because CMAKE_BUILD_TYPE defaulted to empty.  Default to
+# Release so a hand-built daemon is never silently unoptimised;
+# explicit -DCMAKE_BUILD_TYPE=... (and multi-config generators) are
+# unaffected.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING
+        "Build type (defaulted; use -DCMAKE_BUILD_TYPE= to override)" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE not set -- defaulting to Release")
+endif()
+
+# Keep assert() live in Release builds (historical behaviour).  OFF
+# lets the lab measure the assertion cost at the Wave-0 workload; it
+# does NOT change the shipped default, and asserts guarding invariants
+# must never be relied on for control flow either way.
+option(ENABLE_RELEASE_ASSERTS "Keep assert() enabled in Release builds" ON)
+
+# Optional codegen opt-ins for measurement runs (both intentionally
+# OFF: neither belongs in a portable default build).
+option(ENABLE_LTO         "Enable link-time optimisation" OFF)
+option(ENABLE_NATIVE_ARCH "Compile with -march=native" OFF)
+
 add_compile_options(
     -Wall -Wextra -Wpedantic -Werror
     -Wshadow
@@ -166,8 +188,22 @@ add_compile_options(
     -Wno-error=uninitialized
     -fstack-protector-strong
     -D_GNU_SOURCE
-    -UNDEBUG # always define "assert()" in assert.h, even for Release builds
 )
+
+if(ENABLE_RELEASE_ASSERTS)
+    # Always define assert() in assert.h, even for Release builds.
+    add_compile_options(-UNDEBUG)
+endif()
+
+if(ENABLE_LTO)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+    message(STATUS "LTO enabled (CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON)")
+endif()
+
+if(ENABLE_NATIVE_ARCH)
+    add_compile_options(-march=native)
+    message(STATUS "-march=native enabled (non-portable binaries)")
+endif()
 
 # GCC-specific flags that clang does not understand.
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")

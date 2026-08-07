@@ -824,7 +824,12 @@ bool decode_op_write(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
     if (data_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->data, data_len)) {
+        /* Decode into the op's scratch buffer; a->data becomes a
+         * borrowed const view of it (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_write_data(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, data_len)) {
             return false;
 }
     }
@@ -1164,6 +1169,14 @@ bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
     uint8_t cookieverf[8];
     bool have_requested = readdir_requested_any(rd->requested);
 
+    /* Borrowed scratch pages: NULL with a non-zero count means the
+     * producer skipped nfs4_result_ensure_readdir(). */
+    if (rd->count > 0 &&
+        (rd->entries == NULL || rd->entry_attrs == NULL ||
+         rd->entry_attrs_valid == NULL)) {
+        return false;
+    }
+
     /* R1.1: cookieverf = dir inode change attribute (8 bytes, BE). */
     {
         uint64_t cv = htobe64(rd->dir_change);
@@ -1442,7 +1455,11 @@ bool encode_res_read(XDR *xdrs, const struct nfs4_result *r)
         return false;
 }
     if (len > 0) {
-        if (!xdr_opaque_encode(xdrs, (const char *)rd->data, len)) {
+        /* Borrowed scratch pointer: NULL with len > 0 means a
+         * producer skipped nfs4_result_ensure_read() -- fail the
+         * encode instead of dereferencing NULL. */
+        if (rd->data == NULL ||
+            !xdr_opaque_encode(xdrs, (const char *)rd->data, len)) {
             return false;
 }
     }

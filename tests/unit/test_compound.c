@@ -2244,8 +2244,10 @@ static struct nfs4_op mk_write_op_ex(const struct nfs4_stateid *sid,
 		op.arg.write.stateid = *sid;
 	op.arg.write.offset = offset;
 	op.arg.write.data_len = len;
-	if (len > 0 && data != NULL)
-		memcpy(op.arg.write.data, data, len);
+	/* Wave 2: the arg carries a borrowed pointer; the caller's
+	 * buffer must outlive the compound (all callers pass literals
+	 * or test-scope arrays). */
+	op.arg.write.data = data;
 	return op;
 }
 
@@ -2256,8 +2258,7 @@ static struct nfs4_op mk_write_op(const void *data, uint32_t len)
 	memset(&op, 0, sizeof(op));
 	op.opnum = OP_WRITE;
 	op.arg.write.data_len = len;
-	if (len > 0 && data != NULL)
-		memcpy(op.arg.write.data, data, len);
+	op.arg.write.data = data;
 	return op;
 }
 
@@ -3946,7 +3947,7 @@ static void test_write_then_getattr_sees_new_size(void)
 	ops[2].opnum = OP_WRITE;
 	ops[2].arg.write.offset = 0;
 	ops[2].arg.write.data_len = 5;
-	memcpy(ops[2].arg.write.data, "hello", 5);
+	ops[2].arg.write.data = (const uint8_t *)"hello";
 
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
@@ -3983,8 +3984,7 @@ static struct nfs4_op mk_setxattr(uint32_t option, const char *name,
 	snprintf(op.arg.setxattr.name, sizeof(op.arg.setxattr.name),
 		 "%s", name);
 	op.arg.setxattr.value_len = vallen;
-	if (vallen > 0 && val != NULL)
-		memcpy(op.arg.setxattr.value, val, vallen);
+	op.arg.setxattr.value = val;
 	return op;
 }
 

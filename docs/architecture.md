@@ -129,6 +129,25 @@ A short-lived per-request struct (`include/compound.h`) that holds:
 - A per-request notion of "current shard" used by sharded deployments.
 The struct is rebuilt fresh per COMPOUND.  Any state that must outlive a
 compound lives in one of the long-lived subsystems it points at.
+### Request memory model (Wave-2 heap scratch)
+Each worker thread owns calloc'd slot arrays of 64 `nfs4_op` and 64
+`nfs4_result` (`rpc_server.c`).  Large payloads — READ/READ_PLUS data,
+GETXATTR/LISTXATTRS values, the READDIR page, WRITE/WRITE_SAME/SETXATTR
+argument bytes — are NOT inlined in those unions: each slot carries a
+scratch block OUTSIDE the union (`nfs4_result_scratch` /
+`nfs4_op_scratch`) that owns grow-once buffers allocated lazily at the
+payload's protocol maximum, and the union arms hold only borrowed
+pointer mirrors set by the `nfs4_*_ensure_*()` helpers.  Ownership
+outside the union means an arm switch between compounds can never leak
+a buffer and resets never save or restore pointers.
+Per op, `compound_process` runs `nfs4_result_destroy()` (frees
+layoutget's per-request arrays under the stored opnum) and then
+`nfs4_result_reset()`, which zeroes exactly the incoming op's union arm
+— status-only ops zero nothing.  The pre-Wave-2 model inlined worst
+cases (524 KB per result slot, ~37 MB scratch per worker, a full-union
+memset per op); post-Wave-2 a result slot is ~13 KB, an op slot ~4 KB,
+and a `_Static_assert` ceiling keeps new payloads from silently
+regrowing the union instead of using the scratch.
 ### Per-op dispatch
 Op handlers are split across files by topic:
 - `compound_namespace.c` — ACCESS, PUTFH/PUTROOTFH/SAVEFH/RESTOREFH/GETFH,

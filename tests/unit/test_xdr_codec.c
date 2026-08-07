@@ -1533,6 +1533,8 @@ static void test_readdir_result_encode(void)
     memset(&result, 0, sizeof(result));
     result.opnum = OP_READDIR;
     result.status = NFS4_OK;
+    /* Wave 2: the readdir page arrays are scratch-backed now. */
+    ASSERT_EQ(nfs4_result_ensure_readdir(&result), 0);
     result.res.readdir.count = 1;
     result.res.readdir.eof = true;
     result.res.readdir.dir_change = 7;
@@ -1611,6 +1613,8 @@ static void test_readdir_result_encode(void)
     ASSERT_EQ(value_follows, 0);
     ASSERT_TRUE(xdr_getbool(&dec, &eof));
     ASSERT_EQ(eof, 1);
+
+    nfs4_result_scratch_release(&result);
 }
 
 /* -----------------------------------------------------------------------

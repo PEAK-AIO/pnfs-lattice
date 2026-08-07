@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "pnfs_mds.h"
 #include "mds_catalogue.h"
 #include "session.h"
@@ -707,7 +708,11 @@ struct nfs4_arg_write_same {
 	uint64_t            offset;
 	uint64_t            length;    /**< Total byte range to fill. */
 	uint32_t            data_len;  /**< Pattern block size. */
-	uint8_t             data[MDS_XATTR_VAL_MAX]; /**< Pattern data. */
+	/* Borrowed pattern bytes: the RPC decoder points this at the
+	 * op's scratch block (nfs4_op_ensure_ws_data); direct callers
+	 * (tests) may point it at their own storage, which must
+	 * outlive the compound.  Sized <= MDS_XATTR_VAL_MAX. */
+	const uint8_t      *data;
 };
 
 /** Device ID size (RFC 8881 §3.3.14 — 16 bytes). */
@@ -798,7 +803,8 @@ struct nfs4_arg_setxattr {
 	uint32_t option;  /**< SETXATTR4_EITHER/CREATE/REPLACE */
 	char     name[MDS_XATTR_NAME_MAX + 1];
 	uint32_t value_len;
-	uint8_t  value[MDS_XATTR_VAL_MAX];
+	/* Borrowed value bytes (see nfs4_arg_write_same.data). */
+	const uint8_t *value;
 };
 
 /** RFC 8276 §4.2.4 — LISTXATTRS arguments. */
@@ -822,7 +828,8 @@ struct nfs4_arg_write {
 	struct nfs4_stateid stateid;
 	uint64_t            offset;
 	uint32_t            data_len;
-	uint8_t             data[MDS_XATTR_VAL_MAX];
+	/* Borrowed payload bytes (see nfs4_arg_write_same.data). */
+	const uint8_t      *data;
 };
 
 struct nfs4_arg_layoutget {
@@ -955,9 +962,28 @@ struct nfs4_res_locku {
 	struct nfs4_stateid     stateid;
 };
 
+/*
+ * Op payload scratch (Wave 2) -- decode-side twin of
+ * nfs4_result_scratch.  Owns the buffers the RPC decoder fills for
+ * WRITE / WRITE_SAME / SETXATTR payloads; the arg union carries only
+ * borrowed const pointers, so an arg-union memset between requests
+ * (decode_one_op clears op->arg only) can never leak the buffers.
+ * Direct op builders (unit tests, benches) bypass the scratch
+ * entirely by pointing the arg at their own storage.  A zeroed
+ * struct is the valid initial state.
+ */
+struct nfs4_op_scratch {
+	uint8_t *write_data;   /* MDS_XATTR_VAL_MAX */
+	uint8_t *ws_data;      /* MDS_XATTR_VAL_MAX */
+	uint8_t *sx_value;     /* MDS_XATTR_VAL_MAX */
+};
+
 /* Tagged union of operation arguments. */
 struct nfs4_op {
 	enum nfs_opnum4 opnum;
+	/* Decode payload ownership -- deliberately OUTSIDE the arg
+	 * union; see struct nfs4_op_scratch above. */
+	struct nfs4_op_scratch scratch;
 	union {
 		/* NFSv4.1 */
 		struct nfs4_arg_access          access;
@@ -1071,9 +1097,15 @@ struct nfs4_res_create {
 };
 
 struct nfs4_res_readdir {
-	struct mds_cat_dirent entries[NFS4_READDIR_MAX];
-	struct mds_inode     entry_attrs[NFS4_READDIR_MAX];
-	bool                 entry_attrs_valid[NFS4_READDIR_MAX];
+	/* Borrowed page arrays from the result's scratch block, each
+	 * NFS4_READDIR_MAX rows; obtained via
+	 * nfs4_result_ensure_readdir(), which also re-zeroes
+	 * entry_attrs_valid so a recycled slot cannot leak stale
+	 * validity into the encoder.  entries/entry_attrs rows are
+	 * fully written per index <= count, so they need no re-zero. */
+	struct mds_cat_dirent *entries;
+	struct mds_inode      *entry_attrs;
+	bool                  *entry_attrs_valid;
 	uint32_t             requested[3];
 	uint32_t             count;
 	bool                 eof;
@@ -1242,7 +1274,11 @@ struct nfs4_read_plus_content {
 	union {
 		struct {
 			uint32_t data_len;
-			uint8_t  data[MDS_XATTR_VAL_MAX];
+			/* Borrowed from the result's scratch block (see
+			 * struct nfs4_result_scratch); producers obtain it
+			 * via nfs4_result_ensure_rp_seg().  NULL until
+			 * ensured; sized MDS_XATTR_VAL_MAX. */
+			uint8_t *data;
 		} data;
 		struct {
 			uint64_t length;
@@ -1266,7 +1302,10 @@ struct nfs4_res_read_plus {
 /** RFC 8276 §4.2.2 — GETXATTR result. */
 struct nfs4_res_getxattr {
 	uint32_t value_len;
-	uint8_t  value[MDS_XATTR_VAL_MAX];
+	/* Borrowed from the result's scratch block; obtained via
+	 * nfs4_result_ensure_xattr_value().  NULL until ensured;
+	 * sized MDS_XATTR_VAL_MAX. */
+	uint8_t *value;
 };
 
 /** RFC 8276 §4.2.3 — SETXATTR result. */
@@ -1279,7 +1318,11 @@ struct nfs4_res_setxattr {
 struct nfs4_res_listxattrs {
 	uint64_t cookie;
 	uint32_t name_count;
-	char     names[NFS4_LISTXATTRS_MAX][MDS_XATTR_NAME_MAX + 1];
+	/* Borrowed row array from the result's scratch block
+	 * (NFS4_LISTXATTRS_MAX rows); obtained via
+	 * nfs4_result_ensure_listxattrs().  Row-pointer type keeps
+	 * names[i] indexing identical to the old inline array. */
+	char     (*names)[MDS_XATTR_NAME_MAX + 1];
 	bool     eof;
 };
 
@@ -1329,7 +1372,10 @@ struct nfs4_res_readlink {
 struct nfs4_res_read {
 	bool     eof;
 	uint32_t data_len;
-	uint8_t  data[MDS_XATTR_VAL_MAX];
+	/* Borrowed from the result's scratch block; obtained via
+	 * nfs4_result_ensure_read().  NULL until ensured; sized
+	 * MDS_XATTR_VAL_MAX. */
+	uint8_t *data;
 };
 
 struct nfs4_res_write {
@@ -1518,10 +1564,43 @@ struct nfs4_res_layoutcommit {
 struct ds_prepare_ctx;
 struct ds_cache;
 
+/* -----------------------------------------------------------------------
+ * Result payload scratch (Wave 2 heap-scratch refactor).
+ *
+ * The result union used to inline every worst-case payload
+ * (~524 KB per slot; 64 thread-local slots were ~34 MB per worker,
+ * and every op paid a full-union memset).  Converted arms now carry
+ * only lengths plus borrowed pointer mirrors; OWNERSHIP lives here,
+ * outside the union, so an arm switch between compounds may clobber
+ * the arm bytes -- including the mirrors -- without leaking, and
+ * resets never save/restore pointers.
+ *
+ * Buffers are grow-once at the payload's fixed protocol maximum,
+ * allocated lazily by the nfs4_result_ensure_*() helpers, and live
+ * as long as the owning result slot (the daemon's thread-local
+ * slots never release them, mirroring tl_results itself).
+ * nfs4_result_scratch_release() exists for harnesses that want a
+ * leak-clean teardown.  A zeroed struct (calloc'd slot array) is
+ * the valid initial state: NULL pointers mean "not yet allocated".
+ * ----------------------------------------------------------------------- */
+struct nfs4_result_scratch {
+	uint8_t *read_data;                        /* MDS_XATTR_VAL_MAX      */
+	uint8_t *rp_data[NFS4_READ_PLUS_MAX_SEGS]; /* MDS_XATTR_VAL_MAX each */
+	uint8_t *xattr_value;                      /* MDS_XATTR_VAL_MAX      */
+	char    (*listx_names)[MDS_XATTR_NAME_MAX + 1]; /* LISTXATTRS rows   */
+	/* READDIR page (NFS4_READDIR_MAX rows each). */
+	struct mds_cat_dirent *rd_entries;
+	struct mds_inode      *rd_attrs;
+	bool                  *rd_valid;
+};
+
 /* Tagged union of operation results. */
 struct nfs4_result {
 	enum nfs_opnum4  opnum;
 	enum nfs4_status status;
+	/* Payload buffer ownership -- deliberately OUTSIDE the union;
+	 * see struct nfs4_result_scratch above. */
+	struct nfs4_result_scratch scratch;
 	union {
 		/* NFSv4.1 */
 		struct nfs4_res_access         access;
@@ -1563,6 +1642,71 @@ struct nfs4_result {
 		struct nfs4_res_removexattr    removexattr;
 	} res;
 };
+
+/*
+ * Wave-2 guardrail: the whole point of the scratch refactor is that
+ * nfs4_result stays small enough for cheap per-arm resets (the union
+ * max is getdeviceinfo at ~13 KB; it was 524,496 B before the
+ * refactor).  If a new inline payload regrows the union past this
+ * ceiling, move it to nfs4_result_scratch instead of bumping the
+ * limit.
+ */
+_Static_assert(sizeof(struct nfs4_result) <= 20480,
+	       "nfs4_result regrew -- move payloads to nfs4_result_scratch");
+
+/* -----------------------------------------------------------------------
+ * Scratch ensure helpers (Wave 2).
+ *
+ * Each helper lazily allocates the payload's fixed maximum in the
+ * result's scratch block, re-points the corresponding union arm's
+ * borrowed mirror, and returns the buffer.  NULL (or -1) means
+ * allocation failure; callers surface NFS4ERR_RESOURCE.  Producers
+ * MUST call the helper before writing payload bytes -- the mirror
+ * pointer starts NULL and is cleared by every slot reset.
+ * ----------------------------------------------------------------------- */
+
+/** Ensure res.read.data (MDS_XATTR_VAL_MAX bytes). */
+uint8_t *nfs4_result_ensure_read(struct nfs4_result *r);
+
+/** Ensure res.read_plus.segs[seg].u.data.data (MDS_XATTR_VAL_MAX). */
+uint8_t *nfs4_result_ensure_rp_seg(struct nfs4_result *r, uint32_t seg);
+
+/** Ensure res.getxattr.value (MDS_XATTR_VAL_MAX bytes). */
+uint8_t *nfs4_result_ensure_xattr_value(struct nfs4_result *r);
+
+/** Ensure res.listxattrs.names (NFS4_LISTXATTRS_MAX rows). 0 / -1. */
+int nfs4_result_ensure_listxattrs(struct nfs4_result *r);
+
+/** Ensure the three READDIR page arrays (NFS4_READDIR_MAX rows each)
+ *  and re-zero entry_attrs_valid.  0 / -1. */
+int nfs4_result_ensure_readdir(struct nfs4_result *r);
+
+/* Op-side (decode) scratch helpers -- same contract as the result
+ * helpers: lazily allocate the fixed maximum, re-point the arg
+ * mirror, return the WRITABLE buffer (the arg keeps a const view). */
+uint8_t *nfs4_op_ensure_write_data(struct nfs4_op *op);
+uint8_t *nfs4_op_ensure_ws_data(struct nfs4_op *op);
+uint8_t *nfs4_op_ensure_sx_value(struct nfs4_op *op);
+
+/** Free the op's scratch buffers and zero the block.  NULL-safe. */
+void nfs4_op_scratch_release(struct nfs4_op *op);
+
+/**
+ * Prepare a (possibly recycled) result slot for @p opnum: zero the
+ * status and exactly the union arm that op produces/encodes, set the
+ * opnum, and leave the scratch block untouched.  Callers must run
+ * nfs4_result_destroy() first so per-request heap state (layoutget
+ * arrays) is freed before the arm bytes are cleared.  Ops whose
+ * results are status-only on the wire (and whose error bodies are
+ * void) zero nothing; unknown opnums fall back to clearing the whole
+ * union, which is the safety net for future ops.
+ */
+void nfs4_result_reset(struct nfs4_result *r, enum nfs_opnum4 opnum);
+
+/** Free every scratch buffer and zero the block.  NULL-safe.  For
+ *  test/bench teardown; the daemon's thread-local slots never call
+ *  this (buffers live for the worker thread's lifetime). */
+void nfs4_result_scratch_release(struct nfs4_result *r);
 
 /* -----------------------------------------------------------------------
  * Compound processing context
@@ -1711,9 +1855,9 @@ struct layout_recall     *lr;
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */
 	bool                      sequence_done; /* Set by successful SEQUENCE */
 	bool                      replay_cached; /* DRC: cached reply available */
-	/* Path tracking for subtree ownership checks. */
-	char                      current_path[MDS_MAX_PATH];
-	char                      saved_path[MDS_MAX_PATH];
+	/* Path tracking for subtree ownership checks: current_path /
+	 * saved_path moved to the TAIL of the struct -- see the T2.4
+	 * note there. */
 	/* Xattr state — set by OPENATTR+LOOKUP for READ/WRITE on xattr objects. */
 	char                      xattr_name[MDS_XATTR_NAME_MAX + 1];
 	bool                      xattr_obj_set;  /* xattr_name is valid */
@@ -1836,7 +1980,32 @@ struct layout_recall     *lr;
 	const struct nfs4_op      *ops;
 	uint32_t                  op_count;
 	uint32_t                  op_index;
+
+	/*
+	 * T2.4 (Wave 2): path tracking for subtree ownership checks.
+	 * These two 4 KB buffers dominate sizeof(struct compound_data)
+	 * (~8 KB of ~9.8 KB), and their contents are only ever consumed
+	 * as NUL-terminated strings guarded by `path[0] == '\0'` empty
+	 * checks -- so per-request initialisation needs ONE byte each,
+	 * not 4 KB of stores.  They MUST remain the trailing members:
+	 * compound_init() zeroes only the prefix up to current_path and
+	 * then empties both strings explicitly; the _Static_asserts
+	 * below pin the layout so a reorder cannot silently break the
+	 * prefix-memset contract.
+	 */
+	char                      current_path[MDS_MAX_PATH];
+	char                      saved_path[MDS_MAX_PATH];
 };
+
+/* T2.4 layout pins -- see the tail comment inside the struct. */
+_Static_assert(offsetof(struct compound_data, saved_path) ==
+	       offsetof(struct compound_data, current_path) +
+	       sizeof(((struct compound_data *)0)->current_path),
+	       "current_path/saved_path must be contiguous");
+_Static_assert(offsetof(struct compound_data, saved_path) +
+	       sizeof(((struct compound_data *)0)->saved_path) ==
+	       sizeof(struct compound_data),
+	       "path buffers must be the trailing compound_data members");
 
 /* -----------------------------------------------------------------------
  * Public API

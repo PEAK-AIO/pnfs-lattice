@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Build hygiene knobs** — `ENABLE_RELEASE_ASSERTS` (default ON keeps
+  the historical `-UNDEBUG`; OFF makes the assertion cost measurable),
+  `CMAKE_BUILD_TYPE` defaults to Release when unset (a bare cmake
+  invocation can no longer produce a silent -O0 tree), and opt-in
+  `ENABLE_LTO` / `ENABLE_NATIVE_ARCH` codegen knobs (both OFF).
 - **mk/rm scale benchmark** — `bench_mk_rm_scale` (tests/integration)
   measures create, synchronous-remove, and delete-at-ack (ack-path)
   throughput at 1/4/8/16 threads in shared-directory vs
@@ -35,6 +40,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- **Wave-2 heap scratch**: the compound op/result unions no longer
+  inline worst-case payloads.  READ, READ_PLUS, GETXATTR, LISTXATTRS
+  and the READDIR page arrays (results), plus WRITE, WRITE_SAME and
+  SETXATTR bytes (op arguments), live in per-slot scratch blocks
+  OUTSIDE the unions, allocated grow-once at the protocol maximum and
+  reused for the worker's lifetime.  `sizeof(struct nfs4_result)`
+  drops 524,496 -> 12,928 B and `sizeof(struct nfs4_op)` 65,808 ->
+  4,416 B; static per-worker slot scratch falls ~37.8 MB -> ~1.11 MB.
+- The per-op full-union memset in `compound_process` (524 KB per op,
+  ~2.6 MB cleared per five-op compound) is replaced by
+  `nfs4_result_reset()`, which zeroes only the incoming op's union arm
+  and nothing at all for status-only ops.  `nfs4_result_destroy()`
+  still runs first, and the fresh-thread zero-init guarantee is
+  preserved (both thread-local slot arrays are calloc'd).
+- `compound_init()` clears ~1.7 KB instead of ~9.8 KB per request: the
+  two 4 KB path buffers moved to the struct tail (layout pinned by
+  `_Static_assert`s) and are emptied by a single NUL byte each.
 - The stripe-entry serialisation buffers in `stripe_map_get` and the
   fused LAYOUTGET (~136 KiB / ~544 KiB worst case) now come from a
   grow-once thread-local scratch instead of a per-call `malloc`/`free`.

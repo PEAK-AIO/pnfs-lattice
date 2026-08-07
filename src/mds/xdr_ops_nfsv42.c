@@ -112,7 +112,11 @@ bool decode_op_write_same(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &a->data_len)) { return false; }
     if (a->data_len > MDS_XATTR_VAL_MAX) { return false; }
     if (a->data_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->data, a->data_len)) {
+        /* Decode into the op's scratch buffer (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_ws_data(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, a->data_len)) {
             return false;
         }
     }
@@ -165,7 +169,10 @@ static bool encode_rp_data_seg(XDR *xdrs,
     if (!xdr_uint64_t(xdrs, &doff)) { return false; }
     if (!xdr_uint32_t(xdrs, &dlen)) { return false; }
     if (dlen > 0) {
-        if (!xdr_opaque_encode(xdrs,
+        /* Borrowed scratch pointer; NULL means the producer never
+         * called nfs4_result_ensure_rp_seg(). */
+        if (seg->u.data.data == NULL ||
+            !xdr_opaque_encode(xdrs,
                 (char *)seg->u.data.data, dlen)) {
             return false;
         }
@@ -315,7 +322,11 @@ bool decode_op_setxattr(XDR *xdrs, struct nfs4_op *op)
     if (!xdr_uint32_t(xdrs, &val_len)) { return false; }
     if (val_len > MDS_XATTR_VAL_MAX) { return false; }
     if (val_len > 0) {
-        if (!xdr_opaque_decode(xdrs, (char *)a->value, val_len)) {
+        /* Decode into the op's scratch buffer (Wave 2). */
+        uint8_t *dst = nfs4_op_ensure_sx_value(op);
+
+        if (dst == NULL ||
+            !xdr_opaque_decode(xdrs, (char *)dst, val_len)) {
             return false;
         }
     }
@@ -349,7 +360,10 @@ bool encode_res_getxattr(XDR *xdrs, const struct nfs4_result *r)
 
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
     if (len > 0) {
-        if (!xdr_opaque_encode(xdrs, (const char *)rx->value, len)) {
+        /* Borrowed scratch pointer; NULL means the producer never
+         * called nfs4_result_ensure_xattr_value(). */
+        if (rx->value == NULL ||
+            !xdr_opaque_encode(xdrs, (const char *)rx->value, len)) {
             return false;
         }
     }
@@ -379,6 +393,10 @@ bool encode_res_listxattrs(XDR *xdrs, const struct nfs4_result *r)
      */
     if (!xdr_uint64_t(xdrs, &cookie)) { return false; }
     if (!xdr_uint32_t(xdrs, &cnt)) { return false; }
+    if (cnt > 0 && rx->names == NULL) {
+        /* Borrowed scratch rows missing with a non-zero count. */
+        return false;
+    }
     for (i = 0; i < cnt; i++) {
         uint32_t nlen = (uint32_t)strlen(rx->names[i]);
 
