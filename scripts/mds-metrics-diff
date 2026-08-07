@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# mds-metrics-diff -- snapshot and diff the MDS Prometheus endpoint.
+#
+# Diffing two /metrics snapshots taken around a workload burst is the
+# fastest way to find where milliseconds hide: the per-op, per-cat-op,
+# and per-phase histogram *_sum/_count deltas name the code region
+# directly.
+#
+# Read-only: the only side effects are the snapshot files the caller
+# names and HTTP GETs against the metrics endpoint.
+#
+# Usage:
+#   mds-metrics-diff snap [-u URL] OUT.prom
+#       Capture one snapshot to OUT.prom (overwrites OUT.prom).
+#   mds-metrics-diff diff [-n TOP] BEFORE.prom AFTER.prom
+#       Print the TOP (default 25) largest metric deltas, skipping
+#       zero deltas.  Histogram buckets are skipped by default so the
+#       list stays readable; _sum/_count/plain counters remain.
+#   mds-metrics-diff run [-u URL] [-n TOP] -- CMD [ARGS...]
+#       Snapshot, run CMD, snapshot again, then diff.  Temp files are
+#       removed on exit.
+#
+# Default URL: http://127.0.0.1:9090/metrics (metrics_http_port=9090).
+
+set -euo pipefail
+
+DEFAULT_URL="http://127.0.0.1:9090/metrics"
+
+usage() {
+    sed -n '5,27p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+capture() {
+    local url="$1"
+    local out="$2"
+    # --fail: non-2xx is an error; --silent --show-error keeps stderr
+    # meaningful without a progress bar.
+    curl --fail --silent --show-error --max-time 10 "$url" > "$out"
+}
+
+# diff_snapshots BEFORE AFTER TOP
+# Prometheus text format: "name{labels} value" or "name value".
+# Keyed on the full series identity; numeric delta = after - before.
+diff_snapshots() {
+    local before="$1"
+    local after="$2"
+    local top="$3"
+
+    awk -v topn="$top" '
+        # Skip comments, blank lines, and histogram buckets (the
+        # _sum/_count pair carries the burst signal without the
+        # per-bucket noise).
+        /^#/ || /^$/ { next }
+        /_bucket\{/  { next }
+        {
+            # Series identity = everything before the last field;
+            # value = last field.
+            val = $NF
+            key = $0
+            sub(/[[:space:]]+[^[:space:]]+$/, "", key)
+            if (FNR == NR) {
+                beforev[key] = val
+                next
+            }
+            delta = val - beforev[key]
+            if (delta == 0) { next }
+            deltas[key] = delta
+        }
+        END {
+            n = 0
+            for (k in deltas) {
+                order[++n] = k
+            }
+            # Sort by |delta| descending (simple selection sort:
+            # series counts are small).
+            for (i = 1; i <= n; i++) {
+                best = i
+                for (j = i + 1; j <= n; j++) {
+                    a = deltas[order[j]]; if (a < 0) a = -a
+                    b = deltas[order[best]]; if (b < 0) b = -b
+                    if (a > b) { best = j }
+                }
+                tmp = order[i]; order[i] = order[best]; order[best] = tmp
+            }
+            shown = (n < topn) ? n : topn
+            printf "%-14s %s\n", "DELTA", "SERIES"
+            for (i = 1; i <= shown; i++) {
+                printf "%+14.6g %s\n", deltas[order[i]], order[i]
+            }
+            if (n > shown) {
+                printf "(… %d more non-zero series; raise -n)\n", n - shown
+            }
+            if (n == 0) {
+                print "(no non-zero deltas)"
+            }
+        }
+    ' "$before" "$after"
+}
+
+main() {
+    local mode="${1:-}"
+    shift || true
+
+    local url="$DEFAULT_URL"
+    local top=25
+
+    case "$mode" in
+    snap)
+        while getopts "u:" opt; do
+            case "$opt" in
+            u) url="$OPTARG" ;;
+            *) usage ;;
+            esac
+        done
+        shift $((OPTIND - 1))
+        [ $# -eq 1 ] || usage
+        capture "$url" "$1"
+        echo "snapshot: $1"
+        ;;
+    diff)
+        while getopts "n:" opt; do
+            case "$opt" in
+            n) top="$OPTARG" ;;
+            *) usage ;;
+            esac
+        done
+        shift $((OPTIND - 1))
+        [ $# -eq 2 ] || usage
+        [ -r "$1" ] && [ -r "$2" ] || {
+            echo "ERROR: snapshot file missing or unreadable" >&2
+            exit 1
+        }
+        diff_snapshots "$1" "$2" "$top"
+        ;;
+    run)
+        while getopts "u:n:" opt; do
+            case "$opt" in
+            u) url="$OPTARG" ;;
+            n) top="$OPTARG" ;;
+            *) usage ;;
+            esac
+        done
+        shift $((OPTIND - 1))
+        [ "${1:-}" = "--" ] || usage
+        shift
+        [ $# -ge 1 ] || usage
+
+        local tmp_before tmp_after
+        tmp_before="$(mktemp /tmp/mds-metrics-before.XXXXXX)"
+        tmp_after="$(mktemp /tmp/mds-metrics-after.XXXXXX)"
+        # shellcheck disable=SC2064  # expand now: names are fixed here
+        trap "rm -f '$tmp_before' '$tmp_after'" EXIT
+
+        capture "$url" "$tmp_before"
+        "$@"
+        capture "$url" "$tmp_after"
+        diff_snapshots "$tmp_before" "$tmp_after" "$top"
+        ;;
+    *)
+        usage
+        ;;
+    esac
+}
+
+main "$@"
