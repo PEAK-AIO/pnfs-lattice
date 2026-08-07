@@ -781,6 +781,16 @@ struct nfs4_arg_layoutstats {
 /** Max DS endpoint entries returned by GETDEVICEINFO. */
 #define MDS_MAX_LAYOUT_DS    16
 
+/*
+ * GETDEVICEINFO result DS rows (Wave 5).  A device ID resolves to
+ * exactly ONE DS (deviceid bytes [4..8) carry the ds_id), so
+ * op_getdeviceinfo only ever fills ds[0]; 2 rows keep one spare for a
+ * future multipath form without re-growing the result union past the
+ * Wave-2 ceiling.  The previous MDS_MAX_LAYOUT_DS (16) sizing made
+ * this arm the largest member of nfs4_result for no wire benefit.
+ */
+#define MDS_GETDEVINFO_MAX_DS 2
+
 /* -----------------------------------------------------------------------
  * pNFS per-operation argument structures
  * ----------------------------------------------------------------------- */
@@ -1173,6 +1183,13 @@ struct nfs4_res_create_session {
 	 * to enforce ca_maxrequestsize / ca_maxoperations. */
 	uint32_t fore_max_request_size;
 	uint32_t fore_max_operations;
+	/* Negotiated ca_maxresponsesize / ca_maxresponsesizecached
+	 * (Wave 5 T5.2).  Fetched from the session record after creation
+	 * so the encoder emits the values the SEQUENCE path actually
+	 * enforces; 0 lets the encoder fall back to the server defaults
+	 * (NFS4_REPLY_BUF_SIZE / 64 KiB). */
+	uint32_t fore_max_response_size;
+	uint32_t fore_max_response_size_cached;
 };
 
 struct nfs4_res_sequence {
@@ -1548,7 +1565,17 @@ struct nfs4_res_getdeviceinfo {
 		uint16_t port;       /**< Legacy single port */
 		uint32_t endpoint_count;
 		struct nfs4_ds_endpoint endpoints[2];
-	} ds[MDS_MAX_LAYOUT_DS];
+		/*
+		 * Wave 5 T5.1: effective per-DS I/O limits advertised in
+		 * the flex-files ffdv_rsize / ffdv_wsize fields.  Clients
+		 * write DIRECTLY to the DS at these sizes, so they must
+		 * reflect what the DS accepts (see ds_io_limits.h).
+		 * 0 = not populated -- the encoder falls back to the
+		 * legacy 1 MiB constants.
+		 */
+		uint32_t rsize;
+		uint32_t wsize;
+	} ds[MDS_GETDEVINFO_MAX_DS];
 };
 
 struct nfs4_res_layoutreturn {

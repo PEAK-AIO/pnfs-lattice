@@ -33,6 +33,7 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
+#include "ds_io_limits.h"   /* per-DS I/O limits (Wave 5 T5.1) */
 #include "lease_table.h"
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "synth_uid.h"           /* RFC 8435 §2.2.1 synthetic UID derivation */
@@ -44,18 +45,29 @@
  * ----------------------------------------------------------------------- */
 
 /**
- * Build a device ID from mds_id=1 and ds_id.
- * Format: [mds_id BE 4][ds_id BE 4][zeros 8] = 16 bytes.
+ * Build a device ID from mds_id, ds_id, and the DS's I/O-limit
+ * generation (Wave 5 T5.1).
+ * Format: [mds_id BE 4][ds_id BE 4][generation BE 4][zeros 4] = 16 B.
+ *
+ * The generation bytes make the device ID change whenever the DS's
+ * effective I/O limits change: new layouts then carry an ID the
+ * client has not cached, forcing a fresh GETDEVICEINFO that observes
+ * the new ffdv_rsize/ffdv_wsize.  deviceid_to_ds_id() ignores the
+ * generation bytes, so every generation of the ID resolves to the
+ * same DS registry row.
  */
 static void build_deviceid(uint32_t mds_id, uint32_t ds_id,
+			   uint32_t generation,
 			   uint8_t out[NFS4_DEVICEID4_SIZE])
 {
 	uint32_t mds = htonl(mds_id);
 	uint32_t ds  = htonl(ds_id);
+	uint32_t gen = htonl(generation);
 
 	memset(out, 0, NFS4_DEVICEID4_SIZE);
 	memcpy(out, &mds, 4);
 	memcpy(out + 4, &ds, 4);
+	memcpy(out + 8, &gen, 4);
 }
 
 /**
@@ -816,6 +828,32 @@ static enum mds_status layout_filter_for_inode(
 		required_mode, required_transport,
 		DS_TRANSPORT_RDMA, DS_CAP_GPUDIRECT,
 		out, out_count);
+}
+
+/*
+ * Wave 5 T5.1 -- drop DSes whose probed I/O limits are unusable
+ * (FSINFO decoded below 4 KiB marks the DS ineligible; see
+ * ds_io_limits.h).  In-place compaction of the filtered candidate
+ * list; a no-op while the ds_io_limits module is disabled (every DS
+ * reports eligible).  Applied only on the placement-fallback path --
+ * files with an existing stripe map keep their geometry, and the
+ * capability recall issued by the prober handles their holders.
+ */
+static void layout_drop_iolimit_ineligible(struct mds_ds_info *list,
+					   uint32_t *count)
+{
+	uint32_t kept = 0;
+	uint32_t i;
+
+	if (list == NULL || count == NULL) {
+		return;
+	}
+	for (i = 0; i < *count; i++) {
+		if (ds_io_limits_eligible(list[i].ds_id)) {
+			list[kept++] = list[i];
+		}
+	}
+	*count = kept;
 }
 
 
@@ -1915,6 +1953,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 				}
 			}
 
+			layout_drop_iolimit_ineligible(ds_list, &ds_count);
+			if (ds_count == 0) {
+				free(ds_list);
+				return NFS4ERR_NOSPC;
+			}
+
 			/*
 			 * Phase 3: honour the daemon's configured default
 			 * stripe/mirror geometry when the placement policy
@@ -2147,6 +2191,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 					free(ds_list);
 					return NFS4ERR_NOSPC;
 				}
+			}
+
+			layout_drop_iolimit_ineligible(ds_list, &ds_count);
+			if (ds_count == 0) {
+				free(ds_list);
+				return NFS4ERR_NOSPC;
 			}
 
 			stripe_count = 1;
@@ -2562,8 +2612,17 @@ fill_layoutget_result:
 			memcpy(r->ds[i].nfs_fh, entries[src_idx].nfs_fh,
 			       entries[src_idx].nfs_fh_len);
 		}
-		build_deviceid(cd->mds_id, entries[src_idx].ds_id,
-			       r->ds[i].deviceid);
+		{
+			/* Wave 5 T5.1: stamp the DS's current I/O-limit
+			 * generation into the device ID so limit changes
+			 * surface as a new ID (fresh GETDEVICEINFO). */
+			uint32_t io_gen = 0;
+
+			ds_io_limits_get(entries[src_idx].ds_id,
+					 NULL, NULL, &io_gen);
+			build_deviceid(cd->mds_id, entries[src_idx].ds_id,
+				       io_gen, r->ds[i].deviceid);
+		}
 	}
 
 	/* Phase E+ runtime assert: any layout with more than one DS
@@ -2845,6 +2904,11 @@ enum nfs4_status op_getdeviceinfo(const struct compound_data *cd,
 	r->ds[0].ds_id = info.ds_id;
 	r->ds[0].port = info.port;
 	(void)snprintf(r->ds[0].addr, sizeof(r->ds[0].addr), "%s", info.addr);
+
+	/* Wave 5 T5.1: effective per-DS I/O limits for the flex-files
+	 * ffdv_rsize/ffdv_wsize fields.  Legacy 1 MiB when probing is
+	 * disabled; 64 KiB unverified fallback until FSINFO answers. */
+	ds_io_limits_get(info.ds_id, &r->ds[0].rsize, &r->ds[0].wsize, NULL);
 
 	/* Apply configured GETDEVICEINFO transport advertisement (ds_transport):
 	 * 0=tcp (default, info unchanged), 1=rdma (populate rdma_port, suppress

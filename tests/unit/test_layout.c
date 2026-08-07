@@ -135,13 +135,58 @@ static void test_layout_encode_mirrored(void)
 
 /* -------------------------------------------------------------------
  * Test 3: encode_res_getdeviceinfo
+ *
+ * Also decodes the trailing ff_device_versions4 entry to pin the
+ * ffdv_rsize/ffdv_wsize wire values (Wave 5 T5.1): populated per-DS
+ * limits are emitted verbatim; unpopulated (0) falls back to the
+ * legacy 1 MiB constants.
  * ------------------------------------------------------------------- */
+static void decode_deviceinfo_ffdv(const uint8_t *buf, uint32_t len,
+                                   uint32_t *rsize_out,
+                                   uint32_t *wsize_out)
+{
+    XDR dec;
+    uint32_t layout_type = 0;
+    uint32_t body_len = 0;
+    uint32_t total_addrs = 0;
+    uint32_t v;
+
+    xdrmem_ncreate(&dec, (char *)(uintptr_t)buf, len, XDR_DECODE);
+    VERIFY(xdr_uint32_t(&dec, &layout_type));
+    VERIFY(layout_type == LAYOUT4_FLEX_FILES);
+    VERIFY(xdr_uint32_t(&dec, &body_len));
+    VERIFY(body_len > 0);
+
+    /* ff_device_addr4 body: netaddr count, then per-address
+     * netid + uaddr strings. */
+    VERIFY(xdr_uint32_t(&dec, &total_addrs));
+    for (uint32_t i = 0; i < total_addrs; i++) {
+        char sbuf[300];
+        char *sp = sbuf;
+        VERIFY(xdr_string_decode(&dec, &sp, sizeof(sbuf))); /* netid */
+        sp = sbuf;
+        VERIFY(xdr_string_decode(&dec, &sp, sizeof(sbuf))); /* uaddr */
+    }
+
+    /* ff_device_versions4<1>: count, version, minorversion,
+     * rsize, wsize, tightly_coupled. */
+    VERIFY(xdr_uint32_t(&dec, &v));
+    VERIFY(v == 1);
+    VERIFY(xdr_uint32_t(&dec, &v));  /* version = 3 */
+    VERIFY(v == 3);
+    VERIFY(xdr_uint32_t(&dec, &v));  /* minorversion = 0 */
+    VERIFY(xdr_uint32_t(&dec, rsize_out));
+    VERIFY(xdr_uint32_t(&dec, wsize_out));
+}
+
 static void test_layout_encode_deviceinfo(void)
 {
     struct nfs4_result res;
     struct nfs4_res_getdeviceinfo *gdi = &res.res.getdeviceinfo;
     uint8_t buf[4096];
     XDR enc;
+    uint32_t rsz = 0;
+    uint32_t wsz = 0;
 
     memset(&res, 0, sizeof(res));
     res.opnum = OP_GETDEVICEINFO;
@@ -153,9 +198,23 @@ static void test_layout_encode_deviceinfo(void)
     gdi->ds[0].port = 2049;
     snprintf(gdi->ds[0].addr, sizeof(gdi->ds[0].addr), "10.0.0.1");
 
+    /* Unpopulated per-DS limits (0) -> legacy 1 MiB on the wire. */
     xdrmem_ncreate(&enc, (char *)buf, sizeof(buf), XDR_ENCODE);
     VERIFY(encode_res_getdeviceinfo(&enc, &res));
     VERIFY(xdr_getpos(&enc) > 0);
+    decode_deviceinfo_ffdv(buf, xdr_getpos(&enc), &rsz, &wsz);
+    VERIFY(rsz == 1048576U);
+    VERIFY(wsz == 1048576U);
+
+    /* Probed limits are emitted verbatim (Wave 5 T5.1). */
+    gdi->ds[0].rsize = 524288U;
+    gdi->ds[0].wsize = 61440U;
+    xdrmem_ncreate(&enc, (char *)buf, sizeof(buf), XDR_ENCODE);
+    VERIFY(encode_res_getdeviceinfo(&enc, &res));
+    VERIFY(xdr_getpos(&enc) > 0);
+    decode_deviceinfo_ffdv(buf, xdr_getpos(&enc), &rsz, &wsz);
+    VERIFY(rsz == 524288U);
+    VERIFY(wsz == 61440U);
 }
 
 /* -------------------------------------------------------------------
@@ -169,6 +228,9 @@ static void test_delegreturn_dispatch(void)
 
     compound_init(&cd);
     memset(ops, 0, sizeof(ops));
+    /* compound_process recycles result slots by their STORED opnum
+     * (nfs4_result_destroy); first use requires zeroed slots. */
+    memset(res, 0, sizeof(res));
     ops[0].opnum = OP_DELEGRETURN;
 
     uint32_t n = compound_process(&cd, ops, res, 1);

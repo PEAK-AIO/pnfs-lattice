@@ -28,6 +28,7 @@
 #include "xdr_codec.h"
 #include "layout_range.h"
 #include "layout_recall.h"
+#include "ds_io_limits.h"
 #include "mds_metrics.h"
 
 /* -----------------------------------------------------------------------
@@ -410,6 +411,7 @@ static void test_root_getattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -439,6 +441,7 @@ static void test_putrootfh_discards_stale_snapshot(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	uint64_t file_fid;
 	char *path;
@@ -482,6 +485,7 @@ static void test_lookupp_discards_child_snapshot(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	uint64_t parent_fid;
 	char *path;
@@ -536,6 +540,7 @@ static void test_layoutget_ds_pending_without_proxy_unavailable(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_inode inode;
 	struct mds_ds_map_entry *entries = NULL;
 	uint32_t stripe_count = 0;
@@ -602,6 +607,7 @@ static void test_layoutget_ds_pending_patched_ready_clears_pending(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	uint64_t fileid;
 	char *path;
@@ -661,6 +667,7 @@ static void test_create_and_lookup(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint64_t created_fid;
 	uint32_t n;
 	char *path;
@@ -709,6 +716,7 @@ static void test_create_and_remove(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -754,6 +762,7 @@ static void test_readdir(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -797,6 +806,7 @@ static void test_readdir_skips_pending_hpc_create(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	struct mds_inode alpha;
 	struct mds_inode pending;
 	struct mds_inode bravo;
@@ -868,6 +878,7 @@ static void test_readdir_pagination(void)
 	struct compound_data cd;
 	struct nfs4_op ops[10];
 	struct nfs4_result res[10];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -962,6 +973,7 @@ static void test_readdir_cursor_multipage(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 	const uint32_t total = 600;
@@ -1052,6 +1064,7 @@ static void test_readdir_byte_budget(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 	const uint32_t total = 100;
@@ -1104,6 +1117,7 @@ static void test_readdir_deleted_cookie(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 	const uint32_t total = 300;
@@ -1190,6 +1204,7 @@ static void test_readdir_hides_referral_junctions(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	uint32_t i;
 	bool saw_shard1 = false;
@@ -1275,6 +1290,7 @@ static void test_rename(void)
 	struct compound_data cd;
 	struct nfs4_op ops[7];
 	struct nfs4_result res[7];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1330,6 +1346,7 @@ static void test_link(void)
 	struct compound_data cd;
 	struct nfs4_op ops[7];
 	struct nfs4_result res[7];
+	memset(res, 0, sizeof(res));
 	uint64_t file_fid;
 	uint32_t n;
 	char *path;
@@ -1389,6 +1406,7 @@ static void test_setattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1424,6 +1442,7 @@ static void test_fh_state_machine(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1472,6 +1491,7 @@ static void test_fh_owner_stamped(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1560,6 +1580,7 @@ static void test_stop_on_error(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1593,6 +1614,7 @@ static void test_nofilehandle(void)
 	struct compound_data cd;
 	struct nfs4_op ops[2];
 	struct nfs4_result res[2];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1632,6 +1654,7 @@ static void test_putfh_invalid(void)
 	struct compound_data cd;
 	struct nfs4_op ops[2];
 	struct nfs4_result res[2];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -1669,6 +1692,7 @@ static void test_getattr_space_gated_on_bitmap(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -2030,6 +2054,7 @@ static void test_layoutget(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -2080,6 +2105,7 @@ static void test_layoutget_maxcount_toosmall_revokes_layout_state(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_ds_map_entry sme;
 	struct mds_cat_txn *txn = NULL;
 	struct compound_layout_idx_scan_ctx scan;
@@ -2215,6 +2241,7 @@ static void test_layoutget_newfile_fastpath(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct layout_recall *lr = NULL;
 	uint64_t fid;
 	uint64_t skips_before;
@@ -2341,6 +2368,7 @@ static void test_layoutreturn(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -2455,6 +2483,7 @@ static void test_openattr_create_remove(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	char *path;
 	uint32_t n;
@@ -2515,6 +2544,7 @@ static void test_openattr_read_write(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	char *path;
 	uint32_t n;
@@ -2580,6 +2610,7 @@ static void test_gc_on_remove(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	char *path;
 	uint32_t n, gc_count;
@@ -2670,6 +2701,7 @@ static void test_gc_on_remove_fused(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	char *path;
 	uint32_t n, gc_count;
@@ -2777,6 +2809,7 @@ static void test_proxy_read_write_compound(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	char *path, *ds_path;
@@ -2853,6 +2886,7 @@ static void test_read_bad_seqid(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -2940,6 +2974,7 @@ static void test_inline_read_bad_stateid_does_not_promote(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -3004,6 +3039,7 @@ static void test_inline_write_bad_stateid_does_not_promote(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -3069,6 +3105,7 @@ static void test_ds_pending_read_bad_stateid_does_not_materialize(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -3130,6 +3167,7 @@ static void test_ds_pending_write_bad_stateid_does_not_clear_pending(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -3196,6 +3234,7 @@ static void test_write_wrong_client(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	struct mds_proxy_ctx *proxy;
 	struct open_state_table *ot;
@@ -3281,6 +3320,7 @@ static void test_xattr_short_read_eof(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_catalogue *db;
 	char *path;
 	uint32_t n;
@@ -3376,6 +3416,7 @@ static void test_cross_module_namespace(void)
 	struct compound_data cd;
 	struct nfs4_op ops[7];
 	struct nfs4_result res[7];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -3427,6 +3468,7 @@ static void test_dispatch_illegal_op(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -3471,6 +3513,7 @@ static void test_getdeviceinfo_structured_endpoint(void)
 	struct compound_data cd;
 	struct nfs4_op ops[2];
 	struct nfs4_result res[2];
+	memset(res, 0, sizeof(res));
 
 	compound_init(&cd);
 	cd.cat = g_test_cat;
@@ -3515,6 +3558,10 @@ static void test_getdeviceinfo_structured_endpoint(void)
 	ASSERT_TRUE(strcmp(res[0].res.getdeviceinfo.ds[0].endpoints[0].netid, "tcp") == 0);
 	ASSERT_TRUE(strcmp(res[0].res.getdeviceinfo.ds[0].endpoints[0].host, "ds42") == 0);
 	ASSERT_EQ(res[0].res.getdeviceinfo.ds[0].endpoints[0].port, 2049);
+	/* Wave 5 T5.1: ds_io_limits module disabled in this test ->
+	 * per-DS limits report the legacy 1 MiB constants. */
+	ASSERT_EQ(res[0].res.getdeviceinfo.ds[0].rsize, DS_IOLIMIT_LEGACY_BYTES);
+	ASSERT_EQ(res[0].res.getdeviceinfo.ds[0].wsize, DS_IOLIMIT_LEGACY_BYTES);
 
 	close_test_db(db, dbpath);
 }
@@ -3533,6 +3580,7 @@ static void test_layoutget_flex_files(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 
 	seed_patched_ready_ds(db, 50, "pds50:/data");
 	seed_ds_provision(db, 50);
@@ -3597,6 +3645,7 @@ static void test_layoutget_flex_patched_unready_unavailable(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 
 	compound_init(&cd);
 	cd.cat = g_test_cat;
@@ -3670,6 +3719,7 @@ static void test_getdeviceinfo_flex_files(void)
 	struct compound_data cd;
 	struct nfs4_op ops[1];
 	struct nfs4_result res[1];
+	memset(res, 0, sizeof(res));
 
 	compound_init(&cd);
 	cd.cat = g_test_cat;
@@ -3704,11 +3754,19 @@ static void test_getdeviceinfo_flex_files(void)
 		memcpy(ops[0].arg.getdeviceinfo.deviceid + 4, &be, 4);
 	}
 
+	/* Wave 5 T5.1: with the ds_io_limits module ENABLED but the DS
+	 * not yet probed, GETDEVICEINFO must advertise the safe 64 KiB
+	 * unverified fallback instead of the legacy 1 MiB. */
+	ASSERT_EQ(ds_io_limits_enable(), 0);
+
 	uint32_t n = compound_process(&cd, ops, res, 1);
+	ds_io_limits_shutdown();
 	ASSERT_EQ(n, 1);
 	ASSERT_EQ(res[0].status, NFS4_OK);
 	ASSERT_EQ(res[0].res.getdeviceinfo.layout_type, LAYOUT4_FLEX_FILES);
 	ASSERT_TRUE(strcmp(res[0].res.getdeviceinfo.ds[0].endpoints[0].host, "ffds70") == 0);
+	ASSERT_EQ(res[0].res.getdeviceinfo.ds[0].rsize, DS_IOLIMIT_FALLBACK_BYTES);
+	ASSERT_EQ(res[0].res.getdeviceinfo.ds[0].wsize, DS_IOLIMIT_FALLBACK_BYTES);
 
 	close_test_db(db, dbpath);
 }
@@ -3727,6 +3785,7 @@ static void test_layoutget_flex_patched_creds(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 
 	compound_init(&cd);
 	cd.cat = g_test_cat;
@@ -3803,6 +3862,7 @@ static void test_lookup_snapshot_cached_parent(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	uint64_t child_fid;
 	char *path;
@@ -3852,6 +3912,7 @@ static void test_lookup_notfound_falls_through(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -3882,6 +3943,7 @@ static void test_lookup_ext_dirent_on_root_shard(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	struct mds_cat_txn *txn = NULL;
 	uint32_t n;
@@ -3937,6 +3999,7 @@ static void test_lookup_catalogue_root_child(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -3992,6 +4055,7 @@ static void test_create_then_getattr_sees_new_inode(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4025,6 +4089,7 @@ static void test_setattr_then_getattr_sees_update(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4069,6 +4134,7 @@ static void test_catalogue_setattr_then_getattr_sees_update(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4104,6 +4170,7 @@ static void test_write_then_getattr_sees_new_size(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4206,6 +4273,7 @@ static void test_rfc8276_setxattr_getxattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4248,6 +4316,7 @@ static void test_rfc8276_getxattr_noxattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4280,6 +4349,7 @@ static void test_rfc8276_setxattr_create_exist(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4325,6 +4395,7 @@ static void test_rfc8276_setxattr_replace_noxattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4357,6 +4428,7 @@ static void test_rfc8276_listxattrs(void)
 	struct compound_data cd;
 	struct nfs4_op ops[8];
 	struct nfs4_result res[8];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4406,6 +4478,7 @@ static void test_rfc8276_removexattr(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	struct mds_inode child;
 	uint32_t n;
 	char *root_path;
@@ -4480,6 +4553,7 @@ static void test_get_dir_delegation_unavail(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4525,6 +4599,7 @@ static void test_get_dir_delegation_no_fh(void)
 	struct compound_data cd;
 	struct nfs4_op ops[2];
 	struct nfs4_result res[2];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4672,6 +4747,7 @@ static void test_rfc8276_xattr_no_fh(void)
 	struct compound_data cd;
 	struct nfs4_op ops[3];
 	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *root_path;
 
@@ -4732,6 +4808,7 @@ static void dac_seed_file(const char *name, uint32_t mode,
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 
 	dac_cd_init(&cd, 0, 0);
@@ -4752,6 +4829,7 @@ static void test_dac_chmod_chown_gates(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4812,6 +4890,7 @@ static void test_dac_sgid_dropped_for_non_member(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4841,6 +4920,7 @@ static void test_dac_chown_clears_setid(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4894,6 +4974,7 @@ static void test_dac_dir_write_and_sticky(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4957,6 +5038,7 @@ static void test_dac_truncate_requires_write(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -4992,6 +5074,7 @@ static void test_dac_disabled_or_non_authsys_permissive(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -5030,6 +5113,7 @@ static void test_remove_nonempty_dir_notempty(void)
 	struct compound_data cd;
 	struct nfs4_op ops[4];
 	struct nfs4_result res[4];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 
@@ -5169,6 +5253,7 @@ static void test_access_posix_bit_mapping(void)
 	struct compound_data cd;
 	struct nfs4_op ops[5];
 	struct nfs4_result res[5];
+	memset(res, 0, sizeof(res));
 	uint32_t n, acc;
 	char *path;
 
@@ -5295,6 +5380,7 @@ static void test_nametoolong_flag_paths(void)
 	struct compound_data cd;
 	struct nfs4_op ops[6];
 	struct nfs4_result res[6];
+	memset(res, 0, sizeof(res));
 	uint32_t n;
 	char *path;
 

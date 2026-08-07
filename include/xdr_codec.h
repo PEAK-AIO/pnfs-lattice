@@ -47,6 +47,17 @@
  *  buffer and produce a short/dropped reply on the wire. */
 #define NFS4_REPLY_BUF_SIZE  ((size_t)256 * 1024)
 
+/** Per-op ceiling for MDS-served (proxy) READ/WRITE payloads (Wave 5
+ *  T5.2).  The READ/WRITE scratch buffers are MDS_XATTR_VAL_MAX
+ *  (64 KiB), so one READ/WRITE op against the MDS can move at most
+ *  this many bytes.  FATTR4_MAXREAD / FATTR4_MAXWRITE advertise
+ *  min(NFS4_PROXY_IO_MAX, weakest probed DS limit) -- see
+ *  ds_io_limits.h -- so a client never issues an I/O the MDS proxy
+ *  path or a data server would reject.  pNFS data-path sizing is NOT
+ *  bounded by this: flex-files clients take per-DS limits from
+ *  GETDEVICEINFO's ffdv_rsize/ffdv_wsize. */
+#define NFS4_PROXY_IO_MAX  65536U
+
 /** COMPOUND4 minor versions we accept (1 = NFSv4.1, 2 = NFSv4.2). */
 #define NFS4_MINOR_VERSION_MIN 1  /* v4.1+ only; v4.0 lacks SEQUENCE */
 #define NFS4_MINOR_VERSION_MAX 2

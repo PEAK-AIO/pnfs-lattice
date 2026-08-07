@@ -822,7 +822,17 @@ bool encode_res_getdeviceinfo(XDR *xdrs, const struct nfs4_result *r)
     {
         uint32_t ver_count = 1;
         uint32_t ds_ver = 3, ds_min = 0;
-        uint32_t ds_rsz = 1048576, ds_wsz = 1048576;
+        /* Wave 5 T5.1: ffdv_rsize/ffdv_wsize carry the DS's probed
+         * I/O limits (op_getdeviceinfo fills them from ds_io_limits).
+         * The client writes DIRECTLY to the DS at these sizes, so an
+         * oversized constant wedges hard-mounted clients against DSes
+         * with a smaller rtmax/wtmax.  Unpopulated results (0) keep
+         * the legacy 1 MiB constants -- direct-encoder tests and
+         * pre-Wave-5 producers. */
+        uint32_t ds_rsz = (gdi->ds_count > 0 && gdi->ds[0].rsize != 0)
+                          ? gdi->ds[0].rsize : 1048576;
+        uint32_t ds_wsz = (gdi->ds_count > 0 && gdi->ds[0].wsize != 0)
+                          ? gdi->ds[0].wsize : 1048576;
         uint32_t ds_tight = 0;
         if (!xdr_uint32_t(&dev_xdrs, &ver_count)) { return false; }
         if (!xdr_uint32_t(&dev_xdrs, &ds_ver)) { return false; }

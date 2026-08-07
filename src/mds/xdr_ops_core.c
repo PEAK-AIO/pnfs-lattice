@@ -969,8 +969,19 @@ bool encode_res_create_session(XDR *xdrs,
         uint32_t pad = 0;
         uint32_t maxreq = (cs->fore_max_request_size > 0)
                           ? cs->fore_max_request_size : 1048576U;
-        uint32_t maxresp = 1048576;
-        uint32_t maxcached = 65536;
+        /* Wave 5 T5.2: emit the NEGOTIATED response caps stored on
+         * the session (populated by op_create_session).  Zero-valued
+         * fields (direct-encoder tests, replay after session
+         * destruction) fall back to the server capability the
+         * negotiation would have produced: the 256 KiB reply buffer
+         * and the 64 KiB cached-reply default.  The historical
+         * hardcoded 1 MiB maxresp promised replies the encode buffer
+         * could never emit. */
+        uint32_t maxresp = (cs->fore_max_response_size > 0)
+                          ? cs->fore_max_response_size
+                          : (uint32_t)NFS4_REPLY_BUF_SIZE;
+        uint32_t maxcached = (cs->fore_max_response_size_cached > 0)
+                          ? cs->fore_max_response_size_cached : 65536U;
         uint32_t maxops = (cs->fore_max_operations > 0)
                           ? cs->fore_max_operations : NFS4_MAX_OPS;
         uint32_t slots = cs->fore_slots;

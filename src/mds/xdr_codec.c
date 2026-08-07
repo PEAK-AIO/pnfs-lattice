@@ -22,6 +22,7 @@
 #include "xdr_internal.h"
 #include "pnfs_mds.h"
 #include "hpc_shared.h"
+#include "ds_io_limits.h"   /* MAXREAD/MAXWRITE min-across-DS (Wave 5) */
 
 /* -----------------------------------------------------------------------
  * NFSv4.1 type codecs
@@ -509,14 +510,29 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
         uint32_t maxname = MDS_MAX_NAME;
         if (!xdr_uint32_t(xdrs, &maxname)) { return false; }
     }
-    /* FATTR4_MAXREAD (bit 30). */
+    /* FATTR4_MAXREAD (bit 30).  min(proxy per-op ceiling, weakest
+     * probed DS limit): the MDS itself serves at most 64 KiB per
+     * READ (scratch sizing, NFS4_PROXY_IO_MAX) and must never invite
+     * an I/O size some data server would reject (Wave 5 T5.2).  The
+     * historical hardcoded 1 MiB promised reads the proxy path
+     * always short-read. */
     if (nfs4_bitmap_test(actual, FATTR4_MAXREAD)) {
-        uint64_t maxrd = 1048576; /* 1 MiB */
+        uint32_t ds_cap = 0;
+        uint64_t maxrd;
+
+        ds_io_limits_min(&ds_cap, NULL);
+        maxrd = (ds_cap < NFS4_PROXY_IO_MAX)
+                    ? ds_cap : NFS4_PROXY_IO_MAX;
         if (!xdr_uint64_t(xdrs, &maxrd)) { return false; }
     }
-    /* FATTR4_MAXWRITE (bit 31). */
+    /* FATTR4_MAXWRITE (bit 31) -- same policy as MAXREAD. */
     if (nfs4_bitmap_test(actual, FATTR4_MAXWRITE)) {
-        uint64_t maxwr = 1048576; /* 1 MiB */
+        uint32_t ds_cap = 0;
+        uint64_t maxwr;
+
+        ds_io_limits_min(NULL, &ds_cap);
+        maxwr = (ds_cap < NFS4_PROXY_IO_MAX)
+                    ? ds_cap : NFS4_PROXY_IO_MAX;
         if (!xdr_uint64_t(xdrs, &maxwr)) { return false; }
     }
 
