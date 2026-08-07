@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`rpc_listener_threads` config key** — makes the TCP RPC listener
+  (SO_REUSEPORT epoll loop) count operator-tunable (range 0..32).
+  `0` (the default) keeps the historical auto rule
+  `min(worker_threads, 4)`; explicit values are clamped to online
+  CPUs and to the compile-time maximum (32).  At `nconnect=8/16` four
+  listeners can be the binding constraint before worker count.
+  Rendered by `mds-admin config show`.
 - **Async NDB write pipeline (Phase 4)** — setting
   `ndb_async_writes = true` now routes single-commit creates
   (`ns_create` and the fused create+layout) through the
@@ -18,12 +25,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- Logging level checks moved from inside `mds_log()` into the
+  `MDS_LOG_*` macros: a suppressed DEBUG/TRACE call site now costs one
+  relaxed atomic load and a predicted branch instead of a varargs
+  function call.  Runtime level changes via `mds_log_set_level()`
+  remain thread-safe (atomic stores paired with the macro loads).
+- The RPC threadpool's queue-wait sampling (two `clock_gettime` calls
+  per work item plus a histogram observation) is now gated on the
+  existing `metrics_op_enabled` switch; with op metrics disabled the
+  dispatch path performs no clock reads.  The plain dispatcher
+  counters (submitted/completed/queue-full totals, active workers,
+  queue depth) stay always-on.
 - Per-connection NDB flush threads are now created lazily, only when
   `ndb_async_writes = true` is set at startup.  With the flag off
   (the default) no flush threads exist, removing the idle
   send/poll cycle that previously ran every 10 ms per connection.
   Armed flush threads also skip NDB API calls entirely while no
   transaction is in flight.
+
+### Fixed
+- README and configuration docs no longer overstate the cache
+  subsystem: the inode cache is a global LRU under a single mutex
+  (not striped) and both the inode and dirent caches default to
+  disabled (`inode_cache_size = 0`, `dirent_cache_size = 0`).  The
+  stale 16384/32768 defaults in `docs/config-keys.md` and
+  `mds.conf(5)` were corrected to match the code.
+- `test_config` now actually fails when an assertion fails: the
+  runner previously counted every test as passed because assertion
+  macros only printed and returned.  This had been masking a stale
+  assertion that still expected the old 32768 dirent-cache default;
+  the assertion was updated to the shipped default (0, disabled).
 
 ## [v0.1.1-community] — 2026-05-02
 

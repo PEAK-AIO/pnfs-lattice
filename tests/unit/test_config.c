@@ -18,11 +18,13 @@
 
 static int tests_run;
 static int tests_passed;
+static int test_failed;   /* Set by ASSERT_* so RUN_TEST records it. */
 
 #define ASSERT_EQ(a, b) do { \
     if ((a) != (b)) { \
         fprintf(stderr, "  FAIL %s:%d: %s (%d) != %s (%d)\n", \
                 __FILE__, __LINE__, #a, (int)(a), #b, (int)(b)); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
@@ -31,17 +33,26 @@ static int tests_passed;
     if (!(cond)) { \
         fprintf(stderr, "  FAIL %s:%d: !(%s)\n", \
                 __FILE__, __LINE__, #cond); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
 
+/* A failed assertion must fail the suite: RUN_TEST previously
+ * counted every test as passed because the ASSERT_* macros only
+ * printed and returned, which let stale assertions rot silently. */
 #define RUN_TEST(fn) do { \
     tests_run++; \
+    test_failed = 0; \
     fprintf(stdout, "  %-50s", #fn); \
     fflush(stdout); \
     fn(); \
-    tests_passed++; \
-    fprintf(stdout, "PASS\n"); \
+    if (test_failed == 0) { \
+        tests_passed++; \
+        fprintf(stdout, "PASS\n"); \
+    } else { \
+        fprintf(stdout, "FAILED\n"); \
+    } \
 } while (0)
 
 /* ------------------------------------------------------------------- */
@@ -178,7 +189,9 @@ static void test_promoted_knob_defaults(void)
     ASSERT_EQ((int)cfg.metrics_http_port, 9090);
     ASSERT_EQ((int)cfg.inline_max_size, 65536);
     ASSERT_EQ((int)cfg.inode_cache_size, 0);
-    ASSERT_EQ((int)cfg.dirent_cache_size, 32768);
+    /* Both namespace caches ship disabled: per-MDS caches cannot
+     * stay coherent across the referral cluster (config.c). */
+    ASSERT_EQ((int)cfg.dirent_cache_size, 0);
     ASSERT_EQ((int)cfg.negative_cache_ttl_ms, 5000);
     ASSERT_EQ(cfg.transient_state_cache, false);
     unlink(path);
@@ -202,6 +215,25 @@ static void test_out_of_range_rejected(void)
     ASSERT_EQ((int)cfg.cb_recall_timeout_ms, 5000);
     ASSERT_EQ((int)cfg.dir_deleg_recall_timeout_ms, 5000);
     ASSERT_EQ((int)cfg.metrics_http_port, 9090);
+    unlink(path);
+}
+
+static void test_rpc_listener_threads_key(void)
+{
+    char path[128];
+    struct mds_config cfg;
+    /* Default: 0 = auto (min(worker_threads, 4) at startup). */
+    ASSERT_EQ(write_tmp_ini("", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.rpc_listener_threads, 0);
+    /* Explicit in-range value applies verbatim. */
+    ASSERT_EQ(write_tmp_ini("rpc_listener_threads = 8\n", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.rpc_listener_threads, 8);
+    /* Out of range (> 32) is rejected: auto default retained. */
+    ASSERT_EQ(write_tmp_ini("rpc_listener_threads = 99\n", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.rpc_listener_threads, 0);
     unlink(path);
 }
 
@@ -415,6 +447,7 @@ int main(void)
     RUN_TEST(test_parse_promoted_knobs);
     RUN_TEST(test_promoted_knob_defaults);
     RUN_TEST(test_out_of_range_rejected);
+    RUN_TEST(test_rpc_listener_threads_key);
 
     /* mountd_compat keys. */
     RUN_TEST(test_mountd_compat_defaults);

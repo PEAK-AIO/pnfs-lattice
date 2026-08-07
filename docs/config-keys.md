@@ -39,6 +39,7 @@ are logged as `WARN:` and the default is kept.
 ## Workload / tuning
 - `workload_profile` — `default|hpc|ai_training|genomics|media`.
 - `worker_threads` — COMPOUND dispatch thread count.  Default: 16.
+- `rpc_listener_threads` — TCP RPC listener (SO_REUSEPORT) count (0..32).  Default: 0 = auto, the historical rule `min(worker_threads, 4)`.  Explicit values are clamped to online CPUs and to the compile-time maximum (32).  Raise when a high-`nconnect` bandwidth sweep shows listener saturation.
 - `stripe_unit_bytes` — default stripe unit.  Default: 65536.
 - `default_stripe_count` / `default_mirror_count` — geometry for new files.  Default: 1 / 1.
 - `lease_time_sec` / `grace_period_sec` — NFSv4 lease + grace.
@@ -48,8 +49,8 @@ are logged as `WARN:` and the default is kept.
 ## Commit pipeline
 - `CommitBatchSize`, `CommitBatchMaxBytes`, `CommitFlushMs`, `CommitQueueDepth` — single-writer batch commit knobs.
 ## Caches
-- `inode_cache_size` (0..1000000).  Default: 16384.
-- `dirent_cache_size` (0..1000000).  Default: 32768.
+- `inode_cache_size` (0..1000000).  Default: 0 (disabled; set e.g. 16384 to enable the previous lab default).
+- `dirent_cache_size` (0..1000000).  Default: 0 (disabled; set e.g. 32768 to enable the previous lab default).
 - `negative_cache_ttl_ms` (0..3600000).  Default: 5000.
 ## Data servers
 - `ds_count` — number of configured DSes.
