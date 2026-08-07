@@ -165,7 +165,10 @@ static bool encode_rp_data_seg(XDR *xdrs,
     if (!xdr_uint64_t(xdrs, &doff)) { return false; }
     if (!xdr_uint32_t(xdrs, &dlen)) { return false; }
     if (dlen > 0) {
-        if (!xdr_opaque_encode(xdrs,
+        /* Borrowed scratch pointer; NULL means the producer never
+         * called nfs4_result_ensure_rp_seg(). */
+        if (seg->u.data.data == NULL ||
+            !xdr_opaque_encode(xdrs,
                 (char *)seg->u.data.data, dlen)) {
             return false;
         }
@@ -349,7 +352,10 @@ bool encode_res_getxattr(XDR *xdrs, const struct nfs4_result *r)
 
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
     if (len > 0) {
-        if (!xdr_opaque_encode(xdrs, (const char *)rx->value, len)) {
+        /* Borrowed scratch pointer; NULL means the producer never
+         * called nfs4_result_ensure_xattr_value(). */
+        if (rx->value == NULL ||
+            !xdr_opaque_encode(xdrs, (const char *)rx->value, len)) {
             return false;
         }
     }
@@ -379,6 +385,10 @@ bool encode_res_listxattrs(XDR *xdrs, const struct nfs4_result *r)
      */
     if (!xdr_uint64_t(xdrs, &cookie)) { return false; }
     if (!xdr_uint32_t(xdrs, &cnt)) { return false; }
+    if (cnt > 0 && rx->names == NULL) {
+        /* Borrowed scratch rows missing with a non-zero count. */
+        return false;
+    }
     for (i = 0; i < cnt; i++) {
         uint32_t nlen = (uint32_t)strlen(rx->names[i]);
 

@@ -1242,7 +1242,11 @@ struct nfs4_read_plus_content {
 	union {
 		struct {
 			uint32_t data_len;
-			uint8_t  data[MDS_XATTR_VAL_MAX];
+			/* Borrowed from the result's scratch block (see
+			 * struct nfs4_result_scratch); producers obtain it
+			 * via nfs4_result_ensure_rp_seg().  NULL until
+			 * ensured; sized MDS_XATTR_VAL_MAX. */
+			uint8_t *data;
 		} data;
 		struct {
 			uint64_t length;
@@ -1266,7 +1270,10 @@ struct nfs4_res_read_plus {
 /** RFC 8276 §4.2.2 — GETXATTR result. */
 struct nfs4_res_getxattr {
 	uint32_t value_len;
-	uint8_t  value[MDS_XATTR_VAL_MAX];
+	/* Borrowed from the result's scratch block; obtained via
+	 * nfs4_result_ensure_xattr_value().  NULL until ensured;
+	 * sized MDS_XATTR_VAL_MAX. */
+	uint8_t *value;
 };
 
 /** RFC 8276 §4.2.3 — SETXATTR result. */
@@ -1279,7 +1286,11 @@ struct nfs4_res_setxattr {
 struct nfs4_res_listxattrs {
 	uint64_t cookie;
 	uint32_t name_count;
-	char     names[NFS4_LISTXATTRS_MAX][MDS_XATTR_NAME_MAX + 1];
+	/* Borrowed row array from the result's scratch block
+	 * (NFS4_LISTXATTRS_MAX rows); obtained via
+	 * nfs4_result_ensure_listxattrs().  Row-pointer type keeps
+	 * names[i] indexing identical to the old inline array. */
+	char     (*names)[MDS_XATTR_NAME_MAX + 1];
 	bool     eof;
 };
 
@@ -1329,7 +1340,10 @@ struct nfs4_res_readlink {
 struct nfs4_res_read {
 	bool     eof;
 	uint32_t data_len;
-	uint8_t  data[MDS_XATTR_VAL_MAX];
+	/* Borrowed from the result's scratch block; obtained via
+	 * nfs4_result_ensure_read().  NULL until ensured; sized
+	 * MDS_XATTR_VAL_MAX. */
+	uint8_t *data;
 };
 
 struct nfs4_res_write {
@@ -1518,10 +1532,39 @@ struct nfs4_res_layoutcommit {
 struct ds_prepare_ctx;
 struct ds_cache;
 
+/* -----------------------------------------------------------------------
+ * Result payload scratch (Wave 2 heap-scratch refactor).
+ *
+ * The result union used to inline every worst-case payload
+ * (~524 KB per slot; 64 thread-local slots were ~34 MB per worker,
+ * and every op paid a full-union memset).  Converted arms now carry
+ * only lengths plus borrowed pointer mirrors; OWNERSHIP lives here,
+ * outside the union, so an arm switch between compounds may clobber
+ * the arm bytes -- including the mirrors -- without leaking, and
+ * resets never save/restore pointers.
+ *
+ * Buffers are grow-once at the payload's fixed protocol maximum,
+ * allocated lazily by the nfs4_result_ensure_*() helpers, and live
+ * as long as the owning result slot (the daemon's thread-local
+ * slots never release them, mirroring tl_results itself).
+ * nfs4_result_scratch_release() exists for harnesses that want a
+ * leak-clean teardown.  A zeroed struct (calloc'd slot array) is
+ * the valid initial state: NULL pointers mean "not yet allocated".
+ * ----------------------------------------------------------------------- */
+struct nfs4_result_scratch {
+	uint8_t *read_data;                        /* MDS_XATTR_VAL_MAX      */
+	uint8_t *rp_data[NFS4_READ_PLUS_MAX_SEGS]; /* MDS_XATTR_VAL_MAX each */
+	uint8_t *xattr_value;                      /* MDS_XATTR_VAL_MAX      */
+	char    (*listx_names)[MDS_XATTR_NAME_MAX + 1]; /* LISTXATTRS rows   */
+};
+
 /* Tagged union of operation results. */
 struct nfs4_result {
 	enum nfs_opnum4  opnum;
 	enum nfs4_status status;
+	/* Payload buffer ownership -- deliberately OUTSIDE the union;
+	 * see struct nfs4_result_scratch above. */
+	struct nfs4_result_scratch scratch;
 	union {
 		/* NFSv4.1 */
 		struct nfs4_res_access         access;
@@ -1563,6 +1606,34 @@ struct nfs4_result {
 		struct nfs4_res_removexattr    removexattr;
 	} res;
 };
+
+/* -----------------------------------------------------------------------
+ * Scratch ensure helpers (Wave 2).
+ *
+ * Each helper lazily allocates the payload's fixed maximum in the
+ * result's scratch block, re-points the corresponding union arm's
+ * borrowed mirror, and returns the buffer.  NULL (or -1) means
+ * allocation failure; callers surface NFS4ERR_RESOURCE.  Producers
+ * MUST call the helper before writing payload bytes -- the mirror
+ * pointer starts NULL and is cleared by every slot reset.
+ * ----------------------------------------------------------------------- */
+
+/** Ensure res.read.data (MDS_XATTR_VAL_MAX bytes). */
+uint8_t *nfs4_result_ensure_read(struct nfs4_result *r);
+
+/** Ensure res.read_plus.segs[seg].u.data.data (MDS_XATTR_VAL_MAX). */
+uint8_t *nfs4_result_ensure_rp_seg(struct nfs4_result *r, uint32_t seg);
+
+/** Ensure res.getxattr.value (MDS_XATTR_VAL_MAX bytes). */
+uint8_t *nfs4_result_ensure_xattr_value(struct nfs4_result *r);
+
+/** Ensure res.listxattrs.names (NFS4_LISTXATTRS_MAX rows). 0 / -1. */
+int nfs4_result_ensure_listxattrs(struct nfs4_result *r);
+
+/** Free every scratch buffer and zero the block.  NULL-safe.  For
+ *  test/bench teardown; the daemon's thread-local slots never call
+ *  this (buffers live for the worker thread's lifetime). */
+void nfs4_result_scratch_release(struct nfs4_result *r);
 
 /* -----------------------------------------------------------------------
  * Compound processing context

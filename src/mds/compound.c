@@ -1881,13 +1881,106 @@ void nfs4_result_destroy(struct nfs4_result *r)
 		return;
 	}
 	/*
-	 * Only the layoutget result currently owns heap state; other
-	 * opnums fall through and the call is a no-op.  When future
-	 * results add heap buffers, extend this dispatcher case-wise.
+	 * Only the layoutget result currently owns PER-REQUEST heap
+	 * state; other opnums fall through and the call is a no-op.
+	 * The scratch block (r->scratch) is deliberately NOT touched
+	 * here: it is slot-lifetime state reused across requests (see
+	 * struct nfs4_result_scratch), released only by
+	 * nfs4_result_scratch_release().
 	 */
 	if (r->opnum == OP_LAYOUTGET) {
 		nfs4_res_layoutget_destroy(&r->res.layoutget);
 	}
+}
+
+/* -----------------------------------------------------------------------
+ * Result payload scratch (Wave 2 heap-scratch refactor).
+ *
+ * Grow-once buffers owned by nfs4_result.scratch -- OUTSIDE the res
+ * union -- so an arm switch between compounds can clobber the arm
+ * bytes (including the borrowed mirror pointers) without leaking.
+ * Every helper allocates the payload's fixed protocol maximum on
+ * first use, re-points the arm's mirror, and returns the buffer;
+ * NULL / -1 mean allocation failure and callers surface
+ * NFS4ERR_RESOURCE.
+ * ----------------------------------------------------------------------- */
+
+uint8_t *nfs4_result_ensure_read(struct nfs4_result *r)
+{
+	if (r == NULL) {
+		return NULL;
+	}
+	if (r->scratch.read_data == NULL) {
+		r->scratch.read_data = malloc(MDS_XATTR_VAL_MAX);
+		if (r->scratch.read_data == NULL) {
+			return NULL;
+		}
+	}
+	r->res.read.data = r->scratch.read_data;
+	return r->scratch.read_data;
+}
+
+uint8_t *nfs4_result_ensure_rp_seg(struct nfs4_result *r, uint32_t seg)
+{
+	if (r == NULL || seg >= NFS4_READ_PLUS_MAX_SEGS) {
+		return NULL;
+	}
+	if (r->scratch.rp_data[seg] == NULL) {
+		r->scratch.rp_data[seg] = malloc(MDS_XATTR_VAL_MAX);
+		if (r->scratch.rp_data[seg] == NULL) {
+			return NULL;
+		}
+	}
+	r->res.read_plus.segs[seg].u.data.data = r->scratch.rp_data[seg];
+	return r->scratch.rp_data[seg];
+}
+
+uint8_t *nfs4_result_ensure_xattr_value(struct nfs4_result *r)
+{
+	if (r == NULL) {
+		return NULL;
+	}
+	if (r->scratch.xattr_value == NULL) {
+		r->scratch.xattr_value = malloc(MDS_XATTR_VAL_MAX);
+		if (r->scratch.xattr_value == NULL) {
+			return NULL;
+		}
+	}
+	r->res.getxattr.value = r->scratch.xattr_value;
+	return r->scratch.xattr_value;
+}
+
+int nfs4_result_ensure_listxattrs(struct nfs4_result *r)
+{
+	if (r == NULL) {
+		return -1;
+	}
+	if (r->scratch.listx_names == NULL) {
+		r->scratch.listx_names =
+			calloc(NFS4_LISTXATTRS_MAX,
+			       sizeof(r->scratch.listx_names[0]));
+		if (r->scratch.listx_names == NULL) {
+			return -1;
+		}
+	}
+	r->res.listxattrs.names = r->scratch.listx_names;
+	return 0;
+}
+
+void nfs4_result_scratch_release(struct nfs4_result *r)
+{
+	uint32_t i;
+
+	if (r == NULL) {
+		return;
+	}
+	free(r->scratch.read_data);
+	for (i = 0; i < NFS4_READ_PLUS_MAX_SEGS; i++) {
+		free(r->scratch.rp_data[i]);
+	}
+	free(r->scratch.xattr_value);
+	free(r->scratch.listx_names);
+	memset(&r->scratch, 0, sizeof(r->scratch));
 }
 
 /* -----------------------------------------------------------------------
@@ -2108,9 +2201,22 @@ uint32_t compound_process(struct compound_data *cd,
 		 * layoutget heap buffer reachable; memset() alone does
 		 * not free it.  nfs4_result_destroy() dispatches by the
 		 * stored opnum, so it must run BEFORE memset clears it.
+		 *
+		 * Wave 2: the scratch block owns slot-lifetime payload
+		 * buffers and must SURVIVE the reset -- save/restore it
+		 * around the memset (a dozen pointer stores).  The
+		 * union's borrowed mirrors are wiped by the memset and
+		 * re-pointed by the nfs4_result_ensure_*() helpers at
+		 * op time.
 		 */
 		nfs4_result_destroy(&results[i]);
-		memset(&results[i], 0, sizeof(results[i]));
+		{
+			struct nfs4_result_scratch keep =
+				results[i].scratch;
+
+			memset(&results[i], 0, sizeof(results[i]));
+			results[i].scratch = keep;
+		}
 		results[i].opnum = ops[i].opnum;
 
 		if (do_sample && i < 64) {

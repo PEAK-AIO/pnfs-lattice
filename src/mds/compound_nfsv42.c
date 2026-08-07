@@ -351,6 +351,9 @@ enum nfs4_status op_read_plus(struct compound_data *cd,
 			count = MDS_XATTR_VAL_MAX;
 }
 
+		if (nfs4_result_ensure_rp_seg(res, 0) == NULL) {
+			return NFS4ERR_RESOURCE;
+		}
 		st = mds_proxy_read(cd->proxy, cd->cat, cd->current_fh.fileid,
 				    inode.size,
 				    a->offset, count,
@@ -1004,6 +1007,9 @@ enum nfs4_status op_getxattr(struct compound_data *cd,
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);
 		}
+		if (nfs4_result_ensure_xattr_value(res) == NULL) {
+			return NFS4ERR_RESOURCE;
+		}
 		r->value_len = out_len;
 		if (out_len > 0) {
 			memcpy(r->value, buf, out_len);
@@ -1025,6 +1031,10 @@ enum nfs4_status op_getxattr(struct compound_data *cd,
 		return NFS4ERR_XATTR2BIG;
 	}
 
+	if (nfs4_result_ensure_xattr_value(res) == NULL) {
+		free(val);
+		return NFS4ERR_RESOURCE;
+	}
 	r->value_len = vallen;
 	if (vallen > 0 && val != NULL) {
 		memcpy(r->value, val, vallen);
@@ -1194,6 +1204,9 @@ enum nfs4_status op_listxattrs(struct compound_data *cd,
 	}
 
 	memset(r, 0, sizeof(*r));
+	if (nfs4_result_ensure_listxattrs(res) != 0) {
+		return NFS4ERR_RESOURCE;
+	}
 	ctx.res      = r;
 	ctx.skip     = a->cookie;
 	ctx.index    = 0;

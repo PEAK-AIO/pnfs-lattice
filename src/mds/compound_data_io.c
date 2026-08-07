@@ -1992,6 +1992,10 @@ enum nfs4_status op_read(struct compound_data *cd,
 				val_len = a->count;
 }
 
+			if (nfs4_result_ensure_read(res) == NULL) {
+				free(val);
+				return NFS4ERR_RESOURCE;
+			}
 			r->data_len = val_len;
 			if (val_len > 0) {
 				memcpy(r->data, val, val_len);
@@ -2107,6 +2111,9 @@ proxy_read:
 			return mds_status_to_nfs4(st);
 		}
 
+		if (nfs4_result_ensure_read(res) == NULL) {
+			return NFS4ERR_RESOURCE;
+		}
 		st = mds_proxy_read(cd->proxy, cd->cat, cd->current_fh.fileid,
 				    proxy_inode.size,
 				    a->offset, count,
