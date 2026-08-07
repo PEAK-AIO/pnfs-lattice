@@ -2091,6 +2091,175 @@ void nfs4_op_scratch_release(struct nfs4_op *op)
 	memset(&op->scratch, 0, sizeof(op->scratch));
 }
 
+/* Convenience: zero one union arm.  Plain memset call sites read
+ * better than a macro here, but the arm list below is long. */
+#define NFS4_RESET_ARM(r_, field_) \
+	memset(&(r_)->res.field_, 0, sizeof((r_)->res.field_))
+
+/* NOLINTNEXTLINE(readability-function-cognitive-complexity): flat opnum->arm map */
+void nfs4_result_reset(struct nfs4_result *r, enum nfs_opnum4 opnum)
+{
+	if (r == NULL) {
+		return;
+	}
+
+	/*
+	 * Zero exactly the arm the op's handler writes and its encoder
+	 * (or error body) reads -- the mapping mirrors the switch in
+	 * encode_one_result() and the LOCK/LOCKT exception in
+	 * encode_error_body().  The scratch block outside the union is
+	 * never touched; borrowed mirrors inside the cleared arm are
+	 * re-pointed by the nfs4_result_ensure_*() helpers at op time.
+	 */
+	switch (opnum) {
+	case OP_SEQUENCE:
+	case OP_BIND_CONN_TO_SESSION: /* encoder echoes res.sequence */
+		NFS4_RESET_ARM(r, sequence);
+		break;
+	case OP_EXCHANGE_ID:
+		NFS4_RESET_ARM(r, exchange_id);
+		break;
+	case OP_CREATE_SESSION:
+		NFS4_RESET_ARM(r, create_session);
+		break;
+	case OP_GETFH:
+		NFS4_RESET_ARM(r, getfh);
+		break;
+	case OP_GETATTR:
+		NFS4_RESET_ARM(r, getattr);
+		break;
+	case OP_CREATE:
+		NFS4_RESET_ARM(r, create);
+		break;
+	case OP_READDIR:
+		NFS4_RESET_ARM(r, readdir);
+		break;
+	case OP_OPEN:
+		NFS4_RESET_ARM(r, open);
+		break;
+	case OP_CLOSE:
+	case OP_OPEN_DOWNGRADE:       /* shares res.close.stateid */
+		NFS4_RESET_ARM(r, close);
+		break;
+	case OP_REMOVE:
+	case OP_RENAME:
+	case OP_LINK:
+		NFS4_RESET_ARM(r, change_info);
+		break;
+	case OP_LOCK:
+	case OP_LOCKT:                /* NFS4ERR_DENIED body reads lock.denied */
+		NFS4_RESET_ARM(r, lock);
+		break;
+	case OP_LOCKU:
+		NFS4_RESET_ARM(r, locku);
+		break;
+	case OP_READ:
+		NFS4_RESET_ARM(r, read);
+		break;
+	case OP_WRITE:
+		NFS4_RESET_ARM(r, write);
+		break;
+	case OP_SECINFO:
+	case OP_SECINFO_NO_NAME:
+		NFS4_RESET_ARM(r, secinfo);
+		break;
+	case OP_COMMIT:
+		NFS4_RESET_ARM(r, commit);
+		break;
+	case OP_READLINK:
+		NFS4_RESET_ARM(r, readlink);
+		break;
+	case OP_TEST_STATEID:
+		NFS4_RESET_ARM(r, test_stateid);
+		break;
+	case OP_GET_DIR_DELEGATION:
+		NFS4_RESET_ARM(r, get_dir_delegation);
+		break;
+	case OP_LAYOUTGET:
+		NFS4_RESET_ARM(r, layoutget);
+		break;
+	case OP_GETDEVICEINFO:
+		NFS4_RESET_ARM(r, getdeviceinfo);
+		break;
+	case OP_LAYOUTRETURN:
+		NFS4_RESET_ARM(r, layoutreturn);
+		break;
+	case OP_LAYOUTCOMMIT:
+		NFS4_RESET_ARM(r, layoutcommit);
+		break;
+	case OP_SEEK:
+		NFS4_RESET_ARM(r, seek);
+		break;
+	case OP_COPY:
+		NFS4_RESET_ARM(r, copy);
+		break;
+	case OP_COPY_NOTIFY:
+		NFS4_RESET_ARM(r, copy_notify);
+		break;
+	case OP_OFFLOAD_STATUS:
+		NFS4_RESET_ARM(r, offload_status);
+		break;
+	case OP_IO_ADVISE:
+		NFS4_RESET_ARM(r, io_advise);
+		break;
+	case OP_READ_PLUS:
+		NFS4_RESET_ARM(r, read_plus);
+		break;
+	case OP_ACCESS:
+		NFS4_RESET_ARM(r, access);
+		break;
+	case OP_GETXATTR:
+		NFS4_RESET_ARM(r, getxattr);
+		break;
+	case OP_SETXATTR:
+		NFS4_RESET_ARM(r, setxattr);
+		break;
+	case OP_LISTXATTRS:
+		NFS4_RESET_ARM(r, listxattrs);
+		break;
+	case OP_REMOVEXATTR:
+		NFS4_RESET_ARM(r, removexattr);
+		break;
+	/*
+	 * Status-only results: encode_one_result emits nothing past
+	 * the status word for these and their error bodies are void,
+	 * so no arm bytes are ever read -- zero nothing.
+	 */
+	case OP_PUTROOTFH:
+	case OP_PUTFH:
+	case OP_SAVEFH:
+	case OP_RESTOREFH:
+	case OP_LOOKUP:
+	case OP_LOOKUPP:
+	case OP_SETATTR:              /* encoder emits a static bitmap */
+	case OP_VERIFY:
+	case OP_NVERIFY:
+	case OP_OPENATTR:
+	case OP_DELEGRETURN:
+	case OP_DESTROY_SESSION:
+	case OP_DESTROY_CLIENTID:
+	case OP_FREE_STATEID:
+	case OP_BACKCHANNEL_CTL:
+	case OP_RECLAIM_COMPLETE:
+	case OP_ALLOCATE:
+	case OP_DEALLOCATE:
+	case OP_LAYOUTERROR:
+	case OP_LAYOUTSTATS:
+	case OP_OFFLOAD_CANCEL:
+	case OP_WRITE_SAME:
+	case OP_CLONE:
+		break;
+	default:
+		/* Unknown / future opnums: clear the whole union (~13 KB
+		 * post-refactor) rather than guess. */
+		memset(&r->res, 0, sizeof(r->res));
+		break;
+	}
+
+	r->opnum = opnum;
+	r->status = (enum nfs4_status)0;
+}
+
 /* -----------------------------------------------------------------------
  * Public API
  * ----------------------------------------------------------------------- */
@@ -2304,28 +2473,21 @@ uint32_t compound_process(struct compound_data *cd,
 		cd->op_index = i;
 		/*
 		 * Phase C / Step 1: free any heap state attached to a
-		 * recycled thread-local results slot before zeroing it.
+		 * recycled thread-local results slot before resetting it.
 		 * The previous compound on this thread may have left a
-		 * layoutget heap buffer reachable; memset() alone does
-		 * not free it.  nfs4_result_destroy() dispatches by the
-		 * stored opnum, so it must run BEFORE memset clears it.
+		 * layoutget heap buffer reachable; nfs4_result_destroy()
+		 * dispatches by the STORED opnum, so it must run before
+		 * the reset overwrites it.
 		 *
-		 * Wave 2: the scratch block owns slot-lifetime payload
-		 * buffers and must SURVIVE the reset -- save/restore it
-		 * around the memset (a dozen pointer stores).  The
-		 * union's borrowed mirrors are wiped by the memset and
-		 * re-pointed by the nfs4_result_ensure_*() helpers at
-		 * op time.
+		 * Wave 2 (T2.3): the reset zeroes only the incoming op's
+		 * union arm -- the full-union memset this replaces was
+		 * 524,496 bytes per op before the scratch refactor.  The
+		 * slot's scratch block is untouched by design (ownership
+		 * lives outside the union), and the fresh-thread hazard
+		 * stays closed by rpc_server's calloc'd slot arrays.
 		 */
 		nfs4_result_destroy(&results[i]);
-		{
-			struct nfs4_result_scratch keep =
-				results[i].scratch;
-
-			memset(&results[i], 0, sizeof(results[i]));
-			results[i].scratch = keep;
-		}
-		results[i].opnum = ops[i].opnum;
+		nfs4_result_reset(&results[i], ops[i].opnum);
 
 		if (do_sample && i < 64) {
 			clock_gettime(CLOCK_MONOTONIC, &t_op_start);

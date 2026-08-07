@@ -1642,6 +1642,17 @@ struct nfs4_result {
 	} res;
 };
 
+/*
+ * Wave-2 guardrail: the whole point of the scratch refactor is that
+ * nfs4_result stays small enough for cheap per-arm resets (the union
+ * max is getdeviceinfo at ~13 KB; it was 524,496 B before the
+ * refactor).  If a new inline payload regrows the union past this
+ * ceiling, move it to nfs4_result_scratch instead of bumping the
+ * limit.
+ */
+_Static_assert(sizeof(struct nfs4_result) <= 20480,
+	       "nfs4_result regrew -- move payloads to nfs4_result_scratch");
+
 /* -----------------------------------------------------------------------
  * Scratch ensure helpers (Wave 2).
  *
@@ -1678,6 +1689,18 @@ uint8_t *nfs4_op_ensure_sx_value(struct nfs4_op *op);
 
 /** Free the op's scratch buffers and zero the block.  NULL-safe. */
 void nfs4_op_scratch_release(struct nfs4_op *op);
+
+/**
+ * Prepare a (possibly recycled) result slot for @p opnum: zero the
+ * status and exactly the union arm that op produces/encodes, set the
+ * opnum, and leave the scratch block untouched.  Callers must run
+ * nfs4_result_destroy() first so per-request heap state (layoutget
+ * arrays) is freed before the arm bytes are cleared.  Ops whose
+ * results are status-only on the wire (and whose error bodies are
+ * void) zero nothing; unknown opnums fall back to clearing the whole
+ * union, which is the safety net for future ops.
+ */
+void nfs4_result_reset(struct nfs4_result *r, enum nfs_opnum4 opnum);
 
 /** Free every scratch buffer and zero the block.  NULL-safe.  For
  *  test/bench teardown; the daemon's thread-local slots never call
