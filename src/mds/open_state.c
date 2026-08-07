@@ -551,6 +551,9 @@ int open_state_open(struct open_state_table *ot,
             existing->share_access | share_access;
         uint32_t merged_deny =
             existing->share_deny | share_deny;
+        uint32_t prev_seqid;
+        uint32_t prev_access;
+        uint32_t prev_deny;
 
         /* Re-validate share reservations against every OTHER open on
          * the file using the upgraded (merged) modes.  Skipping
@@ -566,6 +569,12 @@ int open_state_open(struct open_state_table *ot,
             stateid_lock_stripe(existing->stateid.other);
         pthread_rwlock_wrlock(
             &ot->stateid_locks[stateid_lock_idx]);
+
+        /* Snapshot the pre-upgrade values so a failed persist can
+         * restore them (T4.1 persist-failure policy below). */
+        prev_seqid = existing->stateid.seqid;
+        prev_access = existing->share_access;
+        prev_deny = existing->share_deny;
 
         /* RFC 8881 S8.2.2: bump seqid by one; the value 0 is
          * reserved, so 0xFFFFFFFF wraps to 1 (not 0). */
@@ -583,9 +592,21 @@ int open_state_open(struct open_state_table *ot,
             &ot->stateid_locks[stateid_lock_idx]);
 
         /* Persist updated row (same primary key as the original
-         * insert, so this is an in-place update). */
+         * insert, so this is an in-place update).
+         *
+         * T4.1 persist-failure policy: fail the OPEN.  Under the
+         * any-MDS routing contract the durable row is what makes
+         * this open's share reservation visible to peer MDSes;
+         * publishing in-memory state whose persist failed would
+         * let a peer grant a conflicting open.  The RonDB layer
+         * already retries transient NDB errors internally, so a
+         * failure surfacing here is treated as real: restore the
+         * pre-upgrade state and return -5 (mapped to
+         * NFS4ERR_DELAY -- the client retries once NDB heals). */
         if (ot->cat != NULL && !ot->skip_ndb_persist) {
             struct mds_coord_open_row row;
+            enum mds_status pst;
+
             memset(&row, 0, sizeof(row));
             memcpy(row.stateid_other, existing->stateid.other,
                    NFS4_OTHER_SIZE);
@@ -601,7 +622,22 @@ int open_state_open(struct open_state_table *ot,
             row.open_owner_len = open_owner_len;
             row.owner_mds_id = ot->mds_id;
             row.owner_boot_epoch = ot->boot_epoch;
-            (void)mds_coord_open_put(ot->cat, &row);
+            pst = mds_coord_open_put(ot->cat, &row);
+            /* NOSUPPORT = the backend has no shared open-state
+             * table at all; nothing durable was expected, so it
+             * is not a persist failure (same effective contract
+             * as cat == NULL). */
+            if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+                pthread_rwlock_wrlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                existing->stateid.seqid = prev_seqid;
+                existing->share_access = prev_access;
+                existing->share_deny = prev_deny;
+                pthread_rwlock_unlock(
+                    &ot->stateid_locks[stateid_lock_idx]);
+                rc = -5; /* NFS4ERR_DELAY */
+                goto out_unlock;
+            }
         }
 
         pthread_mutex_unlock(&ot->locks[file_lock_idx]);
@@ -658,9 +694,18 @@ int open_state_open(struct open_state_table *ot,
     *out_stateid = os->stateid;
 
     /* Persist to RonDB if catalogue is set (shared-attr)
-     * and transient caching is off. */
+     * and transient caching is off.
+     *
+     * T4.1 persist-failure policy: fail the OPEN.  A stateid whose
+     * durable row was never written must not be handed to the
+     * client -- peer MDSes would miss its share reservation and a
+     * restart would forget it entirely.  Unwind the in-memory
+     * insert (stateid hash + file chain) and return -5 (mapped to
+     * NFS4ERR_DELAY so the client retries once NDB heals). */
     if (ot->cat != NULL && !ot->skip_ndb_persist) {
         struct mds_coord_open_row row;
+        enum mds_status pst;
+
         memset(&row, 0, sizeof(row));
         memcpy(row.stateid_other, os->stateid.other, NFS4_OTHER_SIZE);
         row.seqid = os->stateid.seqid;
@@ -674,7 +719,19 @@ int open_state_open(struct open_state_table *ot,
         row.open_owner_len = open_owner_len;
         row.owner_mds_id = ot->mds_id;
         row.owner_boot_epoch = ot->boot_epoch;
-        (void)mds_coord_open_put(ot->cat, &row);
+        pst = mds_coord_open_put(ot->cat, &row);
+        /* NOSUPPORT = no shared open-state table on this backend;
+         * treated as "nothing to persist", same as cat == NULL. */
+        if (pst != MDS_OK && pst != MDS_ERR_NOSUPPORT) {
+            pthread_rwlock_wrlock(
+                &ot->stateid_locks[stateid_lock_idx]);
+            unhash_stateid(ot, os);
+            pthread_rwlock_unlock(
+                &ot->stateid_locks[stateid_lock_idx]);
+            unlink_from_file(ot, os);
+            rc = -5; /* NFS4ERR_DELAY */
+            goto out_unlock_free;
+        }
     }
 
     pthread_mutex_unlock(&ot->locks[file_lock_idx]);

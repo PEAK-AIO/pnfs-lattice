@@ -249,6 +249,11 @@ void open_state_table_set_skip_ndb(struct open_state_table *ot, bool skip);
  *         -1 = NFS4ERR_SHARE_DENIED (share conflict).
  *         -2 = allocation failure (NFS4ERR_RESOURCE).
  *         -3 = invalid parameters.
+ *         -5 = durable persist of the open state failed
+ *              (NFS4ERR_DELAY).  The in-memory mutation has been
+ *              fully unwound: a fresh open is removed again, an
+ *              upgrade has its previous seqid/share bits restored.
+ *              No stateid is published to the client.
  */
 int open_state_open(struct open_state_table *ot,
                     uint64_t clientid,
