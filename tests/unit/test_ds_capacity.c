@@ -24,12 +24,14 @@
 
 static int tests_run;
 static int tests_passed;
+static int test_failed;   /* Set by ASSERT_* so RUN_TEST records it. */
 
 #define ASSERT_EQ(a, b) do { \
     if ((long long)(a) != (long long)(b)) { \
         fprintf(stderr, "  FAIL %s:%d: %s (%lld) != %s (%lld)\n", \
                 __FILE__, __LINE__, #a, (long long)(a), \
                 #b, (long long)(b)); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
@@ -38,17 +40,26 @@ static int tests_passed;
     if (!(cond)) { \
         fprintf(stderr, "  FAIL %s:%d: !(%s)\n", \
                 __FILE__, __LINE__, #cond); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
 
+/* A failed assertion must fail the suite: RUN_TEST previously
+ * counted every test as passed because the ASSERT_* macros only
+ * printed and returned, which let stale assertions rot silently. */
 #define RUN_TEST(fn) do { \
     tests_run++; \
+    test_failed = 0; \
     fprintf(stdout, "  %-44s", #fn); \
     fflush(stdout); \
     fn(); \
-    tests_passed++; \
-    fprintf(stdout, "PASS\n"); \
+    if (test_failed == 0) { \
+        tests_passed++; \
+        fprintf(stdout, "PASS\n"); \
+    } else { \
+        fprintf(stdout, "FAILED\n"); \
+    } \
 } while (0)
 
 /*
@@ -184,8 +195,6 @@ static void test_stop_null_safe(void)
 {
     ds_capacity_stop(NULL);
     /* Reaching here means no crash. */
-    tests_passed--;  /* RUN_TEST increments on return; keep at +0 overall */
-    tests_passed++;
 }
 
 /*

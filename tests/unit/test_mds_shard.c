@@ -16,11 +16,13 @@
 #include "mds_shard.h"
 
 static int tests_run, tests_passed;
+static int test_failed;   /* Set by ASSERT_* so RUN_TEST records it. */
 
 #define ASSERT_EQ(a, b) do { \
     if ((a) != (b)) { \
         fprintf(stderr, "  FAIL %s:%d: %s (%d) != %s (%d)\n", \
                 __FILE__, __LINE__, #a, (int)(a), #b, (int)(b)); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
@@ -29,17 +31,27 @@ static int tests_run, tests_passed;
     if ((a) == (b)) { \
         fprintf(stderr, "  FAIL %s:%d: %s == %s\n", \
                 __FILE__, __LINE__, #a, #b); \
+        test_failed = 1; \
         return; \
     } \
 } while (0)
 
 #define ASSERT_TRUE(x) ASSERT_NE((x), 0)
 
+/* A failed assertion must fail the suite: RUN_TEST previously
+ * counted every test as passed because the ASSERT_* macros only
+ * printed and returned, which let stale assertions rot silently. */
 #define RUN_TEST(fn) do { \
     tests_run++; \
+    test_failed = 0; \
     fprintf(stdout, "  %-50s", #fn); fflush(stdout); \
-    fn(); tests_passed++; \
-    fprintf(stdout, "PASS\n"); \
+    fn(); \
+    if (test_failed == 0) { \
+        tests_passed++; \
+        fprintf(stdout, "PASS\n"); \
+    } else { \
+        fprintf(stdout, "FAILED\n"); \
+    } \
 } while (0)
 
 static void test_shard_map_create_destroy(void)
