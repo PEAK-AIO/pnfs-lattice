@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-DS I/O limit prober (Wave 5)** — new `ds_io_limits` module +
+  `ds_iolimit_probe_ms` config key (default 60000; 0 disables).  Each
+  ONLINE generic DS is probed with NFSv3 FSINFO for its real
+  `rtmax`/`wtmax`; the effective values (capped 1 MiB, rounded down to
+  4 KiB, 64 KiB unverified fallback, last-known-good on probe failure)
+  feed GETDEVICEINFO's per-DS `ffdv_rsize`/`ffdv_wsize`.  Limits below
+  4 KiB mark the DS ineligible for new layout placement.  Any
+  effective change bumps the DS's device-ID generation (bytes [8..11]
+  of the device ID) so clients re-fetch device info; a DECREASE
+  additionally recalls the DS's outstanding layouts — after the safe
+  values are published, never before.  New metrics:
+  `pnfs_mds_ds_iolimit_probe_failures`,
+  `pnfs_mds_ds_iolimit_capability_recalls` (counters) and
+  `pnfs_mds_ds_iolimit_min_read`/`_write` (gauges).
 - **Protocol state-table sizing keys (Wave 4)** —
   `open_state_file_buckets`, `open_state_stateid_buckets`,
   `open_state_lock_stripes`, `session_client_buckets`,
@@ -64,6 +78,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   permanent) is identical to the synchronous path.
 
 ### Changed
+- **Truthful wire size advertisement (Wave 5)** — FATTR4_MAXREAD /
+  FATTR4_MAXWRITE now emit `min(64 KiB proxy per-op ceiling, weakest
+  probed DS limit)` instead of a hardcoded 1 MiB the MDS proxy path
+  always short-served (its READ/WRITE scratch is 64 KiB per op; pNFS
+  data-path sizing is unaffected — flex-files clients take per-DS
+  limits from GETDEVICEINFO).  CREATE_SESSION now negotiates
+  `ca_maxresponsesize` against the real 256 KiB reply buffer and
+  echoes the negotiated response/cached caps in the reply (previously:
+  accepted up to 1 MiB, then emitted hardcoded 1 MiB / 64 KiB
+  regardless); the cached cap never exceeds the response cap.  The
+  GETDEVICEINFO result union arm shrank from 16 DS rows to 2 (a device
+  ID resolves to exactly one DS), cutting ~11 KB per result slot.
 - **OPEN-state persistence runs outside the stripe lock (Wave 4)** —
   `open_state_open()` used to execute its synchronous NDB write while
   holding the per-file stripe mutex, serialising every OPEN/CLOSE on
@@ -138,6 +164,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **GETDEVICEINFO advertised I/O sizes the DS may reject (Wave 5)** —
+  the flex-files `ffdv_rsize`/`ffdv_wsize` fields were hardcoded to
+  1 MiB.  Clients write DIRECTLY to the DS at the advertised size, so
+  against a data server with a smaller `wtmax` (e.g. a stock 512 KiB
+  knfsd export) every large WRITE was rejected and hard-mounted
+  clients wedged in an unkillable retry loop.  The fields now carry
+  the DS's probed limits (see the Wave 5 prober under Added); with
+  probing disabled the legacy constants are preserved bit-for-bit.
+- **Oversized replies were slot-cached despite the negotiated cap
+  (Wave 5)** — RFC 8881 §2.10.6.1.3 requires a reply larger than
+  `ca_maxresponsesize_cached` NOT be cached and, when the client set
+  `sa_cachethis`, be answered with `NFS4ERR_REP_TOO_BIG_TO_CACHE`.
+  The reply path now enforces the cap post-encode against the real
+  reply bytes; `sa_cachethis=false` replies keep the historical
+  cache-always behaviour (RFC-permitted) so legal replays keep
+  working.  Regression-tested over a loopback wire flow.
 - **Silently ignored OPEN-state persist failures (Wave 4)** — both
   `mds_coord_open_put()` call sites discarded the return value, so a
   failed NDB write published in-memory open state as though durable:

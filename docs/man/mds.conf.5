@@ -481,6 +481,35 @@ disables the background sweep;
 .BR "mds-admin ds capacity probe-now"
 still forces an on-demand sweep.
 .TP
+.B ds_iolimit_probe_ms
+.IR uint ,
+range
+.I "0..86400000"
+(default
+.BR 60000 ).
+Per-DS I/O limit probe interval.  The prober asks each ONLINE generic
+DS for its real
+.IR rtmax / wtmax
+via NFSv3
+.B FSINFO
+so
+.B GETDEVICEINFO
+advertises per-DS
+.IR ffdv_rsize / ffdv_wsize
+values the DS actually accepts \(em flex-files clients write DIRECTLY
+to the DS at these sizes, and an oversized advertisement against a DS
+with a smaller write limit wedges hard-mounted clients.  Probed values
+are capped at 1 MiB and rounded down to a 4 KiB multiple; a DS that
+has never answered advertises a safe 64 KiB fallback; a failed probe
+keeps the last-known-good values; decoded limits below 4 KiB mark the
+DS ineligible for new layout placement.  Any effective change bumps
+the DS's device-ID generation (clients re-fetch device info); a
+decrease additionally recalls the DS's outstanding layouts after the
+new values are published.
+.B 0
+disables probing entirely and restores the legacy hardcoded 1 MiB
+wire constants.
+.TP
 .B ds_gc_workers
 .IR uint ,
 range
