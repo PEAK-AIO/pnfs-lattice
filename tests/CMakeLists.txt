@@ -327,9 +327,11 @@ add_executable(test_failover         integration/test_failover.c)
 add_executable(test_client_lifecycle integration/test_client_lifecycle.c)
 add_executable(bench_create_layout_fusion
     integration/bench_create_layout_fusion.c)
+add_executable(bench_mk_rm_scale
+    integration/bench_mk_rm_scale.c)
 
 foreach(test_target test_cluster test_failover test_client_lifecycle
-                    bench_create_layout_fusion)
+                    bench_create_layout_fusion bench_mk_rm_scale)
     target_include_directories(${test_target} PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src/tools
