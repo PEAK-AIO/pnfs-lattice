@@ -2,13 +2,15 @@
  * Copyright (c) 2026 PeakAIO
  * SPDX-License-Identifier: MIT
  *
- * inode_cache.h -- In-memory inode LRU cache.
+ * inode_cache.h -- In-memory inode LRU cache (16-way striped).
  *
  * Hot inodes are cached to avoid catalogue reads on every operation.
  * The cache is write-through: callers are responsible for persisting
  * inode changes to the catalogue before (or after) calling inode_cache_put().
  *
- * Thread-safe: all operations hold an internal mutex.
+ * Thread-safe: the cache is partitioned into 16 independent stripes
+ * (selected by fileid hash), each guarded by its own mutex, so
+ * concurrent operations on different stripes never contend.
  */
 
 #ifndef INODE_CACHE_H
@@ -23,8 +25,12 @@ struct inode_cache;
 /**
  * Create an inode cache.
  *
- * @param max_entries  Maximum number of cached inodes.  When the cache
- *                     is full, the least-recently-used entry is evicted.
+ * @param max_entries  Total cache budget in inodes.  The budget is
+ *                     divided across 16 stripes (ceil(max/16) each);
+ *                     when a stripe is full, its least-recently-used
+ *                     entry is evicted.  Eviction is therefore
+ *                     stripe-local: a skewed fileid distribution can
+ *                     evict from a full stripe while others have room.
  * @param out          Receives the cache handle.
  * @return 0 on success, -1 on error (ENOMEM or invalid args).
  */
@@ -49,8 +55,8 @@ void inode_cache_set_ttl_ms(struct inode_cache *ic, uint32_t ttl_ms);
 /**
  * Look up an inode by fileid.
  *
- * On a hit the entry is promoted to MRU position and the inode is
- * copied into @inode.
+ * On a hit the entry is promoted to MRU position within its stripe
+ * and the inode is copied into @inode.
  *
  * @return 0 on cache hit, -1 on miss.
  */
@@ -61,8 +67,8 @@ int inode_cache_get(struct inode_cache *ic, uint64_t fileid,
  * Insert or update an inode in the cache.
  *
  * If an entry with the same fileid already exists it is updated and
- * promoted to MRU position.  If the cache is full the LRU entry is
- * evicted first.
+ * promoted to MRU position.  If the target stripe is full its LRU
+ * entry is evicted first.
  *
  * @return 0 on success, -1 on error.
  */

@@ -64,6 +64,51 @@ static struct mds_inode make_inode(uint64_t fileid, uint64_t size)
 }
 
 /* -----------------------------------------------------------------------
+ * Stripe-aware fileid helpers (Wave 3 T3.2)
+ *
+ * The cache is 16-way striped by splitmix64(fileid) % 16 with the
+ * capacity divided across stripes, so LRU eviction is stripe-local.
+ * Eviction-order tests must therefore use fileids that collide into
+ * the SAME stripe.  These helpers mirror the stripe selection in
+ * src/mds/inode_cache.c (IC_STRIPES / ic_stripe_idx).
+ * ----------------------------------------------------------------------- */
+
+#define IC_TEST_STRIPES 16
+
+static uint64_t test_splitmix64(uint64_t x)
+{
+	x ^= x >> 30;
+	x *= 0xbf58476d1ce4e5b9ULL;
+	x ^= x >> 27;
+	x *= 0x94d049bb133111ebULL;
+	x ^= x >> 31;
+	return x;
+}
+
+static uint32_t test_stripe_of(uint64_t fileid)
+{
+	return (uint32_t)(test_splitmix64(fileid) % IC_TEST_STRIPES);
+}
+
+/**
+ * Fill @ids with @n distinct fileids >= @base that all map to the
+ * same stripe as @base.
+ */
+static void pick_same_stripe_ids(uint64_t base, uint64_t *ids, uint32_t n)
+{
+	uint32_t stripe = test_stripe_of(base);
+	uint32_t found = 0;
+	uint64_t cand = base;
+
+	while (found < n) {
+		if (test_stripe_of(cand) == stripe) {
+			ids[found++] = cand;
+		}
+		cand++;
+	}
+}
+
+/* -----------------------------------------------------------------------
  * test_init_destroy -- basic lifecycle
  * ----------------------------------------------------------------------- */
 
@@ -171,35 +216,38 @@ static void test_invalidate(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_lru_eviction -- exceeding capacity evicts oldest
+ * test_lru_eviction -- exceeding a stripe's capacity evicts its oldest
  * ----------------------------------------------------------------------- */
 
 static void test_lru_eviction(void)
 {
 	struct inode_cache *ic = NULL;
 	struct mds_inode in, out;
+	uint64_t ids[4];
 
-	/* Cache holds only 3 entries. */
-	ASSERT_EQ(inode_cache_init(3, &ic), 0);
+	/* 48 total -> 3 entries per stripe; all four test fileids land
+	 * in ONE stripe so the eviction order is deterministic. */
+	ASSERT_EQ(inode_cache_init(48, &ic), 0);
+	pick_same_stripe_ids(1, ids, 4);
 
-	/* Insert fileids 1, 2, 3 (LRU order: 3=MRU, 1=LRU). */
-	in = make_inode(1, 0);
+	/* Insert ids[0..2] (stripe LRU order: [2]=MRU, [0]=LRU). */
+	in = make_inode(ids[0], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(2, 0);
+	in = make_inode(ids[1], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(3, 0);
-	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	ASSERT_EQ(inode_cache_count(ic), (uint32_t)3);
-
-	/* Insert fileid 4 -- should evict fileid 1 (LRU tail). */
-	in = make_inode(4, 0);
+	in = make_inode(ids[2], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	ASSERT_EQ(inode_cache_count(ic), (uint32_t)3);
 
-	ASSERT_EQ(inode_cache_get(ic, 1, &out), -1); /* evicted */
-	ASSERT_EQ(inode_cache_get(ic, 2, &out), 0);  /* still here */
-	ASSERT_EQ(inode_cache_get(ic, 3, &out), 0);
-	ASSERT_EQ(inode_cache_get(ic, 4, &out), 0);
+	/* Insert ids[3] -- should evict ids[0] (stripe LRU tail). */
+	in = make_inode(ids[3], 0);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+	ASSERT_EQ(inode_cache_count(ic), (uint32_t)3);
+
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), -1); /* evicted */
+	ASSERT_EQ(inode_cache_get(ic, ids[1], &out), 0);  /* still here */
+	ASSERT_EQ(inode_cache_get(ic, ids[2], &out), 0);
+	ASSERT_EQ(inode_cache_get(ic, ids[3], &out), 0);
 
 	inode_cache_destroy(ic);
 }
@@ -212,28 +260,31 @@ static void test_lru_promote_on_get(void)
 {
 	struct inode_cache *ic = NULL;
 	struct mds_inode in, out;
+	uint64_t ids[4];
 
-	ASSERT_EQ(inode_cache_init(3, &ic), 0);
+	/* 48 total -> 3 per stripe; same-stripe ids (see T3.2 note). */
+	ASSERT_EQ(inode_cache_init(48, &ic), 0);
+	pick_same_stripe_ids(1, ids, 4);
 
-	/* Insert 1, 2, 3. LRU: 3-MRU ... 1-LRU. */
-	in = make_inode(1, 0);
+	/* Insert ids[0..2]. Stripe LRU: [2]-MRU ... [0]-LRU. */
+	in = make_inode(ids[0], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(2, 0);
+	in = make_inode(ids[1], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(3, 0);
-	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-
-	/* Touch fileid 1 -- promotes it to MRU. LRU: 1-MRU ... 2-LRU. */
-	ASSERT_EQ(inode_cache_get(ic, 1, &out), 0);
-
-	/* Insert fileid 4 -- now fileid 2 is LRU and should be evicted. */
-	in = make_inode(4, 0);
+	in = make_inode(ids[2], 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
-	ASSERT_EQ(inode_cache_get(ic, 1, &out), 0);  /* promoted, safe */
-	ASSERT_EQ(inode_cache_get(ic, 2, &out), -1); /* evicted */
-	ASSERT_EQ(inode_cache_get(ic, 3, &out), 0);
-	ASSERT_EQ(inode_cache_get(ic, 4, &out), 0);
+	/* Touch ids[0] -- promotes it to MRU. LRU: [0]-MRU ... [1]-LRU. */
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), 0);
+
+	/* Insert ids[3] -- now ids[1] is LRU and should be evicted. */
+	in = make_inode(ids[3], 0);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), 0);  /* promoted, safe */
+	ASSERT_EQ(inode_cache_get(ic, ids[1], &out), -1); /* evicted */
+	ASSERT_EQ(inode_cache_get(ic, ids[2], &out), 0);
+	ASSERT_EQ(inode_cache_get(ic, ids[3], &out), 0);
 
 	inode_cache_destroy(ic);
 }
@@ -246,26 +297,29 @@ static void test_lru_promote_on_put(void)
 {
 	struct inode_cache *ic = NULL;
 	struct mds_inode in, out;
+	uint64_t ids[4];
 
-	ASSERT_EQ(inode_cache_init(3, &ic), 0);
+	/* 48 total -> 3 per stripe; same-stripe ids (see T3.2 note). */
+	ASSERT_EQ(inode_cache_init(48, &ic), 0);
+	pick_same_stripe_ids(1, ids, 4);
 
-	in = make_inode(1, 10);
+	in = make_inode(ids[0], 10);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(2, 20);
+	in = make_inode(ids[1], 20);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	in = make_inode(3, 30);
-	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-
-	/* Update fileid 1 (promotes to MRU). */
-	in = make_inode(1, 99);
-	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-
-	/* Insert fileid 4 -- fileid 2 is now LRU tail. */
-	in = make_inode(4, 40);
+	in = make_inode(ids[2], 30);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 
-	ASSERT_EQ(inode_cache_get(ic, 2, &out), -1); /* evicted */
-	ASSERT_EQ(inode_cache_get(ic, 1, &out), 0);
+	/* Update ids[0] (promotes to MRU). */
+	in = make_inode(ids[0], 99);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+
+	/* Insert ids[3] -- ids[1] is now the stripe's LRU tail. */
+	in = make_inode(ids[3], 40);
+	ASSERT_EQ(inode_cache_put(ic, &in), 0);
+
+	ASSERT_EQ(inode_cache_get(ic, ids[1], &out), -1); /* evicted */
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), 0);
 	ASSERT_EQ(out.size, (uint64_t)99); /* updated value */
 
 	inode_cache_destroy(ic);
@@ -279,29 +333,57 @@ static void test_many_entries(void)
 {
 	struct inode_cache *ic = NULL;
 	struct mds_inode in, out;
+	uint64_t ids[256];
+	uint64_t extra;
+	uint32_t fill[IC_TEST_STRIPES];
+	uint32_t per_stripe;
 	uint32_t i;
 	uint32_t cap = 256;
+	uint64_t cand;
 
 	ASSERT_EQ(inode_cache_init(cap, &ic), 0);
+	per_stripe = cap / IC_TEST_STRIPES; /* 16 */
+
+	/* Pick exactly per_stripe fileids for EVERY stripe so the total
+	 * budget is filled without any stripe overflowing (capacity is
+	 * enforced per stripe, not globally). */
+	memset(fill, 0, sizeof(fill));
+	i = 0;
+	cand = 1000;
+	while (i < cap) {
+		uint32_t s = test_stripe_of(cand);
+
+		if (fill[s] < per_stripe) {
+			fill[s]++;
+			ids[i++] = cand;
+		}
+		cand++;
+	}
 
 	for (i = 0; i < cap; i++) {
-		in = make_inode(1000 + i, i * 10);
+		in = make_inode(ids[i], i * 10);
 		ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	}
 	ASSERT_EQ(inode_cache_count(ic), cap);
 
-	/* Every entry should be retrievable. */
+	/* Every entry should be retrievable.  Gets run in insertion
+	 * order, so each stripe's relative LRU order is preserved. */
 	for (i = 0; i < cap; i++) {
-		ASSERT_EQ(inode_cache_get(ic, 1000 + i, &out), 0);
-		ASSERT_EQ(out.fileid, (uint64_t)(1000 + i));
+		ASSERT_EQ(inode_cache_get(ic, ids[i], &out), 0);
+		ASSERT_EQ(out.fileid, ids[i]);
 		ASSERT_EQ(out.size, (uint64_t)(i * 10));
 	}
 
-	/* One more evicts the LRU tail (fileid 1000). */
-	in = make_inode(9999, 0);
+	/* One more id in ids[0]'s stripe evicts that stripe's LRU tail,
+	 * which is ids[0] (the first insert into that stripe). */
+	extra = cand;
+	while (test_stripe_of(extra) != test_stripe_of(ids[0])) {
+		extra++;
+	}
+	in = make_inode(extra, 0);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	ASSERT_EQ(inode_cache_count(ic), cap);
-	ASSERT_EQ(inode_cache_get(ic, 1000, &out), -1);
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), -1);
 
 	inode_cache_destroy(ic);
 }
@@ -314,19 +396,23 @@ static void test_single_entry_cache(void)
 {
 	struct inode_cache *ic = NULL;
 	struct mds_inode in, out;
+	uint64_t ids[2];
 
+	/* max_entries=1 -> one entry per stripe; use two ids in the SAME
+	 * stripe so the second insert must evict the first. */
 	ASSERT_EQ(inode_cache_init(1, &ic), 0);
+	pick_same_stripe_ids(10, ids, 2);
 
-	in = make_inode(10, 100);
+	in = make_inode(ids[0], 100);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
-	ASSERT_EQ(inode_cache_get(ic, 10, &out), 0);
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), 0);
 
-	/* Second insert evicts the only entry. */
-	in = make_inode(20, 200);
+	/* Second insert evicts the stripe's only entry. */
+	in = make_inode(ids[1], 200);
 	ASSERT_EQ(inode_cache_put(ic, &in), 0);
 	ASSERT_EQ(inode_cache_count(ic), (uint32_t)1);
-	ASSERT_EQ(inode_cache_get(ic, 10, &out), -1);
-	ASSERT_EQ(inode_cache_get(ic, 20, &out), 0);
+	ASSERT_EQ(inode_cache_get(ic, ids[0], &out), -1);
+	ASSERT_EQ(inode_cache_get(ic, ids[1], &out), 0);
 
 	inode_cache_destroy(ic);
 }
