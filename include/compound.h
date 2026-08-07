@@ -1850,6 +1850,15 @@ struct layout_recall     *lr;
 	enum mds_hpc_xdr_form     cfg_hpc_xdr_form;
 	bool                      cfg_hpc_serve_layouts;
 	bool                      cfg_serve_layouts;
+	/*
+	 * Wave 3 T3.1 — new-file LAYOUTGET fast path.  When true,
+	 * op_layoutget skips the byte-range conflict-recall holder
+	 * scan for a file created earlier in the SAME compound (fused
+	 * OPEN(CREATE) pregrant or stripe cache hit).  Populated from
+	 * cfg.layoutget_newfile_fastpath at compound init; default
+	 * false preserves the full scan for every LAYOUTGET.
+	 */
+	bool                      cfg_layoutget_newfile_fastpath;
 	uint32_t                  cfg_stripe_lease_duration_ms;
 	uint64_t                  write_verf;   /* Server boot epoch (writeverf4) */
 	uint32_t                  minorversion; /* NFSv4 minor version (0 or 1) */

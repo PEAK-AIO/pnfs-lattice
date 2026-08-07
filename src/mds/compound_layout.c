@@ -1351,7 +1351,42 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	 * vacuous.  If/when we mix modes we should fall back to the
 	 * full scan whenever `cd->skip_transient_ndb` is false.
 	 */
-	if (cd->lr != NULL && !cd->skip_transient_ndb) {
+	/*
+	 * T3.1 (Wave 3) -- new-file LAYOUTGET fast path.
+	 *
+	 * A LAYOUTGET whose target file was created earlier in this
+	 * SAME compound cannot conflict with any other client's
+	 * layout: the fileid did not exist before this request (and
+	 * fileids are monotonic, never reused), so the holder scan is
+	 * a guaranteed-miss catalogue round-trip.  Both signals below
+	 * are set only on the OPEN(CREATE) create-success paths in
+	 * compound_data_io.c -- the open-existing branch (including
+	 * the EXCLUSIVE4 verifier-match replay) can never set them --
+	 * so the predicate is provably false for pre-existing files
+	 * and their scan + byte-range recall behaviour is unchanged.
+	 *
+	 * The pregrant is only TESTED here, not consumed; consumption
+	 * stays below (after the stripe-lease checks) so an error
+	 * return between here and there still routes through
+	 * compound_process's revoke_unused_pregrant cleanup.
+	 *
+	 * Gated on layoutget_newfile_fastpath (default off).
+	 */
+	const bool created_this_compound =
+		(cd->layout_pregranted &&
+		 cd->layout_pregrant_fileid == cd->current_fh.fileid) ||
+		(cd->stripe_cached &&
+		 cd->stripe_cached_fileid == cd->current_fh.fileid);
+
+	if (cd->cfg_layoutget_newfile_fastpath && created_this_compound) {
+		/* Count only when the scan would otherwise have run, so
+		 * the counter measures real round-trips saved. */
+		if (cd->lr != NULL && !cd->skip_transient_ndb) {
+			atomic_fetch_add_explicit(
+				&g_branch_metrics.layoutget_newfile_scan_skipped,
+				1, memory_order_relaxed);
+		}
+	} else if (cd->lr != NULL && !cd->skip_transient_ndb) {
 		uint32_t recalled = 0;
 		uint32_t req_iomode_for_recall = a->iomode;
 

@@ -132,6 +132,9 @@ struct rpc_server {
     enum mds_hpc_xdr_form    hpc_xdr_form;
     bool                     hpc_serve_layouts;
     bool                     serve_layouts;
+    /* Wave 3 T3.1: new-file LAYOUTGET fast path (skip conflict-recall
+     * scan for same-compound creates). */
+    bool                     layoutget_newfile_fastpath;
 
     struct mds_catalogue    *cat;
     struct session_table    *st;
@@ -1180,6 +1183,7 @@ wrongsec:
         cd.cfg_hpc_xdr_form = srv->hpc_xdr_form;
         cd.cfg_hpc_serve_layouts = srv->hpc_serve_layouts;
         cd.cfg_serve_layouts = srv->serve_layouts;
+        cd.cfg_layoutget_newfile_fastpath = srv->layoutget_newfile_fastpath;
         cd.write_verf = srv->write_verf;
         cd.minorversion = minorver;
 	cd.shard_map = srv->shard_map;
@@ -1905,6 +1909,7 @@ int rpc_server_create(const struct rpc_server_config *cfg,
     srv->hpc_xdr_form = cfg->hpc_xdr_form;
     srv->hpc_serve_layouts = cfg->hpc_serve_layouts;
     srv->serve_layouts = cfg->serve_layouts;
+    srv->layoutget_newfile_fastpath = cfg->layoutget_newfile_fastpath;
     srv->write_verf = cfg->write_verf;
     srv->cat = cfg->cat;
     srv->st = cfg->st;
