@@ -100,6 +100,7 @@ static const char *const cat_op_name[MDS_CATOP__COUNT] = {
 	[MDS_CATOP_DS_PREPARE_CHECK]     = "ds_prepare_check",
 	[MDS_CATOP_LAYOUT_RECALL_SCAN]   = "layout_recall_scan",
 	[MDS_CATOP_LAYOUT_REVOKE_GRANT]  = "layout_revoke_grant",
+	[MDS_CATOP_UNLINK_RECALL]        = "unlink_recall",
 	[MDS_CATOP_OTHER]            = "other",
 };
 

@@ -161,6 +161,13 @@ enum mds_cat_op {
 	MDS_CATOP_DS_PREPARE_CHECK,     /* compound_ds_prepare_check   */
 	MDS_CATOP_LAYOUT_RECALL_SCAN,   /* byte-range recall scan      */
 	MDS_CATOP_LAYOUT_REVOKE_GRANT,  /* layout_revoke_unready_grant */
+	/* Wave 6 T6.5 -- the client-visible final-unlink layout recall
+	 * (layout_recall_revoke_all_for_unlink on the REMOVE path).
+	 * Separating it from ns_remove lets delete-path cost be
+	 * attributed across the four REMOVE cost classes: metadata
+	 * mutation (ns_remove), this recall, post-remove cleanup
+	 * (remove_async_*), and DS reclamation (gc_pending / ds_gc). */
+	MDS_CATOP_UNLINK_RECALL,
 	MDS_CATOP_OTHER,
 	MDS_CATOP__COUNT,
 };

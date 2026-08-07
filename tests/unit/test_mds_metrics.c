@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 
 #include "mds_metrics.h"
+#include "mds_op_metrics.h"
 
 static int passed = 0;
 static int failed = 0;
@@ -95,6 +96,61 @@ static void test_metrics_prometheus_truncation(void)
     passed++;
 }
 
+/* Wave 6: the branch (v2) render must expose the decision
+ * instrumentation counters the lab reads via mds-metrics-diff. */
+static void test_metrics_prometheus_v2_wave6(void)
+{
+    fprintf(stdout, "  test_metrics_prometheus_v2_wave6:  ");
+
+    /* The v2 render includes the always-on per-op and per-cat-op
+     * histogram families (~50 KB with zero observations), so the
+     * buffer must be sized like the real scrape consumer's. */
+    struct mds_metrics_snapshot s;
+    static char buf[131072];
+    int n;
+
+    memset(&s, 0, sizeof(s));
+    atomic_fetch_add(&g_branch_metrics.cat_transient_retries, 3);
+    atomic_fetch_add(&g_branch_metrics.cat_transient_backoff_us, 1500);
+    atomic_fetch_add(&g_branch_metrics.cat_transient_retry_exhausted, 1);
+    atomic_fetch_add(&g_branch_metrics.ds_fh_cache_hits, 7);
+    atomic_fetch_add(&g_branch_metrics.ds_fh_cache_misses, 2);
+
+    n = mds_metrics_prometheus_v2(&s, &g_branch_metrics,
+                                  buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_cat_transient_retries 3") != NULL);
+    ASSERT_TRUE(strstr(buf,
+        "pnfs_mds_cat_transient_backoff_us 1500") != NULL);
+    ASSERT_TRUE(strstr(buf,
+        "pnfs_mds_cat_transient_retry_exhausted 1") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_ds_fh_cache_hits 7") != NULL);
+    ASSERT_TRUE(strstr(buf, "pnfs_mds_ds_fh_cache_misses 2") != NULL);
+
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
+/* Every op/cat-op enum entry must have a name-table row: designated
+ * initializers silently leave gaps as NULL, which would put "(null)"
+ * into /metrics label values.  Also pins the Wave 6 addition. */
+static void test_op_metrics_name_tables_complete(void)
+{
+    fprintf(stdout, "  test_op_metrics_name_tables:       ");
+
+    for (int i = 0; i < (int)MDS_OPC__COUNT; i++) {
+        ASSERT_TRUE(mds_op_class_name((enum mds_op_class)i) != NULL);
+    }
+    for (int i = 0; i < (int)MDS_CATOP__COUNT; i++) {
+        ASSERT_TRUE(mds_cat_op_name((enum mds_cat_op)i) != NULL);
+    }
+    ASSERT_TRUE(strcmp(mds_cat_op_name(MDS_CATOP_UNLINK_RECALL),
+                       "unlink_recall") == 0);
+
+    fprintf(stdout, "PASS\n");
+    passed++;
+}
+
 int main(void)
 {
     fprintf(stdout, "test_mds_metrics:\n");
@@ -103,6 +159,8 @@ int main(void)
     test_metrics_increment();
     test_metrics_prometheus();
     test_metrics_prometheus_truncation();
+    test_metrics_prometheus_v2_wave6();
+    test_op_metrics_name_tables_complete();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

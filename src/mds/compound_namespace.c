@@ -40,6 +40,7 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* Mark Q5: recall layouts on truncate / unlink */
+#include "mds_op_metrics.h" /* Wave 6 T6.5: time the final-unlink recall */
 
 #define ACCESS4_READ    0x00000001
 #define ACCESS4_LOOKUP  0x00000002
@@ -1882,8 +1883,15 @@ enum nfs4_status op_remove(struct compound_data *cd,
 		 * STALE/EACCES on its next op.
 		 */
 		if (cd->lr != NULL && !cd->skip_transient_ndb) {
-			int lrc = layout_recall_revoke_all_for_unlink(
-				cd->lr, rm_fileid, NULL);
+			int lrc = 0;
+
+			/* Wave 6 T6.5: time the client-visible unlink
+			 * recall separately from the ns_remove mutation so
+			 * delete-path cost attribution is readable from the
+			 * cat_op histogram (cat_op="unlink_recall"). */
+			MDS_TIME_CAT_OP(MDS_CATOP_UNLINK_RECALL,
+				lrc = layout_recall_revoke_all_for_unlink(
+					cd->lr, rm_fileid, NULL));
 			if (lrc != 0) {
 				return NFS4ERR_DELAY;
 			}
