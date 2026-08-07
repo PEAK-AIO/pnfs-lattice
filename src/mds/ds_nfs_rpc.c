@@ -55,6 +55,7 @@
 #define NFSPROC3_LOOKUP   3
 #define NFSPROC3_CREATE   8
 #define NFSPROC3_MKDIR    9
+#define NFSPROC3_FSINFO   19
 
 #define NFS3_OK           0
 #define NFS3ERR_NOENT     2
@@ -634,6 +635,149 @@ static int nfs3_create(int fd,
     memcpy(out_fh, p, fh_len);
     *out_fh_len = fh_len;
     return NFS3_OK;
+}
+
+/* -----------------------------------------------------------------------
+ * NFS3 FSINFO -- read the server's static filesystem information
+ * ----------------------------------------------------------------------- */
+
+/**
+ * NFS3 FSINFO (RFC 1813 S3.3.19): fetch rtmax/wtmax for the
+ * filesystem rooted at @a fh.  Reply layout after the status word:
+ *
+ *   post_op_attr obj_attributes;   bool(4) [+ fattr3(84)]
+ *   uint32 rtmax;  uint32 rtpref;  uint32 rtmult;
+ *   uint32 wtmax;  uint32 wtpref;  uint32 wtmult;
+ *   ... (dtpref, maxfilesize, time_delta, properties -- not needed)
+ *
+ * Every read is bounds-checked against the reply length: FSINFO
+ * replies come from an external server and must not be trusted.
+ *
+ * @return NFS3 status (0 = OK), or -1 on transport/decode error.
+ */
+static int nfs3_fsinfo(int fd,
+                       const uint8_t *fh, uint32_t fh_len,
+                       uint32_t *rtmax_out, uint32_t *wtmax_out)
+{
+    uint8_t msg[RPC_BUF_SIZE];
+    uint8_t reply[RPC_BUF_SIZE];
+    uint32_t xid = atomic_fetch_add(&g_xid, 1);
+    size_t off;
+
+    off = build_rpc_header(msg, xid, NFS_PROGRAM, NFS_V3, NFSPROC3_FSINFO);
+    /* FSINFO3args = fhandle3 (the export root). */
+    off += put_fh3(msg + off, fh, fh_len);
+
+    int rlen = rpc_exchange(fd, msg, (uint32_t)off, reply, sizeof(reply));
+    if (rlen < 0) {
+        return -1;
+    }
+
+    const uint8_t *p = validate_rpc_reply(reply, rlen, xid);
+    if (p == NULL) {
+        return -1;
+    }
+    const uint8_t *end = reply + rlen;
+
+    if (p + 4 > end) {
+        return -1;
+    }
+    uint32_t status = get_u32(p);
+    p += 4;
+    if (status != NFS3_OK) {
+        return (int)status;
+    }
+
+    /* post_op_attr: attributes_follow bool + optional fattr3 (84 B). */
+    if (p + 4 > end) {
+        return -1;
+    }
+    {
+        uint32_t attrs_follow = get_u32(p);
+        p += 4;
+        if (attrs_follow != 0) {
+            if (p + 84 > end) {
+                return -1;
+            }
+            p += 84;
+        }
+    }
+
+    /* rtmax(4) rtpref(4) rtmult(4) wtmax(4). */
+    if (p + 16 > end) {
+        return -1;
+    }
+    if (rtmax_out != NULL) {
+        *rtmax_out = get_u32(p);
+    }
+    if (wtmax_out != NULL) {
+        *wtmax_out = get_u32(p + 12);
+    }
+    return NFS3_OK;
+}
+
+/* -----------------------------------------------------------------------
+ * Public API: ds_nfs3_fsinfo
+ * ----------------------------------------------------------------------- */
+
+int ds_nfs3_fsinfo(const char *host, uint16_t port,
+                   const char *export_path,
+                   uint32_t *rtmax_out, uint32_t *wtmax_out,
+                   uint32_t timeout_ms)
+{
+    sigset_t mask, old_mask;
+    uint8_t root_fh[NFS3_FHSIZE];
+    uint32_t root_fh_len = NFS3_FHSIZE;
+    int fd = -1;
+    int rc = -1;
+
+    if (host == NULL || export_path == NULL ||
+        rtmax_out == NULL || wtmax_out == NULL) {
+        return -1;
+    }
+
+    /* Block signals to prevent NDB EINTR interference (same contract
+     * as ds_nfs3_lookup_fh). */
+    sigfillset(&mask);
+    pthread_sigmask(SIG_BLOCK, &mask, &old_mask);
+
+    /* MOUNT3 for the export root FH.  No caching: the prober runs on
+     * a slow periodic cadence and a fresh MOUNT keeps the probe
+     * honest across DS restarts (a restart can change the FH). */
+    {
+        uint16_t mount_port = pmap_getport_mount(host, timeout_ms);
+        int mount_fd;
+        int mrc;
+
+        if (mount_port == 0) {
+            goto out;
+        }
+        mount_fd = tcp_connect(host, mount_port, timeout_ms);
+        if (mount_fd < 0) {
+            goto out;
+        }
+        mrc = mount3_mnt(mount_fd, export_path, root_fh, &root_fh_len);
+        close(mount_fd);
+        if (mrc != 0) {
+            goto out;
+        }
+    }
+
+    fd = tcp_connect(host, port, timeout_ms);
+    if (fd < 0) {
+        goto out;
+    }
+    if (nfs3_fsinfo(fd, root_fh, root_fh_len,
+                    rtmax_out, wtmax_out) == NFS3_OK) {
+        rc = 0;
+    }
+
+out:
+    if (fd >= 0) {
+        close(fd);
+    }
+    pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+    return rc;
 }
 
 /* -----------------------------------------------------------------------

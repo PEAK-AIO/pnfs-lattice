@@ -54,4 +54,32 @@ int ds_nfs3_lookup_fh(const char *host, uint16_t port,
                       uint8_t *fh_out, uint32_t *fh_len,
                       uint32_t timeout_ms);
 
+/**
+ * @brief Probe a data server's real I/O limits via NFSv3 FSINFO.
+ *
+ * Performs portmapper + MOUNT3 to obtain the export root FH, then
+ * NFS3 FSINFO (proc 19) against it and returns the server's rtmax
+ * and wtmax verbatim (no capping or rounding -- policy belongs to
+ * the caller, see ds_io_limits.c).  Reading the value from the
+ * server itself (not from a local mount) matters: a mount's
+ * rsize/wsize is already min(server max, client cap, mount option)
+ * and would silently under-report.
+ *
+ * Same temporary-connection + full-signal-block pattern as
+ * ds_nfs3_lookup_fh; used by the periodic DS I/O-limit prober
+ * (Wave 5 T5.1).
+ *
+ * @param host         DS hostname or IP address.
+ * @param port         DS NFS port (typically 2049).
+ * @param export_path  DS export path (e.g. "/export/ds").
+ * @param rtmax_out    Receives the server's maximum READ size.
+ * @param wtmax_out    Receives the server's maximum WRITE size.
+ * @param timeout_ms   TCP + RPC timeout in milliseconds.
+ * @return 0 on success, -1 on any connect/RPC/decode failure.
+ */
+int ds_nfs3_fsinfo(const char *host, uint16_t port,
+                   const char *export_path,
+                   uint32_t *rtmax_out, uint32_t *wtmax_out,
+                   uint32_t timeout_ms);
+
 #endif /* DS_NFS_RPC_H */
