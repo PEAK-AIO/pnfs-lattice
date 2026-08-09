@@ -2944,6 +2944,10 @@ static int rondb_define_gc_queue_table(NdbDictionary::Dictionary *dict)
                         false, false);
     /* owner_mds_id: which MDS drains this row (0 = legacy/unassigned). */
     rondb_add_unsigned(tbl, RONDB_GC_COL_OWNER_MDS);
+    /* sweep_hint: MDS_GC_SWEEP_* stripe/mirror coverage (NULL/0 = legacy
+     * dense sweep).  Nullable + dynamic so the same definition also
+     * works as an online ALTER on pre-hint tables. */
+    rondb_add_unsigned_dyn(tbl, RONDB_GC_COL_SWEEP_HINT);
     int rc = rondb_create_table_if_not_exists(dict, tbl);
     if (rc != 0) {
         return rc;
@@ -3025,6 +3029,37 @@ static int rondb_alter_add_synth_cols(NdbDictionary::Dictionary *dict,
     if (dict->endSchemaTrans() != 0) {
         return rondb_report_error(dict->getNdbError(),
                                   "alter_add_synth endSchemaTrans");
+    }
+    dict->invalidateTable(tblname);
+    return 0;
+}
+
+/* Online ADD COLUMN of ONE nullable + dynamic Unsigned column.  Same
+ * contract and idempotency as rondb_alter_add_synth_cols above. */
+static int rondb_alter_add_unsigned_col(NdbDictionary::Dictionary *dict,
+                                        const char *tblname,
+                                        const char *col)
+{
+    const NdbDictionary::Table *old = dict->getTable(tblname);
+    if (old == nullptr) { return 0; }
+    if (old->getColumn(col) != nullptr) { return 0; }
+
+    NdbDictionary::Table altered = *old;
+    rondb_add_unsigned_dyn(altered, col);
+
+    if (dict->beginSchemaTrans() != 0) {
+        return rondb_report_error(dict->getNdbError(),
+                                  "alter_add_col beginSchemaTrans");
+    }
+    if (dict->alterTable(*old, altered) != 0) {
+        NdbError e = dict->getNdbError();
+        (void)dict->endSchemaTrans(
+            NdbDictionary::Dictionary::SchemaTransAbort);
+        return rondb_report_error(e, "alter_add_col alterTable");
+    }
+    if (dict->endSchemaTrans() != 0) {
+        return rondb_report_error(dict->getNdbError(),
+                                  "alter_add_col endSchemaTrans");
     }
     dict->invalidateTable(tblname);
     return 0;
@@ -3423,6 +3458,15 @@ int rondb_shim_bootstrap_metadata(void *handle, const char *schema)
             RONDB_INO_COL_SYNTH_SUID, RONDB_INO_COL_SYNTH_SGID);
     (void)rondb_alter_add_synth_cols(dict, RONDB_TBL_PREALLOC_POOL,
             RONDB_PP_COL_SYNTH_SUID, RONDB_PP_COL_SYNTH_SGID);
+    /*
+     * mds_gc_queue sweep_hint -- same idempotent + unconditional pattern
+     * as the synth columns: added on every start so a cluster that ran a
+     * pre-hint binary self-heals.  Non-fatal on failure: enqueue guards
+     * on getColumn() and the drainer treats a missing/NULL hint as the
+     * legacy dense sweep.
+     */
+    (void)rondb_alter_add_unsigned_col(dict, RONDB_TBL_GC_QUEUE,
+            RONDB_GC_COL_SWEEP_HINT);
     if (schema_version < RONDB_SCHEMA_VERSION) {
         /* Upgrade: bump schema version to current. */
         std::fprintf(stderr,
@@ -8396,6 +8440,11 @@ static int rondb_shim_ns_remove_once(void *handle,
         gop->setValue(RONDB_GC_COL_NFS_FH,
                       (const char *)fh_enc, fh_enc_len);
         gop->setValue(RONDB_GC_COL_OWNER_MDS, (Uint32)owner_mds_id);
+        /* Column-guarded, mirroring rondb_shim_gc_enqueue. */
+        if (gc_tbl->getColumn(RONDB_GC_COL_SWEEP_HINT) != nullptr) {
+            gop->setValue(RONDB_GC_COL_SWEEP_HINT,
+                          (Uint32)gc_rows[gi].sweep_hint);
+        }
     }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
@@ -10092,7 +10141,8 @@ static int rondb_shim_gc_seq_alloc_unbatched(void *handle, uint64_t *seq_out)
 int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
                           uint64_t fileid, uint32_t ds_id,
                           const uint8_t *nfs_fh, uint32_t fh_len,
-                          uint32_t owner_mds_id)
+                          uint32_t owner_mds_id,
+                          uint32_t sweep_hint)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
@@ -10143,6 +10193,11 @@ int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
     op->setValue(RONDB_GC_COL_NFS_FH,
                  (const char *)fh_enc, fh_enc_len);
     op->setValue(RONDB_GC_COL_OWNER_MDS, (Uint32)owner_mds_id);
+    /* Column-guarded (online ALTER may have failed): a row without the
+     * hint reads back NULL and takes the legacy dense sweep. */
+    if (tbl->getColumn(RONDB_GC_COL_SWEEP_HINT) != nullptr) {
+        op->setValue(RONDB_GC_COL_SWEEP_HINT, (Uint32)sweep_hint);
+    }
 
     if (tx->execute(NdbTransaction::Commit) == -1) {
         err = tx->getNdbError();
@@ -10162,6 +10217,7 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
     NdbTransaction *tx;
     NdbScanOperation *scan;
     NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh;
+    NdbRecAttr *a_hint = nullptr;
     NdbError err;
     int next_rc;
     bool found = false;
@@ -10198,6 +10254,9 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
     a_dsid  = scan->getValue(RONDB_GC_COL_DS_ID, nullptr);
     a_fhlen = scan->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
     a_fh    = scan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
+    if (tbl->getColumn(RONDB_GC_COL_SWEEP_HINT) != nullptr) {
+        a_hint = scan->getValue(RONDB_GC_COL_SWEEP_HINT, nullptr);
+    }
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -10218,6 +10277,10 @@ int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry)
             if (entry->nfs_fh_len > MDS_NFS_FH_MAX) {
                 entry->nfs_fh_len = MDS_NFS_FH_MAX;
             }
+            /* NULL on legacy rows -> 0 (legacy dense sweep). */
+            entry->sweep_hint =
+                (a_hint != nullptr && !a_hint->isNULL())
+                    ? a_hint->u_32_value() : 0U;
             std::memset(entry->nfs_fh, 0, MDS_NFS_FH_MAX);
             const char *fh_ptr = a_fh->aRef();
             if (fh_ptr != nullptr && entry->nfs_fh_len > 0) {
@@ -10272,6 +10335,7 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
     NdbTransaction *tx;
     NdbScanOperation *scan;
     NdbRecAttr *a_seq, *a_fid, *a_dsid, *a_fhlen, *a_fh, *a_owner;
+    NdbRecAttr *a_hint = nullptr;
     NdbError err;
     int next_rc;
     std::vector<struct mds_gc_entry> heap;
@@ -10325,6 +10389,11 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
                         iscan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
                     NdbRecAttr *i_owner =
                         iscan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
+                    NdbRecAttr *i_hint =
+                        (tbl->getColumn(RONDB_GC_COL_SWEEP_HINT) != nullptr)
+                            ? iscan->getValue(RONDB_GC_COL_SWEEP_HINT,
+                                              nullptr)
+                            : nullptr;
                     if (itx->execute(NdbTransaction::NoCommit) != -1) {
                         uint32_t got = 0;
                         uint64_t examined = 0;
@@ -10345,6 +10414,9 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
                             e.fileid       = i_fid->u_64_value();
                             e.ds_id        = i_dsid->u_32_value();
                             e.owner_mds_id = owner;
+                            e.sweep_hint   =
+                                (i_hint != nullptr && !i_hint->isNULL())
+                                    ? i_hint->u_32_value() : 0U;
                             e.nfs_fh_len   = i_fhlen->u_32_value();
                             if (e.nfs_fh_len > MDS_NFS_FH_MAX) {
                                 e.nfs_fh_len = MDS_NFS_FH_MAX;
@@ -10397,6 +10469,9 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
     a_fhlen = scan->getValue(RONDB_GC_COL_NFS_FH_LEN, nullptr);
     a_fh    = scan->getValue(RONDB_GC_COL_NFS_FH, nullptr);
     a_owner = scan->getValue(RONDB_GC_COL_OWNER_MDS, nullptr);
+    a_hint  = (tbl->getColumn(RONDB_GC_COL_SWEEP_HINT) != nullptr)
+                  ? scan->getValue(RONDB_GC_COL_SWEEP_HINT, nullptr)
+                  : nullptr;
 
     if (tx->execute(NdbTransaction::NoCommit) == -1) {
         err = tx->getNdbError();
@@ -10435,6 +10510,8 @@ int rondb_shim_gc_peek_batch(void *handle, struct mds_gc_entry *entries,
         e.fileid       = a_fid->u_64_value();
         e.ds_id        = a_dsid->u_32_value();
         e.owner_mds_id = owner;
+        e.sweep_hint   = (a_hint != nullptr && !a_hint->isNULL())
+                             ? a_hint->u_32_value() : 0U;
         e.nfs_fh_len   = a_fhlen->u_32_value();
         if (e.nfs_fh_len > MDS_NFS_FH_MAX) {
             e.nfs_fh_len = MDS_NFS_FH_MAX;

@@ -958,6 +958,7 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
 	const struct mds_inode *child, uint32_t stripe_count,
 	const struct mds_ds_map_entry *gc_entries,
 	uint32_t gc_entry_count,
+	uint32_t gc_sweep_hint,
 	bool *gc_folded)
 {
 	void *h = rondb_handle(cat);
@@ -1026,6 +1027,7 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
 			(gc_entries[i].nfs_fh_len > MDS_NFS_FH_MAX)
 			? MDS_NFS_FH_MAX : gc_entries[i].nfs_fh_len;
 		rows[i].nfs_fh = gc_entries[i].nfs_fh;
+		rows[i].sweep_hint = gc_sweep_hint;
 	}
 
 	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
@@ -2353,7 +2355,8 @@ static enum mds_status catalogue_rondb_quota_usage_put(
 static enum mds_status catalogue_rondb_gc_enqueue(
 	struct mds_catalogue *cat, struct mds_cat_txn *txn,
 	uint64_t fileid, uint32_t ds_id,
-	const uint8_t *nfs_fh, uint32_t fh_len)
+	const uint8_t *nfs_fh, uint32_t fh_len,
+	uint32_t sweep_hint)
 {
 	void *h = rondb_handle(cat);
 	uint64_t seq = 0;
@@ -2370,7 +2373,7 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 	}
 
 	rc = rondb_shim_gc_enqueue(h, seq, fileid, ds_id, nfs_fh, fh_len,
-				   rondb_self_mds_id(cat));
+				   rondb_self_mds_id(cat), sweep_hint);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -3275,12 +3278,14 @@ static enum mds_status rondb_auth_ns_remove_known_gc(
 	uint64_t parent, const char *name,
 	const struct mds_inode *child, uint32_t stripe_count,
 	const struct mds_ds_map_entry *gc_entries,
-	uint32_t gc_entry_count, bool *gc_folded)
+	uint32_t gc_entry_count, uint32_t gc_sweep_hint,
+	bool *gc_folded)
 {
 	(void)txn;
 	return catalogue_rondb_ns_remove_known_gc(cat, parent, name, child,
 						  stripe_count, gc_entries,
-						  gc_entry_count, gc_folded);
+						  gc_entry_count,
+						  gc_sweep_hint, gc_folded);
 }
 
 

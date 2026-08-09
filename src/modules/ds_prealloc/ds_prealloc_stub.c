@@ -335,17 +335,21 @@ void ds_prealloc_destroy(struct ds_prealloc_ctx *ctx)
 
 /* GC-enqueue the DS files created for slots [0, upto) of a failed
  * batch.  Best-effort: the GC drainer owns the actual unlinks, and a
- * failed enqueue only delays reclamation (never corrupts state). */
+ * failed enqueue only delays reclamation (never corrupts state).
+ * sweep_hint carries the requested geometry so the drainer probes
+ * every slot (wide layouts are not stripe-dense per DS). */
 static void batch_rollback_enqueue(const struct ds_prealloc_ctx *ctx,
                                    uint64_t fileid,
                                    const struct mds_ds_map_entry *entries,
-                                   uint32_t upto)
+                                   uint32_t upto,
+                                   uint32_t sweep_hint)
 {
     for (uint32_t j = 0; j < upto; j++) {
-        (void)mds_cat_gc_enqueue((struct mds_catalogue *)ctx->cat, NULL,
-                                 fileid, entries[j].ds_id,
-                                 entries[j].nfs_fh,
-                                 entries[j].nfs_fh_len);
+        (void)mds_cat_gc_enqueue_hint((struct mds_catalogue *)ctx->cat,
+                                      NULL, fileid, entries[j].ds_id,
+                                      entries[j].nfs_fh,
+                                      entries[j].nfs_fh_len,
+                                      sweep_hint);
     }
 }
 
@@ -475,7 +479,9 @@ enum mds_status ds_prealloc_batch(
                                          entries[i].nfs_fh, &fh_len);
         if (st != MDS_OK || fh_len == 0 ||
             fh_len > sizeof(entries[i].nfs_fh)) {
-            batch_rollback_enqueue(ctx, fileid, entries, i);
+            batch_rollback_enqueue(ctx, fileid, entries, i,
+                                   MDS_GC_SWEEP_GEOM(req->stripe_count,
+                                                     n / req->stripe_count));
             free(entries);
             return MDS_ERR_NOSPC;
         }

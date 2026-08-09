@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **REMOVE of a wide (multi-stripe) file leaked every DS backing
+  file** — the ds_gc drainer's slot probe assumed a file's stripes
+  are dense from 0 on each DS and stopped at the first absent one.
+  With round-robin placement a wide file holds only its own stripe
+  indices per DS (stripe k on DS k), so the probe of stripe 0 missed,
+  the queue row was dequeued as done, and every non-stripe-0 backing
+  file leaked (observed: ~150k orphaned files / ~20 GB per DS after
+  an io500 run's deletes, with `pnfs_mds_gc_pending` at 0).  GC queue
+  rows now carry a `sweep_hint` column (nullable dynamic Unsigned,
+  added by an idempotent online ALTER; NULL/0 = legacy dense sweep so
+  pre-hint rows and rolling upgrades behave exactly as before):
+  `MDS_GC_SWEEP_GEOM(sc, mc)` makes the drainer probe every
+  (stripe, mirror) slot of the file's real geometry, and
+  `MDS_GC_SWEEP_SLOT(s, m)` reclaims exactly one slot for the
+  rebalance mover (whose moved-away file was equally leaked whenever
+  its stripe index was non-zero — and whose file's other live slots a
+  whole-file sweep must not touch).  Every geometry-aware enqueue
+  site now stamps the hint: op_remove (split and fused REMOVE+GC
+  paths), rename-overwrite, orphan finalize, the async-REMOVE
+  manifest drainer, HPC wide-create rollback, ds_prealloc batch
+  rollback (both builds), cross-shard rename overwrite, and the
+  rebalance mover.
 - **HPC-Shared CREATE failed with `NFS4ERR_INVAL` in the community
   build** — the default build (`ENABLE_DS_PREALLOC=OFF`) linked a
   `ds_prealloc_batch` stub that returned a permanent `MDS_ERR_INVAL`

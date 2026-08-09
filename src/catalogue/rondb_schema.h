@@ -365,6 +365,14 @@
  */
 #define RONDB_GC_COL_OWNER_MDS    "owner_mds_id"
 /*
+ * sweep_hint: MDS_GC_SWEEP_* encoding (pnfs_mds.h) telling the drainer
+ * which (stripe, mirror) DS files this row covers.  Nullable + dynamic
+ * (added via online ALTER); rows written before the column existed --
+ * or by a pre-hint binary during a rolling upgrade -- read back NULL
+ * and take the legacy dense sweep, exactly as before.
+ */
+#define RONDB_GC_COL_SWEEP_HINT   "sweep_hint"
+/*
  * Ordered index on gc_seq: lets the drainer read the oldest queued
  * entries in gc_seq order without a full-table scan, so the GC keeps
  * up with heavy-delete bursts even when the backlog is millions of

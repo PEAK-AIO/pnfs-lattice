@@ -1137,9 +1137,13 @@ enum mds_status rename_2pc_initiate_local_shard(
                 rep_sm != NULL) {
                 uint32_t total = rep_sc * rep_mc;
                 for (uint32_t gi = 0; gi < total; gi++) {
-                    (void)mds_cat_gc_enqueue(dcat, NULL,
+                    /* Geometry hint: the sweep probes every (s, m)
+                     * slot -- wide layouts are not stripe-dense per
+                     * DS. */
+                    (void)mds_cat_gc_enqueue_hint(dcat, NULL,
                         replaced_fid, rep_sm[gi].ds_id,
-                        rep_sm[gi].nfs_fh, rep_sm[gi].nfs_fh_len);
+                        rep_sm[gi].nfs_fh, rep_sm[gi].nfs_fh_len,
+                        MDS_GC_SWEEP_GEOM(rep_sc, rep_mc));
                 }
                 free(rep_sm);
             }

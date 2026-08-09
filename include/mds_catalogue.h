@@ -271,6 +271,9 @@ struct mds_ds_map_entry;
  *
  * @param gc_entries      Unique-DS entries to enqueue (ds_id + FH).
  * @param gc_entry_count  Number of entries (> 0 for a real fold).
+ * @param gc_sweep_hint   MDS_GC_SWEEP_* coverage stamped on every row
+ *                        (typically MDS_GC_SWEEP_GEOM(sc, mc) of the
+ *                        file's stripe map; 0 = legacy dense sweep).
  * @param gc_folded       Receives true when the rows were committed
  *                        with the remove; false when the remove
  *                        degenerated to a plain known-remove.
@@ -287,6 +290,7 @@ enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
 					   uint32_t stripe_count,
 					   const struct mds_ds_map_entry *gc_entries,
 					   uint32_t gc_entry_count,
+					   uint32_t gc_sweep_hint,
 					   bool *gc_folded);
 
 /** Atomic rename: src dirent -> dst dirent + parent touches. */
@@ -726,6 +730,25 @@ enum mds_status mds_cat_gc_enqueue(struct mds_catalogue *cat,
 				   uint32_t ds_id,
 				   const uint8_t *nfs_fh,
 				   uint32_t fh_len);
+
+/**
+ * Like mds_cat_gc_enqueue, with an explicit MDS_GC_SWEEP_* hint
+ * (pnfs_mds.h) telling the ds_gc drainer which (stripe, mirror) DS
+ * files the row covers.  Callers that know the file's stripe map
+ * geometry MUST use this variant with MDS_GC_SWEEP_GEOM(sc, mc) --
+ * the hintless wrapper's legacy dense sweep stops at the first
+ * absent stripe and silently leaks every backing file of a wide
+ * (multi-stripe) layout whose stripe on that DS is not stripe 0.
+ * Single-slot reclaimers (rebalance movers) pass
+ * MDS_GC_SWEEP_SLOT(stripe, mirror).
+ */
+enum mds_status mds_cat_gc_enqueue_hint(struct mds_catalogue *cat,
+					struct mds_cat_txn *txn,
+					uint64_t fileid,
+					uint32_t ds_id,
+					const uint8_t *nfs_fh,
+					uint32_t fh_len,
+					uint32_t sweep_hint);
 
 enum mds_status mds_cat_gc_peek(struct mds_catalogue *cat,
 				struct mds_gc_entry *entry);

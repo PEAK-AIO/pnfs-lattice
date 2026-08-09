@@ -746,7 +746,8 @@ cat_remove_known_gc(struct compound_data *cd, uint64_t parent,
 		    const char *name, const struct mds_inode *child,
 		    uint32_t stripe_count,
 		    const struct mds_ds_map_entry *gc_entries,
-		    uint32_t gc_entry_count, bool *gc_folded)
+		    uint32_t gc_entry_count, uint32_t gc_sweep_hint,
+		    bool *gc_folded)
 {
 	if (cd->cat == NULL) {
 		return MDS_ERR_INVAL;
@@ -754,7 +755,7 @@ cat_remove_known_gc(struct compound_data *cd, uint64_t parent,
 	return mds_cat_ns_remove_known_gc(cd->cat, NULL, parent, name,
 					  child, stripe_count,
 					  gc_entries, gc_entry_count,
-					  gc_folded);
+					  gc_sweep_hint, gc_folded);
 }
 
 static inline enum mds_status
