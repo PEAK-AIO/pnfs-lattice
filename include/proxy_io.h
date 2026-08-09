@@ -434,6 +434,19 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
  * @param bytes_copied  Receives total bytes actually copied.
  * @return MDS_OK, MDS_ERR_NOTFOUND, MDS_ERR_IO.
  */
+/**
+ * Flush this host's NFS writeback for every DS backing file of
+ * @p fileid (fsync through the proxy's DS mounts).  Required before
+ * advertising the file's proxy-written bytes as durable/visible to
+ * pNFS clients that read DS-direct (e.g. COPY's FILE_SYNC4 reply).
+ *
+ * @return MDS_OK, MDS_ERR_NOTFOUND when the stripe map or a DS mount
+ *         is missing, MDS_ERR_IO on fsync failure.
+ */
+enum mds_status mds_proxy_flush_file(const struct mds_proxy_ctx *ctx,
+                                     struct mds_catalogue *cat,
+                                     uint64_t fileid);
+
 enum mds_status mds_proxy_copy_data(const struct mds_proxy_ctx *ctx,
                                     struct mds_catalogue *cat,
                                     uint64_t src_fileid,

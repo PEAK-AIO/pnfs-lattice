@@ -1843,6 +1843,104 @@ enum mds_status mds_proxy_copy_data(const struct mds_proxy_ctx *ctx,
 
     free(buf);
     *bytes_copied = total;
+
+    /*
+     * The chunk writes above landed in THIS host's NFS page cache
+     * for the destination DS mounts.  The caller replies FILE_SYNC4
+     * (op_copy) or returns success to a CLONE fallback — either way
+     * the client may immediately read the destination DS-DIRECT and
+     * must see the bytes.  Flush before returning; a flush failure
+     * downgrades the whole copy to an I/O error rather than
+     * advertising durable data that is not there.
+     */
+    if (st == MDS_OK && total > 0) {
+        st = mds_proxy_flush_file(ctx, cat, dst_fileid);
+    }
+    return st;
+}
+
+/*
+ * Flush the MDS-side NFS writeback for every DS backing file of
+ * @fileid.  The proxy writes go through this host's kernel NFS mount
+ * of each DS, so a successful pwrite() only reaches the MDS page
+ * cache — a pNFS client reading DS-DIRECT immediately afterwards
+ * races the writeback and sees a short (zero-filled) file.  Callers
+ * that advertise durable/visible data (COPY replies FILE_SYNC4)
+ * MUST flush before answering.
+ */
+enum mds_status mds_proxy_flush_file(const struct mds_proxy_ctx *ctx,
+                                     struct mds_catalogue *cat,
+                                     uint64_t fileid)
+{
+    struct mds_ds_map_entry *entries = NULL;
+    uint32_t stripe_count = 0, stripe_unit = 0, mirror_count = 0;
+    enum mds_status st;
+
+    if (ctx == NULL || cat == NULL) {
+        return MDS_ERR_INVAL;
+    }
+
+    st = proxy_stripe_map_get(cat, fileid,
+                              &stripe_count, &stripe_unit,
+                              &mirror_count, &entries);
+    if (st != MDS_OK) {
+        return st;
+    }
+    (void)stripe_unit;
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
+    for (uint32_t s = 0; s < stripe_count && st == MDS_OK; s++) {
+        for (uint32_t m = 0; m < mirror_count; m++) {
+            uint32_t entry_idx = s * mirror_count + m;
+            const char *mount;
+            char path[MDS_MAX_PATH];
+            int fd;
+
+            if (entry_idx >= stripe_count * mirror_count) {
+                st = MDS_ERR_IO;
+                break;
+            }
+            mount = find_mount(ctx, entries[entry_idx].ds_id);
+            if (mount == NULL) {
+                st = MDS_ERR_NOTFOUND;
+                break;
+            }
+            if (build_ds_path(path, sizeof(path), mount,
+                              fileid, s, m) != 0) {
+                st = MDS_ERR_IO;
+                break;
+            }
+            fd = fd_cache_get(&((struct mds_proxy_ctx *)ctx)->fdc,
+                              fileid, entries[entry_idx].ds_id,
+                              s, m, O_WRONLY | O_CREAT);
+            if (fd < 0) {
+                fd = open(path, O_WRONLY);
+                if (fd < 0) {
+                    /* Never written (hole stripe) — nothing to
+                     * flush for this entry. */
+                    if (errno == ENOENT) {
+                        continue;
+                    }
+                    st = MDS_ERR_IO;
+                    break;
+                }
+                if (fsync(fd) != 0) {
+                    st = MDS_ERR_IO;
+                }
+                close(fd);
+                continue;
+            }
+            if (fsync(fd) != 0) {
+                st = MDS_ERR_IO;
+            }
+            fd_cache_release(&((struct mds_proxy_ctx *)ctx)->fdc,
+                             fileid, entries[entry_idx].ds_id,
+                             s, m, O_WRONLY | O_CREAT, fd);
+        }
+    }
+
+    free(entries);
     return st;
 }
 
