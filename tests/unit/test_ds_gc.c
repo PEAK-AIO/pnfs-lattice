@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -92,6 +93,33 @@ static void enqueue_n(struct mds_catalogue *cat, uint32_t ds_id, uint32_t count)
                                      ds_id, fh, sizeof(fh)),
                   MDS_OK);
     }
+}
+
+/** Create the DS-side data file {mount}/data/{fileid}_{s}_{m}. */
+static void touch_ds_file(const char *mount, uint64_t fileid,
+                          uint32_t stripe, uint32_t mirror)
+{
+    char path[4200];
+    FILE *fp;
+
+    (void)snprintf(path, sizeof(path), "%s/data", mount);
+    (void)mkdir(path, 0755);
+    (void)snprintf(path, sizeof(path), "%s/data/%llu_%u_%u",
+                   mount, (unsigned long long)fileid, stripe, mirror);
+    fp = fopen(path, "w");
+    ASSERT_TRUE(fp != NULL);
+    (void)fclose(fp);
+}
+
+/** True when {mount}/data/{fileid}_{s}_{m} still exists. */
+static bool ds_file_exists(const char *mount, uint64_t fileid,
+                           uint32_t stripe, uint32_t mirror)
+{
+    char path[4200];
+
+    (void)snprintf(path, sizeof(path), "%s/data/%llu_%u_%u",
+                   mount, (unsigned long long)fileid, stripe, mirror);
+    return access(path, F_OK) == 0;
 }
 
 /**
@@ -290,6 +318,92 @@ static void test_disabled_inputs(void)
     rm_ds_dir(ds_dir);
 }
 
+/**
+ * Wide-stripe regression (the io500 leak): a 4x1 wide file holds only
+ * stripe indices 1 and 3 on this DS -- NOT stripe 0.  The legacy dense
+ * sweep probed (0,0), saw it absent, and dequeued the row leaving both
+ * files behind.  A row carrying MDS_GC_SWEEP_GEOM(4,1) must probe all
+ * four stripes and unlink both backing files.
+ */
+static void test_wide_geom_sweep_reclaims_all_stripes(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct mds_proxy_ctx *proxy = NULL;
+    struct ds_gc *gc = NULL;
+    char *ds_dir = make_ds_dir();
+    const uint64_t fileid = 712707;
+    uint8_t fh[4] = { 'g', 'c', 0, 0 };
+    uint32_t observed = 0;
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, /*ds_id*/ 1, ds_dir), MDS_OK);
+
+    touch_ds_file(ds_dir, fileid, /*stripe*/ 1, /*mirror*/ 0);
+    touch_ds_file(ds_dir, fileid, /*stripe*/ 3, /*mirror*/ 0);
+
+    ASSERT_EQ(mds_cat_gc_enqueue_hint(cat, NULL, fileid, /*ds_id*/ 1,
+                                      fh, sizeof(fh),
+                                      MDS_GC_SWEEP_GEOM(4, 1)),
+              MDS_OK);
+
+    ASSERT_EQ(ds_gc_start_ex(cat, proxy, /*poll_ms*/ 100U,
+                             /*workers*/ 1U, /*batch_size*/ 16U, &gc), 0);
+    ASSERT_TRUE(gc != NULL);
+
+    observed = wait_for_count(cat, /*target*/ 0U, /*timeout_ms*/ 30000U);
+    ASSERT_EQ(observed, 0U);
+    ds_gc_stop(gc);
+
+    ASSERT_TRUE(!ds_file_exists(ds_dir, fileid, 1, 0));
+    ASSERT_TRUE(!ds_file_exists(ds_dir, fileid, 3, 0));
+
+    mds_proxy_ctx_destroy(proxy);
+    mds_catalogue_close(cat);
+    rm_ds_dir(ds_dir);
+}
+
+/**
+ * Single-slot sweep (rebalance mover): MDS_GC_SWEEP_SLOT(3, 0) must
+ * unlink exactly {fileid}_3_0 and leave the file's other live slot
+ * ({fileid}_1_0) on the same DS untouched.
+ */
+static void test_slot_sweep_touches_one_slot(void)
+{
+    struct mds_catalogue *cat = open_test_catalogue();
+    struct mds_proxy_ctx *proxy = NULL;
+    struct ds_gc *gc = NULL;
+    char *ds_dir = make_ds_dir();
+    const uint64_t fileid = 714755;
+    uint8_t fh[4] = { 'g', 'c', 0, 0 };
+    uint32_t observed = 0;
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, /*ds_id*/ 1, ds_dir), MDS_OK);
+
+    touch_ds_file(ds_dir, fileid, /*stripe*/ 1, /*mirror*/ 0);
+    touch_ds_file(ds_dir, fileid, /*stripe*/ 3, /*mirror*/ 0);
+
+    ASSERT_EQ(mds_cat_gc_enqueue_hint(cat, NULL, fileid, /*ds_id*/ 1,
+                                      fh, sizeof(fh),
+                                      MDS_GC_SWEEP_SLOT(3, 0)),
+              MDS_OK);
+
+    ASSERT_EQ(ds_gc_start_ex(cat, proxy, /*poll_ms*/ 100U,
+                             /*workers*/ 1U, /*batch_size*/ 16U, &gc), 0);
+    ASSERT_TRUE(gc != NULL);
+
+    observed = wait_for_count(cat, /*target*/ 0U, /*timeout_ms*/ 30000U);
+    ASSERT_EQ(observed, 0U);
+    ds_gc_stop(gc);
+
+    ASSERT_TRUE(ds_file_exists(ds_dir, fileid, 1, 0));
+    ASSERT_TRUE(!ds_file_exists(ds_dir, fileid, 3, 0));
+
+    mds_proxy_ctx_destroy(proxy);
+    mds_catalogue_close(cat);
+    rm_ds_dir(ds_dir);
+}
+
 /* -----------------------------------------------------------------------
  * Entry point
  * ----------------------------------------------------------------------- */
@@ -303,6 +417,8 @@ int main(void)
     RUN_TEST(test_legacy_start_wrapper);
     RUN_TEST(test_workers_one_parity);
     RUN_TEST(test_backlog_drains_with_workers);
+    RUN_TEST(test_wide_geom_sweep_reclaims_all_stripes);
+    RUN_TEST(test_slot_sweep_touches_one_slot);
 
     fprintf(stdout, "%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

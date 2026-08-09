@@ -621,10 +621,14 @@ static enum mds_status mem_ns_remove(struct mds_catalogue *cat,
         uint32_t smc = 0, smmc = 0;
         if (mds_cat_stripe_map_get(cat, child_fid, &smc, NULL, &smmc,
                                    &sme) == MDS_OK && sme != NULL) {
-            uint32_t total = smc * (smmc ? smmc : 1);
+            uint32_t mc = smmc ? smmc : 1;
+            uint32_t total = smc * mc;
             for (uint32_t gi = 0; gi < total; gi++) {
-                mds_cat_gc_enqueue(cat, txn, child_fid, sme[gi].ds_id,
-                                   sme[gi].nfs_fh, sme[gi].nfs_fh_len);
+                mds_cat_gc_enqueue_hint(cat, txn, child_fid,
+                                        sme[gi].ds_id,
+                                        sme[gi].nfs_fh,
+                                        sme[gi].nfs_fh_len,
+                                        MDS_GC_SWEEP_GEOM(smc, mc));
             }
             free(sme);
             mds_cat_stripe_map_del(cat, txn, child_fid);
@@ -1519,7 +1523,8 @@ static enum mds_status mem_ds_list(struct mds_catalogue *cat,
 /* GC queue */
 static enum mds_status mem_gc_enqueue(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t fileid,
-    uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len)
+    uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len,
+    uint32_t sweep_hint)
 {
     (void)txn;
     struct memdb *m = cat->backend_private;
@@ -1530,6 +1535,7 @@ static enum mds_status mem_gc_enqueue(struct mds_catalogue *cat,
             m->gc_queue[i].entry.fileid = fileid;
             m->gc_queue[i].entry.ds_id = ds_id;
             m->gc_queue[i].entry.nfs_fh_len = fh_len;
+            m->gc_queue[i].entry.sweep_hint = sweep_hint;
             if (fh_len > 0 && nfs_fh != NULL)
                 memcpy(m->gc_queue[i].entry.nfs_fh, nfs_fh, fh_len);
             return MDS_OK;
@@ -1593,7 +1599,8 @@ static enum mds_status mem_ns_remove_known_gc(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent, const char *name,
     const struct mds_inode *child, uint32_t stripe_count,
     const struct mds_ds_map_entry *gc_entries,
-    uint32_t gc_entry_count, bool *gc_folded)
+    uint32_t gc_entry_count, uint32_t gc_sweep_hint,
+    bool *gc_folded)
 {
     struct memdb *m = cat->backend_private;
     bool nlink_zero = false;
@@ -1634,7 +1641,8 @@ static enum mds_status mem_ns_remove_known_gc(struct mds_catalogue *cat,
             (void)mem_gc_enqueue(cat, txn, child_fid,
                                  gc_entries[gi].ds_id,
                                  gc_entries[gi].nfs_fh,
-                                 gc_entries[gi].nfs_fh_len);
+                                 gc_entries[gi].nfs_fh_len,
+                                 gc_sweep_hint);
         }
         (void)mds_cat_stripe_map_del(cat, txn, child_fid);
         pthread_mutex_lock(&m->lock);

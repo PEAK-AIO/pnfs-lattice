@@ -213,8 +213,18 @@ static void hpc_enqueue_cleanup_entries(
     struct mds_catalogue *cat,
     uint64_t fileid,
     const struct mds_ds_map_entry *entries,
-    uint64_t entry_count)
+    uint64_t entry_count,
+    uint32_t stripe_count,
+    uint32_t mirror_count)
 {
+    /* Whole-file geometry hint: the ds_gc sweep must probe every
+     * (stripe, mirror) slot -- the legacy dense sweep stops at the
+     * first absent stripe and leaks the non-stripe-0 files of a
+     * wide layout.  Falls back to 0 (legacy) on absent geometry. */
+    uint32_t sweep_hint =
+        (stripe_count > 0 && mirror_count > 0)
+            ? MDS_GC_SWEEP_GEOM(stripe_count, mirror_count) : 0U;
+
     if (cat == NULL || entries == NULL) {
         return;
     }
@@ -224,10 +234,11 @@ static void hpc_enqueue_cleanup_entries(
             entries[entry_index].nfs_fh_len > MDS_NFS_FH_MAX) {
             continue;
         }
-        (void)mds_cat_gc_enqueue(
+        (void)mds_cat_gc_enqueue_hint(
             cat, NULL, fileid, entries[entry_index].ds_id,
             entries[entry_index].nfs_fh,
-            entries[entry_index].nfs_fh_len);
+            entries[entry_index].nfs_fh_len,
+            sweep_hint);
     }
 }
 
@@ -316,7 +327,8 @@ enum mds_status hpc_shared_recover_pending(
         mirror_count > 0 && mirror_count <= MDS_MAX_MIRRORS) {
         entry_count = (uint64_t)stripe_count * mirror_count;
     }
-    hpc_enqueue_cleanup_entries(cd->cat, inode->fileid, entries, entry_count);
+    hpc_enqueue_cleanup_entries(cd->cat, inode->fileid, entries, entry_count,
+                                stripe_count, mirror_count);
     free(entries);
     st = mds_cat_ns_dirent_name_for_child(
         cd->cat, inode->parent_fileid, inode->fileid, name, sizeof(name));
@@ -468,7 +480,8 @@ static void hpc_create_gc_enqueue_entries(
         return;
     }
     hpc_enqueue_cleanup_entries(
-        cat, fileid, batch->entries, entry_count);
+        cat, fileid, batch->entries, entry_count,
+        batch->stripe_count, batch->mirror_count);
 }
 
 enum mds_status hpc_shared_create_wide_layout(

@@ -232,6 +232,9 @@ struct commit_op_rebalance_move {
 	uint32_t                          gc_ds_id;
 	uint8_t                           gc_nfs_fh[MDS_NFS_FH_MAX];
 	uint32_t                          gc_fh_len;
+	/** MDS_GC_SWEEP_* coverage for the GC row; movers reclaim one
+	 *  slot, so this is MDS_GC_SWEEP_SLOT(stripe, mirror). */
+	uint32_t                          gc_sweep_hint;
 };
 /** Arguments for COMMIT_OP_QUOTA_ADJUST. */
 struct commit_op_quota_adjust {

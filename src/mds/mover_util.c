@@ -224,16 +224,24 @@ int mover_relocate_file(const struct mover_ctx *ctx,
             memcpy(op.args.rebalance_move.gc_nfs_fh, gc_fh_buf, gc_fh_len);
         }
         op.args.rebalance_move.gc_fh_len = gc_fh_len;
+        /* Single-slot reclaim: only the moved-away (stripe, mirror)
+         * file on the source DS is dead. */
+        op.args.rebalance_move.gc_sweep_hint =
+            MDS_GC_SWEEP_SLOT(stripe_idx, source_mirror);
         st = commit_queue_submit(ctx->cq, &op);
     } else if (ctx->cat != NULL) {
         /* RonDB mode: no commit queue -- write stripe map + GC
-         * entry directly via catalogue vtable. */
+         * entry directly via catalogue vtable.  Single-slot hint:
+         * only the moved-away (stripe, mirror) file on the source
+         * DS is dead; other slots of this file on that DS (and the
+         * legacy dense sweep's stripe-0 probe) must not be touched. */
         st = mds_cat_stripe_map_put(ctx->cat, NULL, fileid,
                                     sc2, su2, mc2, entries2);
         if (st == MDS_OK && gc_fh_len > 0) {
-            (void)mds_cat_gc_enqueue(ctx->cat, NULL, fileid,
-                                     source_ds, gc_fh_buf,
-                                     gc_fh_len);
+            (void)mds_cat_gc_enqueue_hint(
+                ctx->cat, NULL, fileid, source_ds, gc_fh_buf,
+                gc_fh_len,
+                MDS_GC_SWEEP_SLOT(stripe_idx, source_mirror));
         }
     } else {
         st = MDS_ERR_IO;

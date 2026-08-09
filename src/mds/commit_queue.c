@@ -320,9 +320,12 @@ enum mds_status commit_queue_submit(struct commit_queue *cq,
 					    rm->stripe_unit, rm->mirror_count,
 					    rm->entries);
 		if (st == MDS_OK) {
-			st = mds_cat_gc_enqueue(cat, NULL,
-						rm->gc_fileid, rm->gc_ds_id,
-						rm->gc_nfs_fh, rm->gc_fh_len);
+			st = mds_cat_gc_enqueue_hint(cat, NULL,
+						     rm->gc_fileid,
+						     rm->gc_ds_id,
+						     rm->gc_nfs_fh,
+						     rm->gc_fh_len,
+						     rm->gc_sweep_hint);
 		}
 		break;
 	}

@@ -340,6 +340,50 @@ struct mds_ds_info {
  * GC queue entry
  * ----------------------------------------------------------------------- */
 
+/*
+ * sweep_hint -- tells the ds_gc worker WHICH (stripe, mirror) DS files
+ * to unlink for (fileid, ds_id), closing the wide-stripe leak where
+ * the legacy dense sweep stopped at the first absent stripe:
+ *
+ *   0                        Legacy dense sweep (stripes assumed dense
+ *                            from 0 on this DS -- true only for 1x1
+ *                            files).  Written by pre-hint binaries and
+ *                            by enqueue sites with no geometry in scope.
+ *   MDS_GC_SWEEP_GEOM(sc,mc) Whole-file reclaim: probe every slot
+ *                            (s < sc, m < mc).  Absent slots are
+ *                            expected (a wide file holds only its own
+ *                            stripes on this DS) and are NOT a
+ *                            termination signal.
+ *   MDS_GC_SWEEP_SLOT(s,m)   Single-slot reclaim (bit 31 set): unlink
+ *                            exactly one (stripe, mirror) file.  Used
+ *                            by rebalance-style movers where other
+ *                            slots of the same file on the same DS are
+ *                            still live.
+ */
+#define MDS_GC_SWEEP_SLOT_FLAG  (1U << 31)
+#define MDS_GC_SWEEP_GEOM(sc, mc) \
+	((((uint32_t)(sc)) << 4) | ((uint32_t)(mc) & 0xFU))
+#define MDS_GC_SWEEP_SLOT(s, m) \
+	(MDS_GC_SWEEP_SLOT_FLAG | (((uint32_t)(s)) << 4) | \
+	 ((uint32_t)(m) & 0xFU))
+#define MDS_GC_SWEEP_IS_SLOT(h)  (((h) & MDS_GC_SWEEP_SLOT_FLAG) != 0U)
+#define MDS_GC_SWEEP_SC(h)       ((((uint32_t)(h)) >> 4) & 0x07FFFFFFU)
+#define MDS_GC_SWEEP_MC(h)       (((uint32_t)(h)) & 0xFU)
+
+/* This header is shared with C++ translation units (the RonDB shim),
+ * where the C11 _Static_assert keyword is unavailable. */
+#ifdef __cplusplus
+static_assert(MDS_MAX_STRIPES <= 0x07FFFFFF,
+	      "MDS_GC_SWEEP_SC field must hold MDS_MAX_STRIPES");
+static_assert(MDS_MAX_MIRRORS <= 0xF,
+	      "MDS_GC_SWEEP_MC field must hold MDS_MAX_MIRRORS");
+#else
+_Static_assert(MDS_MAX_STRIPES <= 0x07FFFFFF,
+	       "MDS_GC_SWEEP_SC field must hold MDS_MAX_STRIPES");
+_Static_assert(MDS_MAX_MIRRORS <= 0xF,
+	       "MDS_GC_SWEEP_MC field must hold MDS_MAX_MIRRORS");
+#endif
+
 struct mds_gc_entry {
 	uint64_t gc_seq;
 	uint64_t fileid;
@@ -347,6 +391,7 @@ struct mds_gc_entry {
 	uint32_t nfs_fh_len;
 	uint8_t  nfs_fh[MDS_NFS_FH_MAX];
 	uint32_t owner_mds_id;   /* MDS that enqueued this entry (0 = legacy). */
+	uint32_t sweep_hint;     /* MDS_GC_SWEEP_* encoding (0 = legacy). */
 };
 
 /* One persisted DS-prealloc slot (ENABLE_DS_PREALLOC).  See

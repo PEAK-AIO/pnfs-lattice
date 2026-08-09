@@ -265,6 +265,7 @@ enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
                                            uint32_t stripe_count,
                                            const struct mds_ds_map_entry *gc_entries,
                                            uint32_t gc_entry_count,
+                                           uint32_t gc_sweep_hint,
                                            bool *gc_folded)
 {
     if (gc_folded != NULL) {
@@ -282,6 +283,7 @@ enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
         cat->auth_ops->ns_remove_known_gc(cat, txn, parent_fileid,
                                           name, child, stripe_count,
                                           gc_entries, gc_entry_count,
+                                          gc_sweep_hint,
                                           gc_folded));
 }
 
@@ -1306,11 +1308,24 @@ enum mds_status mds_cat_gc_enqueue(struct mds_catalogue *cat,
                                    const uint8_t *nfs_fh,
                                    uint32_t fh_len)
 {
+    /* No geometry in scope at the call site: legacy dense sweep. */
+    return mds_cat_gc_enqueue_hint(cat, txn, fileid, ds_id,
+                                   nfs_fh, fh_len, 0U);
+}
+
+enum mds_status mds_cat_gc_enqueue_hint(struct mds_catalogue *cat,
+                                        struct mds_cat_txn *txn,
+                                        uint64_t fileid,
+                                        uint32_t ds_id,
+                                        const uint8_t *nfs_fh,
+                                        uint32_t fh_len,
+                                        uint32_t sweep_hint)
+{
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
     return cat->auth_ops->gc_enqueue(cat, txn, fileid, ds_id,
-                                     nfs_fh, fh_len);
+                                     nfs_fh, fh_len, sweep_hint);
 }
 
 enum mds_status mds_cat_gc_peek(struct mds_catalogue *cat,

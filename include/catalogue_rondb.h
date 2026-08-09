@@ -381,6 +381,7 @@ struct rondb_gc_row {
     uint32_t       ds_id;
     uint32_t       fh_len;   /**< 0..MDS_NFS_FH_MAX */
     const uint8_t *nfs_fh;   /**< May be NULL when fh_len == 0. */
+    uint32_t       sweep_hint; /**< MDS_GC_SWEEP_* (0 = legacy sweep). */
 };
 
 /** Atomic REMOVE + GC enqueue.
@@ -592,12 +593,14 @@ int rondb_shim_quota_usage_put(void *handle, uint8_t usage_type,
                                uint64_t scope_id,
                                const struct mds_quota_usage *usage);
 
-/* GC queue (mds_gc_queue: PK=gc_seq). */
+/* GC queue (mds_gc_queue: PK=gc_seq).  sweep_hint is the MDS_GC_SWEEP_*
+ * stripe/mirror coverage for the drainer (0 = legacy dense sweep). */
 int rondb_shim_gc_seq_alloc(void *handle, uint64_t *seq_out);
 int rondb_shim_gc_enqueue(void *handle, uint64_t gc_seq,
                           uint64_t fileid, uint32_t ds_id,
                           const uint8_t *nfs_fh, uint32_t fh_len,
-                          uint32_t owner_mds_id);
+                          uint32_t owner_mds_id,
+                          uint32_t sweep_hint);
 int rondb_shim_gc_peek(void *handle, struct mds_gc_entry *entry);
 
 /** Batched peek: scan mds_gc_queue once, return the lowest-`cap`
@@ -1057,6 +1060,7 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
     const struct mds_inode *child, uint32_t stripe_count,
     const struct mds_ds_map_entry *gc_entries,
     uint32_t gc_entry_count,
+    uint32_t gc_sweep_hint,
     bool *gc_folded);
 
 /**

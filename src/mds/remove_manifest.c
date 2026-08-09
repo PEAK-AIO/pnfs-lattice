@@ -310,9 +310,13 @@ static void rm_finalize_inode(struct remove_manifest *rm,
 				if (fhl > MDS_NFS_FH_MAX) {
 					fhl = MDS_NFS_FH_MAX;
 				}
-				(void)mds_cat_gc_enqueue(rm->cat, NULL,
-							 ino->fileid, ds_id,
-							 sm[i].nfs_fh, fhl);
+				/* Geometry hint: sweep all (s, m) slots on
+				 * this DS -- wide layouts are not stripe-
+				 * dense per DS. */
+				(void)mds_cat_gc_enqueue_hint(
+					rm->cat, NULL, ino->fileid, ds_id,
+					sm[i].nfs_fh, fhl,
+					MDS_GC_SWEEP_GEOM(sc, mc));
 			}
 		}
 	}

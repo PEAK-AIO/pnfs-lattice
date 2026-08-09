@@ -1668,18 +1668,24 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 		return;
 	}
 
-	/* One GC row per unique DS.  On geometry/allocation failure we
-	 * skip GC scheduling for this unlink; the stripe_map row stays
-	 * around and a later cleanup pass (admin or restart-time scan)
-	 * picks it up. */
+	/* One GC row per unique DS, each carrying the file's stripe-map
+	 * geometry so the ds_gc sweep probes every (stripe, mirror) slot
+	 * instead of the legacy dense sweep that stopped at the first
+	 * absent stripe and leaked every non-stripe-0 file of a wide
+	 * layout.  On geometry/allocation failure we skip GC scheduling
+	 * for this unlink; the stripe_map row stays around and a later
+	 * cleanup pass (admin or restart-time scan) picks it up. */
 	if (collect_unique_ds_gc_entries(entries, stripe_count,
 					 mirror_count, &uniq,
 					 &n_uniq) == 0) {
 		for (i = 0; i < n_uniq; i++) {
-			(void)mds_cat_gc_enqueue(cd->cat, NULL, fileid,
-						 uniq[i].ds_id,
-						 uniq[i].nfs_fh,
-						 uniq[i].nfs_fh_len);
+			(void)mds_cat_gc_enqueue_hint(cd->cat, NULL, fileid,
+						      uniq[i].ds_id,
+						      uniq[i].nfs_fh,
+						      uniq[i].nfs_fh_len,
+						      MDS_GC_SWEEP_GEOM(
+							      stripe_count,
+							      mirror_count));
 		}
 	}
 	free(uniq);
@@ -2073,6 +2079,7 @@ enum nfs4_status op_remove(struct compound_data *cd,
 					cd, cd->current_fh.fileid,
 					op->arg.remove.name, &rm_inode,
 					rm_sm_sc, uniq, n_uniq,
+					MDS_GC_SWEEP_GEOM(rm_sm_sc, rm_sm_mc),
 					&rm_gc_folded);
 			}
 			free(uniq);

@@ -906,12 +906,18 @@ enum mds_status ds_prealloc_batch(
         if (!captured) {
             /* No usable FH for this stripe -- roll back the DS files
              * created so far (best-effort GC) and fail the whole batch
-             * so the caller never sees a half-built layout. */
+             * so the caller never sees a half-built layout.  Each row
+             * carries the requested geometry so the sweep probes every
+             * slot (wide layouts are not stripe-dense per DS). */
+            uint32_t rb_mc = (req->mirror_count == 0U)
+                                 ? 1U : req->mirror_count;
+
             for (uint32_t j = 0; j < i; j++) {
-                (void)mds_cat_gc_enqueue(
+                (void)mds_cat_gc_enqueue_hint(
                     (struct mds_catalogue *)ctx->cat, NULL, fileid,
                     entries[j].ds_id, entries[j].nfs_fh,
-                    entries[j].nfs_fh_len);
+                    entries[j].nfs_fh_len,
+                    MDS_GC_SWEEP_GEOM(req->stripe_count, rb_mc));
             }
             free(entries);
             return MDS_ERR_NOSPC;

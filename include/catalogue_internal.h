@@ -93,6 +93,7 @@ struct mds_authority_ops {
         uint32_t stripe_count,
         const struct mds_ds_map_entry *gc_entries,
         uint32_t gc_entry_count,
+        uint32_t gc_sweep_hint,
         bool *gc_folded);
     /* parent_touch flush target: one interpreted update on the parent
      * inode row (change += delta, mtime/ctime = stamp).  Missing parent
@@ -303,10 +304,12 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint8_t usage_type,
         uint64_t scope_id, const struct mds_quota_usage *usage);
 
-    /* GC queue */
+    /* GC queue.  sweep_hint carries the MDS_GC_SWEEP_* stripe/mirror
+     * coverage for the ds_gc drainer (0 = legacy dense sweep). */
     enum mds_status (*gc_enqueue)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t fileid,
-        uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len);
+        uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len,
+        uint32_t sweep_hint);
     enum mds_status (*gc_peek)(struct mds_catalogue *cat,
         struct mds_gc_entry *entry);
     enum mds_status (*gc_dequeue)(struct mds_catalogue *cat,
