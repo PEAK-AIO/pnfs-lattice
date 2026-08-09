@@ -166,6 +166,31 @@ struct deleg_revoked_entry {
     struct deleg_revoked_entry *next;
 };
 
+/*
+ * Pending-recall ledger (pynfs DSESS9003).  One entry per CB_RECALL
+ * whose answer has not been observed.  A client that destroys the
+ * session the recall was sent over and creates a replacement gets
+ * the recall retransmitted from here (deleg_resend_pending_recalls,
+ * driven by op_create_session).  Entries leave the ledger when:
+ *   - the client answers a (re)transmitted CB_RECALL,
+ *   - DELEGRETURN / FREE_STATEID arrives for the stateid,
+ *   - the owning client is destroyed,
+ *   - the TTL (one lease period) or the resend cap expires.
+ * Protected by pending_lock; never touched under a stripe lock.
+ */
+#define DELEG_PENDING_RECALL_TTL_NS  (90ULL * 1000000000ULL)
+#define DELEG_PENDING_RESEND_MAX     8U
+#define DELEG_PENDING_RESEND_BATCH   16U
+
+struct deleg_pending_recall {
+    struct nfs4_stateid stateid;
+    uint64_t            clientid;
+    uint64_t            fileid;
+    uint64_t            recorded_ns;   /* CLOCK_MONOTONIC at record */
+    uint32_t            resend_count;
+    struct deleg_pending_recall *next;
+};
+
 struct deleg_table {
     struct deleg_entry  **buckets;     /* [DELEG_HASH_SIZE] */
     pthread_mutex_t       stripe_locks[DELEG_STRIPE_COUNT];
@@ -178,7 +203,87 @@ struct deleg_table {
     /* Revoked-stateid tracking (RFC 8881 §10.2.1). */
     struct deleg_revoked_entry *revoked_head;
     pthread_mutex_t             revoked_lock;
+    /* Pending-recall ledger (DSESS9003 retransmit). */
+    struct deleg_pending_recall *pending_head;
+    pthread_mutex_t              pending_lock;
 };
+
+static uint64_t deleg_now_ns(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* Append one ledger entry.  Best-effort: allocation failure only
+ * costs the retransmit, never the recall itself. */
+static void deleg_pending_record(struct deleg_table *dt,
+                                 const struct nfs4_stateid *stateid,
+                                 uint64_t clientid, uint64_t fileid)
+{
+    struct deleg_pending_recall *p = calloc(1, sizeof(*p));
+
+    if (p == NULL) {
+        return;
+    }
+    p->stateid     = *stateid;
+    p->clientid    = clientid;
+    p->fileid      = fileid;
+    p->recorded_ns = deleg_now_ns();
+
+    pthread_mutex_lock(&dt->pending_lock);
+    p->next = dt->pending_head;
+    dt->pending_head = p;
+    pthread_mutex_unlock(&dt->pending_lock);
+}
+
+/* Remove ledger entries matching @p other (any client).  Called on
+ * DELEGRETURN and FREE_STATEID — both mean the client acknowledged
+ * the recall outcome, so retransmits must stop. */
+static void deleg_pending_clear_stateid(struct deleg_table *dt,
+                                        const uint8_t other[NFS4_OTHER_SIZE])
+{
+    struct deleg_pending_recall **pp;
+
+    pthread_mutex_lock(&dt->pending_lock);
+    pp = &dt->pending_head;
+    while (*pp != NULL) {
+        if (memcmp((*pp)->stateid.other, other,
+                   NFS4_OTHER_SIZE) == 0) {
+            struct deleg_pending_recall *dead = *pp;
+
+            *pp = dead->next;
+            free(dead);
+            continue;
+        }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&dt->pending_lock);
+}
+
+/* Remove every ledger entry owned by @p clientid (client destroy). */
+static void deleg_pending_clear_client(struct deleg_table *dt,
+                                       uint64_t clientid)
+{
+    struct deleg_pending_recall **pp;
+
+    pthread_mutex_lock(&dt->pending_lock);
+    pp = &dt->pending_head;
+    while (*pp != NULL) {
+        if ((*pp)->clientid == clientid) {
+            struct deleg_pending_recall *dead = *pp;
+
+            *pp = dead->next;
+            free(dead);
+            continue;
+        }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&dt->pending_lock);
+}
 
 /* Forward declarations for CB_GETATTR (defined after hash helpers). */
 static uint32_t deleg_hash(uint64_t fileid);
@@ -348,6 +453,7 @@ int deleg_table_init(uint32_t mds_id, struct deleg_table **out)
         pthread_mutex_init(&dt->stripe_locks[i], NULL);
     }
     pthread_mutex_init(&dt->revoked_lock, NULL);
+    pthread_mutex_init(&dt->pending_lock, NULL);
 
     *out = dt;
     return 0;
@@ -384,6 +490,17 @@ void deleg_table_destroy(struct deleg_table *dt)
         }
     }
     pthread_mutex_destroy(&dt->revoked_lock);
+
+    /* Free pending-recall ledger. */
+    {
+        struct deleg_pending_recall *p = dt->pending_head;
+        while (p != NULL) {
+            struct deleg_pending_recall *pn = p->next;
+            free(p);
+            p = pn;
+        }
+    }
+    pthread_mutex_destroy(&dt->pending_lock);
 
     /* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion) */
     free(dt->buckets);
@@ -491,6 +608,11 @@ int deleg_return(struct deleg_table *dt,
     if (dt == NULL || stateid == NULL) {
         return -1;
     }
+
+    /* DELEGRETURN acknowledges the recall outcome whether or not the
+     * grant still exists in the table (conflict-recalls revoke it
+     * first) — stop any pending CB_RECALL retransmits for it. */
+    deleg_pending_clear_stateid(dt, stateid->other);
 
     /* Scan all buckets -- stateid doesn't encode fileid.
      * Acceptable cost: DELEGRETURN is infrequent. */
@@ -652,6 +774,20 @@ int deleg_recall_file(struct deleg_table *dt,
     unlock_stripe(dt, fileid);
 
     /*
+     * Ledger every recall target BEFORE any CB I/O (pynfs DSESS9003):
+     * whether the send below succeeds, times out unanswered, or finds
+     * no backchannel at all, the holder is entitled to a retransmit
+     * over whatever backchannel it binds next.  Entries are cleared
+     * when the client answers a (re)sent CB, DELEGRETURNs, or
+     * FREE_STATEIDs — otherwise the TTL reaps them.
+     */
+    for (uint32_t pi = 0; pi < target_count; pi++) {
+        deleg_pending_record(dt, &targets[pi].stateid,
+                             targets[pi].clientid,
+                             targets[pi].fileid);
+    }
+
+    /*
      * Phase 2 -- outside the stripe lock: for each detached snapshot,
      * find the holder's backchannel via the session table, dup() the
      * cb_conn fd under the session-table lock, then send CB_RECALL on
@@ -707,10 +843,189 @@ int deleg_recall_file(struct deleg_table *dt,
                 (unsigned long long)targets[i].fileid,
                 (unsigned long long)targets[i].clientid, cbrc);
         }
+        /* NOTE: cbrc == 0 only means the record was SENT — the
+         * backchannel is fire-and-forget (replies are consumed by
+         * the connection's epoll reader).  The ledger entry
+         * therefore stays until the client acknowledges via
+         * DELEGRETURN / FREE_STATEID, or the TTL / resend cap
+         * reaps it. */
         (void)close(lc.fd);
     }
 
     return recalled;
+}
+
+/* -----------------------------------------------------------------------
+ * Pending-recall retransmit (pynfs DSESS9003)
+ * ----------------------------------------------------------------------- */
+
+bool deleg_has_pending_recall(const struct deleg_table *dt,
+                              uint64_t clientid)
+{
+    struct deleg_table *mdt = (struct deleg_table *)dt;
+    const struct deleg_pending_recall *p;
+    bool found = false;
+
+    if (dt == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&mdt->pending_lock);
+    for (p = mdt->pending_head; p != NULL; p = p->next) {
+        if (p->clientid == clientid) {
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mdt->pending_lock);
+    return found;
+}
+
+int deleg_resend_pending_recalls(struct deleg_table *dt,
+                                 uint64_t clientid)
+{
+    struct deleg_pending_recall snap[DELEG_PENDING_RESEND_BATCH];
+    uint32_t snap_count = 0;
+    uint64_t now = 0;
+    int sent = 0;
+
+    if (dt == NULL) {
+        return -1;
+    }
+    now = deleg_now_ns();
+
+    /*
+     * Snapshot up to a batch of this client's ledger entries while
+     * reaping expired / resend-capped ones.  CB I/O happens strictly
+     * outside pending_lock (and outside every stripe lock).
+     */
+    pthread_mutex_lock(&dt->pending_lock);
+    {
+        struct deleg_pending_recall **pp = &dt->pending_head;
+
+        while (*pp != NULL) {
+            struct deleg_pending_recall *p = *pp;
+
+            if (now - p->recorded_ns > DELEG_PENDING_RECALL_TTL_NS ||
+                p->resend_count > DELEG_PENDING_RESEND_MAX) {
+                *pp = p->next;
+                free(p);
+                continue;
+            }
+            if (p->clientid == clientid &&
+                snap_count < DELEG_PENDING_RESEND_BATCH) {
+                p->resend_count++;
+                snap[snap_count++] = *p;
+            }
+            pp = &p->next;
+        }
+    }
+    pthread_mutex_unlock(&dt->pending_lock);
+
+    if (snap_count == 0 || dt->st == NULL) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < snap_count; i++) {
+        struct deleg_cb_lookup_ctx lc;
+        struct nfs4_cb_recall_args ra;
+        int cbrc;
+
+        memset(&lc, 0, sizeof(lc));
+        lc.want_clientid = clientid;
+        lc.fd = -1;
+
+        (void)session_for_each_with_cb(dt->st, deleg_cb_lookup_cb, &lc);
+        if (!lc.found) {
+            /* No bound backchannel yet — the scheduler retries. */
+            break;
+        }
+
+        memset(&ra, 0, sizeof(ra));
+        ra.stateid  = snap[i].stateid;
+        ra.truncate = false;
+        ra.fileid   = snap[i].fileid;
+
+        cbrc = nfs4_cb_recall_fd(lc.fd, lc.session_id, lc.cb_prog,
+                                 lc.slot_seq_id, lc.num_cb_slots,
+                                 lc.minorversion, &lc.cb_sec,
+                                 &ra, 3000);
+        (void)close(lc.fd);
+
+        if (cbrc == 0) {
+            /* Sent (fire-and-forget) — the entry stays until the
+             * client acknowledges via DELEGRETURN / FREE_STATEID
+             * or the TTL / resend cap reaps it. */
+            sent++;
+        }
+        MDS_LOG_INFO(LOG_COMP_MDS,
+            "deleg: retransmitted CB_RECALL fileid=%llu client=%llu "
+            "attempt=%u rc=%d",
+            (unsigned long long)snap[i].fileid,
+            (unsigned long long)clientid,
+            (unsigned)snap[i].resend_count, cbrc);
+    }
+    return sent;
+}
+
+/* Short-lived detached worker: give the client time to process the
+ * CREATE_SESSION reply (a CB referencing the new session before that
+ * is rejected with BADSESSION), then retransmit for a few rounds. */
+struct deleg_resend_ctx {
+    struct deleg_table *dt;
+    uint64_t            clientid;
+};
+
+static void *deleg_resend_worker(void *arg)
+{
+    struct deleg_resend_ctx *ctx = arg;
+
+    for (int round = 0; round < 5; round++) {
+        (void)usleep(500 * 1000);
+        if (!deleg_has_pending_recall(ctx->dt, ctx->clientid)) {
+            break;
+        }
+        /* One successful retransmit round is this worker's job
+         * done: the entries deliberately stay ledgered until the
+         * client acknowledges (DELEGRETURN / FREE_STATEID) or the
+         * TTL reaps them, so looping again here would only send
+         * duplicates half a second apart. */
+        if (deleg_resend_pending_recalls(ctx->dt, ctx->clientid) > 0) {
+            break;
+        }
+    }
+    free(ctx);
+    return NULL;
+}
+
+void deleg_schedule_pending_resend(struct deleg_table *dt,
+                                   uint64_t clientid)
+{
+    struct deleg_resend_ctx *ctx;
+    pthread_t tid;
+    pthread_attr_t attr;
+
+    if (dt == NULL || !deleg_has_pending_recall(dt, clientid)) {
+        return;
+    }
+    ctx = calloc(1, sizeof(*ctx));
+    if (ctx == NULL) {
+        return; /* Retransmit forfeited; TTL reaps the entries. */
+    }
+    ctx->dt = dt;
+    ctx->clientid = clientid;
+
+    /* Detached: the worker's lifetime (≤ ~3 s) is far shorter than
+     * the deleg table's, which is destroyed only at process
+     * teardown after the RPC layer has quiesced. */
+    if (pthread_attr_init(&attr) != 0) {
+        free(ctx);
+        return;
+    }
+    (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, deleg_resend_worker, ctx) != 0) {
+        free(ctx);
+    }
+    pthread_attr_destroy(&attr);
 }
 
 void deleg_revoke_client(struct deleg_table *dt, uint64_t clientid)
@@ -739,6 +1054,9 @@ void deleg_revoke_client(struct deleg_table *dt, uint64_t clientid)
 
         pthread_mutex_unlock(&dt->stripe_locks[stripe]);
     }
+
+    /* Client is gone — nobody left to retransmit recalls to. */
+    deleg_pending_clear_client(dt, clientid);
 }
 
 void deleg_revoke_file(struct deleg_table *dt, uint64_t fileid)
@@ -834,6 +1152,9 @@ int deleg_free_revoked(struct deleg_table *dt,
             *pp = re->next;
             free(re);
             pthread_mutex_unlock(&dt->revoked_lock);
+            /* FREE_STATEID acknowledges the revocation — stop any
+             * pending CB_RECALL retransmits for this stateid. */
+            deleg_pending_clear_stateid(dt, other);
             return 0;
         }
         pp = &re->next;

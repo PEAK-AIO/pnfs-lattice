@@ -251,6 +251,48 @@ int deleg_free_revoked(struct deleg_table *dt,
                        const uint8_t other[12]);
 
 /**
+ * Pending-recall retransmit support (pynfs DSESS9003).
+ *
+ * deleg_recall_file() revokes the grant immediately and sends
+ * CB_RECALL best-effort.  Each recall is also recorded in a small
+ * pending-recall ledger so that a client which never answered the
+ * callback — for example because it destroyed the session the CB
+ * was sent over — receives a retransmit when it establishes a new
+ * backchannel.  Ledger entries are cleared by DELEGRETURN /
+ * FREE_STATEID, dropped with the client, and TTL-reaped after one
+ * lease period.
+ */
+
+/** True when @p clientid has recorded recalls awaiting an answer. */
+bool deleg_has_pending_recall(const struct deleg_table *dt,
+                              uint64_t clientid);
+
+/**
+ * Re-send CB_RECALL for every pending recall of @p clientid over the
+ * client's currently bound backchannel.  The backchannel is
+ * fire-and-forget, so a send never clears the ledger — entries leave
+ * via DELEGRETURN / FREE_STATEID / client destroy, or the TTL /
+ * resend cap.
+ *
+ * @return Number of recalls sent on this pass, 0 when nothing was
+ *         sent (no backchannel / nothing pending), -1 on invalid
+ *         arguments.
+ */
+int deleg_resend_pending_recalls(struct deleg_table *dt,
+                                 uint64_t clientid);
+
+/**
+ * Fire-and-forget retransmit scheduler, called from CREATE_SESSION:
+ * spawns a short-lived detached worker that waits for the client to
+ * process the CREATE_SESSION reply (a CB referencing the new session
+ * before then would be rejected with BADSESSION), then drives
+ * deleg_resend_pending_recalls() for a few rounds.  NULL-safe; no-op
+ * when nothing is pending.
+ */
+void deleg_schedule_pending_resend(struct deleg_table *dt,
+                                   uint64_t clientid);
+
+/**
  * RFC 8881 §20.1: issue CB_GETATTR to a WRITE delegation holder.
  *
  * If @p fileid has an active WRITE delegation from a client other
