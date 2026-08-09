@@ -28,10 +28,15 @@
  * Synchronous placement is measurably slower than the enterprise
  * pre-fetch ring on fan-in workloads but is correct for every
  * CREATE shape pynfs exercises and keeps the code path free of
- * per-DS rings, refill workers, and fileid pools.  Wide pre-warm
- * (ds_prealloc_batch) is intentionally not implemented in CE -- the
- * caller in compound_data_io.c only takes that path for HPC-Shared
- * inodes, which the community build never marks.
+ * per-DS rings, refill workers, and fileid pools.
+ *
+ * Wide pre-warm (ds_prealloc_batch) follows the same synchronous
+ * philosophy: the HPC-Shared trigger (the user.pnfs.hpc_shared
+ * xattr, hpc_shared_xattr_apply) is fully reachable in the
+ * community build, so the OPEN(CREATE) wide branch must work here
+ * too.  Each wide CREATE runs placement plus per-stripe DS file
+ * creation + FH capture inline -- all-or-nothing, mirroring the
+ * enterprise contract, minus the ring amortisation.
  */
 #include "ds_prealloc.h"
 
@@ -328,20 +333,161 @@ void ds_prealloc_destroy(struct ds_prealloc_ctx *ctx)
     free(ctx);
 }
 
+/* GC-enqueue the DS files created for slots [0, upto) of a failed
+ * batch.  Best-effort: the GC drainer owns the actual unlinks, and a
+ * failed enqueue only delays reclamation (never corrupts state). */
+static void batch_rollback_enqueue(const struct ds_prealloc_ctx *ctx,
+                                   uint64_t fileid,
+                                   const struct mds_ds_map_entry *entries,
+                                   uint32_t upto)
+{
+    for (uint32_t j = 0; j < upto; j++) {
+        (void)mds_cat_gc_enqueue((struct mds_catalogue *)ctx->cat, NULL,
+                                 fileid, entries[j].ds_id,
+                                 entries[j].nfs_fh,
+                                 entries[j].nfs_fh_len);
+    }
+}
+
 enum mds_status ds_prealloc_batch(
     struct ds_prealloc_ctx *ctx,
     const struct ds_prealloc_batch_request *req,
     struct ds_prealloc_batch_result *out)
 {
-    /* Wide pre-warm is HPC-Shared territory; the community build
-     * never sets MDS_IFLAG_HPC_SHARED so the OPEN(CREATE) wide
-     * branch is unreachable and a permanent INVAL is correct. */
-    (void)ctx;
-    (void)req;
+    /*
+     * Community-build wide pre-warm: the synchronous batch analogue
+     * of ds_prealloc_pop() above.  The enterprise implementation in
+     * ds_prealloc.c amortises the DS round-trips through pre-fill
+     * rings; here each HPC-Shared CREATE pays its stripe_count FH
+     * captures inline.  Same all-or-nothing contract: on any
+     * placement or capture failure every DS file created so far is
+     * GC-enqueued and the caller sees an error, never a half-built
+     * layout.
+     *
+     * This used to be a permanent MDS_ERR_INVAL on the assumption
+     * that the community build could never mark an inode HPC-Shared.
+     * That assumption was wrong: the user.pnfs.hpc_shared control
+     * xattr (hpc_shared_xattr_apply) has no build gate, so flagging
+     * a directory made every OPEN(CREATE) inside it fail with
+     * NFS4ERR_INVAL.
+     */
+    struct mds_ds_info *ds_list = NULL;
+    struct mds_ds_map_entry *entries = NULL;
+    uint32_t ds_count = 0, n;
+    uint32_t stripe_unit;
+    uint64_t fileid = 0;
+    enum mds_status st;
+
     if (out != NULL) {
         memset(out, 0, sizeof(*out));
     }
-    return MDS_ERR_INVAL;
+    if (ctx == NULL || req == NULL || out == NULL ||
+        req->stripe_count == 0U || req->stripe_count > MDS_MAX_STRIPES) {
+        return MDS_ERR_INVAL;
+    }
+    {
+        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+
+        if (mc > MDS_MAX_MIRRORS) {
+            return MDS_ERR_INVAL;
+        }
+        n = req->stripe_count * mc;
+    }
+    stripe_unit = (req->stripe_unit != 0U) ? req->stripe_unit
+                                           : ctx->stripe_unit;
+
+    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, &ds_list,
+                         &ds_count);
+    if (st != MDS_OK || ds_list == NULL || ds_count == 0) {
+        free(ds_list);
+        return MDS_ERR_NOSPC;
+    }
+    /* strict_unique_ds: every stripe must land on a distinct DS, so
+     * the pool must be at least stripe_count wide. */
+    if (req->strict_unique_ds && ds_count < req->stripe_count) {
+        free(ds_list);
+        return MDS_ERR_NOSPC;
+    }
+    if (ctx->cache != NULL) {
+        ds_cache_overlay_weights(ctx->cache, ds_list, ds_count);
+    }
+    entries = calloc(n, sizeof(*entries));
+    if (entries == NULL) {
+        free(ds_list);
+        return MDS_ERR_NOMEM;
+    }
+
+    /* Resolve the fileid before placement so the RR window rotates
+     * per file (start = fileid % online_count), matching the
+     * enterprise batch: successive wide files walk across the whole
+     * ONLINE pool instead of pinning one hot set. */
+    fileid = req->fileid_hint;
+    if (fileid == 0U) {
+        st = mds_cat_alloc_fileid((struct mds_catalogue *)ctx->cat, NULL,
+                                  &fileid);
+        if (st != MDS_OK || fileid == 0U) {
+            free(ds_list);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+    }
+
+    {
+        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+        uint32_t sc = req->stripe_count;
+
+        st = placement_select_rr_at2(ds_list, ds_count, &sc, mc,
+                                     stripe_unit, fileid, entries);
+        if (st != MDS_OK) {
+            free(ds_list);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+        /* strict_unique_ds: refuse graceful degrade -- the caller
+         * asked for a full-width unique spread and must see NOSPC
+         * rather than a silently narrower layout. */
+        if (req->strict_unique_ds && sc != req->stripe_count) {
+            free(ds_list);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+    }
+    free(ds_list);
+
+    /* Synchronous per-slot DS file create + FH capture.  A slot
+     * without a captured FH fails the whole batch: the wide fused
+     * CREATE persists the map exactly as captured, and a stripe
+     * with an empty FH would strand every I/O that lands on it.
+     * Without a proxy there is no way to capture handles at all
+     * (test fixtures) -- report NOSPC so the OPEN falls back to a
+     * client-visible error rather than committing a broken map. */
+    if (ctx->proxy == NULL) {
+        free(entries);
+        return MDS_ERR_NOSPC;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t stripe = i % req->stripe_count;
+        uint32_t mirror = i / req->stripe_count;
+        uint32_t fh_len = (uint32_t)sizeof(entries[i].nfs_fh);
+
+        st = mds_proxy_ensure_ds_file_fh(ctx->proxy, entries[i].ds_id,
+                                         fileid, stripe, mirror,
+                                         entries[i].nfs_fh, &fh_len);
+        if (st != MDS_OK || fh_len == 0 ||
+            fh_len > sizeof(entries[i].nfs_fh)) {
+            batch_rollback_enqueue(ctx, fileid, entries, i);
+            free(entries);
+            return MDS_ERR_NOSPC;
+        }
+        entries[i].nfs_fh_len = fh_len;
+    }
+
+    out->fileid = fileid;
+    out->stripe_count = req->stripe_count;
+    out->mirror_count = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+    out->stripe_unit = stripe_unit;
+    out->entries = entries;
+    return MDS_OK;
 }
 
 void ds_prealloc_batch_result_destroy(

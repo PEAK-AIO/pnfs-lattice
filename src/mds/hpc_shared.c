@@ -516,6 +516,9 @@ enum mds_status hpc_shared_create_wide_layout(
 
     st = hpc_prepare_wide_inode(cat, parent_fileid, mode, uid, gid, &child);
     if (st != MDS_OK) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "hpc wide-create '%s' parent=%llu: inode prepare failed (st=%d)",
+            name, (unsigned long long)parent_fileid, (int)st);
         return st;
     }
     memset(&request, 0, sizeof(request));
@@ -532,6 +535,13 @@ enum mds_status hpc_shared_create_wide_layout(
 
     st = ds_prealloc_batch(prealloc, &request, &batch);
     if (st != MDS_OK) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "hpc wide-create '%s' parent=%llu fileid=%llu: DS pre-warm "
+            "batch failed (st=%d sc=%u mc=%u su=%u)",
+            name, (unsigned long long)parent_fileid,
+            (unsigned long long)child.fileid, (int)st,
+            (unsigned)stripe_count, (unsigned)mirror_count,
+            (unsigned)stripe_unit);
         return st;
     }
 
@@ -541,6 +551,13 @@ enum mds_status hpc_shared_create_wide_layout(
         batch.stripe_unit, batch.mirror_count, batch.entries,
         &safe_to_discard);
     if (st != MDS_OK) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "hpc wide-create '%s' parent=%llu fileid=%llu: catalogue "
+            "commit failed (st=%d sc=%u su=%u discard=%d)",
+            name, (unsigned long long)parent_fileid,
+            (unsigned long long)child.fileid, (int)st,
+            (unsigned)batch.stripe_count, (unsigned)batch.stripe_unit,
+            safe_to_discard ? 1 : 0);
         /* Reclaim the DS bundle only when the create is PROVEN not to have
          * published a live file at child.fileid.  On an indeterminate
          * result (MDS_ERR_DELAY) the commit may have landed, so we must not
