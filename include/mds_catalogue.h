@@ -303,6 +303,33 @@ enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
 				  uint64_t dst_parent,
 				  const char *dst_name);
 
+/*
+ * ns_rename behaviour flags.
+ *
+ * MDS_CAT_RNF_KEEP_DST_ORPHAN — when the rename overwrites the LAST
+ * link of a regular file, keep the overwritten inode row instead of
+ * deleting it: nlink stays 0 and MDS_IFLAG_UNLINK_ORPHAN is set in
+ * the same rename transaction.  Used when live opens reference the
+ * overwritten file (POSIX unlink-of-open semantics); the caller
+ * finalizes the orphan after the last CLOSE.  Non-final links and
+ * non-regular targets are unaffected by the flag.
+ */
+#define MDS_CAT_RNF_KEEP_DST_ORPHAN (1U << 0)
+
+/**
+ * Flags-aware rename.  With ns_flags == 0 behaves exactly like
+ * mds_cat_ns_rename.  Returns MDS_ERR_NOSUPPORT when ns_flags != 0
+ * and the backend does not implement the flags-aware op (callers
+ * choose their own degradation).
+ */
+enum mds_status mds_cat_ns_rename_flags(struct mds_catalogue *cat,
+					struct mds_cat_txn *txn,
+					uint64_t src_parent,
+					const char *src_name,
+					uint64_t dst_parent,
+					const char *dst_name,
+					uint32_t ns_flags);
+
 /** Hard link: create dirent + bump nlink on target. */
 enum mds_status mds_cat_ns_link(struct mds_catalogue *cat,
 				struct mds_cat_txn *txn,

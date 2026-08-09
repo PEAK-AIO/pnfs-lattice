@@ -1266,7 +1266,8 @@ static enum mds_status rondb_ns_rename_resolved(
 	uint64_t dst_parent,
 	const char *dst_name,
 	uint64_t *src_fid_out,
-	uint8_t *src_type_out)
+	uint8_t *src_type_out,
+	uint32_t rn_flags)
 {
 	void *h = rondb_handle(cat);
 	struct mds_inode sp, dp, sc, dc;
@@ -1376,6 +1377,22 @@ static enum mds_status rondb_ns_rename_resolved(
 			dc.nlink--;
 		}
 		delete_dst = (dc.nlink == 0) ? 1 : 0;
+		/*
+		 * Keep-orphan overwrite (pynfs RNM21 / POSIX unlink-of-
+		 * open): when the caller knows live opens reference the
+		 * overwritten regular file, keep its inode row in the
+		 * SAME rename transaction — nlink 0 + UNLINK_ORPHAN flag
+		 * — instead of deleting it.  The row keeps resolving for
+		 * the holder's PUTFH+CLOSE; the last CLOSE finalizes
+		 * (compound_orphan_finalize).  The ctime/change bump and
+		 * serialisation below run because delete_dst is 0.
+		 */
+		if (delete_dst != 0 &&
+		    (rn_flags & MDS_CAT_RNF_KEEP_DST_ORPHAN) != 0U &&
+		    dc.type == MDS_FTYPE_REG) {
+			dc.flags |= MDS_IFLAG_UNLINK_ORPHAN;
+			delete_dst = 0;
+		}
 	} else if (rc != 1) {
 		return MDS_ERR_IO;
 	}
@@ -1451,7 +1468,8 @@ enum mds_status catalogue_rondb_ns_rename(
 	const char *dst_name)
 {
 	return rondb_ns_rename_resolved(cat, src_parent, src_name,
-					dst_parent, dst_name, NULL, NULL);
+					dst_parent, dst_name, NULL, NULL,
+					0U);
 }
 
 /* -----------------------------------------------------------------------
@@ -3481,6 +3499,19 @@ static enum mds_status rondb_auth_ns_rename(
 					dst_parent, dst_name);
 }
 
+/* Flags-aware rename for the single-MDS (unlocked) vtable. */
+static enum mds_status rondb_auth_ns_rename_flags(
+	struct mds_catalogue *cat, struct mds_cat_txn *txn,
+	uint64_t src_parent, const char *src_name,
+	uint64_t dst_parent, const char *dst_name,
+	uint32_t ns_flags)
+{
+	(void)txn;
+	return rondb_ns_rename_resolved(cat, src_parent, src_name,
+					dst_parent, dst_name, NULL, NULL,
+					ns_flags);
+}
+
 static enum mds_status rondb_auth_ns_link(
 	struct mds_catalogue *cat, struct mds_cat_txn *txn,
 	uint64_t parent, const char *name, uint64_t target)
@@ -3783,10 +3814,11 @@ static int rondb_emit_delta(
  * acquired inside catalogue_rondb_ns_rename still protect against
  * concurrent non-rename mutations of the same rows.
  */
-static enum mds_status rondb_locked_ns_rename(
+static enum mds_status rondb_locked_ns_rename_flags(
     struct mds_catalogue *cat, struct mds_cat_txn *txn,
     uint64_t src_parent, const char *src_name,
-    uint64_t dst_parent, const char *dst_name)
+    uint64_t dst_parent, const char *dst_name,
+    uint32_t ns_flags)
 {
     struct mds_rondb_state *st = rondb_state(cat);
     void *h = rondb_handle(cat);
@@ -3813,7 +3845,7 @@ static enum mds_status rondb_locked_ns_rename(
 
     rc = rondb_ns_rename_resolved(cat, src_parent, src_name,
                                   dst_parent, dst_name,
-                                  &child_fid, &child_type);
+                                  &child_fid, &child_type, ns_flags);
     if (rc == MDS_OK && st->changefeed_enabled) {
         /* Emit DIRENT_DELETE(src) + DIRENT_PUT(dst) carrying the
          * child fileid/type resolved by the rename prologue.
@@ -3845,6 +3877,16 @@ static enum mds_status rondb_locked_ns_rename(
     }
     rondb_unlock_set(h, st, &lock, 1);
     return rc;
+}
+
+/* Legacy (flag-less) locked rename — vtable ns_rename slot. */
+static enum mds_status rondb_locked_ns_rename(
+    struct mds_catalogue *cat, struct mds_cat_txn *txn,
+    uint64_t src_parent, const char *src_name,
+    uint64_t dst_parent, const char *dst_name)
+{
+    return rondb_locked_ns_rename_flags(cat, txn, src_parent, src_name,
+                                        dst_parent, dst_name, 0U);
 }
 
 /* -----------------------------------------------------------------------
@@ -4060,6 +4102,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
 	.ns_parent_touch         = rondb_auth_ns_parent_touch,
 	.ns_rename         = rondb_auth_ns_rename,
+	.ns_rename_flags   = rondb_auth_ns_rename_flags,
 	.remove_pending_enqueue    = catalogue_rondb_remove_pending_enqueue,
 	.remove_pending_enqueue_unlink = catalogue_rondb_remove_pending_enqueue_unlink,
 	.remove_pending_peek_batch = catalogue_rondb_remove_pending_peek_batch,
@@ -4163,6 +4206,7 @@ static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
 	.ns_rename         = rondb_locked_ns_rename,
+	.ns_rename_flags   = rondb_locked_ns_rename_flags,
 	.ns_link           = rondb_auth_ns_link,
 	.ns_lookup         = catalogue_rondb_ns_lookup,
 	.ns_getattr        = catalogue_rondb_ns_getattr,

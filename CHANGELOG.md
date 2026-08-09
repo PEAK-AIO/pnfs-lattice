@@ -191,6 +191,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **CLOSE after rename-over-an-open-file returned NFS4ERR_STALE
+  (pynfs RNM21)** — overwriting the last link of an OPEN regular file
+  via RENAME deleted its inode row inside the rename transaction, so
+  the holder's subsequent PUTFH+CLOSE failed with STALE.  The rename
+  path now implements POSIX unlink-of-open semantics: with live local
+  opens on the target, the new `MDS_CAT_RNF_KEEP_DST_ORPHAN` rename
+  keeps the row (nlink 0 + new `MDS_IFLAG_UNLINK_ORPHAN` flag) in the
+  same transaction, and the LAST CLOSE finalizes the orphan — GC of
+  DS objects, stripe rows, inode row, quota
+  (`compound_orphan_finalize`).  Orphan inodes keep resolving through
+  PUTFH (unlike `DELETE_PENDING` corpses, which stay deliberately
+  dead).  Known limitation: opens are tracked per-MDS in memory, so a
+  cross-MDS open or a crash between the rename and the last CLOSE
+  leaves the orphan row for a future sweeper — same blind spot as the
+  async-remove writer gate.
+- **Rename-overwrite leaked the overwritten file's DS objects** —
+  unlike REMOVE, the rename-overwrite path performed no layout
+  recall, no GC enqueue, no stripe-row cleanup and no quota release
+  for the destroyed file; its DS data files leaked on every
+  overwrite.  op_rename now mirrors op_remove's final-unlink
+  sequence: layouts are revoked before the mutation (same
+  STALE-PUTFH/CB_LAYOUTRECALL deadlock rationale), delegations are
+  dropped, and on the delete path the DS objects are GC'd, orphaned
+  stripe rows removed and quota adjusted.
+- **DESTROY_SESSION accepted from unbound connections (pynfs
+  DSESS9001)** — sessions now track their fore-channel connection
+  bindings (RFC 8881 §2.10.3.1): the CREATE_SESSION connection binds
+  at session creation and every accepted SEQUENCE implicitly binds
+  its carrying connection, inside the same shard critical section the
+  sequence check already holds (no extra hot-path locking).
+  DESTROY_SESSION from a connection that is not bound to the target
+  session now fails with NFS4ERR_CONN_NOT_BOUND_TO_SESSION instead of
+  destroying the session; one SEQUENCE over that connection makes a
+  retry legal.  Connection teardown clears fore-channel bindings
+  alongside the existing backchannel unbind (now under the lock-all
+  protocol so teardown cannot race shard-locked binding writes).
+- **EXCHANGE_ID state-protection decode desync (pynfs EID50)** — the
+  argument decoder read the `state_protect4_a` discriminant but never
+  consumed the SP4_MACH_CRED / SP4_SSV union arms, so an SSV
+  EXCHANGE_ID left the arm bytes in the XDR stream and every
+  subsequent field/op decoded as garbage (surfacing as
+  NFS4ERR_BADXDR on whatever the client sent next).  The decoder now
+  consumes both arms with bounded skips and records the discriminant;
+  `op_exchange_id` rejects SP4_SSV up front with the SSV-specific
+  NFS4ERR_ENCR_ALG_UNSUPP (matching Linux knfsd — the SSV GSS
+  mechanism remains unimplemented), and SP4_MACH_CRED degrades to
+  SP4_NONE semantics on this AUTH_SYS-only server (the reply always
+  advertises SP4_NONE).  New decode regression tests cover both arms
+  with a trailing sentinel op that only parses when the stream stays
+  in sync.
 - **Test-suite debt retired: zero known failures** — every
   long-carried known test failure was test-side; `ctest` now passes
   60/60 with no exceptions and no product code changed.  Twenty

@@ -1242,6 +1242,67 @@ static void test_catalogue_root_global_helper_routing(void)
 #endif  /* retired: shard-routing tests, see comment near line ~666. */
 
 /* -----------------------------------------------------------------------
+ * test_catalogue_ns_rename_keep_orphan — MDS_CAT_RNF_KEEP_DST_ORPHAN
+ *
+ * Overwriting the final link of a regular file via the flags-aware
+ * rename must either delete the destination inode row (flags == 0,
+ * the legacy semantics) or keep it flagged MDS_IFLAG_UNLINK_ORPHAN
+ * with nlink 0 (KEEP_DST_ORPHAN — the unlink-of-open contract that
+ * op_rename relies on for pynfs RNM21).
+ * ----------------------------------------------------------------------- */
+
+static void test_catalogue_ns_rename_keep_orphan(void)
+{
+	struct mds_catalogue *cat;
+	struct mds_inode src, dst, looked;
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	/* Case 1: KEEP_DST_ORPHAN — the overwritten inode survives. */
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "ren-src", MDS_FTYPE_REG,
+				    0644, 1000, 1000, NULL, &src),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "ren-dst", MDS_FTYPE_REG,
+				    0644, 1000, 1000, NULL, &dst),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_ns_rename_flags(cat, NULL,
+					  MDS_FILEID_ROOT, "ren-src",
+					  MDS_FILEID_ROOT, "ren-dst",
+					  MDS_CAT_RNF_KEEP_DST_ORPHAN),
+		  MDS_OK);
+	/* Name now resolves to the source file... */
+	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT,
+				    "ren-dst", &looked), MDS_OK);
+	ASSERT_EQ(looked.fileid, src.fileid);
+	/* ...and the overwritten inode row survived as an orphan. */
+	ASSERT_EQ(mds_cat_ns_getattr(cat, dst.fileid, &looked), MDS_OK);
+	ASSERT_EQ(looked.nlink, (uint32_t)0);
+	ASSERT_TRUE((looked.flags & MDS_IFLAG_UNLINK_ORPHAN) != 0U);
+
+	/* Case 2: flags == 0 — the overwritten inode row is deleted. */
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "ren-src2", MDS_FTYPE_REG,
+				    0644, 1000, 1000, NULL, &src),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+				    "ren-dst2", MDS_FTYPE_REG,
+				    0644, 1000, 1000, NULL, &dst),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_ns_rename_flags(cat, NULL,
+					  MDS_FILEID_ROOT, "ren-src2",
+					  MDS_FILEID_ROOT, "ren-dst2",
+					  0U),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_ns_getattr(cat, dst.fileid, &looked),
+		  MDS_ERR_NOTFOUND);
+
+	close_test_cat(cat, path);
+}
+
+/* -----------------------------------------------------------------------
  * Main
  * ----------------------------------------------------------------------- */
 
@@ -1260,6 +1321,7 @@ int main(void)
 	RUN_TEST(test_catalogue_ns_readdir_max_entries);
 	RUN_TEST(test_catalogue_dirent_name_for_child);
 	RUN_TEST(test_catalogue_dirent_insert_only);
+	RUN_TEST(test_catalogue_ns_rename_keep_orphan);
 	RUN_TEST(test_catalogue_stripe_map_wide_round_trip);
 	RUN_TEST(test_catalogue_layout_grant_return);
 	RUN_TEST(test_catalogue_layout_iter_file);

@@ -116,6 +116,19 @@ struct nfs4_slot {
 
 struct nfs4_client;  /* Forward — owner back-link on nfs4_session */
 
+/*
+ * RFC 8881 §2.10.3.1 — fore-channel connection binding.  A session
+ * tracks the connections it is bound to (the CREATE_SESSION
+ * connection plus every connection that later carried an accepted
+ * SEQUENCE for it).  DESTROY_SESSION consults this set: a request
+ * arriving on an unbound connection MUST fail with
+ * NFS4ERR_CONN_NOT_BOUND_TO_SESSION (pynfs DSESS9001).  16 entries
+ * cover the Linux client's nconnect maximum; beyond that the oldest
+ * binding is recycled (harmless — a recycled connection simply
+ * re-binds on its next SEQUENCE).
+ */
+#define SESSION_FORE_CONNS_MAX 16U
+
 struct nfs4_session {
 	uint8_t              session_id[SESSION_ID_SIZE];
 	uint64_t             clientid;
@@ -161,6 +174,12 @@ struct nfs4_session {
 	struct nfs4_slot    *cb_slots;        /* Backchannel slot table */
 	uint32_t             num_cb_slots;    /* Backchannel slot count */
 	uint32_t             cb_next_slot;    /* Round-robin index */
+	/* Fore-channel connection bindings (RFC 8881 §2.10.3.1).
+	 * Borrowed pointers, cleared by session_unbind_conn() at
+	 * connection teardown.  Guarded by the session shard lock. */
+	struct rpc_conn     *fore_conns[SESSION_FORE_CONNS_MAX];
+	uint32_t             fore_conn_count;
+	uint32_t             fore_conn_ring;  /* Eviction cursor when full */
 };
 
 /* -----------------------------------------------------------------------
@@ -554,6 +573,27 @@ int session_sequence_check(struct session_table *st,
 			   uint32_t *out_max_resp,
 			   uint32_t *out_max_resp_cached);
 
+/**
+ * session_sequence_check plus implicit fore-channel binding of @conn
+ * (RFC 8881 §2.10.3.1): an accepted SEQUENCE associates the carrying
+ * connection with the session, inside the same shard critical
+ * section (no extra lock acquisition on the hot path).  @conn may be
+ * NULL (unit tests / internal callers) — behaves exactly like
+ * session_sequence_check.
+ */
+int session_sequence_check_conn(struct session_table *st,
+				const uint8_t session_id[SESSION_ID_SIZE],
+				uint32_t slot_id,
+				uint32_t seq_id,
+				uint32_t highest_slot_id,
+				uint32_t *out_highest_slot,
+				uint32_t *out_target_slot,
+				uint32_t *out_status_flags,
+				uint64_t *out_clientid,
+				uint32_t *out_max_resp,
+				uint32_t *out_max_resp_cached,
+				struct rpc_conn *conn);
+
 /* -----------------------------------------------------------------------
  * API — Backchannel connection binding
  * ----------------------------------------------------------------------- */
@@ -574,15 +614,41 @@ int session_bind_conn(struct session_table *st,
 		      struct rpc_conn *conn);
 
 /**
+ * Bind an RPC connection to a session's fore channel (RFC 8881
+ * §2.10.3.1).  Idempotent; recycles the oldest binding when the
+ * per-session table is full.  Called by op_create_session for the
+ * creating connection.  SEQUENCE-time implicit binding uses
+ * session_sequence_check_conn() instead (no extra lock round-trip).
+ *
+ * @return 0 on success, -1 if the session was not found.
+ */
+int session_bind_fore_conn(struct session_table *st,
+			   const uint8_t session_id[SESSION_ID_SIZE],
+			   struct rpc_conn *conn);
+
+/**
+ * Test whether @conn is bound to @session_id's fore channel (either
+ * the CREATE_SESSION connection or implicitly via a SEQUENCE).
+ *
+ * @return 1 when bound, 0 when the session exists but @conn is not
+ *         bound to it, -1 when the session does not exist.
+ */
+int session_conn_is_bound(struct session_table *st,
+			  const uint8_t session_id[SESSION_ID_SIZE],
+			  const struct rpc_conn *conn);
+
+/**
  * Unbind an RPC connection from all sessions that reference it.
  *
  * Called when a client connection closes.  Any session whose cb_conn
- * matches @conn will have cb_conn set to NULL.
+ * matches @conn will have cb_conn set to NULL, and any fore-channel
+ * binding of @conn is cleared.
  *
  * @param st   Session table.
  * @param conn Connection being torn down.
  *
- * Thread safety: acquires the session table lock.
+ * Thread safety: acquires every session stripe lock (teardown is
+ * rare; field writes elsewhere hold a single shard lock).
  */
 void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn);
 

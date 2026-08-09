@@ -768,6 +768,32 @@ cat_rename(struct compound_data *cd,
 	return mds_cat_ns_rename(cd->cat, NULL, sp, sn, dp, dn);
 }
 
+/**
+ * Flags-aware rename dispatch (MDS_CAT_RNF_*).  NOSUPPORT when the
+ * backend lacks the flags-aware op and ns_flags != 0; the caller
+ * chooses its degradation (op_rename falls back to the plain rename).
+ */
+static inline enum mds_status
+cat_rename_flags(struct compound_data *cd,
+		 uint64_t sp, const char *sn,
+		 uint64_t dp, const char *dn, uint32_t ns_flags)
+{
+	if (cd->cat == NULL) {
+		return MDS_ERR_INVAL;
+	}
+	return mds_cat_ns_rename_flags(cd->cat, NULL, sp, sn, dp, dn,
+				       ns_flags);
+}
+
+/**
+ * Finalize an MDS_IFLAG_UNLINK_ORPHAN inode after its last CLOSE:
+ * GC the DS objects, drop orphaned stripe rows, delete the inode row
+ * and account quota.  Implemented in compound_namespace.c (shares the
+ * final-unlink GC helpers with op_remove / op_rename).
+ */
+void compound_orphan_finalize(struct compound_data *cd,
+			      const struct mds_inode *ino);
+
 static inline enum mds_status
 cat_link(struct compound_data *cd, uint64_t parent,
 	 const char *name, uint64_t target)

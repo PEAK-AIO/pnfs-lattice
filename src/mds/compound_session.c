@@ -44,7 +44,11 @@ enum nfs4_status op_sequence(struct compound_data *cd,
 		return NFS4_OK;
 	}
 
-	rc = session_sequence_check(cd->st,
+	/* _conn variant: an accepted SEQUENCE implicitly binds its
+	 * carrying connection to the session (RFC 8881 §2.10.3.1)
+	 * inside the same shard critical section.  cd->conn is NULL in
+	 * unit-test harnesses — identical to the legacy behaviour. */
+	rc = session_sequence_check_conn(cd->st,
 				    a->session_id,
 				    a->slot_id,
 				    a->seq_id,
@@ -54,7 +58,8 @@ enum nfs4_status op_sequence(struct compound_data *cd,
 				    &r->status_flags,
 				    &cd->clientid,
 				    &cd->max_response_size,
-				    &cd->max_response_size_cached);
+				    &cd->max_response_size_cached,
+				    cd->conn);
 	switch (rc) {
 	case 0:  /* new request */
 		memcpy(r->session_id, a->session_id, SESSION_ID_SIZE);
@@ -166,6 +171,21 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 		      cd->op_count == 2)) {
 			return NFS4ERR_NOT_ONLY_OP;
 		}
+	}
+
+	/*
+	 * RFC 8881 §18.35.4 state protection.  SP4_SSV requires the SSV
+	 * GSS mechanism (SET_SSV, SSV-protected ops), which this server
+	 * does not implement — fail the negotiation up front with the
+	 * SSV-specific algorithm error instead of accepting the client
+	 * and failing whatever op it sends next (pynfs EID50; Linux
+	 * knfsd rejects SP4_SSV the same way).  SP4_MACH_CRED is decoded
+	 * but deliberately not enforced: on an AUTH_SYS-only transport
+	 * there is no machine credential to verify, so it degrades to
+	 * SP4_NONE semantics (the reply encoder always emits SP4_NONE).
+	 */
+	if (a->spa_how == SP4_SSV) {
+		return NFS4ERR_ENCR_ALG_UNSUPP;
 	}
 
 	rc = session_exchange_id(cd->st,
@@ -330,10 +350,16 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 		 * still a legal flavor per RFC 8881 §2.10.8.3.
 		 */
 		(void)session_set_cb_sec(cd->st, r->session_id, &a->cb_sec);
-		/* Bind this client connection as the backchannel transport. */
+		/* Bind this client connection as the backchannel transport
+		 * and as the session's first fore-channel binding (RFC 8881
+		 * §2.10.3.1 — the CREATE_SESSION connection is bound to the
+		 * new session; pynfs DSESS9001 relies on the distinction
+		 * between this connection and a later rogue one). */
 		if (cd->conn != NULL) {
 			(void)session_bind_conn(cd->st, r->session_id,
 					       cd->conn);
+			(void)session_bind_fore_conn(cd->st, r->session_id,
+						     cd->conn);
 }
 		/* Wave 5 T5.2: surface the negotiated response-size caps
 		 * in the wire reply.  They are stored on the session at
@@ -366,6 +392,23 @@ enum nfs4_status op_destroy_session(struct compound_data *cd,
 	if (cd->st == NULL) {
 		return NFS4ERR_SERVERFAULT;
 }
+
+	/*
+	 * RFC 8881 §18.37.3 — DESTROY_SESSION MUST be issued over a
+	 * connection that is bound to the session being destroyed (the
+	 * CREATE_SESSION connection, a BIND_CONN_TO_SESSION target, or
+	 * a connection implicitly bound by a SEQUENCE).  A request from
+	 * an unbound connection fails with
+	 * NFS4ERR_CONN_NOT_BOUND_TO_SESSION; after the client sends one
+	 * SEQUENCE over that connection the destroy becomes legal
+	 * (pynfs DSESS9001).  cd->conn == NULL (unit-test harnesses,
+	 * internal callers) skips the check; an unknown session id
+	 * still surfaces as NFS4ERR_BADSESSION below.
+	 */
+	if (cd->conn != NULL &&
+	    session_conn_is_bound(cd->st, a->session_id, cd->conn) == 0) {
+		return NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
+	}
 
 	rc = session_destroy_session(cd->st, a->session_id);
 	if (rc != 0) {

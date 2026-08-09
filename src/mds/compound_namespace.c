@@ -1695,6 +1695,63 @@ static void enqueue_gc_for_final_unlink(struct compound_data *cd,
 	}
 }
 
+/*
+ * Finalize an unlinked-but-open orphan after its last CLOSE (pynfs
+ * RNM21 / POSIX unlink-of-open).  The dirent vanished when a rename
+ * overwrote the file; the inode row was kept (nlink 0 +
+ * MDS_IFLAG_UNLINK_ORPHAN) so the open holder's PUTFH+CLOSE kept
+ * working.  Now that the last local open is gone, run the same
+ * cleanup the delete-overwrite path performs inline: GC the DS
+ * objects, drop the orphaned stripe rows (the rename transaction
+ * never touches them), delete the inode row, account quota, and
+ * flush local caches.  Best-effort by design — CLOSE has already
+ * succeeded protocol-wise; a failed step here leaves rows for the
+ * ds_gc sweeper / future orphan scan, never an error to the client.
+ */
+void compound_orphan_finalize(struct compound_data *cd,
+			      const struct mds_inode *ino)
+{
+	struct mds_ds_map_entry inline_sm;
+	struct mds_ds_map_entry *sm = NULL;
+	uint32_t sc = 0;
+	uint32_t mc = 0;
+
+	if (cd == NULL || cd->cat == NULL || ino == NULL ||
+	    ino->fileid == 0) {
+		return;
+	}
+
+	/* Inline 1x1 files carry their one DS binding on the inode row
+	 * itself; wide files still have their stripe rows, which
+	 * enqueue_gc_for_final_unlink() fetches on its own. */
+	if ((ino->flags & MDS_IFLAG_INLINE_STRIPE) != 0U) {
+		uint32_t fhl = ino->inline_fh_len;
+
+		memset(&inline_sm, 0, sizeof(inline_sm));
+		if (fhl > MDS_NFS_FH_MAX) {
+			fhl = MDS_NFS_FH_MAX;
+		}
+		inline_sm.ds_id = ino->inline_ds_id;
+		inline_sm.nfs_fh_len = fhl;
+		if (fhl > 0) {
+			memcpy(inline_sm.nfs_fh, ino->inline_fh, fhl);
+		}
+		sm = &inline_sm;
+		sc = 1;
+		mc = 1;
+	}
+	enqueue_gc_for_final_unlink(cd, ino->fileid, sm, sc, mc);
+
+	/* Orphaned stripe side-table rows (non-inline only). */
+	if ((ino->flags & MDS_IFLAG_INLINE_STRIPE) == 0U) {
+		(void)mds_cat_stripe_map_del(cd->cat, NULL, ino->fileid);
+	}
+	(void)mds_cat_inode_del(cd->cat, NULL, ino->fileid);
+	quota_submit_adjust(cd, ino->uid, ino->gid,
+			    -(int64_t)ino->size, -1);
+	compound_inode_invalidate(cd, ino->fileid);
+}
+
 enum nfs4_status op_remove(struct compound_data *cd,
 				  const struct nfs4_op *op,
 				  struct nfs4_result *res)
@@ -2438,6 +2495,10 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	 */
 	uint64_t rnm_src_fileid = 0;
 	uint64_t rnm_dst_overwrite_fileid = 0;
+	struct mds_inode rnm_dst_inode;
+	bool rnm_dst_final_reg = false;
+
+	memset(&rnm_dst_inode, 0, sizeof(rnm_dst_inode));
 	{
 		struct mds_inode rnm_src;
 		struct mds_inode rnm_dst;
@@ -2456,6 +2517,14 @@ enum nfs4_status op_rename(struct compound_data *cd,
 		    (rnm_ss != MDS_OK ||
 		     rnm_dst.fileid != rnm_src_fileid)) {
 			rnm_dst_overwrite_fileid = rnm_dst.fileid;
+			/* The overwrite destroys this file when it holds
+			 * the last link — capture the inode for the
+			 * final-unlink side effects below (layout recall,
+			 * GC / keep-orphan decision, quota). */
+			rnm_dst_inode = rnm_dst;
+			rnm_dst_final_reg =
+				(rnm_dst.type == MDS_FTYPE_REG &&
+				 rnm_dst.nlink == 1);
 		}
 		if (rnm_ss == MDS_OK && rnm_ds == MDS_OK &&
 		    rnm_src.type == MDS_FTYPE_DIR &&
@@ -2485,6 +2554,71 @@ enum nfs4_status op_rename(struct compound_data *cd,
 	}
 
 	/*
+	 * Overwrite of the LAST link of a regular file: run the
+	 * op_remove final-unlink safety sequence BEFORE the mutation.
+	 * Layouts are revoked while PUTFH can still resolve the doomed
+	 * fileid (same CB_LAYOUTRECALL/LAYOUTRETURN deadlock rationale
+	 * as op_remove) and delegation grants are dropped.  Then decide
+	 * the keep-orphan path: live LOCAL opens on the target mean its
+	 * inode row must survive the rename so the holder's PUTFH+CLOSE
+	 * keep working (pynfs RNM21 / POSIX unlink-of-open); the last
+	 * CLOSE finalizes via compound_orphan_finalize().  With no
+	 * opens, the row is deleted in the rename txn and the DS
+	 * objects are GC'd below — previously they simply leaked.
+	 */
+	bool rnm_keep_orphan = false;
+	struct mds_ds_map_entry *rnm_sm_entries = NULL;
+	uint32_t rnm_sm_sc = 0;
+	uint32_t rnm_sm_mc = 0;
+
+	if (rnm_dst_final_reg) {
+		if (cd->lr != NULL && !cd->skip_transient_ndb) {
+			int rnm_lrc = 0;
+
+			MDS_TIME_CAT_OP(MDS_CATOP_UNLINK_RECALL,
+				rnm_lrc = layout_recall_revoke_all_for_unlink(
+					cd->lr, rnm_dst_overwrite_fileid,
+					NULL));
+			if (rnm_lrc != 0) {
+				return NFS4ERR_DELAY;
+			}
+		}
+		if (cd->dt != NULL) {
+			deleg_revoke_file(cd->dt, rnm_dst_overwrite_fileid);
+		}
+		if (cd->ot != NULL &&
+		    open_state_file_has_writers(
+			    cd->ot, rnm_dst_overwrite_fileid) != 0) {
+			rnm_keep_orphan = true;
+		}
+		/* Delete-overwrite path: prefetch the doomed file's DS
+		 * binding for the GC enqueue after the rename commits.
+		 * Inline 1x1 files carry it on the inode (which the
+		 * rename txn deletes); wide files keep their stripe
+		 * rows, fetched post-rename by the GC helper itself. */
+		if (!rnm_keep_orphan &&
+		    (rnm_dst_inode.flags & MDS_IFLAG_INLINE_STRIPE) != 0U) {
+			rnm_sm_entries = calloc(1, sizeof(*rnm_sm_entries));
+			if (rnm_sm_entries != NULL) {
+				uint32_t fhl = rnm_dst_inode.inline_fh_len;
+
+				if (fhl > MDS_NFS_FH_MAX) {
+					fhl = MDS_NFS_FH_MAX;
+				}
+				rnm_sm_entries[0].ds_id =
+					rnm_dst_inode.inline_ds_id;
+				rnm_sm_entries[0].nfs_fh_len = fhl;
+				if (fhl > 0) {
+					memcpy(rnm_sm_entries[0].nfs_fh,
+					       rnm_dst_inode.inline_fh, fhl);
+				}
+				rnm_sm_sc = 1;
+				rnm_sm_mc = 1;
+			}
+		}
+	}
+
+	/*
 	 * Phase 8d: emit NOTIFY4_RENAME_ENTRY to holders of the
 	 * same-dir rename case; for cross-dir renames we still notify
 	 * both sides because the entry moved between them.  We pass
@@ -2503,9 +2637,20 @@ enum nfs4_status op_rename(struct compound_data *cd,
 					      NULL);
 	}
 
-	st = cat_rename(cd,
+	st = cat_rename_flags(cd,
 			cd->saved_fh.fileid, op->arg.rename.src_name,
-			cd->current_fh.fileid, op->arg.rename.dst_name);
+			cd->current_fh.fileid, op->arg.rename.dst_name,
+			rnm_keep_orphan ? MDS_CAT_RNF_KEEP_DST_ORPHAN : 0U);
+	if (st == MDS_ERR_NOSUPPORT && rnm_keep_orphan) {
+		/* Backend without the keep-orphan rename: degrade to the
+		 * legacy overwrite-delete.  The open holder will see
+		 * ESTALE on its CLOSE — the pre-fix behaviour. */
+		rnm_keep_orphan = false;
+		st = cat_rename(cd,
+				cd->saved_fh.fileid, op->arg.rename.src_name,
+				cd->current_fh.fileid,
+				op->arg.rename.dst_name);
+	}
 	if (st == MDS_OK) {
 		/* Invalidate BEFORE post-mutation re-read. */
 		compound_inode_invalidate(cd, cd->saved_fh.fileid);
@@ -2548,7 +2693,29 @@ enum nfs4_status op_rename(struct compound_data *cd,
 					   op->arg.rename.src_name);
 		compound_dirent_invalidate(cd, cd->current_fh.fileid,
 					   op->arg.rename.dst_name);
+
+		/* Final-unlink side effects for a delete-overwritten
+		 * regular file (parity with op_remove): GC the DS
+		 * objects, drop the now-orphaned stripe rows and account
+		 * quota.  Keep-orphan defers all of this to the last
+		 * CLOSE (compound_orphan_finalize). */
+		if (rnm_dst_final_reg && !rnm_keep_orphan) {
+			enqueue_gc_for_final_unlink(
+				cd, rnm_dst_overwrite_fileid,
+				rnm_sm_entries, rnm_sm_sc, rnm_sm_mc);
+			if ((rnm_dst_inode.flags &
+			     MDS_IFLAG_INLINE_STRIPE) == 0U) {
+				(void)mds_cat_stripe_map_del(
+					cd->cat, NULL,
+					rnm_dst_overwrite_fileid);
+			}
+			quota_submit_adjust(cd, rnm_dst_inode.uid,
+					    rnm_dst_inode.gid,
+					    -(int64_t)rnm_dst_inode.size,
+					    -1);
+		}
 	}
+	free(rnm_sm_entries);
 	return mds_status_to_nfs4(st);
 }
 

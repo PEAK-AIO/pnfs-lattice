@@ -237,6 +237,46 @@ static struct nfs4_session *find_session(const struct session_table *st,
 }
 
 /* -----------------------------------------------------------------------
+ * Internal: fore-channel connection binding note (RFC 8881 §2.10.3.1)
+ *
+ * Caller holds the session's shard lock (or all stripes).  Idempotent:
+ * an already-bound connection is left in place.  When the table is
+ * full the oldest binding is recycled via the ring cursor — harmless,
+ * because an evicted connection simply re-binds on its next SEQUENCE.
+ * ----------------------------------------------------------------------- */
+
+static void session_note_fore_conn_locked(struct nfs4_session *s,
+					  struct rpc_conn *conn)
+{
+	if (s == NULL || conn == NULL) {
+		return;
+	}
+	for (uint32_t i = 0; i < s->fore_conn_count; i++) {
+		if (s->fore_conns[i] == conn) {
+			return;
+		}
+	}
+	if (s->fore_conn_count < SESSION_FORE_CONNS_MAX) {
+		s->fore_conns[s->fore_conn_count++] = conn;
+		return;
+	}
+	s->fore_conns[s->fore_conn_ring % SESSION_FORE_CONNS_MAX] = conn;
+	s->fore_conn_ring++;
+}
+
+/* Caller holds the session's shard lock (or all stripes). */
+static bool session_fore_conn_bound_locked(const struct nfs4_session *s,
+					   const struct rpc_conn *conn)
+{
+	for (uint32_t i = 0; i < s->fore_conn_count; i++) {
+		if (s->fore_conns[i] == conn) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* -----------------------------------------------------------------------
  * Internal: free a single session (does not unlink from hash/client)
  * ----------------------------------------------------------------------- */
 
@@ -1471,17 +1511,18 @@ int session_slot_get_cached_reply(struct session_table *st,
 	return 0;
 }
 
-int session_sequence_check(struct session_table *st,
-			   const uint8_t session_id[SESSION_ID_SIZE],
-			   uint32_t slot_id,
-			   uint32_t seq_id,
-			   uint32_t highest_slot_id,
-			   uint32_t *out_highest_slot,
-			   uint32_t *out_target_slot,
-			   uint32_t *out_status_flags,
-			   uint64_t *out_clientid,
-			   uint32_t *out_max_resp,
-			   uint32_t *out_max_resp_cached)
+int session_sequence_check_conn(struct session_table *st,
+				const uint8_t session_id[SESSION_ID_SIZE],
+				uint32_t slot_id,
+				uint32_t seq_id,
+				uint32_t highest_slot_id,
+				uint32_t *out_highest_slot,
+				uint32_t *out_target_slot,
+				uint32_t *out_status_flags,
+				uint64_t *out_clientid,
+				uint32_t *out_max_resp,
+				uint32_t *out_max_resp_cached,
+				struct rpc_conn *conn)
 {
 	struct nfs4_session *s;
 	struct nfs4_client *c;
@@ -1549,6 +1590,16 @@ int session_sequence_check(struct session_table *st,
 	}
 
 accepted:
+	/*
+	 * RFC 8881 §2.10.3.1 — implicit fore-channel binding: an
+	 * accepted SEQUENCE associates its carrying connection with the
+	 * session.  Done here, inside the already-held shard critical
+	 * section, so the hot path pays no extra lock round-trip.
+	 * Drives pynfs DSESS9001 (SEQUENCE over a new connection makes
+	 * a subsequent DESTROY_SESSION on that connection legal).
+	 */
+	session_note_fore_conn_locked(s, conn);
+
 	/* Renew lease via the session's owner back-link (set at
 	 * CREATE_SESSION) to avoid a clientid hash walk on every
 	 * SEQUENCE. */
@@ -1586,6 +1637,29 @@ out:
 	return rc;
 }
 
+int session_sequence_check(struct session_table *st,
+			   const uint8_t session_id[SESSION_ID_SIZE],
+			   uint32_t slot_id,
+			   uint32_t seq_id,
+			   uint32_t highest_slot_id,
+			   uint32_t *out_highest_slot,
+			   uint32_t *out_target_slot,
+			   uint32_t *out_status_flags,
+			   uint64_t *out_clientid,
+			   uint32_t *out_max_resp,
+			   uint32_t *out_max_resp_cached)
+{
+	return session_sequence_check_conn(st, session_id, slot_id, seq_id,
+					   highest_slot_id,
+					   out_highest_slot,
+					   out_target_slot,
+					   out_status_flags,
+					   out_clientid,
+					   out_max_resp,
+					   out_max_resp_cached,
+					   NULL);
+}
+
 /* -----------------------------------------------------------------------
  * Backchannel connection binding
  * ----------------------------------------------------------------------- */
@@ -1609,6 +1683,53 @@ int session_bind_conn(struct session_table *st,
 	s->cb_conn = conn;
 	pthread_mutex_unlock(&st->locks[0]);
 	return 0;
+}
+
+int session_bind_fore_conn(struct session_table *st,
+			   const uint8_t session_id[SESSION_ID_SIZE],
+			   struct rpc_conn *conn)
+{
+	struct nfs4_session *s;
+	uint32_t shard;
+
+	if (st == NULL || session_id == NULL || conn == NULL) {
+		return -1;
+	}
+
+	shard = session_id_shard(session_id);
+	pthread_mutex_lock(&st->locks[shard]);
+	s = find_session(st, session_id);
+	if (s == NULL) {
+		pthread_mutex_unlock(&st->locks[shard]);
+		return -1;
+	}
+	session_note_fore_conn_locked(s, conn);
+	pthread_mutex_unlock(&st->locks[shard]);
+	return 0;
+}
+
+int session_conn_is_bound(struct session_table *st,
+			  const uint8_t session_id[SESSION_ID_SIZE],
+			  const struct rpc_conn *conn)
+{
+	struct nfs4_session *s;
+	uint32_t shard;
+	int rc;
+
+	if (st == NULL || session_id == NULL || conn == NULL) {
+		return -1;
+	}
+
+	shard = session_id_shard(session_id);
+	pthread_mutex_lock(&st->locks[shard]);
+	s = find_session(st, session_id);
+	if (s == NULL) {
+		rc = -1;
+	} else {
+		rc = session_fore_conn_bound_locked(s, conn) ? 1 : 0;
+	}
+	pthread_mutex_unlock(&st->locks[shard]);
+	return rc;
 }
 
 /*
@@ -1678,7 +1799,11 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
 		return;
 }
 
-	pthread_mutex_lock(&st->locks[0]);
+	/* Lock ALL stripes: fore_conns entries are written under the
+	 * session's shard lock (SEQUENCE hot path), so clearing them at
+	 * connection teardown must exclude every shard.  Teardown is
+	 * rare; the lock-all protocol matches unhash/free. */
+	session_table_lock_all(st);
 	for (i = 0; i < st->session_buckets; i++) {
 		struct nfs4_session *s;
 
@@ -1686,9 +1811,21 @@ void session_unbind_conn(struct session_table *st, const struct rpc_conn *conn)
 			if (s->cb_conn == conn) {
 				s->cb_conn = NULL;
 }
+			for (uint32_t k = 0; k < s->fore_conn_count; k++) {
+				if (s->fore_conns[k] != conn) {
+					continue;
+				}
+				/* Compact: move the tail entry down so the
+				 * live prefix stays dense. */
+				s->fore_conns[k] =
+					s->fore_conns[s->fore_conn_count - 1];
+				s->fore_conns[s->fore_conn_count - 1] = NULL;
+				s->fore_conn_count--;
+				break;
+			}
 		}
 	}
-	pthread_mutex_unlock(&st->locks[0]);
+	session_table_unlock_all(st);
 }
 
 

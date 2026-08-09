@@ -1853,6 +1853,133 @@ static void test_compound_open_owner_decode(void)
 }
 
 /* -----------------------------------------------------------------------
+ * EXCHANGE_ID state_protect4_a decode (pynfs EID50 regression)
+ *
+ * The SP4_SSV / SP4_MACH_CRED union arms must be consumed from the
+ * wire even though the server rejects (SSV) or ignores (MACH_CRED)
+ * them: dropping the arm bytes desyncs the stream and every later
+ * field decodes as garbage.  Each case hand-encodes the COMPOUND args
+ * with a trailing PUTROOTFH sentinel op; the sentinel only decodes
+ * correctly when the arm was fully consumed.
+ * ----------------------------------------------------------------------- */
+
+/* Encode the fixed EXCHANGE_ID prefix: verifier + ownerid + flags. */
+static void encode_eid_prefix(XDR *enc)
+{
+    char verifier[NFS4_VERIFIER_SIZE];
+    char owner[8];
+    uint32_t u;
+
+    memset(verifier, 0x5A, sizeof(verifier));
+    memcpy(owner, "eid50own", sizeof(owner));
+    (void)xdr_opaque(enc, verifier, NFS4_VERIFIER_SIZE);
+    u = 8;
+    (void)xdr_uint32_t(enc, &u);
+    (void)xdr_opaque(enc, owner, 8);
+    u = 0; /* eia_flags */
+    (void)xdr_uint32_t(enc, &u);
+}
+
+/* Encode a bitmap4 of @words words, each 0xF0F0F0F0. */
+static void encode_test_bitmap(XDR *enc, uint32_t words)
+{
+    uint32_t u = words;
+
+    (void)xdr_uint32_t(enc, &u);
+    for (uint32_t i = 0; i < words; i++) {
+        u = 0xF0F0F0F0U;
+        (void)xdr_uint32_t(enc, &u);
+    }
+}
+
+static void test_exchange_id_ssv_decode(void)
+{
+    char buf[BUF_SIZE];
+    XDR enc, dec;
+    struct nfs4_op decoded[4];
+    char tag[NFS4_TAG_MAXLEN];
+    uint32_t minorver = 0, op_count = 0;
+    uint32_t u;
+
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* tag len */
+    u = 1; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* minorversion */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* numops */
+
+    u = OP_EXCHANGE_ID; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_eid_prefix(&enc);
+    /* state_protect4_a: SP4_SSV + ssv_sp_parms4. */
+    u = SP4_SSV; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_test_bitmap(&enc, 2);                          /* spo_must_enforce */
+    encode_test_bitmap(&enc, 1);                          /* spo_must_allow */
+    /* ssp_hash_algs<2>: 7-byte and 5-byte OIDs (pad exercised). */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    u = 7; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"\x60\x86\x48\x01\x65\x03\x04", 7));
+    u = 5; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"\x2b\x0e\x03\x02\x1a", 5));
+    /* ssp_encr_algs<2>: a 13-byte gibberish OID + a 9-byte OID
+     * (mirrors pynfs EID50, which sends b"giberrish_oid"). */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    u = 13; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"giberrish_oid", 13));
+    u = 9; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"\x60\x86\x48\x01\x65\x03\x04\x01\x2a", 9));
+    u = 4; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* ssp_window */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* ssp_num_gss_handles */
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* impl_id<0> */
+
+    u = OP_PUTROOTFH; ASSERT_TRUE(xdr_uint32_t(&enc, &u)); /* sentinel */
+
+    xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+    memset(decoded, 0, sizeof(decoded));
+    ASSERT_EQ(nfs4_decode_compound_args(&dec, tag, sizeof(tag),
+                                        &minorver, decoded, 4,
+                                        &op_count), 0);
+    ASSERT_EQ(op_count, (uint32_t)2);
+    ASSERT_EQ(decoded[0].opnum, OP_EXCHANGE_ID);
+    ASSERT_EQ(decoded[0].arg.exchange_id.spa_how, (uint32_t)SP4_SSV);
+    ASSERT_EQ(decoded[0].arg.exchange_id.co_ownerid_len, (uint32_t)8);
+    ASSERT_MEM_EQ(decoded[0].arg.exchange_id.co_ownerid, "eid50own", 8);
+    ASSERT_EQ(decoded[1].opnum, OP_PUTROOTFH);
+}
+
+static void test_exchange_id_mach_cred_decode(void)
+{
+    char buf[BUF_SIZE];
+    XDR enc, dec;
+    struct nfs4_op decoded[4];
+    char tag[NFS4_TAG_MAXLEN];
+    uint32_t minorver = 0, op_count = 0;
+    uint32_t u;
+
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* tag len */
+    u = 1; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* minorversion */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* numops */
+
+    u = OP_EXCHANGE_ID; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_eid_prefix(&enc);
+    /* state_protect4_a: SP4_MACH_CRED + state_protect_ops4. */
+    u = SP4_MACH_CRED; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_test_bitmap(&enc, 2);                          /* spo_must_enforce */
+    encode_test_bitmap(&enc, 1);                          /* spo_must_allow */
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* impl_id<0> */
+
+    u = OP_PUTROOTFH; ASSERT_TRUE(xdr_uint32_t(&enc, &u)); /* sentinel */
+
+    xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+    memset(decoded, 0, sizeof(decoded));
+    ASSERT_EQ(nfs4_decode_compound_args(&dec, tag, sizeof(tag),
+                                        &minorver, decoded, 4,
+                                        &op_count), 0);
+    ASSERT_EQ(op_count, (uint32_t)2);
+    ASSERT_EQ(decoded[0].opnum, OP_EXCHANGE_ID);
+    ASSERT_EQ(decoded[0].arg.exchange_id.spa_how, (uint32_t)SP4_MACH_CRED);
+    ASSERT_EQ(decoded[1].opnum, OP_PUTROOTFH);
+}
+
+/* -----------------------------------------------------------------------
  * Edge case: decode truncated/bad data
  * ----------------------------------------------------------------------- */
 
@@ -2294,6 +2421,8 @@ int main(void)
     RUN_TEST(test_compound_readdir_decode);
     RUN_TEST(test_compound_close);
     RUN_TEST(test_compound_open_owner_decode);
+    RUN_TEST(test_exchange_id_ssv_decode);
+    RUN_TEST(test_exchange_id_mach_cred_decode);
     RUN_TEST(test_setattr_decode_layout_hint);
     RUN_TEST(test_open_create_decode_layout_hint);
 

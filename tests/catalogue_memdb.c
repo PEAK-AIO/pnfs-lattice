@@ -923,6 +923,63 @@ static enum mds_status mem_ns_rename(struct mds_catalogue *cat,
     return mem_dirent_put(cat, txn, dst_parent, dst_name, fid, type);
 }
 
+/*
+ * Flags-aware rename — mirrors the RonDB backend's overwrite
+ * semantics so the keep-orphan contract (MDS_CAT_RNF_KEEP_DST_ORPHAN)
+ * is unit-testable without NDB: overwriting the final link of a
+ * regular file either deletes its inode row (flags == 0) or keeps it
+ * with nlink 0 + MDS_IFLAG_UNLINK_ORPHAN (flag set).  The legacy
+ * mem_ns_rename above is untouched (it never deleted dst inodes).
+ */
+static enum mds_status mem_ns_rename_flags(struct mds_catalogue *cat,
+    struct mds_cat_txn *txn, uint64_t src_parent,
+    const char *src_name, uint64_t dst_parent, const char *dst_name,
+    uint32_t ns_flags)
+{
+    struct memdb *m = cat->backend_private;
+    pthread_mutex_lock(&m->lock);
+
+    int sidx = memdb_find_dirent(m, src_parent, src_name);
+    if (sidx < 0) {
+        pthread_mutex_unlock(&m->lock);
+        return MDS_ERR_NOTFOUND;
+    }
+    uint64_t fid = m->dirents[sidx].child_fileid;
+    uint8_t type = m->dirents[sidx].child_type;
+
+    /* Overwrite: resolve the doomed destination inode first. */
+    int didx = memdb_find_dirent(m, dst_parent, dst_name);
+    if (didx >= 0) {
+        uint64_t dfid = m->dirents[didx].child_fileid;
+
+        if (dfid != fid) {
+            int diidx = memdb_find_inode(m, dfid);
+
+            if (diidx >= 0 &&
+                m->inodes[diidx].type == MDS_FTYPE_REG) {
+                if (m->inodes[diidx].nlink > 0) {
+                    m->inodes[diidx].nlink--;
+                }
+                if (m->inodes[diidx].nlink == 0) {
+                    if ((ns_flags &
+                         MDS_CAT_RNF_KEEP_DST_ORPHAN) != 0U) {
+                        m->inodes[diidx].flags |=
+                            MDS_IFLAG_UNLINK_ORPHAN;
+                    } else {
+                        m->inode_used[diidx] = 0;
+                    }
+                }
+            }
+        }
+        m->dirents[didx].used = 0;
+    }
+
+    m->dirents[sidx].used = 0;
+    pthread_mutex_unlock(&m->lock);
+
+    return mem_dirent_put(cat, txn, dst_parent, dst_name, fid, type);
+}
+
 static enum mds_status mem_ns_link(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t parent,
     const char *name, uint64_t target)
@@ -2229,6 +2286,7 @@ static const struct mds_authority_ops memdb_auth_ops = {
     .ns_remove_known_gc = mem_ns_remove_known_gc,
     .ns_parent_touch       = mem_ns_parent_touch,
     .ns_rename       = mem_ns_rename,
+    .ns_rename_flags = mem_ns_rename_flags,
     .remove_pending_enqueue    = mem_remove_pending_enqueue,
     .remove_pending_enqueue_unlink = mem_remove_pending_enqueue_unlink,
     .remove_pending_peek_batch = mem_remove_pending_peek_batch,
