@@ -202,6 +202,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **Server-side COPY / CLONE re-enabled** — `op_copy` / `op_clone` no
+  longer return NFS4ERR_NOTSUPP.  The historical "silent data loss on
+  small copies" was root-caused to four stacked defects, all fixed:
+  (1) `decode_op_copy` / `decode_op_copy_notify` never consumed the
+  trailing `netloc4` fields (`ca_source_server<>` /
+  `cna_destination_server`), desyncing the XDR stream so every op
+  after COPY decoded as garbage and the client failed the compound
+  with EREMOTEIO; (2) an async COPY request was accepted and answered
+  with a callback stateid although CB_OFFLOAD is not implemented, so
+  copy_file_range() blocked forever — the server now always completes
+  synchronously (explicitly allowed by RFC 7862 §15.2.3);
+  (3) the COPY reply carried an all-zero `wr_writeverf` while the
+  bundled COMMIT returned the boot-epoch verifier — the Linux client
+  treats the mismatch as a server reboot and retried the copy in a
+  ~600/s storm; the reply now carries the same verifier as COMMIT
+  (byte-matched to the encoder);
+  (4) the proxy's chunk writes land in this host's NFS page cache for
+  the destination DS mounts, so a client reading the destination
+  DS-direct immediately after the FILE_SYNC4 reply raced the
+  writeback and saw a zero-filled file — the original "size=19,
+  content=''" symptom.  `mds_proxy_copy_data` now fsyncs the
+  destination's DS backing files (new `mds_proxy_flush_file`) before
+  returning.  COPY with `ca_count == 0` now implements the RFC 7862
+  copy-to-EOF semantics (pynfs COPY5).
+  Validated on the lab: copy_file_range md5-verified at 19 B / 4 KiB /
+  1 MiB / 20 MiB with exactly one COPY op each; `cp` (CLONE path)
+  verified; pynfs `copy` flag passes; `all` regression unchanged.
 - **Unanswered CB_RECALLs were never retransmitted over a replacement
   session (pynfs DSESS9003)** — conflict-recalls revoke the grant and
   send CB_RECALL once, best-effort; a client that destroyed the

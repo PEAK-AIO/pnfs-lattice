@@ -20,6 +20,72 @@
  * NFSv4.2 op decoders
  * ----------------------------------------------------------------------- */
 
+/**
+ * Consume an opaque<>/string field without storing it (bounded).
+ * Used by the netloc4 skipper below.
+ */
+static bool xdr42_skip_opaque(XDR *xdrs, uint32_t max_len)
+{
+    char skip[256];
+    uint32_t len = 0;
+    uint32_t consumed = 0;
+
+    if (!xdr_uint32_t(xdrs, &len)) { return false; }
+    if (len > max_len) { return false; }
+    while (consumed < len) {
+        uint32_t chunk = len - consumed;
+
+        if (chunk > sizeof(skip)) {
+            chunk = (uint32_t)sizeof(skip);
+        }
+        if (!xdr_opaque_decode(xdrs, skip, chunk)) { return false; }
+        consumed += chunk;
+    }
+    /* xdr_opaque_decode consumes per-call padding; a chunked walk
+     * over a multiple-of-4 prefix leaves only the final partial
+     * chunk's padding, which the last call already ate. */
+    return true;
+}
+
+/**
+ * Consume a netloc4 (RFC 7862 §14.5.1) without storing it:
+ *
+ *   union netloc4 switch (netloc_type4 nl_type) {
+ *     case NL4_NAME:    utf8str_cis nl_name;
+ *     case NL4_URL:     utf8str_cis nl_url;
+ *     case NL4_NETADDR: netaddr4    nl_addr;  -- two strings
+ *   };
+ *
+ * This server only performs intra-server copies, so the source /
+ * destination server lists are validated for wire shape and
+ * discarded.  Leaving the arm bytes unconsumed desyncs the XDR
+ * stream and every op after COPY / COPY_NOTIFY decodes as garbage
+ * (the client then sees OP_ILLEGAL results and fails the whole
+ * compound with EREMOTEIO).
+ */
+#define NL4_NAME    1
+#define NL4_URL     2
+#define NL4_NETADDR 3
+
+static bool xdr42_skip_netloc4(XDR *xdrs)
+{
+    uint32_t nl_type = 0;
+
+    if (!xdr_uint32_t(xdrs, &nl_type)) { return false; }
+    switch (nl_type) {
+    case NL4_NAME:
+    case NL4_URL:
+        return xdr42_skip_opaque(xdrs, 1024U);
+    case NL4_NETADDR:
+        /* netaddr4: r_netid string + r_addr string. */
+        return xdr42_skip_opaque(xdrs, 256U) &&
+               xdr42_skip_opaque(xdrs, 256U);
+    default:
+        /* Unknown discriminant: arm size unknowable. */
+        return false;
+    }
+}
+
 bool decode_op_allocate(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_allocate *a = &op->arg.allocate;
@@ -42,6 +108,7 @@ bool decode_op_copy(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_copy *a = &op->arg.copy;
     uint32_t bval;
+    uint32_t nsrc = 0;
     if (!xdr_nfs4_stateid_decode(xdrs, &a->src_stateid)) { return false; }
     if (!xdr_nfs4_stateid_decode(xdrs, &a->dst_stateid)) { return false; }
     if (!xdr_uint64_t(xdrs, &a->src_offset)) { return false; }
@@ -51,6 +118,20 @@ bool decode_op_copy(XDR *xdrs, struct nfs4_op *op)
     a->consecutive = (bval != 0);
     if (!xdr_uint32_t(xdrs, &bval)) { return false; }
     a->synchronous = (bval != 0);
+    /*
+     * ca_source_server<> (RFC 7862 §15.2.1).  Empty for the
+     * intra-server copies the Linux client issues via
+     * copy_file_range; a populated list selects inter-server SSC,
+     * which this server does not implement — the entries are still
+     * consumed so the stream stays in sync (the previous decoder
+     * dropped the array entirely and every op after COPY decoded
+     * as garbage → OP_ILLEGAL → client EREMOTEIO).
+     */
+    if (!xdr_uint32_t(xdrs, &nsrc)) { return false; }
+    if (nsrc > 8U) { return false; }
+    for (uint32_t i = 0; i < nsrc; i++) {
+        if (!xdr42_skip_netloc4(xdrs)) { return false; }
+    }
     return true;
 }
 
@@ -58,6 +139,9 @@ bool decode_op_copy_notify(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_copy_notify *a = &op->arg.copy_notify;
     if (!xdr_nfs4_stateid_decode(xdrs, &a->stateid)) { return false; }
+    /* cna_destination_server (RFC 7862 §15.3.1): exactly one
+     * netloc4, consumed for stream sync (see decode_op_copy). */
+    if (!xdr42_skip_netloc4(xdrs)) { return false; }
     return true;
 }
 

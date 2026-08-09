@@ -512,33 +512,10 @@ enum nfs4_status op_copy(struct compound_data *cd,
 				const struct nfs4_op *op,
 				struct nfs4_result *res)
 {
-	/* cppcheck-suppress unreadVariable
-	 * The 'a' / 'r' bindings exist so the dead-but-kept body below
-	 * still compiles -- see the TEMP comment under op_copy. */
-	/* NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) */
 	const struct nfs4_arg_copy *a = &op->arg.copy;
-	/* cppcheck-suppress unreadVariable */
-	/* NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) */
 	struct nfs4_res_copy *r = &res->res.copy;
 	enum nfs4_status nst;
-
-	/*
-	 * TEMP: server-side COPY is disabled.  mds_proxy_copy_data
-	 * has a known silent-data-loss bug on small writes -- it
-	 * returns the requested byte count without actually writing
-	 * the bytes through to the destination DS, so smoke's
-	 * cp+cat(small) test sees "size=19, content=''".  Returning
-	 * NFS4ERR_NOTSUPP causes the Linux NFSv4.2 client to fall
-	 * back to a regular read+write copy, which goes through the
-	 * tested data path.  Re-enable when copy_offload + sync copy
-	 * paths are fixed and covered by an integration test.
-	 *
-	 * The body below is intentionally left in place so the static
-	 * helper functions (copy_quota_precheck, copy_validate_stateids,
-	 * copy_update_dst_size) keep at least one compileable caller --
-	 * stripping them would trip -Wunused-function under -Werror.
-	 */
-	return NFS4ERR_NOTSUPP;
+	uint64_t eff_count;
 
 	/* COPY uses saved FH as source, current FH as destination. */
 	nst = require_saved_fh(cd);
@@ -566,39 +543,54 @@ enum nfs4_status op_copy(struct compound_data *cd,
 		return nst;
 	}
 
+	/*
+	 * RFC 7862 §15.2.3: ca_count == 0 means "copy from
+	 * ca_src_offset through the end of the source file" (pynfs
+	 * COPY5).  Resolve it against the live source size so both
+	 * dispatch paths below see a concrete byte count.  A source
+	 * offset beyond EOF is NFS4ERR_INVAL; an offset exactly at
+	 * EOF copies zero bytes and succeeds.
+	 */
+	eff_count = a->count;
+	if (eff_count == 0) {
+		struct mds_inode cp_src;
+		enum mds_status cst;
+
+		cst = cat_getattr(cd, cd->saved_fh.fileid, &cp_src);
+		if (cst != MDS_OK) {
+			return mds_status_to_nfs4(cst);
+		}
+		if (a->src_offset > cp_src.size) {
+			return NFS4ERR_INVAL;
+		}
+		eff_count = cp_src.size - a->src_offset;
+	}
+
 	/* CERT INT30-C: overflow check before arithmetic on offsets. */
-	if (a->count > 0 && a->dst_offset > UINT64_MAX - a->count) {
+	if (eff_count > 0 && a->dst_offset > UINT64_MAX - eff_count) {
 		return NFS4ERR_INVAL;
 	}
 
 	struct copy_pre_ctx pre;
 
 	nst = copy_quota_precheck(cd, cd->saved_fh.fileid, a->src_offset,
-				  a->dst_offset, a->count, &pre);
+				  a->dst_offset, eff_count, &pre);
 	if (nst != NFS4_OK) {
 		return nst;
 	}
 
-	if (!a->synchronous && cd->cot != NULL) {
-		/* Asynchronous copy via offload tracker. */
-		enum mds_status st;
-
-		st = copy_offload_start(cd->cot, cd->proxy, cd->cat,
-					cd->saved_fh.fileid, a->src_offset,
-					cd->current_fh.fileid, a->dst_offset,
-					a->count, &r->copy_stateid,
-					cd->cq, pre.dst_uid, pre.dst_gid,
-					pre.dst_old_size);
-		if (st != MDS_OK) {
-			return mds_status_to_nfs4(st);
-		}
-
-		r->write_count  = 0;
-		r->committed    = UNSTABLE4;
-		r->consecutive  = true;
-		r->synchronous  = false;
-		return NFS4_OK;
-	}
+	/*
+	 * Asynchronous completion is deliberately NOT offered: an async
+	 * reply hands the client a callback stateid and promises a
+	 * CB_OFFLOAD when the copy finishes, but this server does not
+	 * emit CB_OFFLOAD yet — the Linux client then blocks in
+	 * copy_file_range() waiting for a callback that never comes.
+	 * RFC 7862 §15.2.3 explicitly allows the server to complete a
+	 * copy synchronously even when the client requested async
+	 * (cr_synchronous = true, empty wr_callback_id); the client
+	 * proceeds immediately.  The offload tracker (cd->cot,
+	 * OFFLOAD_STATUS/CANCEL) stays wired for when CB_OFFLOAD lands.
+	 */
 
 	/* Synchronous copy via proxy. */
 	{
@@ -608,14 +600,31 @@ enum nfs4_status op_copy(struct compound_data *cd,
 		st = mds_proxy_copy_data(cd->proxy, cd->cat,
 					 cd->saved_fh.fileid, a->src_offset,
 					 cd->current_fh.fileid, a->dst_offset,
-					 a->count, &copied);
+					 eff_count, &copied);
 		if (st != MDS_OK) {
 			return mds_status_to_nfs4(st);
 		}
 
 		r->write_count = copied;
 		r->committed   = FILE_SYNC4;
-		memset(r->verifier, 0, sizeof(r->verifier));
+		/*
+		 * wr_writeverf MUST be the server's write verifier, not
+		 * zeros: the Linux client bundles a COMMIT after COPY and
+		 * compares the two verifiers — a mismatch is treated as a
+		 * server reboot between COPY and COMMIT, so the client
+		 * retries the whole copy forever (observed as a ~600/s
+		 * COPY storm on a 19-byte copy_file_range).  Use the same
+		 * boot-epoch verifier op_commit returns.
+		 */
+		{
+			/* Big-endian to byte-match op_commit's encoder,
+			 * which emits the verifier via xdr_uint64_t. */
+			uint64_t vf = htobe64(cd->write_verf);
+
+			_Static_assert(sizeof(r->verifier) == sizeof(vf),
+				       "writeverf4 must be 8 bytes");
+			memcpy(r->verifier, &vf, sizeof(vf));
+		}
 		memset(&r->copy_stateid, 0, sizeof(r->copy_stateid));
 		r->consecutive = true;
 		r->synchronous = true;
@@ -843,23 +852,11 @@ enum nfs4_status op_clone(struct compound_data *cd,
 				 const struct nfs4_op *op,
 				 struct nfs4_result *res)
 {
-	/* cppcheck-suppress unreadVariable
-	 * The 'a' binding exists so the dead-but-kept body below still
-	 * compiles -- see the TEMP comment under op_clone. */
-	/* NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) */
 	const struct nfs4_arg_clone *a = &op->arg.clone;
 	enum nfs4_status nst;
 	enum mds_status st;
 	struct mds_inode src_inode, dst_inode;
 	(void)res;
-
-	/*
-	 * TEMP: server-side CLONE is disabled -- same root cause as
-	 * op_copy (mds_proxy_copy_data silent-data-loss).  Returning
-	 * NFS4ERR_NOTSUPP forces the Linux client to fall back to
-	 * read+write copy.  Re-enable alongside op_copy.
-	 */
-	return NFS4ERR_NOTSUPP;
 
 	/* CLONE uses saved FH as source, current FH as destination. */
 	nst = require_saved_fh(cd);

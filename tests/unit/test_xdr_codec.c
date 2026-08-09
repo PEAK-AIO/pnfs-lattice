@@ -1980,6 +1980,90 @@ static void test_exchange_id_mach_cred_decode(void)
 }
 
 /* -----------------------------------------------------------------------
+ * COPY ca_source_server<> decode (copy_file_range EREMOTEIO regression)
+ *
+ * COPY4args ends with a netloc4 array the previous decoder never
+ * consumed, desyncing the stream — every op after COPY decoded as
+ * garbage and the client failed the compound with EREMOTEIO.  Both
+ * cases append a PUTROOTFH sentinel that only parses when the array
+ * was fully consumed.
+ * ----------------------------------------------------------------------- */
+
+static void encode_copy_prefix(XDR *enc)
+{
+    struct nfs4_stateid sid;
+    uint64_t u64;
+    uint32_t u;
+
+    memset(&sid, 0, sizeof(sid));
+    sid.seqid = 1;
+    memset(sid.other, 0xAB, sizeof(sid.other));
+    (void)xdr_nfs4_stateid_encode(enc, &sid);   /* ca_src_stateid */
+    (void)xdr_nfs4_stateid_encode(enc, &sid);   /* ca_dst_stateid */
+    u64 = 0;  (void)xdr_uint64_t(enc, &u64);    /* ca_src_offset */
+    u64 = 0;  (void)xdr_uint64_t(enc, &u64);    /* ca_dst_offset */
+    u64 = 19; (void)xdr_uint64_t(enc, &u64);    /* ca_count */
+    u = 1; (void)xdr_uint32_t(enc, &u);         /* ca_consecutive */
+    u = 1; (void)xdr_uint32_t(enc, &u);         /* ca_synchronous */
+}
+
+static void test_copy_source_server_decode(void)
+{
+    char buf[BUF_SIZE];
+    XDR enc, dec;
+    struct nfs4_op decoded[4];
+    char tag[NFS4_TAG_MAXLEN];
+    uint32_t minorver = 0, op_count = 0;
+    uint32_t u;
+
+    /* Case 1: empty ca_source_server<> (the Linux intra-server
+     * copy_file_range shape). */
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* tag len */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* minorversion */
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* numops */
+    u = OP_COPY; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_copy_prefix(&enc);
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* netloc<0> */
+    u = OP_PUTROOTFH; ASSERT_TRUE(xdr_uint32_t(&enc, &u)); /* sentinel */
+
+    xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+    memset(decoded, 0, sizeof(decoded));
+    ASSERT_EQ(nfs4_decode_compound_args(&dec, tag, sizeof(tag),
+                                        &minorver, decoded, 4,
+                                        &op_count), 0);
+    ASSERT_EQ(op_count, (uint32_t)2);
+    ASSERT_EQ(decoded[0].opnum, OP_COPY);
+    ASSERT_EQ(decoded[0].arg.copy.count, (uint64_t)19);
+    ASSERT_TRUE(decoded[0].arg.copy.synchronous);
+    ASSERT_EQ(decoded[1].opnum, OP_PUTROOTFH);
+
+    /* Case 2: one NL4_NETADDR entry (r_netid + r_addr strings). */
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    u = 0; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    u = 2; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    u = OP_COPY; ASSERT_TRUE(xdr_uint32_t(&enc, &u));
+    encode_copy_prefix(&enc);
+    u = 1; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* netloc<1> */
+    u = 3; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* NL4_NETADDR */
+    u = 3; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* r_netid len */
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"tcp", 3));
+    u = 9; ASSERT_TRUE(xdr_uint32_t(&enc, &u));           /* r_addr len */
+    ASSERT_TRUE(xdr_opaque(&enc, (char *)"10.0.0.99", 9));
+    u = OP_PUTROOTFH; ASSERT_TRUE(xdr_uint32_t(&enc, &u)); /* sentinel */
+
+    xdrmem_ncreate(&dec, buf, xdr_getpos(&enc), XDR_DECODE);
+    memset(decoded, 0, sizeof(decoded));
+    ASSERT_EQ(nfs4_decode_compound_args(&dec, tag, sizeof(tag),
+                                        &minorver, decoded, 4,
+                                        &op_count), 0);
+    ASSERT_EQ(op_count, (uint32_t)2);
+    ASSERT_EQ(decoded[0].opnum, OP_COPY);
+    ASSERT_EQ(decoded[1].opnum, OP_PUTROOTFH);
+}
+
+/* -----------------------------------------------------------------------
  * Edge case: decode truncated/bad data
  * ----------------------------------------------------------------------- */
 
@@ -2423,6 +2507,7 @@ int main(void)
     RUN_TEST(test_compound_open_owner_decode);
     RUN_TEST(test_exchange_id_ssv_decode);
     RUN_TEST(test_exchange_id_mach_cred_decode);
+    RUN_TEST(test_copy_source_server_decode);
     RUN_TEST(test_setattr_decode_layout_hint);
     RUN_TEST(test_open_create_decode_layout_hint);
 

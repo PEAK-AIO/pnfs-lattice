@@ -57,10 +57,21 @@ mounts, `nconnect=8`).  Suites: pynfs NFSv4.1 (kofemann), NFStest
 1. DS-capacity-aware placement — the MDS placed new files on a 100%
    full DS.  Generic DSes report no capacity; the placement heuristic
    degrades to uniform and nothing marks a full DS ineligible.
-   Needs FSSTAT probing (alongside the existing FSINFO limit prober),
-   a placement eligibility gate, and ENOSPC feedback from writes.
-   DEFERRED: weighted placement is an enterprise-tier feature; track
-   there.
+   DEFERRED: automatic capacity-weighted placement is an
+   enterprise-tier feature; track there.
+   OPERATIONAL WORKAROUND (validated): mark a filling DS ineligible
+   by hand — every placement path filters on the ONLINE state, while
+   existing data on a DRAINING DS stays fully readable/writable:
+     mds-admin ds capacity show --mds-host <mds> --mds-port <grpc_port>
+     mds-admin ds set-state <ds_id> draining --mds-host <mds> --mds-port <grpc_port>
+     mds-admin ds set-state <ds_id> online   --mds-host <mds> --mds-port <grpc_port>
+   (The admin protocol rides the cluster transport, i.e. the
+   `grpc_port` from mds.conf — the tool's built-in default port does
+   not apply to this deployment.)  Lab validation: with one of four
+   DSes draining, 40 new files placed 12/12/16/0 and reads of
+   existing data on the draining DS kept working.  Watch
+   `ds capacity show` (statvfs-backed, cluster-shared) and drain at
+   ~90% used.
 2. DSESS9003 — a pending CB_RECALL is not re-issued over a
    replacement session (trigger callback, leave it unanswered,
    destroy session, create a new session: no retransmit arrives).
