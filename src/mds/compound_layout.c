@@ -1414,7 +1414,9 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		(cd->layout_pregranted &&
 		 cd->layout_pregrant_fileid == cd->current_fh.fileid) ||
 		(cd->stripe_cached &&
-		 cd->stripe_cached_fileid == cd->current_fh.fileid);
+		 cd->stripe_cached_fileid == cd->current_fh.fileid) ||
+		(cd->wide_created_fileid != 0 &&
+		 cd->wide_created_fileid == cd->current_fh.fileid);
 
 	if (cd->cfg_layoutget_newfile_fastpath && created_this_compound) {
 		/* Count only when the scan would otherwise have run, so
@@ -2318,8 +2320,24 @@ fill_layoutget_result:
 	 * handles for files that exist.  Required for single-stripe too:
 	 * enterprise prealloc recover_pool can restore slots whose DS
 	 * files were wiped, leaving nfs_fh_len>0 but ENOENT on the DS.
-	 * Cache hits already carry verified entries; skip them. */
-	if (!layout_cache_was_hit && entries != NULL &&
+	 * Cache hits already carry verified entries; skip them.
+	 *
+	 * Same-compound wide create: op_open's pre-warm captured and
+	 * committed every stripe's FH synchronously in THIS compound,
+	 * so re-probing each stripe's DS file (one NFS round-trip per
+	 * stripe against sync-export metadata latency) verifies
+	 * nothing that can have changed.  Skipping it is the same
+	 * newly-created-file trust the layoutget_newfile_fastpath knob
+	 * already grants the conflict-recall scan; measured, the
+	 * refresh dominated small-file create cost in HPC-Shared
+	 * directories (~18.5 ms of LAYOUTGET DS I/O per create on a
+	 * 4-stripe layout). */
+	const bool wide_same_compound_create =
+		cd->cfg_layoutget_newfile_fastpath &&
+		cd->wide_created_fileid != 0 &&
+		cd->wide_created_fileid == cd->current_fh.fileid;
+	if (!layout_cache_was_hit && !wide_same_compound_create &&
+	    entries != NULL &&
 	    stripe_count > 0 && mirror_count > 0) {
 		layout_refresh_wide_stripe_fhs(cd, cd->current_fh.fileid,
 					       entries, stripe_count,
@@ -2740,8 +2758,19 @@ fill_layoutget_result:
 		 * is logged but does not fail the layout grant -- the
 		 * client will simply observe NFS4ERR_ACCESS on the DS
 		 * READ/WRITE and retry, matching today's behaviour.
+		 *
+		 * Same-compound wide create: the pre-warm created every
+		 * backing file in THIS compound (root-owned, mode 0666,
+		 * see mds_proxy_ensure_ds_file_fh), so DS access never
+		 * hinges on this chown and each slot's chown is one
+		 * SETATTR round-trip against sync-export metadata
+		 * latency (measured ~5 ms per 4-stripe create).  Skip
+		 * it under the same newly-created-file trust as the
+		 * verify-on-serve skip above; re-serves (including
+		 * refresh-recreated files) still realign ownership.
 		 */
-		if (!use_stored_synth && cd->proxy != NULL && entries != NULL) {
+		if (!use_stored_synth && !wide_same_compound_create &&
+		    cd->proxy != NULL && entries != NULL) {
 			const uint32_t total =
 				stripe_count * mirror_count;
 			for (uint32_t idx = 0; idx < total; idx++) {

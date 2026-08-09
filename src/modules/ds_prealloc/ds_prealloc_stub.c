@@ -333,18 +333,23 @@ void ds_prealloc_destroy(struct ds_prealloc_ctx *ctx)
     free(ctx);
 }
 
-/* GC-enqueue the DS files created for slots [0, upto) of a failed
- * batch.  Best-effort: the GC drainer owns the actual unlinks, and a
- * failed enqueue only delays reclamation (never corrupts state).
- * sweep_hint carries the requested geometry so the drainer probes
- * every slot (wide layouts are not stripe-dense per DS). */
+/* GC-enqueue the DS files a failed batch managed to create (slots
+ * with a captured FH; failed slots left nfs_fh_len == 0 and created
+ * no durable state worth queueing).  Best-effort: the GC drainer
+ * owns the actual unlinks, and a failed enqueue only delays
+ * reclamation (never corrupts state).  sweep_hint carries the
+ * requested geometry so the drainer probes every slot (wide layouts
+ * are not stripe-dense per DS). */
 static void batch_rollback_enqueue(const struct ds_prealloc_ctx *ctx,
                                    uint64_t fileid,
                                    const struct mds_ds_map_entry *entries,
-                                   uint32_t upto,
+                                   uint32_t n,
                                    uint32_t sweep_hint)
 {
-    for (uint32_t j = 0; j < upto; j++) {
+    for (uint32_t j = 0; j < n; j++) {
+        if (entries[j].nfs_fh_len == 0) {
+            continue;
+        }
         (void)mds_cat_gc_enqueue_hint((struct mds_catalogue *)ctx->cat,
                                       NULL, fileid, entries[j].ds_id,
                                       entries[j].nfs_fh,
@@ -458,34 +463,31 @@ enum mds_status ds_prealloc_batch(
     }
     free(ds_list);
 
-    /* Synchronous per-slot DS file create + FH capture.  A slot
-     * without a captured FH fails the whole batch: the wide fused
-     * CREATE persists the map exactly as captured, and a stripe
-     * with an empty FH would strand every I/O that lands on it.
-     * Without a proxy there is no way to capture handles at all
-     * (test fixtures) -- report NOSPC so the OPEN falls back to a
-     * client-visible error rather than committing a broken map. */
+    /* Parallel per-slot DS file create + FH capture (bounded
+     * fork-join; see mds_proxy_ensure_ds_file_fh_batch).  Sequential
+     * capture put stripe_count NFS round-trips on the OPEN(CREATE)
+     * critical path and capped mdtest-style create rates in HPC dirs
+     * at ~28% of the non-HPC rate.  A slot without a captured FH
+     * still fails the whole batch: the wide fused CREATE persists
+     * the map exactly as captured, and a stripe with an empty FH
+     * would strand every I/O that lands on it.  Without a proxy
+     * there is no way to capture handles at all (test fixtures) --
+     * report NOSPC so the OPEN falls back to a client-visible error
+     * rather than committing a broken map. */
     if (ctx->proxy == NULL) {
         free(entries);
         return MDS_ERR_NOSPC;
     }
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t stripe = i % req->stripe_count;
-        uint32_t mirror = i / req->stripe_count;
-        uint32_t fh_len = (uint32_t)sizeof(entries[i].nfs_fh);
-
-        st = mds_proxy_ensure_ds_file_fh(ctx->proxy, entries[i].ds_id,
-                                         fileid, stripe, mirror,
-                                         entries[i].nfs_fh, &fh_len);
-        if (st != MDS_OK || fh_len == 0 ||
-            fh_len > sizeof(entries[i].nfs_fh)) {
-            batch_rollback_enqueue(ctx, fileid, entries, i,
-                                   MDS_GC_SWEEP_GEOM(req->stripe_count,
-                                                     n / req->stripe_count));
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
-        entries[i].nfs_fh_len = fh_len;
+    if (mds_proxy_ensure_ds_file_fh_batch(ctx->proxy, fileid,
+                                          req->stripe_count,
+                                          entries, n) != 0U) {
+        /* Roll back every slot that DID capture (nfs_fh_len > 0);
+         * failed slots created no durable state worth queueing. */
+        batch_rollback_enqueue(ctx, fileid, entries, n,
+                               MDS_GC_SWEEP_GEOM(req->stripe_count,
+                                                 n / req->stripe_count));
+        free(entries);
+        return MDS_ERR_NOSPC;
     }
 
     out->fileid = fileid;

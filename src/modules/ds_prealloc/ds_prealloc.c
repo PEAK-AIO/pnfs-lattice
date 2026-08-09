@@ -880,39 +880,47 @@ enum mds_status ds_prealloc_batch(
     }
     free(ds_list);
 
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t stripe = i % req->stripe_count;
-        uint32_t mirror = i / req->stripe_count;
-        bool captured = false;
+    /*
+     * Parallel per-slot DS file create + FH capture (bounded
+     * fork-join; see mds_proxy_ensure_ds_file_fh_batch).  Sequential
+     * capture put stripe_count NFS round-trips on the OPEN(CREATE)
+     * critical path.  Slots the batch could not capture keep
+     * nfs_fh_len == 0; the per-slot synthetic fallback of the old
+     * sequential loop is preserved by fabricating FHs for exactly
+     * those slots afterwards.
+     */
+    {
+        uint32_t failed;
 
         if (ctx->proxy != NULL) {
-            uint32_t fh_len = (uint32_t)sizeof(entries[i].nfs_fh);
-            st = mds_proxy_ensure_ds_file_fh(ctx->proxy, entries[i].ds_id,
-                                             fileid, stripe, mirror,
-                                             entries[i].nfs_fh, &fh_len);
-            if (st == MDS_OK && fh_len > 0 &&
-                fh_len <= sizeof(entries[i].nfs_fh)) {
-                entries[i].nfs_fh_len = fh_len;
-                captured = true;
-            } else if (ctx->synthetic_fh) {
-                synth_fh(&entries[i], fileid + i + 1U);
-                captured = true;
-            }
-        } else if (ctx->synthetic_fh) {
-            synth_fh(&entries[i], fileid + i + 1U);
-            captured = true;
+            failed = mds_proxy_ensure_ds_file_fh_batch(
+                ctx->proxy, fileid, req->stripe_count, entries, n);
+        } else {
+            failed = n;  /* No proxy: nothing was captured. */
         }
-
-        if (!captured) {
-            /* No usable FH for this stripe -- roll back the DS files
-             * created so far (best-effort GC) and fail the whole batch
-             * so the caller never sees a half-built layout.  Each row
-             * carries the requested geometry so the sweep probes every
-             * slot (wide layouts are not stripe-dense per DS). */
+        if (failed > 0 && ctx->synthetic_fh) {
+            for (uint32_t i = 0; i < n; i++) {
+                if (entries[i].nfs_fh_len == 0) {
+                    synth_fh(&entries[i], fileid + i + 1U);
+                }
+            }
+            failed = 0;
+        }
+        if (failed > 0) {
+            /* No usable FH for at least one stripe -- roll back the
+             * DS files that WERE created (best-effort GC; failed
+             * slots left no durable state worth queueing) and fail
+             * the whole batch so the caller never sees a half-built
+             * layout.  Each row carries the requested geometry so
+             * the sweep probes every slot (wide layouts are not
+             * stripe-dense per DS). */
             uint32_t rb_mc = (req->mirror_count == 0U)
                                  ? 1U : req->mirror_count;
 
-            for (uint32_t j = 0; j < i; j++) {
+            for (uint32_t j = 0; j < n; j++) {
+                if (entries[j].nfs_fh_len == 0) {
+                    continue;
+                }
                 (void)mds_cat_gc_enqueue_hint(
                     (struct mds_catalogue *)ctx->cat, NULL, fileid,
                     entries[j].ds_id, entries[j].nfs_fh,
