@@ -372,6 +372,19 @@ enum nfs4_status op_create_session(struct compound_data *cd,
 			cd->st, r->session_id,
 			&r->fore_max_response_size,
 			&r->fore_max_response_size_cached);
+		/*
+		 * RFC 8881 §10.4.4 robustness / pynfs DSESS9003: if this
+		 * client has CB_RECALLs it never answered (e.g. sent over
+		 * a session it has since destroyed), retransmit them over
+		 * the backchannel this CREATE_SESSION just bound.  Runs on
+		 * a short-lived detached worker with a small delay: the
+		 * client cannot answer a CB referencing this session until
+		 * it has processed our CREATE_SESSION reply, so an inline
+		 * send here would be rejected with NFS4ERR_BADSESSION.
+		 */
+		if (cd->dt != NULL && cd->conn != NULL) {
+			deleg_schedule_pending_resend(cd->dt, a->clientid);
+		}
 		return NFS4_OK;
 	case -1: return NFS4ERR_STALE_CLIENTID;
 	case -2: return NFS4ERR_SEQ_MISORDERED;

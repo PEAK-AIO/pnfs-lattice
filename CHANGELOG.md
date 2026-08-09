@@ -202,6 +202,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **Unanswered CB_RECALLs were never retransmitted over a replacement
+  session (pynfs DSESS9003)** — conflict-recalls revoke the grant and
+  send CB_RECALL once, best-effort; a client that destroyed the
+  session the callback was sent over never heard about the recall
+  again.  Every recall is now recorded in a pending-recall ledger
+  (cleared by DELEGRETURN, FREE_STATEID, or client destroy;
+  TTL-reaped after one lease period with a resend cap — the
+  backchannel is fire-and-forget, so a successful send is not an
+  acknowledgment).  CREATE_SESSION for a client with ledgered
+  recalls schedules
+  a short-lived detached worker that retransmits them over the newly
+  bound backchannel — deferred briefly because a callback referencing
+  the new session before the client processes the CREATE_SESSION
+  reply would be rejected with NFS4ERR_BADSESSION.
 - **CLOSE after rename-over-an-open-file returned NFS4ERR_STALE
   (pynfs RNM21)** — overwriting the last link of an OPEN regular file
   via RENAME deleted its inode row inside the rename transaction, so

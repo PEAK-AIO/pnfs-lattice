@@ -240,6 +240,71 @@ static void test_revoke_file_many_grants(void)
     deleg_table_destroy(dt);
 }
 
+/**
+ * Pending-recall ledger bookkeeping (pynfs DSESS9003).
+ *
+ * A conflict-recall must record the recall in the ledger so a later
+ * CREATE_SESSION can retransmit it; DELEGRETURN must clear it; a
+ * destroyed client's entries must be dropped.  No session table is
+ * attached, so no CB I/O happens — this covers exactly the
+ * bookkeeping the retransmit path depends on.
+ */
+static void test_pending_recall_ledger(void)
+{
+    struct deleg_table *dt = NULL;
+    struct nfs4_stateid sid = {0};
+    const uint64_t holder = 300;
+    const uint64_t rival  = 301;
+    const uint64_t fid    = 777;
+
+    ASSERT_EQ(deleg_table_init(1, &dt), 0);
+    deleg_table_set_skip_transient(dt, true);
+
+    /* No pending recalls on a fresh table; resend is a no-op. */
+    ASSERT_TRUE(!deleg_has_pending_recall(dt, holder));
+    ASSERT_EQ(deleg_resend_pending_recalls(dt, holder), 0);
+    ASSERT_EQ(deleg_resend_pending_recalls(NULL, holder), -1);
+
+    /* Grant to holder; rival's conflict revokes + ledgers it. */
+    ASSERT_EQ(deleg_grant(dt, holder, fid,
+                          OPEN_DELEGATE_READ, NULL, &sid), 0);
+    ASSERT_EQ(deleg_recall_file(dt, fid, rival, 1), 1);
+    ASSERT_TRUE(deleg_has_pending_recall(dt, holder));
+    ASSERT_TRUE(!deleg_has_pending_recall(dt, rival));
+
+    /* Resend without a session table sends nothing but keeps the
+     * entry (the client still deserves a retransmit later). */
+    ASSERT_EQ(deleg_resend_pending_recalls(dt, holder), 0);
+    ASSERT_TRUE(deleg_has_pending_recall(dt, holder));
+
+    /* DELEGRETURN acknowledges the recall: ledger entry cleared
+     * even though the grant itself was already revoked. */
+    (void)deleg_return(dt, &sid, holder);
+    ASSERT_TRUE(!deleg_has_pending_recall(dt, holder));
+
+    /* Client-destroy drops that client's entries only. */
+    ASSERT_EQ(deleg_grant(dt, holder, fid + 1,
+                          OPEN_DELEGATE_READ, NULL, &sid), 0);
+    ASSERT_EQ(deleg_recall_file(dt, fid + 1, rival, 1), 1);
+    ASSERT_TRUE(deleg_has_pending_recall(dt, holder));
+    deleg_revoke_client(dt, holder);
+    ASSERT_TRUE(!deleg_has_pending_recall(dt, holder));
+
+    /* FREE_STATEID of the revoked stateid also clears the ledger. */
+    ASSERT_EQ(deleg_grant(dt, holder, fid + 2,
+                          OPEN_DELEGATE_READ, NULL, &sid), 0);
+    ASSERT_EQ(deleg_recall_file(dt, fid + 2, rival, 1), 1);
+    ASSERT_TRUE(deleg_has_pending_recall(dt, holder));
+    ASSERT_EQ(deleg_free_revoked(dt, sid.other), 0);
+    ASSERT_TRUE(!deleg_has_pending_recall(dt, holder));
+
+    /* Scheduler is NULL-safe and a no-op with nothing pending. */
+    deleg_schedule_pending_resend(NULL, holder);
+    deleg_schedule_pending_resend(dt, holder);
+
+    deleg_table_destroy(dt);
+}
+
 int main(void)
 {
     fprintf(stdout, "test_delegation:\n");
@@ -249,6 +314,7 @@ int main(void)
     RUN_TEST(test_revoke_file_targets_correct_grants);
     RUN_TEST(test_revoke_file_clears_conflict);
     RUN_TEST(test_revoke_file_many_grants);
+    RUN_TEST(test_pending_recall_ledger);
 
     fprintf(stdout, "  %d/%d tests passed\n",
             tests_passed, tests_run);
