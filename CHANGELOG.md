@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **NFSv4.1 conformance findings document** —
+  `docs/conformance-nfs41-findings.md` records the pynfs + NFStest
+  campaign results after the first fix round: 198/198 on the pynfs
+  `all` set with delegations enabled, 459/461 on nfstest_posix, the
+  three defects fixed in PR #90, the items resolved without code
+  change (full-DS root cause of the "blocking-lock hang"; pynfs
+  harness artifacts), and the prioritised open defect queue
+  (capacity-aware placement deferred to the enterprise tier,
+  DSESS9003 callback retransmit, mtime/atime propagation, COPY
+  re-enable, orphan sweeper, CB_NOTIFY_LOCK).  Documentation only —
+  no behaviour changes.
 - **Wave 7 mutation-path design document** —
   `docs/perf-wave7-mutation-design.md` records the mutation-rate
   design study: the decomposition plan for the ~0.78 ms fused-create
