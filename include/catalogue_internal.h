@@ -138,6 +138,14 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, uint64_t src_parent,
         const char *src_name, uint64_t dst_parent,
         const char *dst_name);
+    /** Optional flags-aware rename (MDS_CAT_RNF_*).  Leave NULL when
+     * the backend has no flags support: the dispatch wrapper then
+     * falls back to ns_rename for ns_flags==0 and returns
+     * MDS_ERR_NOSUPPORT otherwise. */
+    enum mds_status (*ns_rename_flags)(struct mds_catalogue *cat,
+        struct mds_cat_txn *txn, uint64_t src_parent,
+        const char *src_name, uint64_t dst_parent,
+        const char *dst_name, uint32_t ns_flags);
     enum mds_status (*ns_link)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name, uint64_t target);

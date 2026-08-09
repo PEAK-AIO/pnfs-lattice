@@ -191,6 +191,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **CLOSE after rename-over-an-open-file returned NFS4ERR_STALE
+  (pynfs RNM21)** — overwriting the last link of an OPEN regular file
+  via RENAME deleted its inode row inside the rename transaction, so
+  the holder's subsequent PUTFH+CLOSE failed with STALE.  The rename
+  path now implements POSIX unlink-of-open semantics: with live local
+  opens on the target, the new `MDS_CAT_RNF_KEEP_DST_ORPHAN` rename
+  keeps the row (nlink 0 + new `MDS_IFLAG_UNLINK_ORPHAN` flag) in the
+  same transaction, and the LAST CLOSE finalizes the orphan — GC of
+  DS objects, stripe rows, inode row, quota
+  (`compound_orphan_finalize`).  Orphan inodes keep resolving through
+  PUTFH (unlike `DELETE_PENDING` corpses, which stay deliberately
+  dead).  Known limitation: opens are tracked per-MDS in memory, so a
+  cross-MDS open or a crash between the rename and the last CLOSE
+  leaves the orphan row for a future sweeper — same blind spot as the
+  async-remove writer gate.
+- **Rename-overwrite leaked the overwritten file's DS objects** —
+  unlike REMOVE, the rename-overwrite path performed no layout
+  recall, no GC enqueue, no stripe-row cleanup and no quota release
+  for the destroyed file; its DS data files leaked on every
+  overwrite.  op_rename now mirrors op_remove's final-unlink
+  sequence: layouts are revoked before the mutation (same
+  STALE-PUTFH/CB_LAYOUTRECALL deadlock rationale), delegations are
+  dropped, and on the delete path the DS objects are GC'd, orphaned
+  stripe rows removed and quota adjusted.
 - **DESTROY_SESSION accepted from unbound connections (pynfs
   DSESS9001)** — sessions now track their fore-channel connection
   bindings (RFC 8881 §2.10.3.1): the CREATE_SESSION connection binds

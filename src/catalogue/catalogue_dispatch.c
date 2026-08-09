@@ -321,6 +321,31 @@ enum mds_status mds_cat_ns_rename(struct mds_catalogue *cat,
                                  dst_parent, dst_name));
 }
 
+enum mds_status mds_cat_ns_rename_flags(struct mds_catalogue *cat,
+                                        struct mds_cat_txn *txn,
+                                        uint64_t src_parent,
+                                        const char *src_name,
+                                        uint64_t dst_parent,
+                                        const char *dst_name,
+                                        uint32_t ns_flags)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (cat->auth_ops->ns_rename_flags != NULL) {
+        return CAT_TIMED(MDS_CATOP_NS_RENAME,
+            cat->auth_ops->ns_rename_flags(cat, txn, src_parent, src_name,
+                                           dst_parent, dst_name,
+                                           ns_flags));
+    }
+    if (ns_flags == 0U) {
+        return CAT_TIMED(MDS_CATOP_NS_RENAME,
+            cat->auth_ops->ns_rename(cat, txn, src_parent, src_name,
+                                     dst_parent, dst_name));
+    }
+    return MDS_ERR_NOSUPPORT;
+}
+
 enum mds_status mds_cat_ns_link(struct mds_catalogue *cat,
                                 struct mds_cat_txn *txn,
                                 uint64_t parent_fileid,

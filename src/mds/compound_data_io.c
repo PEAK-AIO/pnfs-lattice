@@ -1372,8 +1372,11 @@ enum nfs4_status op_close(struct compound_data *cd,
 	default: return NFS4ERR_BAD_STATEID;
 	}
 
-	if (cd->lcommit_agg != NULL && close_fileid != 0 &&
-	    open_state_file_has_writers(cd->ot, close_fileid) == 0) {
+	bool close_last = (close_fileid != 0 &&
+			   open_state_file_has_writers(cd->ot,
+						       close_fileid) == 0);
+
+	if (cd->lcommit_agg != NULL && close_last) {
 		int frc = layout_commit_aggregator_flush_fileid(
 			cd->lcommit_agg, close_fileid);
 		if (frc < 0) {
@@ -1383,6 +1386,26 @@ enum nfs4_status op_close(struct compound_data *cd,
 				"persisted size/mtime will lag until the "
 				"next periodic flush",
 				(unsigned long long)close_fileid);
+		}
+	}
+
+	/*
+	 * Unlinked-but-open orphan finalize (pynfs RNM21 / POSIX
+	 * unlink-of-open): a rename overwrote this file while it was
+	 * open, so its dirent is gone but the inode row survived with
+	 * MDS_IFLAG_UNLINK_ORPHAN.  This CLOSE released the last local
+	 * open — run the deferred final-unlink cleanup now.  The inode
+	 * read is effectively free on the common PUTFH;CLOSE compound:
+	 * PUTFH seeded cd->current_inode, so compound_inode_get is a
+	 * snapshot hit for non-orphan files too.
+	 */
+	if (close_last && cd->cat != NULL) {
+		struct mds_inode close_ino;
+
+		if (compound_inode_get(cd, close_fileid,
+				       &close_ino) == MDS_OK &&
+		    (close_ino.flags & MDS_IFLAG_UNLINK_ORPHAN) != 0U) {
+			compound_orphan_finalize(cd, &close_ino);
 		}
 	}
 

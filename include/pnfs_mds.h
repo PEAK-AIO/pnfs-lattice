@@ -230,6 +230,19 @@ enum cluster_mode {
 /* Final unlink acked (delete-at-ack): dirent already removed; the
  * inode row awaits background finalize by the remove manifest. */
 #define MDS_IFLAG_DELETE_PENDING (1U << 6)
+/*
+ * Unlinked-but-open orphan: the file's last dirent was removed (a
+ * rename overwrote it) while local open state still references the
+ * fileid.  Unlike DELETE_PENDING — whose filehandles are deliberately
+ * dead (compound_inode_get maps it to STALE) — an ORPHAN inode keeps
+ * resolving so the open holder's PUTFH+CLOSE succeed (POSIX
+ * unlink-of-open semantics; pynfs RNM21).  The LAST CLOSE finalizes
+ * the inode: GC of DS objects, stripe rows, the inode row and quota
+ * (compound_orphan_finalize).  Known limitation: opens are tracked
+ * per-MDS in memory, so a crash between rename and the last CLOSE
+ * leaves the row for a future sweeper.
+ */
+#define MDS_IFLAG_UNLINK_ORPHAN (1U << 7)
 
 /* One durable pending-remove manifest row (delete-at-ack). */
 struct mds_remove_pending_entry {
