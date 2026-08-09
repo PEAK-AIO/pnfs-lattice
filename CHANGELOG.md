@@ -191,6 +191,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **DESTROY_SESSION accepted from unbound connections (pynfs
+  DSESS9001)** — sessions now track their fore-channel connection
+  bindings (RFC 8881 §2.10.3.1): the CREATE_SESSION connection binds
+  at session creation and every accepted SEQUENCE implicitly binds
+  its carrying connection, inside the same shard critical section the
+  sequence check already holds (no extra hot-path locking).
+  DESTROY_SESSION from a connection that is not bound to the target
+  session now fails with NFS4ERR_CONN_NOT_BOUND_TO_SESSION instead of
+  destroying the session; one SEQUENCE over that connection makes a
+  retry legal.  Connection teardown clears fore-channel bindings
+  alongside the existing backchannel unbind (now under the lock-all
+  protocol so teardown cannot race shard-locked binding writes).
 - **EXCHANGE_ID state-protection decode desync (pynfs EID50)** — the
   argument decoder read the `state_protect4_a` discriminant but never
   consumed the SP4_MACH_CRED / SP4_SSV union arms, so an SSV
