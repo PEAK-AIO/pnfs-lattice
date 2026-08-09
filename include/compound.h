@@ -1969,6 +1969,22 @@ struct layout_recall     *lr;
 	uint64_t                  layout_pregrant_fileid;
 	struct nfs4_stateid       layout_pregrant_stateid;
 
+	/*
+	 * Fileid of a wide (multi-stripe HPC-Shared) file created by
+	 * op_open(CREATE) earlier in THIS compound, 0 otherwise.  The
+	 * wide pre-warm captured and committed every stripe's DS file
+	 * handle synchronously moments ago, so the follow-up LAYOUTGET
+	 * in the same compound may skip the verify-on-serve FH refresh
+	 * (layout_refresh_wide_stripe_fhs) for this fileid -- that
+	 * refresh re-probes every stripe's DS file (one NFS round-trip
+	 * each, ~stripe_count x the sync-export metadata latency) and
+	 * was the dominant per-create cost for small-file workloads in
+	 * HPC-Shared directories.  Gated on
+	 * cfg_layoutget_newfile_fastpath, the existing same-compound
+	 * trust knob.  Zeroed by compound_init() like its neighbours.
+	 */
+	uint64_t                  wide_created_fileid;
+
 	/* Skip NDB persistence for transient protocol state
 	 * (open_state, layout_state).  Set from config
 	 * transient_state_cache flag. */

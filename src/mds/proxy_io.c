@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
@@ -1219,6 +1220,116 @@ fallback_rpc:
         }
         return MDS_OK;
     }
+}
+
+/* -----------------------------------------------------------------------
+ * Parallel batch FH capture (wide pre-warm).
+ *
+ * A wide HPC CREATE needs stripe_count * mirror_count DS files created
+ * and FH-captured before the catalogue commit.  Sequential capture
+ * costs one NFS round-trip per slot on the OPEN(CREATE) critical path
+ * (measured: mdtest-easy on a 4-stripe HPC dir ran at ~28% of the
+ * non-HPC create rate).  The slots are independent -- different DS
+ * files, usually different DSes -- so capture them with a bounded
+ * fork-join: worker threads pull slot indices from an atomic cursor,
+ * each writes only its own entries[i], and everything is joined before
+ * return.  See the header comment for the thread-safety argument.
+ * ----------------------------------------------------------------------- */
+
+/* Fan-out ceiling, including the calling thread.  4-stripe lab files
+ * use one thread per slot; a 128-stripe file runs 16 slots per
+ * thread.  Bounded so a create burst on a 16-worker daemon cannot
+ * explode into thousands of transient threads. */
+#define MDS_PROXY_FH_CAPTURE_THREADS 8U
+
+struct fh_batch_ctx {
+    const struct mds_proxy_ctx *proxy;
+    struct mds_ds_map_entry    *entries;
+    uint64_t                    fileid;
+    uint32_t                    stripe_count;
+    uint32_t                    n;
+    _Atomic uint32_t            next;    /**< Slot dispenser. */
+    _Atomic uint32_t            failed;  /**< Slots without an FH. */
+};
+
+static void *fh_batch_worker(void *arg)
+{
+    struct fh_batch_ctx *b = arg;
+
+    for (;;) {
+        uint32_t i = atomic_fetch_add_explicit(&b->next, 1U,
+                                               memory_order_relaxed);
+        if (i >= b->n) {
+            break;
+        }
+        {
+            uint32_t stripe = i % b->stripe_count;
+            uint32_t mirror = i / b->stripe_count;
+            uint32_t fh_len = (uint32_t)sizeof(b->entries[i].nfs_fh);
+            enum mds_status st;
+
+            st = mds_proxy_ensure_ds_file_fh(b->proxy,
+                                             b->entries[i].ds_id,
+                                             b->fileid, stripe, mirror,
+                                             b->entries[i].nfs_fh,
+                                             &fh_len);
+            if (st == MDS_OK && fh_len > 0 &&
+                fh_len <= sizeof(b->entries[i].nfs_fh)) {
+                b->entries[i].nfs_fh_len = fh_len;
+            } else {
+                b->entries[i].nfs_fh_len = 0;
+                atomic_fetch_add_explicit(&b->failed, 1U,
+                                          memory_order_relaxed);
+            }
+        }
+    }
+    return NULL;
+}
+
+uint32_t mds_proxy_ensure_ds_file_fh_batch(
+    const struct mds_proxy_ctx *ctx,
+    uint64_t fileid,
+    uint32_t stripe_count,
+    struct mds_ds_map_entry *entries,
+    uint32_t n)
+{
+    struct fh_batch_ctx b;
+    pthread_t tids[MDS_PROXY_FH_CAPTURE_THREADS];
+    uint32_t spawned = 0;
+    uint32_t want;
+
+    if (ctx == NULL || entries == NULL || n == 0 || stripe_count == 0) {
+        return n;  /* Nothing capturable: every slot counts as failed. */
+    }
+
+    b.proxy = ctx;
+    b.entries = entries;
+    b.fileid = fileid;
+    b.stripe_count = stripe_count;
+    b.n = n;
+    atomic_store_explicit(&b.next, 0U, memory_order_relaxed);
+    atomic_store_explicit(&b.failed, 0U, memory_order_relaxed);
+
+    /* The calling thread is worker 0; spawn up to cap-1 helpers, and
+     * never more than n-1 (a helper with no slot would exit at once).
+     * pthread_create failure is non-fatal: whatever spawned (possibly
+     * nothing) plus the calling thread still drains every slot. */
+    want = (n < MDS_PROXY_FH_CAPTURE_THREADS)
+               ? n : MDS_PROXY_FH_CAPTURE_THREADS;
+    for (spawned = 0; spawned + 1U < want; spawned++) {
+        if (pthread_create(&tids[spawned], NULL,
+                           fh_batch_worker, &b) != 0) {
+            break;
+        }
+    }
+
+    (void)fh_batch_worker(&b);
+
+    for (uint32_t t = 0; t < spawned; t++) {
+        (void)pthread_join(tids[t], NULL);
+    }
+
+    return atomic_load_explicit(&b.failed, memory_order_relaxed);
 }
 
 enum mds_status mds_proxy_write_direct(const struct mds_proxy_ctx *ctx,

@@ -493,6 +493,14 @@ enum nfs4_status op_open(struct compound_data *cd,
 				 */
 				st = op_open_hpc_wide_create(cd, a,
 					eff_mode, eff_uid, eff_gid, &inode);
+				if (st == MDS_OK) {
+					/* Same-compound trust: the follow-up
+					 * LAYOUTGET may skip verify-on-serve
+					 * for this fileid -- every stripe FH
+					 * was captured and committed by the
+					 * pre-warm moments ago. */
+					cd->wide_created_fileid = inode.fileid;
+				}
 			} else if (cd->cq != NULL) {
 				struct commit_op cop;
 				memset(&cop, 0, sizeof(cop));

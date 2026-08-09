@@ -278,6 +278,45 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
     uint32_t stripe, uint32_t mirror,
     uint8_t *fh_out, uint32_t *fh_len);
 
+/**
+ * Ensure + FH-capture a whole batch of (stripe, mirror) DS files in
+ * parallel.
+ *
+ * For every slot i in [0, n): slot geometry is stripe = i %
+ * stripe_count, mirror = i / stripe_count, target DS =
+ * entries[i].ds_id (set by the caller's placement step).  On return,
+ * every slot that captured has entries[i].nfs_fh / nfs_fh_len filled;
+ * slots that failed keep nfs_fh_len == 0 so the caller can apply its
+ * own fallback (synthetic FH) or rollback policy per slot.
+ *
+ * Concurrency: fan-out is a bounded fork-join.  Up to
+ * MDS_PROXY_FH_CAPTURE_THREADS threads (including the calling thread)
+ * pull slot indices from a shared atomic cursor and each writes ONLY
+ * its own entries[i] slot; all threads are joined before return, so
+ * no capture outlives the call and the caller observes fully-written
+ * entries.  mds_proxy_ensure_ds_file_fh is safe to call concurrently:
+ * it reads only immutable ctx state (mounts registered at startup)
+ * and per-call locals, and its NFS3 RPC fallback path serialises its
+ * one process-global directory-FH cache internally -- the enterprise
+ * prealloc refill rings already invoke it from multiple threads.
+ * Thread spawn failure degrades gracefully: remaining slots are
+ * captured on the calling thread (correctness never depends on the
+ * fan-out).
+ *
+ * @param ctx           Proxy context (must be non-NULL).
+ * @param fileid        Logical file ID shared by every slot.
+ * @param stripe_count  Stripes per mirror row (>= 1).
+ * @param entries       Slot array [n]; ds_id in, nfs_fh(_len) out.
+ * @param n             Slot count (stripe_count * mirror_count).
+ * @return Number of slots that FAILED capture (0 = all captured).
+ */
+uint32_t mds_proxy_ensure_ds_file_fh_batch(
+    const struct mds_proxy_ctx *ctx,
+    uint64_t fileid,
+    uint32_t stripe_count,
+    struct mds_ds_map_entry *entries,
+    uint32_t n);
+
 
 /**
  * Write data directly to a DS file (no stripe-map lookup).

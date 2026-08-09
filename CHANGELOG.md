@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **LAYOUTGET skips per-stripe DS round-trips for wide files created
+  in the same compound** — the fused OPEN(CREATE)+LAYOUTGET path paid
+  three per-stripe DS costs that verify or align state the wide
+  pre-warm had itself produced milliseconds earlier in the same
+  compound: the verify-on-serve re-probe of every stripe's backing
+  file (`layout_refresh_wide_stripe_fhs`, ~18.5 ms of LAYOUTGET DS
+  I/O per 4-stripe create), the ffl_user/ffl_group ownership chown of
+  every stripe's backing file (~5 ms per create — the files were just
+  created 0666 by the pre-warm, so DS access never hinged on it), and
+  the guaranteed-miss byte-range conflict-recall holder scan (a fresh
+  fileid cannot have layout holders; the single-stripe create path
+  already skipped it).  op_open now records the wide-created fileid
+  in the compound context and op_layoutget skips all three for that
+  fileid, gated on the existing `layoutget_newfile_fastpath`
+  same-compound-trust knob.  Re-serves of pre-existing files (reopen
+  after cache eviction, DS wipe recovery) keep the full
+  verify-on-serve, ownership-alignment, and recall-scan behaviour.
+- **Wide-create DS file-handle capture is now parallel** — the HPC
+  wide pre-warm (`ds_prealloc_batch`, both the community synchronous
+  implementation and the enterprise ring engine's batch path) used to
+  create + FH-capture the stripe_count × mirror_count DS backing
+  files one at a time, putting one NFS round-trip per stripe on the
+  OPEN(CREATE) critical path; mdtest-style create bursts in a
+  4-stripe HPC-Shared directory ran at ~28% of the non-HPC create
+  rate.  A new `mds_proxy_ensure_ds_file_fh_batch` helper captures
+  the slots with a bounded fork-join (up to 8 workers including the
+  calling thread, slot indices from an atomic cursor, each worker
+  writing only its own disjoint entry, all joined before return).
+  Per-slot semantics are unchanged: failed slots keep an empty FH,
+  the enterprise synthetic-FH fallback still applies per slot, and
+  the all-or-nothing rollback (GC-enqueue of captured slots with the
+  geometry sweep hint) is preserved.  Thread spawn failure degrades
+  to capturing the remaining slots on the calling thread.
+
 ### Fixed
 - **REMOVE of a wide (multi-stripe) file leaked every DS backing
   file** — the ds_gc drainer's slot probe assumed a file's stripes
