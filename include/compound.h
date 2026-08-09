@@ -501,11 +501,25 @@ struct nfs4_arg_close {
 	struct nfs4_stateid stateid;
 };
 
+/*
+ * RFC 8881 §18.35.1 state_protect_how4 discriminants.  The decoder
+ * stores the wire value in nfs4_arg_exchange_id.spa_how; the handler
+ * rejects SP4_SSV (unimplemented SSV GSS mechanism) with
+ * NFS4ERR_ENCR_ALG_UNSUPP and treats SP4_MACH_CRED as SP4_NONE
+ * (AUTH_SYS-only transport — no machine credential to verify).
+ */
+#define SP4_NONE      0U
+#define SP4_MACH_CRED 1U
+#define SP4_SSV       2U
+
 struct nfs4_arg_exchange_id {
 	uint8_t  co_ownerid[CO_OWNERID_MAX];
 	uint32_t co_ownerid_len;
 	uint8_t  verifier[NFS4_VERIFIER_SIZE];
 	uint32_t eia_flags;
+	/** state_protect4_a discriminant (SP4_*); arm bytes are consumed
+	 *  by the decoder but not retained. */
+	uint32_t spa_how;
 };
 
 struct nfs4_arg_create_session {

@@ -24,6 +24,67 @@ extern uint32_t mds_type_to_nfs4(enum mds_file_type t);
  * The opnum has already been consumed by the compound decoder.
  * ----------------------------------------------------------------------- */
 
+/* Defined further down (oversized-component skip helper); forward
+ * declared for the EXCHANGE_ID state_protect decoder above it. */
+static bool xdr_skip_opaque_bytes(XDR *xdrs, uint32_t len);
+
+/**
+ * Consume a bitmap4 (counted uint32 array) without storing it.
+ * Bounded at 64 words — far above any legal NFSv4.2 attribute or
+ * operation bitmap — so a hostile length cannot spin the decoder.
+ */
+static bool xdr_skip_bitmap4(XDR *xdrs)
+{
+    uint32_t words;
+
+    if (!xdr_uint32_t(xdrs, &words)) {
+        return false;
+    }
+    if (words > 64U) {
+        return false;
+    }
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t w;
+
+        if (!xdr_uint32_t(xdrs, &w)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Consume a counted array of opaques (e.g. the sec_oid4 lists inside
+ * ssv_sp_parms4) without storing it.  @max_items / @max_item_len
+ * bound the walk so a hostile count cannot spin the decoder.
+ */
+static bool xdr_skip_opaque_array(XDR *xdrs, uint32_t max_items,
+                                  uint32_t max_item_len)
+{
+    uint32_t count;
+
+    if (!xdr_uint32_t(xdrs, &count)) {
+        return false;
+    }
+    if (count > max_items) {
+        return false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t len;
+
+        if (!xdr_uint32_t(xdrs, &len)) {
+            return false;
+        }
+        if (len > max_item_len) {
+            return false;
+        }
+        if (!xdr_skip_opaque_bytes(xdrs, len)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool decode_op_sequence(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_sequence *a = &op->arg.sequence;
@@ -76,14 +137,51 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
         return false;
 }
 
-    /* state_protect4_a: sp_how (we expect SP4_NONE = 0). */
+    /*
+     * state_protect4_a (RFC 8881 §18.35.1).  The union arm MUST be
+     * consumed even for protection modes this server does not
+     * implement: leaving the arm bytes on the wire desyncs the XDR
+     * stream and every LATER field/op decodes as garbage — pynfs
+     * EID50 surfaced this as NFS4ERR_BADXDR on the ops following an
+     * SP4_SSV EXCHANGE_ID.  The discriminant is stored in a->spa_how
+     * so op_exchange_id can reject SP4_SSV with the spec-mandated
+     * NFS4ERR_ENCR_ALG_UNSUPP instead of a wire error.
+     */
     {
         uint32_t sp_how;
 
         if (!xdr_uint32_t(xdrs, &sp_how)) {
             return false;
-}
-        /* We accept SP4_NONE only; other values we'd skip. */
+        }
+        a->spa_how = sp_how;
+        if (sp_how == SP4_MACH_CRED) {
+            /* state_protect_ops4: spo_must_enforce + spo_must_allow. */
+            if (!xdr_skip_bitmap4(xdrs) || !xdr_skip_bitmap4(xdrs)) {
+                return false;
+            }
+        } else if (sp_how == SP4_SSV) {
+            /* ssv_sp_parms4 (§2.10.8.3): ssp_ops (two bitmaps) +
+             * ssp_hash_algs<> + ssp_encr_algs<> (sec_oid4 opaques) +
+             * ssp_window + ssp_num_gss_handles.  Bounds: 16 OIDs of
+             * up to 128 bytes each is far above any real GSS OID. */
+            uint32_t win, ngss;
+
+            if (!xdr_skip_bitmap4(xdrs) || !xdr_skip_bitmap4(xdrs)) {
+                return false;
+            }
+            if (!xdr_skip_opaque_array(xdrs, 16U, 128U) ||
+                !xdr_skip_opaque_array(xdrs, 16U, 128U)) {
+                return false;
+            }
+            if (!xdr_uint32_t(xdrs, &win) ||
+                !xdr_uint32_t(xdrs, &ngss)) {
+                return false;
+            }
+        } else if (sp_how != SP4_NONE) {
+            /* Unknown discriminant: the arm size is unknowable, so
+             * the stream cannot be re-synchronised — wire error. */
+            return false;
+        }
     }
 
     /* nfs_impl_id4<1> array (optional, max 1 per RFC 8881 §18.35.1).

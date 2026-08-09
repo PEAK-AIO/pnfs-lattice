@@ -191,6 +191,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   transaction is in flight.
 
 ### Fixed
+- **EXCHANGE_ID state-protection decode desync (pynfs EID50)** — the
+  argument decoder read the `state_protect4_a` discriminant but never
+  consumed the SP4_MACH_CRED / SP4_SSV union arms, so an SSV
+  EXCHANGE_ID left the arm bytes in the XDR stream and every
+  subsequent field/op decoded as garbage (surfacing as
+  NFS4ERR_BADXDR on whatever the client sent next).  The decoder now
+  consumes both arms with bounded skips and records the discriminant;
+  `op_exchange_id` rejects SP4_SSV up front with the SSV-specific
+  NFS4ERR_ENCR_ALG_UNSUPP (matching Linux knfsd — the SSV GSS
+  mechanism remains unimplemented), and SP4_MACH_CRED degrades to
+  SP4_NONE semantics on this AUTH_SYS-only server (the reply always
+  advertises SP4_NONE).  New decode regression tests cover both arms
+  with a trailing sentinel op that only parses when the stream stays
+  in sync.
 - **Test-suite debt retired: zero known failures** — every
   long-carried known test failure was test-side; `ctest` now passes
   60/60 with no exceptions and no product code changed.  Twenty

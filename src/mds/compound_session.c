@@ -168,6 +168,21 @@ enum nfs4_status op_exchange_id(struct compound_data *cd,
 		}
 	}
 
+	/*
+	 * RFC 8881 §18.35.4 state protection.  SP4_SSV requires the SSV
+	 * GSS mechanism (SET_SSV, SSV-protected ops), which this server
+	 * does not implement — fail the negotiation up front with the
+	 * SSV-specific algorithm error instead of accepting the client
+	 * and failing whatever op it sends next (pynfs EID50; Linux
+	 * knfsd rejects SP4_SSV the same way).  SP4_MACH_CRED is decoded
+	 * but deliberately not enforced: on an AUTH_SYS-only transport
+	 * there is no machine credential to verify, so it degrades to
+	 * SP4_NONE semantics (the reply encoder always emits SP4_NONE).
+	 */
+	if (a->spa_how == SP4_SSV) {
+		return NFS4ERR_ENCR_ALG_UNSUPP;
+	}
+
 	rc = session_exchange_id(cd->st,
 				 a->co_ownerid,
 				 a->co_ownerid_len,
