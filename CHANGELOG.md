@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **HPC-Shared CREATE failed with `NFS4ERR_INVAL` in the community
+  build** — the default build (`ENABLE_DS_PREALLOC=OFF`) linked a
+  `ds_prealloc_batch` stub that returned a permanent `MDS_ERR_INVAL`
+  on the assumption that community deployments could never mark an
+  inode HPC-Shared.  The `user.pnfs.hpc_shared` control xattr has no
+  build gate, so flagging a directory made every file create inside
+  it fail with `EINVAL` on all clients.  The stub now implements the
+  wide pre-warm batch synchronously (fileid-rotated round-robin
+  placement plus per-stripe DS file creation and FH capture, same
+  all-or-nothing rollback contract as the enterprise ring pipeline),
+  so HPC-Shared N-to-1 directories work in the community build.  The
+  wide-create path additionally logs a WARN with the failing step and
+  geometry when a pre-warm or catalogue commit fails — previously the
+  OPEN surfaced a bare error with nothing in the daemon log.
+
 ### Added
 - **NFSv4.1 conformance findings document** —
   `docs/conformance-nfs41-findings.md` records the pynfs + NFStest

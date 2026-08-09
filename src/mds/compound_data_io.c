@@ -156,6 +156,11 @@ static enum mds_status op_open_hpc_wide_create(
 	uint32_t stripe_count = op_open_hpc_clamp_stripes(cd, &online_ds_count);
 
 	if (stripe_count == 0) {
+		MDS_LOG_WARN(LOG_COMP_MDS,
+			"hpc wide-create '%s' parent=%llu: no eligible ONLINE "
+			"generic DS (online=%u) -> NOSPC",
+			a->name, (unsigned long long)cd->current_fh.fileid,
+			(unsigned)online_ds_count);
 		return MDS_ERR_NOSPC;
 	}
 
