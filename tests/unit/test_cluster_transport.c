@@ -33,6 +33,8 @@
 #include "proxy_io.h"
 #include "commit_queue.h"
 #include "ds_cache.h"
+#include "inode_cache.h"
+#include "layout_cache.h"
 
 /* -------------------------------------------------------------------
  * Helpers
@@ -1836,6 +1838,115 @@ static void test_admin_allowed_hosts_acl(void)
     cleanup_db();
     PASS();
 }
+/* ------------------------------------------------------------------- */
+/* test_hpc_mode_admin
+ *
+ * Drive the independent HPC admin transport against the memdb
+ * catalogue.  The cache checks ensure an out-of-band mode update
+ * cannot leave this daemon serving stale inode or layout-cache data.
+ * ------------------------------------------------------------------- */
+
+static void test_hpc_mode_admin(void)
+{
+    fprintf(stdout, "  test_hpc_mode_admin:              ");
+    fflush(stdout);
+
+    struct mds_catalogue *db = open_test_db();
+    struct mds_inode hpc_dir;
+    struct cluster_server *srv = NULL;
+    struct inode_cache *inode_cache = NULL;
+    struct layout_cache *layout_cache = NULL;
+    enum mds_status st;
+
+    ASSERT_TRUE(db != NULL);
+    st = mds_cat_ns_create(db, NULL, MDS_FILEID_ROOT, "hpc",
+                           MDS_FTYPE_DIR, 0755, 0, 0, NULL, &hpc_dir);
+    ASSERT_EQ(st, MDS_OK);
+
+    st = cluster_transport_server_start(0, "127.0.0.1", NULL, 0, 0,
+                                        wrap_db_as_cat(db), NULL, NULL, &srv);
+    ASSERT_EQ(st, MDS_OK);
+    ASSERT_TRUE(srv != NULL);
+
+    ASSERT_EQ(inode_cache_init(16, &inode_cache), 0);
+    ASSERT_EQ(layout_cache_init(16, &layout_cache), 0);
+    cluster_transport_server_set_inode_cache(srv, inode_cache);
+    cluster_transport_server_set_layout_cache(srv, layout_cache);
+
+    struct mds_inode cached_inode;
+    ASSERT_EQ(mds_cat_ns_getattr(db, hpc_dir.fileid, &cached_inode), MDS_OK);
+    ASSERT_EQ(inode_cache_put(inode_cache, &cached_inode), 0);
+
+    struct mds_ds_map_entry cache_entry;
+    memset(&cache_entry, 0, sizeof(cache_entry));
+    ASSERT_EQ(layout_cache_put(layout_cache, hpc_dir.fileid, 1, 65536, 1,
+                               &cache_entry), 0);
+
+    uint16_t port = cluster_transport_server_port(srv);
+    bool enabled = true;
+    ASSERT_TRUE(port > 0);
+
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "/hpc", &enabled),
+              MDS_OK);
+    ASSERT_TRUE(!enabled);
+
+    ASSERT_EQ(cluster_transport_request_hpc_mode_set(
+                  "127.0.0.1", port, "/hpc", true),
+              MDS_OK);
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "/hpc", &enabled),
+              MDS_OK);
+    ASSERT_TRUE(enabled);
+    ASSERT_EQ(mds_cat_ns_getattr(db, hpc_dir.fileid, &cached_inode), MDS_OK);
+    ASSERT_TRUE((cached_inode.flags & MDS_IFLAG_HPC_SHARED) != 0U);
+
+    ASSERT_EQ(inode_cache_get(inode_cache, hpc_dir.fileid, &cached_inode), -1);
+    {
+        struct mds_ds_map_entry *entries = NULL;
+        int rc = layout_cache_get(layout_cache, hpc_dir.fileid, NULL, NULL,
+                                  NULL, &entries);
+        free(entries);
+        ASSERT_EQ(rc, -1);
+    }
+
+    /* Re-enabling an already-enabled path is an idempotent no-op. */
+    ASSERT_EQ(cluster_transport_request_hpc_mode_set(
+                  "127.0.0.1", port, "/hpc", true),
+              MDS_OK);
+
+    ASSERT_EQ(cluster_transport_request_hpc_mode_set(
+                  "127.0.0.1", port, "/hpc", false),
+              MDS_OK);
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "/hpc", &enabled),
+              MDS_OK);
+    ASSERT_TRUE(!enabled);
+    ASSERT_EQ(mds_cat_ns_getattr(db, hpc_dir.fileid, &cached_inode), MDS_OK);
+    ASSERT_TRUE((cached_inode.flags & MDS_IFLAG_HPC_SHARED) == 0U);
+
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "/missing", &enabled),
+              MDS_ERR_NOTFOUND);
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "relative", &enabled),
+              MDS_ERR_INVAL);
+
+    cached_inode.flags |= MDS_IFLAG_HPC_CREATE_PENDING;
+    ASSERT_EQ(mds_cat_ns_setattr(db, NULL, hpc_dir.fileid, &cached_inode,
+                                 MDS_ATTR_FLAGS),
+              MDS_OK);
+    ASSERT_EQ(cluster_transport_request_hpc_mode_status(
+                  "127.0.0.1", port, "/hpc", &enabled),
+              MDS_ERR_DELAY);
+
+    cluster_transport_server_stop(srv);
+    layout_cache_destroy(layout_cache);
+    inode_cache_destroy(inode_cache);
+    mds_catalogue_close(db);
+    cleanup_db();
+    PASS();
+}
 
 int main(void)
 {
@@ -1865,6 +1976,7 @@ int main(void)
     test_ds_admin_invalidates_cache();
     test_ds_add_v2_mode_transport();
     test_admin_allowed_hosts_acl();
+    test_hpc_mode_admin();
 
     fprintf(stdout, "\n  %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
