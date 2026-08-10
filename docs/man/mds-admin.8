@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026 PeakAIO
 .\" SPDX-License-Identifier: MIT
-.TH MDS-ADMIN 8 "2026-05-02" "pnfs-mds 0.1.1" "pnfs-mds Administrator Manual"
+.TH MDS-ADMIN 8 "2026-08-10" "pnfs-mds 0.1.1" "pnfs-mds Administrator Manual"
 .SH NAME
 mds-admin \- administer a running pnfs-mds daemon
 .SH SYNOPSIS
@@ -22,7 +22,8 @@ is the command-line interface for operating a live
 daemon.  It talks to the daemon over the cluster-transport admin socket
 and exposes commands for inspecting and mutating cluster membership,
 subtree ownership, data-server registration and weights, quotas,
-tiering, backup, online upgrade, and runtime configuration.
+tiering, backup, online upgrade, runtime configuration, and the existing
+HPC-Shared inode mode.
 .PP
 Every command operates on a single daemon endpoint selected by
 .B \-\-mds-host
@@ -79,7 +80,7 @@ produce listings (\fBsubtree list\fR, \fBds list\fR, \fBds capacity show\fR,
 \fBconfig show\fR, \fBstatus\fR, \fBmetrics\fR, \fBtier status\fR,
 \fBresilver status\fR, \fBrebalance status\fR, \fBquota report\fR,
 \fBcluster status\fR, \fBmigration progress\fR, \fBupgrade status\fR,
-\fBbackup info\fR).  Ignored by mutation commands.
+\fBhpc status\fR, \fBbackup info\fR).  Ignored by mutation commands.
 .SH COMMANDS
 Commands are grouped by subsystem.  Positional arguments are shown in
 angle brackets (\fI<id>\fR); bracketed \fB[\-\-flag]\fR tokens are
@@ -324,6 +325,27 @@ argument, restrict output to that key.  With
 .B \-\-json
 emit an object.  Requires
 .BI \-\-mds-port " 50051" .
+.SS "HPC-Shared mode"
+.TP
+.B hpc enable \fI<absolute-path>\fR
+Set HPC-Shared mode on the resolved inode.  When the target is a
+directory, objects created under it afterward inherit the mode.  Existing
+objects keep their current stripe maps; this command never re-stripes data.
+.TP
+.B hpc disable \fI<absolute-path>\fR
+Clear HPC-Shared mode on the resolved inode.  This does not change existing
+children or their stripe maps.
+.TP
+.B hpc status \fI<absolute-path>\fR \fR[\fB\-\-json\fR]
+Report whether the resolved inode currently has HPC-Shared mode enabled.
+The JSON form emits the path and an \fBhpc_shared\fR boolean.
+.PP
+These commands use the cluster-transport admin port and therefore normally
+require
+.BI \-\-mds-port " 50051" .
+They are subject to the same peer and admin allow-list checks as all other
+cluster-transport commands.  A pending wide create is not mutable through
+this interface and returns an error until its create transaction completes.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -368,6 +390,8 @@ mds-admin ds capacity show --mds-host 10.0.0.101 --mds-port 50051
 mds-admin ds set-weight 0 250 --mds-host 10.0.0.101 --mds-port 50051
 mds-admin ds capacity probe-now --mds-host 10.0.0.101 --mds-port 50051
 mds-admin config show metrics_http_port --mds-host 10.0.0.101 --mds-port 50051
+mds-admin hpc enable /scratch/checkpoints --mds-host 10.0.0.101 --mds-port 50051
+mds-admin hpc status /scratch/checkpoints --mds-host 10.0.0.101 --mds-port 50051 --json
 .fi
 .RE
 .PP

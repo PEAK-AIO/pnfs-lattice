@@ -441,3 +441,12 @@ Files without the bit set continue to use the legacy paths
 bit-for-bit unchanged.  Operator-facing surface — triggers, tunables,
 deferred phases, caveats — is in `hpc-shared-files.md`.  The full
 phase plan and design rationale is in `hpc-nto1-plan.md`.
+
+Authorized operators can inspect or change this existing bit without a
+client mount through `mds-admin hpc status|enable|disable <absolute-path>`
+on the cluster-transport port.  Enabling a directory affects only objects
+created afterward through the normal inheritance path; it never rewrites
+an existing child's stripe map.  The daemon invalidates its local inode and
+HPC layout-cache entries after a real transition.  Active-active peers
+observe the authoritative catalogue update on their configured cache-TTL
+boundary, matching other cross-MDS metadata mutations.

@@ -1630,6 +1630,9 @@ if (s_pt != NULL) {
 					"(inode_cache_size=0)");
 			}
 			rpc_cfg.icache = icache;
+			if (ct_srv != NULL) {
+				cluster_transport_server_set_inode_cache(ct_srv, icache);
+			}
 
 			/* parent_touch deferred parent-dir attr aggregator (ported).
 			 * Gated on the config key AND a backend capability probe; init /
@@ -1730,6 +1733,9 @@ if (s_pt != NULL) {
 				MDS_LOG_INFO(LOG_COMP_MDS, cfg.layout_cache_size ? "layout_cache_init failed; falling back to catalogue reads" : "HPC layout cache disabled (layout_cache_size=0)");
 			}
 			rpc_cfg.lcache = lcache;
+			if (ct_srv != NULL) {
+				cluster_transport_server_set_layout_cache(ct_srv, lcache);
+			}
 		}
 
 		/* HPC-Shared LAYOUTCOMMIT aggregator (Phase F of

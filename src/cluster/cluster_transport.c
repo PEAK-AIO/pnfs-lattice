@@ -44,6 +44,8 @@
 #include "proxy_io.h"
 #include "ds_cache.h"
 #include "ds_capacity.h"
+#include "inode_cache.h"
+#include "layout_cache.h"
 #include "resilver.h"
 #include "rebalance.h"
 #include "tiering.h"
@@ -214,6 +216,8 @@ struct cluster_server {
     /* Proxy I/O context + mount path format for DS lifecycle. */
     struct mds_proxy_ctx *proxy;
     struct ds_cache     *ds_cache;
+    struct inode_cache  *inode_cache;
+    struct layout_cache *layout_cache;
     char ds_mount_path_fmt[512];
 
     /* Split evaluator (Tier 3 Phase 1). */
@@ -1519,6 +1523,14 @@ static void handle_ds_capacity_probe_admin(
     const struct cluster_server *srv, int conn_fd,
     const uint8_t *payload, uint32_t plen);
 
+/* HPC mode handlers (implementation near other admin requests). */
+static void handle_hpc_mode_set_admin(
+    const struct cluster_server *srv, int conn_fd,
+    const uint8_t *payload, uint32_t plen);
+static void handle_hpc_mode_status_admin(
+    const struct cluster_server *srv, int conn_fd,
+    const uint8_t *payload, uint32_t plen);
+
 /* Cross-subtree nlink handlers (impl near the nlink client code). */
 static void handle_nlink_inc(const struct cluster_server *srv, int conn_fd,
                              const uint8_t *payload, uint32_t plen);
@@ -1736,6 +1748,13 @@ static void handle_connection(struct cluster_server *srv, int conn_fd)
 
         case CT_MSG_DS_CAPACITY_PROBE_REQ:
             handle_ds_capacity_probe_admin(srv, conn_fd, payload, payload_len);
+            break;
+        case CT_MSG_HPC_MODE_SET_REQ:
+            handle_hpc_mode_set_admin(srv, conn_fd, payload, payload_len);
+            break;
+
+        case CT_MSG_HPC_MODE_STATUS_REQ:
+            handle_hpc_mode_status_admin(srv, conn_fd, payload, payload_len);
             break;
 
         case CT_MSG_METRICS_REQ:
@@ -5291,6 +5310,22 @@ void cluster_transport_server_set_ds_cache(struct cluster_server *srv,
     }
 }
 
+void cluster_transport_server_set_inode_cache(struct cluster_server *srv,
+                                              struct inode_cache *cache)
+{
+    if (srv != NULL) {
+        srv->inode_cache = cache;
+    }
+}
+
+void cluster_transport_server_set_layout_cache(struct cluster_server *srv,
+                                               struct layout_cache *cache)
+{
+    if (srv != NULL) {
+        srv->layout_cache = cache;
+    }
+}
+
 /* -----------------------------------------------------------------------
  * Rolling upgrade client request functions (Item 46)
  * ----------------------------------------------------------------------- */
@@ -6927,6 +6962,198 @@ static void handle_ds_capacity_probe_admin(
     (void)send_header(conn_fd, CT_MSG_DS_CAPACITY_PROBE_RESP,
                       (uint32_t)sizeof(resp));
     (void)send_all(conn_fd, resp, sizeof(resp));
+}
+
+static bool hpc_admin_path_is_valid(const uint8_t *path, uint32_t path_len)
+{
+    return path != NULL && path_len > 0 && path_len < MDS_MAX_PATH &&
+           path[0] == '/' && memchr(path, '\0', path_len) == NULL;
+}
+
+static void send_hpc_mode_status_resp(int conn_fd, enum mds_status st,
+                                      bool enabled)
+{
+    uint8_t resp[2];
+
+    resp[0] = (st == MDS_OK) ? 0 : (uint8_t)(-(int)st);
+    resp[1] = enabled ? 1U : 0U;
+    (void)send_header(conn_fd, CT_MSG_HPC_MODE_STATUS_RESP,
+                      (uint32_t)sizeof(resp));
+    (void)send_all(conn_fd, resp, sizeof(resp));
+}
+
+static enum mds_status hpc_admin_resolve_inode(
+    const struct cluster_server *srv, const uint8_t *path,
+    uint32_t path_len, struct mds_inode *inode)
+{
+    char path_buf[MDS_MAX_PATH];
+    uint64_t fileid;
+    enum mds_status st;
+
+    if (srv == NULL || srv->cat == NULL || inode == NULL ||
+        !hpc_admin_path_is_valid(path, path_len)) {
+        return MDS_ERR_INVAL;
+    }
+
+    memcpy(path_buf, path, path_len);
+    path_buf[path_len] = '\0';
+
+    st = mds_cat_resolve_path(srv->cat, path_buf, &fileid);
+    if (st != MDS_OK) {
+        return st;
+    }
+    st = mds_cat_ns_getattr(srv->cat, fileid, inode);
+    if (st != MDS_OK) {
+        return st;
+    }
+    if ((inode->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0U) {
+        return MDS_ERR_DELAY;
+    }
+    return MDS_OK;
+}
+
+static void handle_hpc_mode_set_admin(
+    const struct cluster_server *srv, int conn_fd,
+    const uint8_t *payload, uint32_t plen)
+{
+    struct mds_inode inode;
+    bool enabled;
+    bool changed;
+    enum mds_status st;
+
+    if (payload == NULL || plen < 2 || payload[0] > 1U) {
+        send_status_resp(conn_fd, CT_MSG_HPC_MODE_SET_RESP, MDS_ERR_INVAL);
+        return;
+    }
+
+    enabled = payload[0] != 0U;
+    st = hpc_admin_resolve_inode(srv, payload + 1, plen - 1, &inode);
+    if (st != MDS_OK) {
+        send_status_resp(conn_fd, CT_MSG_HPC_MODE_SET_RESP, st);
+        return;
+    }
+
+    changed = enabled
+        ? (inode.flags & MDS_IFLAG_HPC_SHARED) == 0U
+        : (inode.flags & MDS_IFLAG_HPC_SHARED) != 0U;
+    if (!changed) {
+        send_status_resp(conn_fd, CT_MSG_HPC_MODE_SET_RESP, MDS_OK);
+        return;
+    }
+
+    if (enabled) {
+        inode.flags |= MDS_IFLAG_HPC_SHARED;
+    } else {
+        inode.flags &= ~MDS_IFLAG_HPC_SHARED;
+    }
+    st = mds_cat_ns_setattr(srv->cat, NULL, inode.fileid, &inode,
+                            MDS_ATTR_FLAGS);
+    if (st == MDS_OK) {
+        inode_cache_invalidate(srv->inode_cache, inode.fileid);
+        layout_cache_invalidate(srv->layout_cache, inode.fileid);
+    }
+    send_status_resp(conn_fd, CT_MSG_HPC_MODE_SET_RESP, st);
+}
+
+static void handle_hpc_mode_status_admin(
+    const struct cluster_server *srv, int conn_fd,
+    const uint8_t *payload, uint32_t plen)
+{
+    struct mds_inode inode;
+    enum mds_status st;
+
+    st = hpc_admin_resolve_inode(srv, payload, plen, &inode);
+    send_hpc_mode_status_resp(conn_fd, st,
+                              st == MDS_OK &&
+                              (inode.flags & MDS_IFLAG_HPC_SHARED) != 0U);
+}
+
+static bool hpc_admin_client_path_is_valid(const char *path)
+{
+    size_t path_len;
+
+    if (path == NULL || path[0] != '/') {
+        return false;
+    }
+    path_len = strlen(path);
+    return path_len > 0 && path_len < MDS_MAX_PATH;
+}
+
+enum mds_status cluster_transport_request_hpc_mode_set(
+    const char *mds_host, uint16_t mds_port,
+    const char *path, bool enabled)
+{
+    uint8_t payload[MDS_MAX_PATH];
+    uint8_t resp_type;
+    uint32_t resp_len;
+    uint8_t status;
+    size_t path_len;
+    int fd;
+
+    if (mds_host == NULL || !hpc_admin_client_path_is_valid(path)) {
+        return MDS_ERR_INVAL;
+    }
+    path_len = strlen(path);
+    payload[0] = enabled ? 1U : 0U;
+    memcpy(payload + 1, path, path_len);
+
+    fd = ct_client_connect(mds_host, mds_port);
+    if (fd < 0) {
+        return MDS_ERR_IO;
+    }
+    if (send_header(fd, CT_MSG_HPC_MODE_SET_REQ,
+                    (uint32_t)(path_len + 1)) != 0 ||
+        send_all(fd, payload, path_len + 1) != 0 ||
+        recv_header(fd, &resp_type, &resp_len) != 0 ||
+        resp_type != CT_MSG_HPC_MODE_SET_RESP || resp_len != 1 ||
+        recv_all(fd, &status, 1) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    close(fd);
+    return decode_wire_status(status);
+}
+
+enum mds_status cluster_transport_request_hpc_mode_status(
+    const char *mds_host, uint16_t mds_port,
+    const char *path, bool *enabled)
+{
+    uint8_t resp_type;
+    uint32_t resp_len;
+    uint8_t resp[2];
+    size_t path_len;
+    int fd;
+
+    if (mds_host == NULL || enabled == NULL ||
+        !hpc_admin_client_path_is_valid(path)) {
+        return MDS_ERR_INVAL;
+    }
+    *enabled = false;
+    path_len = strlen(path);
+
+    fd = ct_client_connect(mds_host, mds_port);
+    if (fd < 0) {
+        return MDS_ERR_IO;
+    }
+    if (send_header(fd, CT_MSG_HPC_MODE_STATUS_REQ, (uint32_t)path_len) != 0 ||
+        send_all(fd, path, path_len) != 0 ||
+        recv_header(fd, &resp_type, &resp_len) != 0 ||
+        resp_type != CT_MSG_HPC_MODE_STATUS_RESP || resp_len != sizeof(resp) ||
+        recv_all(fd, resp, sizeof(resp)) != 0) {
+        close(fd);
+        return MDS_ERR_IO;
+    }
+    close(fd);
+    if (resp[1] > 1U) {
+        return MDS_ERR_IO;
+    }
+    {
+        enum mds_status st = decode_wire_status(resp[0]);
+        if (st == MDS_OK) {
+            *enabled = resp[1] != 0U;
+        }
+        return st;
+    }
 }
 
 enum mds_status cluster_transport_request_ds_set_weight(

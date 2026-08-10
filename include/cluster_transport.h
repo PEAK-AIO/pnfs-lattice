@@ -196,6 +196,14 @@ struct rename_2pc_transport {
 #define CT_MSG_DS_CAPACITY_PROBE_REQ  87
 #define CT_MSG_DS_CAPACITY_PROBE_RESP 88
 
+/* HPC-Shared inode-mode administration.  The set payload is
+ * enabled(u8) + absolute path bytes; the status payload is an
+ * absolute path. */
+#define CT_MSG_HPC_MODE_SET_REQ       89
+#define CT_MSG_HPC_MODE_SET_RESP      90
+#define CT_MSG_HPC_MODE_STATUS_REQ    91
+#define CT_MSG_HPC_MODE_STATUS_RESP   92
+
 /** Wire header: [msg_type u8][payload_len u32 BE] = 5 bytes. */
 #define CT_HEADER_SIZE  5
 
@@ -877,6 +885,8 @@ enum mds_status cluster_transport_request_upgrade_status(
 struct commit_queue;
 struct mds_proxy_ctx;
 struct ds_cache;
+struct inode_cache;
+struct layout_cache;
 
 /**
  * @brief Attach a commit queue for DS admin write operations.
@@ -902,6 +912,47 @@ void cluster_transport_server_set_proxy(struct cluster_server *srv,
  */
 void cluster_transport_server_set_ds_cache(struct cluster_server *srv,
                                            struct ds_cache *cache);
+
+/**
+ * @brief Attach the local inode cache for invalidation after an
+ *        out-of-band HPC mode transition.
+ */
+void cluster_transport_server_set_inode_cache(struct cluster_server *srv,
+                                              struct inode_cache *cache);
+
+/**
+ * @brief Attach the local HPC layout cache for invalidation after an
+ *        out-of-band HPC mode transition.
+ */
+void cluster_transport_server_set_layout_cache(struct cluster_server *srv,
+                                               struct layout_cache *cache);
+
+/**
+ * @brief Enable or disable HPC-Shared mode on an existing inode.
+ *
+ * The path must be an absolute, non-empty namespace path.  Updating
+ * a directory controls inheritance for objects created afterward; it
+ * never retrofits the stripe maps of existing children.
+ *
+ * @return MDS_OK on success; MDS_ERR_NOTFOUND for a missing path;
+ *         MDS_ERR_DELAY if the resolved inode is a pending wide
+ *         create; MDS_ERR_INVAL for invalid arguments.
+ */
+enum mds_status cluster_transport_request_hpc_mode_set(
+    const char *mds_host, uint16_t mds_port,
+    const char *path, bool enabled);
+
+/**
+ * @brief Read the HPC-Shared mode of an existing inode.
+ *
+ * @param[out] enabled Receives the current mode.
+ * @return MDS_OK on success; MDS_ERR_NOTFOUND for a missing path;
+ *         MDS_ERR_DELAY if the resolved inode is a pending wide
+ *         create; MDS_ERR_INVAL for invalid arguments.
+ */
+enum mds_status cluster_transport_request_hpc_mode_status(
+    const char *mds_host, uint16_t mds_port,
+    const char *path, bool *enabled);
 
 /* -----------------------------------------------------------------------
  * DS registry admin (read-only)

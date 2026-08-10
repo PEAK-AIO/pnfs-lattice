@@ -79,6 +79,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   OPEN surfaced a bare error with nothing in the daemon log.
 
 ### Added
+- **Native `mds-admin` controls for HPC-Shared mode** — authorized
+  operators can now run `hpc enable <path>`, `hpc disable <path>`, and
+  `hpc status <path> [--json]` against the daemon's cluster-transport
+  port.  The commands update or report only the existing
+  `MDS_IFLAG_HPC_SHARED` inode bit through the catalogue; they do not
+  introduce a new placement policy or re-stripe existing files.  A
+  directory transition affects the established inheritance path for
+  future children only.  Successful transitions invalidate the local
+  inode and HPC layout-cache entries, and malformed paths or pending
+  wide creates are rejected before mutation.
 - **NFSv4.1 conformance findings document** —
   `docs/conformance-nfs41-findings.md` records the pynfs + NFStest
   campaign results after the first fix round: 198/198 on the pynfs

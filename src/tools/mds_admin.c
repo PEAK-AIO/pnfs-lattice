@@ -116,7 +116,10 @@ static void usage(const char *prog)
         "  config show [<key>]       Live INI key=value dump\n"
         "  ds capacity show          Live DS total/used/weight\n"
         "  ds capacity probe-now     Force statvfs sweep now\n"
-        "  ds set-weight <id> <w>    Set runtime WRR weight\n",
+        "  ds set-weight <id> <w>    Set runtime WRR weight\n\n"
+        "  hpc enable <path>         Enable HPC-Shared mode\n"
+        "  hpc disable <path>        Disable HPC-Shared mode\n"
+        "  hpc status <path>         Show HPC-Shared mode\n",
         prog);
 }
 
@@ -2935,6 +2938,126 @@ static int dispatch_config(int argc, const char *const argv[])
     }
     return -1;
 }
+static int hpc_parse_path(int argc, const char *const argv[],
+                          bool allow_json, const char **out_path)
+{
+    const char *path = NULL;
+
+    if (out_path == NULL) {
+        return -1;
+    }
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--mds-host") == 0 ||
+            strcmp(argv[i], "--mds-port") == 0) {
+            if (++i >= argc) {
+                return -1;
+            }
+            continue;
+        }
+        if (allow_json && strcmp(argv[i], "--json") == 0) {
+            continue;
+        }
+        if (argv[i][0] == '-' || path != NULL) {
+            return -1;
+        }
+        path = argv[i];
+    }
+    if (path == NULL || path[0] != '/') {
+        return -1;
+    }
+    *out_path = path;
+    return 0;
+}
+
+static int cmd_hpc_mode_set(int argc, const char *const argv[],
+                            bool enabled)
+{
+    const char *mds_host = NULL;
+    const char *path = NULL;
+    uint16_t mds_port = 0;
+    enum mds_status st;
+
+    if (parse_admin_endpoint(argc, argv, &mds_host, &mds_port, NULL) != 0 ||
+        hpc_parse_path(argc, argv, false, &path) != 0) {
+        (void)fprintf(stderr,
+            "Usage: mds-admin hpc %s <absolute-path> "
+            "[--mds-host H] [--mds-port P]\n",
+            enabled ? "enable" : "disable");
+        return 1;
+    }
+
+    st = cluster_transport_request_hpc_mode_set(mds_host, mds_port,
+                                                path, enabled);
+    if (st != MDS_OK) {
+        (void)fprintf(stderr, "Error: hpc %s failed (%d)%s\n",
+            enabled ? "enable" : "disable", (int)st,
+            st == MDS_ERR_NOTFOUND ? " -- path not found" :
+            st == MDS_ERR_DELAY ? " -- wide create is still pending" : "");
+        return 1;
+    }
+    (void)printf("HPC-Shared mode %s for %s\n",
+                 enabled ? "enabled" : "disabled", path);
+    return 0;
+}
+
+static int cmd_hpc_mode_status(int argc, const char *const argv[])
+{
+    const char *mds_host = NULL;
+    const char *path = NULL;
+    uint16_t mds_port = 0;
+    bool json = false;
+    bool enabled = false;
+    enum mds_status st;
+
+    if (parse_admin_endpoint(argc, argv, &mds_host, &mds_port, &json) != 0 ||
+        hpc_parse_path(argc, argv, true, &path) != 0) {
+        (void)fprintf(stderr,
+            "Usage: mds-admin hpc status <absolute-path> "
+            "[--mds-host H] [--mds-port P] [--json]\n");
+        return 1;
+    }
+
+    st = cluster_transport_request_hpc_mode_status(mds_host, mds_port,
+                                                   path, &enabled);
+    if (st != MDS_OK) {
+        (void)fprintf(stderr, "Error: hpc status failed (%d)%s\n",
+            (int)st,
+            st == MDS_ERR_NOTFOUND ? " -- path not found" :
+            st == MDS_ERR_DELAY ? " -- wide create is still pending" : "");
+        return 1;
+    }
+    if (json) {
+        char escaped_path[MDS_MAX_PATH * 6];
+
+        if (json_escape_string(path, escaped_path, sizeof(escaped_path)) < 0) {
+            (void)fprintf(stderr, "Error: path too long for JSON\n");
+            return 1;
+        }
+        (void)printf("{ \"path\": \"%s\", \"hpc_shared\": %s }\n",
+                     escaped_path, enabled ? "true" : "false");
+    } else {
+        (void)printf("%s: HPC-Shared mode is %s\n", path,
+                     enabled ? "enabled" : "disabled");
+    }
+    return 0;
+}
+
+static int dispatch_hpc(int argc, const char *const argv[])
+{
+    if (argc < 3) {
+        return -1;
+    }
+    if (strcmp(argv[2], "enable") == 0) {
+        return cmd_hpc_mode_set(argc - 3, argv + 3, true);
+    }
+    if (strcmp(argv[2], "disable") == 0) {
+        return cmd_hpc_mode_set(argc - 3, argv + 3, false);
+    }
+    if (strcmp(argv[2], "status") == 0) {
+        return cmd_hpc_mode_status(argc - 3, argv + 3);
+    }
+    return -1;
+}
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 static int dispatch_ds(int argc, const char *const argv[])
@@ -3058,6 +3181,8 @@ int main(int argc, char *argv[])
         rc = dispatch_upgrade(argc, argv);
     } else if (strcmp(group, "config") == 0) {
         rc = dispatch_config(argc, (const char *const *)argv);
+    } else if (strcmp(group, "hpc") == 0) {
+        rc = dispatch_hpc(argc, (const char *const *)argv);
     }
 
     if (rc < 0) {
