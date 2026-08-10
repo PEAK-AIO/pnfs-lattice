@@ -322,6 +322,11 @@ assume a given file's requests reach only its "owning" MDS.
   read-modify-write paths that must serialise with concurrent MDSes.
 - **Read-mostly hot configs** — `_Atomic` pointers + RCU-style swap on
   reload for the shard map and DS table.  No explicit reader lock.
+- **Layout cache** — an optional per-inode stripe-map cache is sharded
+  by fileid.  Inserts accept only geometries within the compile-time
+  `MDS_MAX_STRIPES` and `MDS_MAX_MIRRORS` bounds before copying the
+  caller-owned map.  Capacity-driven LRU removals count as evictions;
+  explicit per-file or full-cache removals count as invalidations.
 ### Compound-internal snapshot caching
 Within a single COMPOUND, an inode is read at most once per fileid.
 `compound_inode_get` first checks `cd->current_inode` / `cd->saved_inode`,

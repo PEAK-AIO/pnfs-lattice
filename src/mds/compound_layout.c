@@ -2308,6 +2308,11 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	}
 
 fill_layoutget_result:
+	/* Null statement: C11 requires a label to be part of a
+	 * statement, and the first thing below is a declaration
+	 * (comments are not statements).  GCC 15 rejects the bare
+	 * label with -Werror=free-labels. */
+	;
 	/* Phase D of docs/hpc-nto1-plan.md -- populate the HPC layout
 	 * cache once per LAYOUTGET that produced a fresh stripe map.
 	 * Skipped when the path was a cache hit (the entry is already

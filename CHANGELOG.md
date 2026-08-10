@@ -41,6 +41,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to capturing the remaining slots on the calling thread.
 
 ### Fixed
+- **GCC 15 rejected `compound_layout.c` under the project's C11
+  `-Werror` build** — `fill_layoutget_result` was a label immediately
+  followed by a declaration; comments do not make that valid C11, and
+  GCC 15 diagnoses it as `-Wfree-labels`.  The label now has an
+  explicit null statement, with no control-flow or layout behavior
+  change.
+- **Layout-cache insertion could read beyond the caller's entries
+  array for an invalid geometry** — `layout_cache_put` previously
+  checked only that stripe and mirror counts were nonzero before
+  copying `stripe_count * mirror_count` entries.  It now rejects
+  dimensions above `MDS_MAX_STRIPES` or `MDS_MAX_MIRRORS`, the same
+  compile-time limits used throughout the MDS, before allocating or
+  reading the caller buffer.
+- **Explicit layout-cache clears were reported as capacity
+  evictions** — `layout_cache_clear` used the LRU capacity-eviction
+  helper, inflating `evictions` and leaving `invalidations` unchanged.
+  It now frees each cache entry through the ordinary removal path and
+  increments `invalidations`, so the counters distinguish operator or
+  test clears from cache pressure.
 - **REMOVE of a wide (multi-stripe) file leaked every DS backing
   file** — the ds_gc drainer's slot probe assumed a file's stripes
   are dense from 0 on each DS and stopped at the first absent one.

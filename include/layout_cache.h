@@ -139,14 +139,18 @@ int layout_cache_get(struct layout_cache *lc, uint64_t fileid,
  *
  * @param lc            Cache handle.
  * @param fileid        File identifier.
- * @param stripe_count  Number of stripes (must be > 0).
+ * @param stripe_count  Number of stripes; must be > 0 and
+ *                      <= MDS_MAX_STRIPES.
  * @param stripe_unit   Stripe unit in bytes.
- * @param mirror_count  Mirrors per stripe (must be > 0).
+ * @param mirror_count  Mirrors per stripe; must be > 0 and
+ *                      <= MDS_MAX_MIRRORS.
  * @param entries       Caller's array; sized stripe_count * mirror_count.
  *                      Must not be NULL.
  * @return 0 on success, -1 on bad args or allocation failure.  On
  *         allocation failure the previous entry (if any) is
- *         preserved unchanged.
+ *         preserved unchanged.  A geometry outside the compile-time
+ *         caps is rejected before the caller's array is read, since
+ *         the array size is implied by the two dimensions.
  */
 int layout_cache_put(struct layout_cache *lc, uint64_t fileid,
                      uint32_t stripe_count, uint32_t stripe_unit,
@@ -163,7 +167,9 @@ void layout_cache_invalidate(struct layout_cache *lc, uint64_t fileid);
 
 /**
  * Drop ALL cached entries.  Used by tests; production callers should
- * prefer per-fileid invalidation.
+ * prefer per-fileid invalidation.  Every dropped entry counts as an
+ * invalidation (like layout_cache_invalidate), not as a capacity
+ * eviction, so @c evictions keeps reporting cache-pressure only.
  */
 void layout_cache_clear(struct layout_cache *lc);
 
