@@ -269,7 +269,13 @@ int layout_cache_put(struct layout_cache *lc, uint64_t fileid,
     size_t entry_bytes;
     struct mds_ds_map_entry *copy;
 
-    if (lc == NULL || entries == NULL || stripe_count == 0 || mirror_count == 0) {
+    /* Reject geometries the rest of the MDS can never produce: the
+     * caller's array is sized stripe_count * mirror_count, so an
+     * out-of-range dimension would make the memcpy below read past
+     * the end of that array. */
+    if (lc == NULL || entries == NULL ||
+        stripe_count == 0 || stripe_count > MDS_MAX_STRIPES ||
+        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS) {
         return -1;
     }
 
@@ -350,7 +356,17 @@ void layout_cache_clear(struct layout_cache *lc)
         shard_t *sh = &lc->shards[i];
         pthread_mutex_lock(&sh->mu);
         while (sh->count > 0) {
-            shard_evict_lru(sh);
+            /* An explicit clear is an invalidation, not a
+             * capacity eviction -- do not touch sh->evictions.
+             * The NULL guard keeps the loop bounded if count and
+             * the LRU list ever disagree. */
+            lce_t *e = lru_tail(sh);
+
+            if (e == NULL) {
+                break;
+            }
+            shard_free_entry(sh, e);
+            sh->invalidations++;
         }
         pthread_mutex_unlock(&sh->mu);
     }

@@ -145,6 +145,10 @@ static void test_invalid_args(void)
     ASSERT_EQ(layout_cache_put(lc, 1, MDS_MAX_STRIPES + 1, 65536,
                                1, &e),
               -1);
+    /* put: mirror count above MDS_MAX_MIRRORS */
+    ASSERT_EQ(layout_cache_put(lc, 1, 1, 65536,
+                               MDS_MAX_MIRRORS + 1, &e),
+              -1);
 
     /* invalidate(NULL) safe */
     layout_cache_invalidate(NULL, 1);
