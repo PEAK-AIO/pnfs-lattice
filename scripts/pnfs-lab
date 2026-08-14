@@ -1179,6 +1179,11 @@ EOC
 systemctl enable --now nfs-kernel-server
 exportfs -ra
 exportfs -v
+if [[ "${LAB_DS_TRANSPORT}" == "rdma" || "${LAB_DS_TRANSPORT}" == "both" ]]; then
+    if ! grep -qx "rdma ${LAB_DS_RDMA_PORT}" /proc/fs/nfsd/portlist; then
+        echo "rdma ${LAB_DS_RDMA_PORT}" > /proc/fs/nfsd/portlist
+    fi
+fi
 # Raise knfsd thread pool.  Default is 8 which serialises any
 # cluster of MDSes fanning out with nconnect > 1.  /proc write
 # reconfigures the running kernel threads; reboots revert, but
