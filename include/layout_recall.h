@@ -176,6 +176,22 @@ int layout_recall_byte_range_for_holders(struct layout_recall *lr,
 void layout_recall_set_default_layout_type(struct layout_recall *lr,
                                            uint32_t layout_type);
 
+/**
+ * Set this MDS's node id, used to build the CB_LAYOUTRECALL filehandle.
+ *
+ * RFC 8881 S20.3 requires the filehandle in a layout recall to be
+ * byte-identical to the one GETFH gave the client.  When the MDS runs
+ * with a non-zero id, GETFH emits the 17-byte cluster-global handle
+ * carrying that id plus the inode generation, so the coordinator needs
+ * the id to reproduce it; the generation is read from the catalogue at
+ * recall time.
+ *
+ * Leaving this unset (or passing 0) keeps the legacy 8-byte handle,
+ * which is the correct and unchanged behaviour for a single-MDS
+ * deployment.  NULL @lr is tolerated.
+ */
+void layout_recall_set_mds_id(struct layout_recall *lr, uint32_t mds_id);
+
 struct session_table;
 
 /**

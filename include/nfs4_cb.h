@@ -17,6 +17,25 @@
 #include "session.h"    /* struct nfs4_session, struct nfs4_cb_sec */
 #include "open_state.h" /* struct nfs4_stateid */
 
+/*
+ * Filehandle identity on the back channel (RFC 8881 S20.2 / S20.3).
+ *
+ * Every CB_* operation that names a file MUST send the filehandle the
+ * client was originally given, byte for byte.  Our handles come in a
+ * legacy 8-byte form and a 17-byte cluster-global form carrying
+ * owner_mds_id + generation, and GETFH picks between them based on
+ * owner_mds_id.  The callback argument structs below therefore carry
+ * the same owner/generation pair so the shared encoder
+ * (xdr_nfs4_fh_encode_desc) reproduces the GETFH bytes exactly.
+ *
+ * The owner_mds_id / generation pair on each struct below defaults to
+ * zero, which selects the legacy 8-byte form.  That is deliberate: a
+ * caller that has not been taught to populate them, or that failed to
+ * read the inode, emits exactly the wire format this server has always
+ * emitted rather than a plausible but wrong 17-byte handle.  Never set
+ * owner_mds_id without a generation read from the inode.
+ */
+
 /**
  * layoutrecall_type4 (RFC 8881 S20.3).
  */
@@ -38,6 +57,10 @@ struct nfs4_cb_layoutrecall_args {
     struct nfs4_stateid  stateid;       /**< Layout stateid to recall. */
     uint64_t             offset;
     uint64_t             length;
+    /* Filehandle identity (see the note at the top of this header).
+     * owner_mds_id == 0 selects the legacy 8-byte filehandle. */
+    uint32_t             owner_mds_id;
+    uint32_t             generation;   /**< Read only when owner != 0. */
 };
 
 /**
@@ -97,7 +120,11 @@ int nfs4_cb_layoutrecall_fd(int fd,
 struct nfs4_cb_recall_args {
 	struct nfs4_stateid stateid;   /**< Delegation stateid to recall. */
 	bool                truncate;  /**< Server will truncate the file. */
-	uint64_t            fileid;    /**< Encoded as 8-byte filehandle. */
+	uint64_t            fileid;    /**< File the delegation covers. */
+	/* Filehandle identity (see the note at the top of this header).
+	 * owner_mds_id == 0 selects the legacy 8-byte filehandle. */
+	uint32_t            owner_mds_id;
+	uint32_t            generation; /**< Read only when owner != 0. */
 };
 
 /**
@@ -169,6 +196,11 @@ struct nfs4_cb_notify_args {
 	uint32_t            old_name_len;
 	char                new_name[256];
 	uint32_t            new_name_len;
+	/* Filehandle identity of dir_fileid (see the note at the top of
+	 * this header).  owner_mds_id == 0 selects the legacy 8-byte
+	 * filehandle. */
+	uint32_t            owner_mds_id;
+	uint32_t            generation; /**< Read only when owner != 0. */
 };
 
 /**
@@ -242,6 +274,12 @@ struct nfs4_cb_getattr_result {
  * @param minorversion  Session minor version.
  * @param sec           Callback security parameters.
  * @param fileid        File whose attrs to query.
+ * @param mds_id        Owning MDS id for the filehandle; 0 selects the
+ *                      legacy 8-byte form.
+ * @param generation    Inode generation for the filehandle.  Must come
+ *                      from the inode whenever @mds_id is non-zero, so
+ *                      the emitted handle matches the client's
+ *                      (RFC 8881 S20.1).  Pass 0 with @mds_id 0.
  * @param deleg_stateid Delegation stateid for the file.
  * @param timeout_ms    Reply timeout (0 = default).
  * @param out           Receives the result.
@@ -256,6 +294,7 @@ int nfs4_cb_getattr_fd(int fd,
 		       const struct nfs4_cb_sec *sec,
 		       uint64_t fileid,
 		       uint32_t mds_id,
+		       uint32_t generation,
 		       const struct nfs4_stateid *deleg_stateid,
 		       uint32_t timeout_ms,
 		       struct nfs4_cb_getattr_result *out);

@@ -107,6 +107,168 @@ static void test_fh_zero(void)
     ASSERT_EQ(out_fid, (uint64_t)0);
 }
 
+/*
+ * encode_res_getfh lives in xdr_ops_core.c and is exported through the
+ * private xdr_internal.h header.  The test target deliberately excludes
+ * src/mds from its include path, so forward-declare it here (same
+ * pattern as decode_op_get_dir_delegation below).
+ */
+bool encode_res_getfh(XDR *xdrs, const struct nfs4_result *r);
+
+/* Encode one filehandle and return its length in @len_out. */
+static void encode_fh_desc(const struct nfs4_fh_desc *fh,
+                           char *buf, size_t buf_size, uint32_t *len_out)
+{
+    XDR enc;
+
+    xdrmem_ncreate(&enc, buf, buf_size, XDR_ENCODE);
+    *len_out = xdr_nfs4_fh_encode_desc(&enc, fh) ? xdr_getpos(&enc) : 0;
+}
+
+/*
+ * A zero owner_mds_id must reproduce the legacy v0 filehandle exactly.
+ *
+ * This is the regression guard for single-MDS deployments (mds_id = 0):
+ * routing the callbacks through the canonical encoder must not change
+ * one byte of what they emitted before.
+ */
+static void test_fh_canonical_v0_matches_legacy(void)
+{
+    char desc_buf[BUF_SIZE];
+    char legacy_buf[BUF_SIZE];
+    XDR legacy_enc;
+    struct nfs4_fh_desc fh;
+    uint32_t desc_len = 0;
+    uint32_t legacy_len;
+
+    memset(&fh, 0, sizeof(fh));
+    fh.fileid = 0xCAFEF00DDEADBEEFULL;
+    fh.owner_mds_id = 0;
+    /* A stale generation must be ignored entirely when owner is 0,
+     * otherwise the v0 form would silently depend on it. */
+    fh.generation = 0x11223344;
+
+    encode_fh_desc(&fh, desc_buf, sizeof(desc_buf), &desc_len);
+    ASSERT_TRUE(desc_len > 0);
+
+    xdrmem_ncreate(&legacy_enc, legacy_buf, sizeof(legacy_buf), XDR_ENCODE);
+    ASSERT_TRUE(xdr_nfs4_fh_encode(&legacy_enc, fh.fileid));
+    legacy_len = xdr_getpos(&legacy_enc);
+
+    ASSERT_EQ(desc_len, legacy_len);
+    ASSERT_MEM_EQ(desc_buf, legacy_buf, desc_len);
+
+    /* 4-byte length prefix must say 8, and nothing more may follow. */
+    ASSERT_EQ(desc_len, (uint32_t)(4 + NFS4_FH_V0_LEN));
+    {
+        uint32_t len_be;
+        memcpy(&len_be, desc_buf, sizeof(len_be));
+        ASSERT_EQ(be32toh(len_be), (uint32_t)NFS4_FH_V0_LEN);
+    }
+}
+
+/* A non-zero owner_mds_id must emit the 17-byte v1 wire layout. */
+static void test_fh_canonical_v1_wire_layout(void)
+{
+    char buf[BUF_SIZE];
+    struct nfs4_fh_desc fh;
+    uint32_t len = 0;
+    const uint8_t *payload;
+
+    memset(&fh, 0, sizeof(fh));
+    fh.owner_mds_id = 7;
+    fh.fileid = 0xCAFEF00DDEADBEEFULL;
+    fh.generation = 0x11223344;
+
+    encode_fh_desc(&fh, buf, sizeof(buf), &len);
+    ASSERT_TRUE(len > 0);
+
+    {
+        uint32_t len_be;
+        memcpy(&len_be, buf, sizeof(len_be));
+        ASSERT_EQ(be32toh(len_be), (uint32_t)NFS4_FH_V1_LEN);
+    }
+
+    payload = (const uint8_t *)buf + 4;
+    ASSERT_EQ(payload[0], (uint8_t)NFS4_FH_V1_TAG);
+    {
+        uint32_t owner_be, gen_be;
+        uint64_t fid_be;
+
+        memcpy(&owner_be, payload + 1, sizeof(owner_be));
+        memcpy(&fid_be, payload + 5, sizeof(fid_be));
+        memcpy(&gen_be, payload + 13, sizeof(gen_be));
+        ASSERT_EQ(be32toh(owner_be), fh.owner_mds_id);
+        ASSERT_EQ(be64toh(fid_be), fh.fileid);
+        ASSERT_EQ(be32toh(gen_be), fh.generation);
+    }
+
+    /* Round-trip through the full decoder. */
+    {
+        XDR dec;
+        struct nfs4_fh_desc out;
+
+        xdrmem_ncreate(&dec, buf, len, XDR_DECODE);
+        ASSERT_TRUE(xdr_nfs4_fh_decode_full(&dec, &out));
+        ASSERT_EQ(out.owner_mds_id, fh.owner_mds_id);
+        ASSERT_EQ(out.fileid, fh.fileid);
+        ASSERT_EQ(out.generation, fh.generation);
+    }
+}
+
+/*
+ * GETFH must delegate to the canonical encoder rather than deciding the
+ * format itself.
+ *
+ * This is the anti-drift guard behind the whole CB filehandle fix: the
+ * callbacks call xdr_nfs4_fh_encode_desc(), so as long as GETFH emits
+ * byte-identical output for the same triple, a callback filehandle
+ * matches the client's handle as RFC 8881 S20.2 / S20.3 require.  If
+ * anyone reintroduces a second format decision in encode_res_getfh,
+ * this test fails.
+ */
+static void test_getfh_uses_canonical_encoder(void)
+{
+    const uint32_t owners[] = { 0, 1, 42 };
+    size_t i;
+
+    for (i = 0; i < sizeof(owners) / sizeof(owners[0]); i++) {
+        struct nfs4_result r;
+        char getfh_buf[BUF_SIZE];
+        char desc_buf[BUF_SIZE];
+        XDR getfh_enc;
+        uint32_t getfh_len;
+        uint32_t desc_len = 0;
+
+        memset(&r, 0, sizeof(r));
+        r.opnum = OP_GETFH;
+        r.status = NFS4_OK;
+        r.res.getfh.fh.owner_mds_id = owners[i];
+        r.res.getfh.fh.fileid = 0xCAFEF00DDEADBEEFULL;
+        r.res.getfh.fh.generation = 0x11223344;
+
+        xdrmem_ncreate(&getfh_enc, getfh_buf, sizeof(getfh_buf),
+                       XDR_ENCODE);
+        ASSERT_TRUE(encode_res_getfh(&getfh_enc, &r));
+        getfh_len = xdr_getpos(&getfh_enc);
+
+        encode_fh_desc(&r.res.getfh.fh, desc_buf, sizeof(desc_buf),
+                       &desc_len);
+
+        ASSERT_EQ(getfh_len, desc_len);
+        ASSERT_MEM_EQ(getfh_buf, desc_buf, getfh_len);
+    }
+}
+
+static void test_fh_canonical_null_desc_rejected(void)
+{
+    char buf[BUF_SIZE];
+    XDR enc;
+
+    xdrmem_ncreate(&enc, buf, sizeof(buf), XDR_ENCODE);
+    ASSERT_TRUE(!xdr_nfs4_fh_encode_desc(&enc, NULL));
+}
+
 static void test_stateid_round_trip(void)
 {
     char buf[BUF_SIZE];
@@ -2481,6 +2643,10 @@ int main(void)
     /* Type codecs */
     RUN_TEST(test_fh_round_trip);
     RUN_TEST(test_fh_zero);
+    RUN_TEST(test_fh_canonical_v0_matches_legacy);
+    RUN_TEST(test_fh_canonical_v1_wire_layout);
+    RUN_TEST(test_getfh_uses_canonical_encoder);
+    RUN_TEST(test_fh_canonical_null_desc_rejected);
     RUN_TEST(test_stateid_round_trip);
     RUN_TEST(test_bitmap_round_trip);
     RUN_TEST(test_bitmap_helpers);

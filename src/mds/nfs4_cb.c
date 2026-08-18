@@ -322,6 +322,30 @@ static bool encode_cb_sequence(XDR *xdrs,
     return true;
 }
 
+/*
+ * Encode the nfs_fh4 of a CB_* operation.
+ *
+ * RFC 8881 S20.2 / S20.3: a callback filehandle MUST be byte-identical
+ * to the handle the client was given by GETFH.  Delegating to
+ * xdr_nfs4_fh_encode_desc() -- the single canonical encoder, also used
+ * by encode_res_getfh() -- is what guarantees that, so no callback
+ * encoder should ever write a filehandle length itself.
+ *
+ * A zero @owner selects the legacy 8-byte form, keeping single-MDS
+ * (mds_id = 0) deployments bit-for-bit unchanged.
+ */
+static bool encode_cb_fh(XDR *xdrs, uint32_t owner, uint64_t fileid,
+                         uint32_t generation)
+{
+    const struct nfs4_fh_desc fh = {
+        .fileid       = fileid,
+        .owner_mds_id = owner,
+        .generation   = generation,
+    };
+
+    return xdr_nfs4_fh_encode_desc(xdrs, &fh);
+}
+
 static bool encode_cb_recall(XDR *xdrs,
                              const struct nfs4_cb_recall_args *a)
 {
@@ -347,19 +371,10 @@ static bool encode_cb_recall(XDR *xdrs,
         return false;
     }
 
-    /* nfs_fh4 is opaque<NFS4_FHSIZE>; we use the 8-byte fileid
-     * in network byte order, matching encode_cb_layoutrecall. */
-    uint64_t fid_be = htobe64(a->fileid);
-    uint32_t fh_len = 8;
-
-    if (!xdr_uint32_t(xdrs, &fh_len)) {
-        return false;
-    }
-    if (!xdr_opaque(xdrs, (char *)&fid_be, fh_len)) {
-        return false;
-    }
-
-    return true;
+    /* nfs_fh4 -- must be byte-identical to the handle the client holds
+     * (RFC 8881 S20.2), so encode it with the same canonical encoder
+     * GETFH uses rather than assuming a length here. */
+    return encode_cb_fh(xdrs, a->owner_mds_id, a->fileid, a->generation);
 }
 
 /*
@@ -464,8 +479,6 @@ static bool encode_cb_notify(XDR *xdrs,
                              const struct nfs4_cb_notify_args *a)
 {
     uint32_t opnum = OP_CB_NOTIFY;
-    uint32_t fh_len = 8;
-    uint64_t fid_be = htobe64(a->dir_fileid);
     uint32_t nchanges = 1;
     uint32_t bm_words = 1;
     uint32_t mask = (uint32_t)1u << a->notify_type;
@@ -476,8 +489,12 @@ static bool encode_cb_notify(XDR *xdrs,
 
     if (!xdr_uint32_t(xdrs, &opnum)) { return false; }
     if (!xdr_nfs4_stateid_encode(xdrs, &a->stateid)) { return false; }
-    if (!xdr_uint32_t(xdrs, &fh_len)) { return false; }
-    if (!xdr_opaque(xdrs, (char *)&fid_be, fh_len)) { return false; }
+    /* Delegated directory's filehandle -- canonical encoding so it
+     * matches the handle the client holds (RFC 8881 S20.4). */
+    if (!encode_cb_fh(xdrs, a->owner_mds_id, a->dir_fileid,
+                      a->generation)) {
+        return false;
+    }
     if (!xdr_uint32_t(xdrs, &nchanges)) { return false; }
     if (!xdr_uint32_t(xdrs, &bm_words)) { return false; }
     if (!xdr_uint32_t(xdrs, &mask)) { return false; }
@@ -523,14 +540,12 @@ static bool encode_cb_layoutrecall(XDR *xdrs,
 }
 
     if (a->recall_type == LAYOUTRECALL4_FILE) {
-        /* fh4 as opaque<NFS4_FHSIZE> -- we encode fileid as 8-byte FH */
-        uint64_t fid_be = htobe64(a->fileid);
-        uint32_t fh_len = 8;
-
-        if (!xdr_uint32_t(xdrs, &fh_len)) {
-            return false;
-}
-        if (!xdr_opaque(xdrs, (char *)&fid_be, fh_len)) {
+        /* fh4 as opaque<NFS4_FHSIZE>.  This is the handle the client
+         * matches the recall against, so it MUST be byte-identical to
+         * the GETFH handle (RFC 8881 S20.3) -- hence the canonical
+         * encoder rather than a length assumed here. */
+        if (!encode_cb_fh(xdrs, a->owner_mds_id, a->fileid,
+                          a->generation)) {
             return false;
 }
 
@@ -1135,13 +1150,18 @@ void nfs4_cb_deliver_reply(const uint8_t *buf, uint32_t len)
  * ----------------------------------------------------------------------- */
 
 static bool encode_cb_getattr(XDR *xdrs, uint64_t fileid, uint32_t mds_id,
+                              uint32_t generation,
                               const struct nfs4_stateid *deleg_sid)
 {
     uint32_t opnum = OP_CB_GETATTR;
     if (!xdr_uint32_t(xdrs, &opnum)) { return false; }
-    /* nfs_fh4 — v1 cluster-global FH matching the delegation grant.
-     * RFC 8881 §20.1: the FH MUST match the one the client holds. */
-    if (!xdr_nfs4_fh_encode_v1(xdrs, mds_id, fileid, 1)) { return false; }
+    /* nfs_fh4 — RFC 8881 §20.1: the FH MUST match the one the client
+     * holds, so use the canonical encoder.  This previously called the
+     * v1 encoder unconditionally with a hardcoded generation of 1,
+     * which was wrong in both directions: it emitted a 17-byte handle
+     * even when mds_id was 0 (where GETFH emits 8 bytes), and when
+     * mds_id was non-zero the generation rarely matched the inode. */
+    if (!encode_cb_fh(xdrs, mds_id, fileid, generation)) { return false; }
     /* bitmap4 requesting CHANGE(3) + SIZE(4). */
     uint32_t bm_words = 1;
     uint32_t bm_w0 = (1u << 3) | (1u << 4); /* CHANGE + SIZE */
@@ -1282,6 +1302,7 @@ int nfs4_cb_getattr_fd(int fd,
                        const struct nfs4_cb_sec *sec,
                        uint64_t fileid,
                        uint32_t mds_id,
+                       uint32_t generation,
                        const struct nfs4_stateid *deleg_stateid,
                        uint32_t timeout_ms,
                        struct nfs4_cb_getattr_result *out)
@@ -1317,7 +1338,8 @@ int nfs4_cb_getattr_fd(int fd,
         xdr_destroy(&xdrs);
         return -EIO;
     }
-    if (!encode_cb_getattr(&xdrs, fileid, mds_id, deleg_stateid)) {
+    if (!encode_cb_getattr(&xdrs, fileid, mds_id, generation,
+                           deleg_stateid)) {
         xdr_destroy(&xdrs);
         return -EIO;
     }
