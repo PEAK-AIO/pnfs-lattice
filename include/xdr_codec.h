@@ -34,6 +34,28 @@
 /** NFSv4 filehandle maximum size (RFC 8881 S3.1). */
 #define NFS4_FHSIZE       128
 
+/*
+ * On-wire lengths of the MDS filehandle formats.
+ *
+ * Filehandles are opaque and variable-length to the client (bounded
+ * only by NFS4_FHSIZE); nothing in the protocol requires either of
+ * these values.  They are named here so no encoder or decoder has to
+ * spell a length as a bare number -- see xdr_nfs4_fh_encode_desc(),
+ * which owns the choice between them.
+ *
+ *   v0 (legacy): fileid BE64
+ *   v1 (cluster-global): tag | owner_mds_id BE32 | fileid BE64
+ *                        | generation BE32
+ */
+#define NFS4_FH_V0_LEN    8U
+#define NFS4_FH_V1_LEN    17U
+/* Leading discriminator byte identifying a v1 filehandle.  Left as a
+ * plain int constant so `buf[0] == NFS4_FH_V1_TAG` stays an int/int
+ * comparison after integer promotion of the uint8_t; an unsigned
+ * spelling would make it signed-vs-unsigned and risk -Wsign-compare
+ * under -Werror. */
+#define NFS4_FH_V1_TAG    0x01
+
 /** Maximum compound tag length. */
 #define NFS4_TAG_MAXLEN   64
 
@@ -178,9 +200,12 @@ static inline bool nfs4_bitmap_test(const uint32_t bm[NFS4_BITMAP_WORDS],
 /**
  * Encode/decode an nfs_fh4 (variable-length opaque filehandle).
  *
- * We represent filehandles as 8-byte big-endian fileids.
- * Encode: fileid -> 8-byte opaque on the wire.
- * Decode: 8-byte opaque from the wire -> fileid.
+ * Two formats exist.  v0 is a bare 8-byte big-endian fileid; v1 is a
+ * 17-byte cluster-global handle carrying owner_mds_id and generation
+ * alongside the fileid.  The decoders accept either.
+ *
+ * Callers that emit a filehandle should use xdr_nfs4_fh_encode_desc()
+ * rather than picking a format themselves; see the note there.
  *
  * @return true on success.
  */
@@ -188,6 +213,25 @@ struct nfs4_fh_desc;
 bool xdr_nfs4_fh_encode(XDR *xdrs, uint64_t fileid);
 bool xdr_nfs4_fh_encode_v1(XDR *xdrs, uint32_t owner_mds_id,
                             uint64_t fileid, uint32_t generation);
+
+/**
+ * Encode an nfs_fh4 in the canonical MDS filehandle format.
+ *
+ * This is the ONLY place that decides between the v0 and v1 wire
+ * forms.  Both the fore-channel GETFH encoder and every back-channel
+ * CB_* encoder call it, so a callback filehandle is byte-identical to
+ * the handle the client was given as required by RFC 8881 S20.2 /
+ * S20.3.  Emitting a filehandle without going through this function
+ * reintroduces the divergence it exists to prevent.
+ *
+ * @param xdrs  XDR stream in ENCODE mode.
+ * @param fh    Owner / fileid / generation triple.  A zero
+ *              owner_mds_id selects the legacy v0 form, which keeps
+ *              single-MDS deployments bit-for-bit unchanged.
+ * @return true on success; false on NULL @fh or XDR failure.
+ */
+bool xdr_nfs4_fh_encode_desc(XDR *xdrs, const struct nfs4_fh_desc *fh);
+
 bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc);
 bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid);
 

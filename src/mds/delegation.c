@@ -290,6 +290,47 @@ static uint32_t deleg_hash(uint64_t fileid);
 static void lock_stripe(struct deleg_table *dt, uint64_t fileid);
 static void unlock_stripe(struct deleg_table *dt, uint64_t fileid);
 
+/*
+ * Resolve the filehandle identity (owner + generation) for @fileid.
+ *
+ * RFC 8881 S20.2: the filehandle in a CB_* operation must be
+ * byte-identical to the one the client was given by GETFH.  When this
+ * MDS has a non-zero mds_id, GETFH emits the 17-byte v1 handle built
+ * from (mds_id, fileid, inode generation), so a callback has to supply
+ * the same triple.
+ *
+ * Degradation is deliberate.  On any failure -- no catalogue wired, or
+ * the inode read fails -- both outputs stay 0, which makes the encoder
+ * emit the legacy 8-byte handle rather than a 17-byte handle with a
+ * wrong generation.  A wrong-but-plausible handle is worse than a
+ * legacy one: it is indistinguishable from a correct handle on the
+ * wire, so it would defeat the very test that proves this fix.  Never
+ * substitute a guessed generation here.
+ *
+ * The generation is narrowed to 32 bits exactly as the GETFH path does
+ * (compound_namespace.c assigns mds_inode.generation, a uint64_t, into
+ * nfs4_fh_desc.generation, a uint32_t), so both paths truncate
+ * identically and the bytes still match.
+ */
+static void deleg_fh_identity(struct deleg_table *dt, uint64_t fileid,
+                             uint32_t *owner_out, uint32_t *gen_out)
+{
+    struct mds_inode inode;
+
+    *owner_out = 0;
+    *gen_out = 0;
+    /* mds_id == 0 means GETFH itself emits the legacy form, so the
+     * callback must too; skip the catalogue read entirely. */
+    if (dt == NULL || dt->cat == NULL || dt->mds_id == 0) {
+        return;
+    }
+    if (mds_cat_ns_getattr(dt->cat, fileid, &inode) != MDS_OK) {
+        return;
+    }
+    *owner_out = dt->mds_id;
+    *gen_out = (uint32_t)inode.generation;
+}
+
 /* -----------------------------------------------------------------------
  * CB_GETATTR for write-delegated files (RFC 8881 §20.1)
  *
@@ -348,7 +389,15 @@ int deleg_cb_getattr_for_file(struct deleg_table *dt,
         return -1;
     }
 
-    /* Send CB_GETATTR and recv reply on the dup'd fd. */
+    /* Send CB_GETATTR and recv reply on the dup'd fd.  The filehandle
+     * must match the delegation grant the holder is caching, so take
+     * the owner/generation pair from the inode rather than assuming
+     * either value (RFC 8881 S20.1). */
+    uint32_t cb_owner = 0;
+    uint32_t cb_generation = 0;
+
+    deleg_fh_identity(dt, fileid, &cb_owner, &cb_generation);
+
     struct nfs4_cb_getattr_result result;
     int rc = nfs4_cb_getattr_fd(ctx.fd,
                                 ctx.session_id,
@@ -358,7 +407,8 @@ int deleg_cb_getattr_for_file(struct deleg_table *dt,
                                 ctx.minorversion,
                                 &ctx.cb_sec,
                                 fileid,
-                                dt->mds_id,
+                                cb_owner,
+                                cb_generation,
                                 &holder_sid,
                                 5000, /* 5s timeout */
                                 &result);
@@ -831,6 +881,9 @@ int deleg_recall_file(struct deleg_table *dt,
         ra.stateid  = targets[i].stateid;
         ra.truncate = false;
         ra.fileid   = targets[i].fileid;
+        /* Filehandle must match the client's (RFC 8881 S20.2). */
+        deleg_fh_identity(dt, targets[i].fileid,
+                          &ra.owner_mds_id, &ra.generation);
 
         cbrc = nfs4_cb_recall_fd(lc.fd, lc.session_id, lc.cb_prog,
                                  lc.slot_seq_id, lc.num_cb_slots,
@@ -944,6 +997,9 @@ int deleg_resend_pending_recalls(struct deleg_table *dt,
         ra.stateid  = snap[i].stateid;
         ra.truncate = false;
         ra.fileid   = snap[i].fileid;
+        /* Filehandle must match the client's (RFC 8881 S20.2). */
+        deleg_fh_identity(dt, snap[i].fileid,
+                          &ra.owner_mds_id, &ra.generation);
 
         cbrc = nfs4_cb_recall_fd(lc.fd, lc.session_id, lc.cb_prog,
                                  lc.slot_seq_id, lc.num_cb_slots,

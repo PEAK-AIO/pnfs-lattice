@@ -69,6 +69,15 @@ struct layout_recall {
      */
     uint32_t                 default_layout_type;
     struct mds_proxy_ctx    *proxy;    /* Optional: for DS-side fencing */
+    /*
+     * This MDS's node id, used to build the filehandle carried in
+     * CB_LAYOUTRECALL.  RFC 8881 S20.3 requires that handle to be
+     * byte-identical to the one GETFH gave the client, and GETFH emits
+     * the 17-byte v1 form whenever the id is non-zero.  Left 0 when
+     * unset, which reproduces the legacy 8-byte form -- correct for a
+     * single-MDS deployment and unchanged from historical behaviour.
+     */
+    uint32_t                 mds_id;
 };
 
 /* -----------------------------------------------------------------------
@@ -446,6 +455,13 @@ void layout_recall_set_default_layout_type(struct layout_recall *lr,
     }
 }
 
+void layout_recall_set_mds_id(struct layout_recall *lr, uint32_t mds_id)
+{
+    if (lr != NULL) {
+        lr->mds_id = mds_id;
+    }
+}
+
 void layout_recall_set_shard(struct layout_recall *lr,
                              const struct mds_shard *shard)
 {
@@ -729,6 +745,15 @@ struct byte_range_holder {
      * always echoes a->layout_type in r->layout_type).
      */
     uint32_t            layout_type;
+    /*
+     * Filehandle identity for this holder's file, copied from the
+     * per-file values resolved once in byte_range_collect_holders.
+     * Both stay 0 when the coordinator has no mds_id or the inode read
+     * failed, which emits the legacy 8-byte handle rather than a
+     * 17-byte handle with a wrong generation (RFC 8881 S20.3).
+     */
+    uint32_t            owner_mds_id;
+    uint32_t            generation;
 };
 
 #define LAYOUT_BYTE_RANGE_MAX_HOLDERS 256
@@ -743,6 +768,9 @@ struct byte_range_collect_ctx {
     uint64_t                  req_offset;
     uint64_t                  req_length;
     uint32_t                  req_layout_type;
+    /* Filehandle identity of `fileid`, resolved once by the caller. */
+    uint32_t                  owner_mds_id;
+    uint32_t                  generation;
     struct mds_catalogue     *cat;
     bool                      skip_req_client;
     bool                      require_iomode_conflict;
@@ -894,6 +922,8 @@ static int byte_range_collect_cb(uint64_t clientid,
                 c->holders[k].recall_length = inter_len;
                 c->holders[k].send_cb       = true;
                 c->holders[k].layout_type   = c->req_layout_type;
+                c->holders[k].owner_mds_id  = c->owner_mds_id;
+                c->holders[k].generation    = c->generation;
                 MDS_LOG_DEBUG(LOG_COMP_MDS,
                     "DBG-RECALL:  -> DEDUP replaced "
                     "holder[%u] (higher seqid)", k);
@@ -924,6 +954,8 @@ static int byte_range_collect_cb(uint64_t clientid,
     c->holders[c->count].recall_length  = inter_len;
     c->holders[c->count].send_cb        = send_cb;
     c->holders[c->count].layout_type    = c->req_layout_type;
+    c->holders[c->count].owner_mds_id   = c->owner_mds_id;
+    c->holders[c->count].generation     = c->generation;
     c->count++;
     return 0;
 }
@@ -1044,6 +1076,11 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
     args.stateid     = recall_stateid;
     args.offset      = c->holder->recall_offset;
     args.length      = c->holder->recall_length;
+    /* Filehandle identity resolved at collect time.  The client matches
+     * the recall to its layout by these exact bytes, so they must equal
+     * the GETFH handle for this file (RFC 8881 S20.3). */
+    args.owner_mds_id = c->holder->owner_mds_id;
+    args.generation   = c->holder->generation;
 
     MDS_LOG_DEBUG(LOG_COMP_MDS,
         "DBG-RECALL:  -> sending CB_LAYOUTRECALL fd=%d cb_prog=%u "
@@ -1125,6 +1162,40 @@ static int byte_range_collect_holders(struct layout_recall *lr,
     col.require_iomode_conflict = require_iomode_conflict;
     col.require_range_overlap   = require_range_overlap;
     col.keep_duplicate_rows     = keep_duplicate_rows;
+
+    /*
+     * Resolve the file's filehandle identity ONCE for all holders.
+     *
+     * RFC 8881 S20.3 requires the CB_LAYOUTRECALL filehandle to be
+     * byte-identical to the handle GETFH gave the client.  On an MDS
+     * with a non-zero id that is the v1 form carrying (mds_id, fileid,
+     * generation), and the generation only exists in the inode.
+     * Recalls are rare and every holder of a file shares one
+     * filehandle, so a single read here is the right cost.
+     *
+     * On failure both stay 0 and the encoder emits the legacy 8-byte
+     * handle.  That is deliberate: a 17-byte handle built from a
+     * guessed generation is unmatchable yet looks correct on the wire,
+     * which is strictly worse than the legacy form.
+     *
+     * The narrowing to 32 bits mirrors the GETFH path exactly
+     * (compound_namespace.c assigns the uint64_t mds_inode.generation
+     * into the uint32_t nfs4_fh_desc.generation), so both truncate the
+     * same way and the bytes still match.
+     */
+    if (lr->mds_id != 0) {
+        struct mds_inode inode;
+
+        if (mds_cat_ns_getattr(lr->cat, fileid, &inode) == MDS_OK) {
+            col.owner_mds_id = lr->mds_id;
+            col.generation   = (uint32_t)inode.generation;
+        } else {
+            MDS_LOG_DEBUG(LOG_COMP_MDS,
+                "DBG-RECALL: no inode for fileid=%llu; CB will use the "
+                "legacy 8-byte filehandle",
+                (unsigned long long)fileid);
+        }
+    }
 
     st = mds_coord_layout_iter_file(lr->cat, fileid,
                                      byte_range_collect_cb, &col);

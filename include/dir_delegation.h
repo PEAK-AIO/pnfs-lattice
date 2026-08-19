@@ -122,6 +122,26 @@ struct session_table;
 void dir_deleg_table_set_session_table(struct dir_deleg_table *ddt,
 				       struct session_table *st);
 
+struct mds_catalogue;
+
+/**
+ * Attach the catalogue so recall / notify can read a directory inode's
+ * generation when building its filehandle.
+ *
+ * RFC 8881 S20.2 / S20.4 require the filehandle in a CB_* operation to
+ * be byte-identical to the one the client received from GETFH.  On an
+ * MDS with a non-zero mds_id that handle carries the inode generation,
+ * which is only obtainable from the catalogue.
+ *
+ * Optional: without it, callbacks emit the legacy 8-byte filehandle,
+ * which is correct on a single-MDS (mds_id = 0) deployment and matches
+ * this module's historical behaviour everywhere else.  The pointer is
+ * borrowed (caller owns the catalogue's lifetime).  Safe to call at any
+ * point; NULL @ddt is tolerated.
+ */
+void dir_deleg_table_set_cat(struct dir_deleg_table *ddt,
+			     struct mds_catalogue *cat);
+
 /**
  * Override the default recall / notify timeout used when callers
  * pass timeout_ms=0 to dir_deleg_recall_dir() or

@@ -1284,6 +1284,13 @@ if (s_pt != NULL) {
 		 * this binding the recall coordinator falls back to
 		 * authoritative-revoke-only mode. */
 		layout_recall_set_session_table(lr, session_tbl);
+		/* RFC 8881 S20.3: a CB_LAYOUTRECALL filehandle must be
+		 * byte-identical to the one GETFH gave the client, which on
+		 * an MDS with a non-zero id is the v1 form carrying this
+		 * id.  Without this the coordinator can only emit the
+		 * legacy 8-byte handle and clients cannot match the
+		 * recall. */
+		layout_recall_set_mds_id(lr, cfg.self.id);
 		/* RFC 8435 §14: proxy context for DS-side fencing
 		 * on layout revocation.  Without this, revocation
 		 * is callback-only. */
@@ -1850,6 +1857,11 @@ if (s_pt != NULL) {
 					MDS_LOG_INFO(LOG_COMP_MDS,
 						"directory delegation "
 						"table active");
+					/* Lets recall / notify read a
+					 * directory inode's generation so
+					 * the CB filehandle matches GETFH
+					 * (RFC 8881 S20.2 / S20.4). */
+					dir_deleg_table_set_cat(ddt, cat);
 					dir_deleg_table_set_session_table(
 						ddt, session_tbl);
 					rpc_cfg.ddt = ddt;

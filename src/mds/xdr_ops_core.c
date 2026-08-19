@@ -1154,12 +1154,11 @@ bool encode_res_create_session(XDR *xdrs,
 
 bool encode_res_getfh(XDR *xdrs, const struct nfs4_result *r)
 {
-    const struct nfs4_fh_desc *fh = &r->res.getfh.fh;
-    if (fh->owner_mds_id != 0) {
-        return xdr_nfs4_fh_encode_v1(xdrs, fh->owner_mds_id,
-                                      fh->fileid, fh->generation);
-    }
-    return xdr_nfs4_fh_encode(xdrs, fh->fileid);
+    /* Format selection lives in xdr_nfs4_fh_encode_desc() so that the
+     * back-channel CB_* encoders emit byte-identical handles for the
+     * same file (RFC 8881 S20.2 / S20.3).  Do not inline the v0/v1
+     * choice here again. */
+    return xdr_nfs4_fh_encode_desc(xdrs, &r->res.getfh.fh);
 }
 
 

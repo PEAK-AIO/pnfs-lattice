@@ -40,6 +40,7 @@
 #include "session.h"
 #include "mds_log.h"
 #include "rpc_server.h"   /* rpc_conn_get_fd */
+#include "mds_catalogue.h" /* mds_cat_ns_getattr (filehandle generation) */
 
 /* -----------------------------------------------------------------------
  * Constants
@@ -93,6 +94,14 @@ struct dir_deleg_table {
 	uint32_t               mds_id;
 	_Atomic uint64_t       sid_counter;
 	struct session_table  *st;        /* Borrowed; NULL if not attached. */
+	/*
+	 * Borrowed catalogue handle, NULL if not attached.  Needed only to
+	 * read a directory inode's generation when building the filehandle
+	 * for a CB_NOTIFY / CB_RECALL, so that handle is byte-identical to
+	 * the one GETFH gave the client (RFC 8881 S20.2 / S20.4).  When
+	 * NULL the callbacks fall back to the legacy 8-byte filehandle.
+	 */
+	struct mds_catalogue  *cat;
 
 	/* Counters, exposed via dir_deleg_counters_snapshot.  All bumped
 	 * with memory_order_relaxed; ordering across counters is not
@@ -470,6 +479,52 @@ void dir_deleg_table_set_session_table(struct dir_deleg_table *ddt,
 	}
 }
 
+void dir_deleg_table_set_cat(struct dir_deleg_table *ddt,
+			     struct mds_catalogue *cat)
+{
+	if (ddt != NULL) {
+		ddt->cat = cat;
+	}
+}
+
+/*
+ * Resolve the filehandle identity (owner + generation) for @dir_fileid.
+ *
+ * Mirrors deleg_fh_identity() in delegation.c; see the rationale there.
+ * In short: GETFH emits a 17-byte handle carrying (mds_id, fileid,
+ * generation) when mds_id is non-zero, and RFC 8881 S20.2 / S20.4
+ * require the callback handle to match it byte for byte.
+ *
+ * Both outputs stay 0 -- selecting the legacy 8-byte handle -- when
+ * mds_id is 0, no catalogue is attached, or the inode read fails.  That
+ * is deliberate: emitting a 17-byte handle with a guessed generation
+ * would look correct on the wire while still being unmatchable.
+ *
+ * Callers resolve this ONCE per directory, outside their per-holder
+ * loop: every holder of a given directory shares one filehandle, so a
+ * per-holder catalogue read would be pure overhead.
+ */
+static void ddt_fh_identity(struct dir_deleg_table *ddt,
+			    uint64_t dir_fileid,
+			    uint32_t *owner_out, uint32_t *gen_out)
+{
+	struct mds_inode inode;
+
+	*owner_out = 0;
+	*gen_out = 0;
+	if (ddt == NULL || ddt->cat == NULL || ddt->mds_id == 0) {
+		return;
+	}
+	if (mds_cat_ns_getattr(ddt->cat, dir_fileid, &inode) != MDS_OK) {
+		return;
+	}
+	*owner_out = ddt->mds_id;
+	/* Narrowed exactly as the GETFH path narrows it, so the bytes
+	 * still match (see ddt_fh_identity's counterpart in
+	 * delegation.c). */
+	*gen_out = (uint32_t)inode.generation;
+}
+
 void dir_deleg_counters_snapshot(const struct dir_deleg_table *ddt,
 				 struct dir_deleg_counters *out)
 {
@@ -687,6 +742,13 @@ int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
 		return recalled;
 	}
 
+	/* Every holder shares this directory's filehandle, so resolve its
+	 * identity once rather than per holder (RFC 8881 S20.2). */
+	uint32_t cb_owner = 0;
+	uint32_t cb_generation = 0;
+
+	ddt_fh_identity(ddt, dir_fileid, &cb_owner, &cb_generation);
+
 	for (uint32_t i = 0; i < target_count; i++) {
 		struct ddt_cb_target cbt;
 		struct nfs4_cb_recall_args ra;
@@ -702,6 +764,8 @@ int dir_deleg_recall_dir(struct dir_deleg_table *ddt,
 		ra.stateid  = targets[i].stateid;
 		ra.truncate = false;
 		ra.fileid   = targets[i].dir_fileid;
+		ra.owner_mds_id = cb_owner;
+		ra.generation   = cb_generation;
 
 		cbrc = nfs4_cb_recall_fd(cbt.fd, cbt.session_id,
 					 cbt.cb_prog, cbt.slot_seq_id,
@@ -761,12 +825,17 @@ static void ddt_collect_entries(struct dir_deleg_table *ddt,
 static void fill_notify_args(struct nfs4_cb_notify_args *args,
 			     const struct ddt_emit_target *t,
 			     uint64_t dir_fileid, uint32_t event,
-			     const char *old_name, const char *new_name)
+			     const char *old_name, const char *new_name,
+			     uint32_t owner_mds_id, uint32_t generation)
 {
 	memset(args, 0, sizeof(*args));
 	args->stateid = t->stateid;
 	args->dir_fileid = dir_fileid;
 	args->notify_type = event;
+	/* Filehandle identity, resolved once by the caller (RFC 8881
+	 * S20.4 -- must match the handle the client holds). */
+	args->owner_mds_id = owner_mds_id;
+	args->generation = generation;
 	if (old_name != NULL) {
 		size_t len = strlen(old_name);
 		if (len > sizeof(args->old_name)) {
@@ -809,6 +878,15 @@ int dir_deleg_notify_dir(struct dir_deleg_table *ddt,
 	memset(&list, 0, sizeof(list));
 	ddt_collect_entries(ddt, dir_fileid, requesting_clientid, &list);
 
+	/* One filehandle serves every holder of this directory, so resolve
+	 * its identity once outside the loop (RFC 8881 S20.4). */
+	uint32_t cb_owner = 0;
+	uint32_t cb_generation = 0;
+
+	if (list.count > 0) {
+		ddt_fh_identity(ddt, dir_fileid, &cb_owner, &cb_generation);
+	}
+
 	for (uint32_t i = 0; i < list.count; i++) {
 		const struct ddt_emit_target *t = &list.targets[i];
 		bool mask_covers = (t->granted_mask &
@@ -824,7 +902,8 @@ int dir_deleg_notify_dir(struct dir_deleg_table *ddt,
 				int rc;
 
 				fill_notify_args(&args, t, dir_fileid,
-						 event, old_name, new_name);
+						 event, old_name, new_name,
+						 cb_owner, cb_generation);
 				rc = nfs4_cb_notify_fd(cbt.fd,
 						       cbt.session_id,
 						       cbt.cb_prog,

@@ -31,25 +31,58 @@
 bool xdr_nfs4_fh_encode(XDR *xdrs, uint64_t fileid)
 {
     /* Legacy v0: 8-byte local fileid. */
-    uint32_t len = 8;
-    uint8_t buf[8];
+    uint8_t buf[NFS4_FH_V0_LEN];
+    uint32_t len = (uint32_t)sizeof(buf);
     uint64_t fid_be = htobe64(fileid);
-    memcpy(buf, &fid_be, 8);
+    memcpy(buf, &fid_be, sizeof(fid_be));
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
-    return xdr_opaque_encode(xdrs, (char *)buf, 8);
+    return xdr_opaque_encode(xdrs, (char *)buf, (u_int)sizeof(buf));
 }
 
 bool xdr_nfs4_fh_encode_v1(XDR *xdrs, uint32_t owner_mds_id,
                             uint64_t fileid, uint32_t generation)
 {
-    uint32_t len = 17;
-    uint8_t buf[17];
-    buf[0] = 0x01;
+    uint8_t buf[NFS4_FH_V1_LEN];
+    uint32_t len = (uint32_t)sizeof(buf);
+    buf[0] = NFS4_FH_V1_TAG;
     { uint32_t m = htobe32(owner_mds_id); memcpy(buf + 1, &m, 4); }
     { uint64_t f = htobe64(fileid); memcpy(buf + 5, &f, 8); }
     { uint32_t g = htobe32(generation); memcpy(buf + 13, &g, 4); }
     if (!xdr_uint32_t(xdrs, &len)) { return false; }
-    return xdr_opaque_encode(xdrs, (char *)buf, 17);
+    return xdr_opaque_encode(xdrs, (char *)buf, (u_int)sizeof(buf));
+}
+
+/*
+ * THE canonical MDS filehandle encoder.
+ *
+ * This is the single point in the server that decides which
+ * filehandle wire format to emit.  Every path that hands a
+ * filehandle to a client -- GETFH on the fore channel and every
+ * CB_* operation on the back channel -- MUST route through here.
+ *
+ * RFC 8881 S20.2 / S20.3 require a callback filehandle to be
+ * byte-identical to the handle the client was originally given.
+ * Historically GETFH selected the format conditionally while the
+ * callback encoders hand-rolled a fixed 8-byte handle, so a server
+ * configured with mds_id != 0 recalled a 17-byte handle's file
+ * using an 8-byte handle and clients could not match it.  Keeping
+ * exactly one decision site makes that class of divergence a
+ * compile-time impossibility rather than something two branches
+ * have to agree about by inspection.
+ *
+ * Do NOT reintroduce a second format decision, and do NOT write a
+ * filehandle length as a bare number at a call site.  When a new
+ * format is added (e.g. the v2 MAC handle), this function is the
+ * only place that needs to learn about it.
+ */
+bool xdr_nfs4_fh_encode_desc(XDR *xdrs, const struct nfs4_fh_desc *fh)
+{
+    if (fh == NULL) { return false; }
+    if (fh->owner_mds_id != 0) {
+        return xdr_nfs4_fh_encode_v1(xdrs, fh->owner_mds_id,
+                                     fh->fileid, fh->generation);
+    }
+    return xdr_nfs4_fh_encode(xdrs, fh->fileid);
 }
 
 bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
@@ -67,7 +100,7 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
     if (len > 0 && !xdr_opaque_decode(xdrs, (char *)buf, len)) {
         return false;
     }
-    if (len == 8) {
+    if (len == NFS4_FH_V0_LEN) {
         /* v0 legacy: 8-byte fileid BE.  memcpy avoids an unaligned
          * uint64_t load from the byte buffer (UB / SIGBUS on
          * strict-alignment targets). */
@@ -76,7 +109,7 @@ bool xdr_nfs4_fh_decode(XDR *xdrs, uint64_t *fileid)
         *fileid = be64toh(fid_be);
         return true;
     }
-    if (len >= 17 && buf[0] == 0x01) {
+    if (len >= NFS4_FH_V1_LEN && buf[0] == NFS4_FH_V1_TAG) {
         /* v1 cluster-global: skip owner_mds_id, extract fileid.
          * buf + 5 is never 8-byte aligned — copy before swapping. */
         uint64_t fid_be;
@@ -101,14 +134,14 @@ bool xdr_nfs4_fh_decode_full(XDR *xdrs, struct nfs4_fh_desc *desc)
         return false;
     }
     memset(desc, 0, sizeof(*desc));
-    if (len == 8) {
+    if (len == NFS4_FH_V0_LEN) {
         /* memcpy avoids an unaligned load (see xdr_nfs4_fh_decode). */
         uint64_t fid_be;
         memcpy(&fid_be, buf, sizeof(fid_be));
         desc->fileid = be64toh(fid_be);
         return true;
     }
-    if (len >= 17 && buf[0] == 0x01) {
+    if (len >= NFS4_FH_V1_LEN && buf[0] == NFS4_FH_V1_TAG) {
         /* buf + 1 / buf + 5 / buf + 13 are misaligned for their
          * types — copy into properly typed locals before swapping. */
         uint32_t m_be, g_be;

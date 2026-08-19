@@ -15,10 +15,14 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "session.h"
 #include "nfs4_cb.h"
 #include "compound.h"
+#include "xdr_codec.h"   /* xdr_nfs4_fh_encode_desc */
 
 /* -----------------------------------------------------------------------
  * Test helpers
@@ -350,6 +354,197 @@ static void test_cb_notify_bad_type_rejected(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Callback filehandle identity on the wire (RFC 8881 S20.2 / S20.3)
+ *
+ * These tests capture what a CB_* sender actually puts on the socket
+ * and assert the filehandle bytes are exactly the bytes the canonical
+ * encoder produces -- the same encoder GETFH uses (asserted in
+ * test_xdr_codec.c's test_getfh_uses_canonical_encoder).  Together the
+ * two prove the property the fix exists for: a callback names a file
+ * with the identical handle the client was given.
+ *
+ * The _fd senders are fire-and-forget (they never read a reply), so a
+ * socketpair is enough and cannot deadlock.
+ * ----------------------------------------------------------------------- */
+
+#define CB_FH_TEST_FILEID  0xCAFEF00DDEADBEEFULL
+#define CB_FH_TEST_GEN     0x11223344u
+
+typedef int (*cb_send_fn)(int socket_fd, uint32_t owner,
+                          uint32_t generation);
+
+static const uint8_t cb_test_sid[SESSION_ID_SIZE] = {
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+};
+
+static uint32_t expected_fh_bytes(uint32_t owner, uint64_t fileid,
+                                  uint32_t generation,
+                                  char *out, size_t out_size)
+{
+    struct nfs4_fh_desc fh;
+    XDR enc;
+
+    memset(&fh, 0, sizeof(fh));
+    fh.owner_mds_id = owner;
+    fh.fileid = fileid;
+    fh.generation = generation;
+
+    xdrmem_create(&enc, out, (u_int)out_size, XDR_ENCODE);
+    if (!xdr_nfs4_fh_encode_desc(&enc, &fh)) {
+        return 0;
+    }
+    return xdr_getpos(&enc);
+}
+
+/* Substring search; avoids depending on the GNU memmem extension. */
+static bool bytes_contain(const char *haystack, size_t haystack_len,
+                          const char *needle, size_t needle_len)
+{
+    if (needle_len == 0 || haystack_len < needle_len) {
+        return false;
+    }
+    for (size_t index = 0; index + needle_len <= haystack_len; index++) {
+        if (memcmp(haystack + index, needle, needle_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void assert_cb_fh_matches(const char *label, cb_send_fn send_cb,
+                                 uint32_t owner)
+{
+    int sockets[2];
+    char record[8192];
+    char want[64];
+    char other[64];
+    uint32_t want_len;
+    uint32_t other_len;
+    ssize_t received;
+    int sender_fd;
+    int receiver_fd;
+    int rc;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        fprintf(stderr, "FAIL %s: socketpair failed\n", label);
+        fail_count++;
+        return;
+    }
+    sender_fd = sockets[0];
+    receiver_fd = sockets[1];
+
+    rc = send_cb(sender_fd, owner, CB_FH_TEST_GEN);
+    if (rc != 0) {
+        fprintf(stderr, "FAIL %s: send returned %d\n", label, rc);
+        fail_count++;
+        close(sender_fd);
+        close(receiver_fd);
+        return;
+    }
+
+    received = recv(receiver_fd, record, sizeof(record), 0);
+    close(sender_fd);
+    close(receiver_fd);
+    if (received <= 0) {
+        fprintf(stderr, "FAIL %s: nothing captured on the wire\n", label);
+        fail_count++;
+        return;
+    }
+
+    want_len = expected_fh_bytes(owner, CB_FH_TEST_FILEID,
+                                 CB_FH_TEST_GEN, want, sizeof(want));
+    other_len = expected_fh_bytes(owner != 0 ? 0 : 99, CB_FH_TEST_FILEID,
+                                  CB_FH_TEST_GEN, other, sizeof(other));
+    if (want_len == 0 || other_len == 0) {
+        fprintf(stderr, "FAIL %s: reference encode failed\n", label);
+        fail_count++;
+        return;
+    }
+
+    if (!bytes_contain(record, (size_t)received, want, want_len)) {
+        fprintf(stderr,
+                "FAIL %s (owner=%u): canonical filehandle absent "
+                "from the wire\n",
+                label, owner);
+        fail_count++;
+        return;
+    }
+    if (bytes_contain(record, (size_t)received, other, other_len)) {
+        fprintf(stderr,
+                "FAIL %s (owner=%u): wrong-format filehandle present "
+                "on the wire\n",
+                label, owner);
+        fail_count++;
+        return;
+    }
+    pass_count++;
+}
+
+static int send_layoutrecall(int sender_fd, uint32_t owner,
+                             uint32_t generation)
+{
+    struct nfs4_cb_layoutrecall_args args;
+
+    memset(&args, 0, sizeof(args));
+    args.layout_type  = 4; /* LAYOUT4_FLEX_FILES */
+    args.iomode       = 2; /* LAYOUTIOMODE4_RW */
+    args.recall_type  = LAYOUTRECALL4_FILE;
+    args.fileid       = CB_FH_TEST_FILEID;
+    args.offset       = 0;
+    args.length       = UINT64_MAX;
+    args.owner_mds_id = owner;
+    args.generation   = generation;
+
+    return nfs4_cb_layoutrecall_fd(sender_fd, cb_test_sid, 0x40000000,
+                                   1, 1, 1, NULL, &args, 1000);
+}
+
+static int send_recall(int sender_fd, uint32_t owner, uint32_t generation)
+{
+    struct nfs4_cb_recall_args args;
+
+    memset(&args, 0, sizeof(args));
+    args.truncate     = false;
+    args.fileid       = CB_FH_TEST_FILEID;
+    args.owner_mds_id = owner;
+    args.generation   = generation;
+
+    return nfs4_cb_recall_fd(sender_fd, cb_test_sid, 0x40000000,
+                             1, 1, 1, NULL, &args, 1000);
+}
+
+static int send_notify(int sender_fd, uint32_t owner, uint32_t generation)
+{
+    struct nfs4_cb_notify_args args;
+
+    memset(&args, 0, sizeof(args));
+    args.dir_fileid   = CB_FH_TEST_FILEID;
+    args.notify_type  = NOTIFY4_REMOVE_ENTRY;
+    args.old_name_len = 3;
+    memcpy(args.old_name, "foo", 3);
+    args.owner_mds_id = owner;
+    args.generation   = generation;
+
+    return nfs4_cb_notify_fd(sender_fd, cb_test_sid, 0x40000000,
+                             1, 1, 1, NULL, &args, 1000);
+}
+
+static void test_cb_fh_matches_getfh_v1(void)
+{
+    assert_cb_fh_matches("CB_LAYOUTRECALL", send_layoutrecall, 42);
+    assert_cb_fh_matches("CB_RECALL", send_recall, 42);
+    assert_cb_fh_matches("CB_NOTIFY", send_notify, 42);
+}
+
+static void test_cb_fh_matches_getfh_v0(void)
+{
+    assert_cb_fh_matches("CB_LAYOUTRECALL", send_layoutrecall, 0);
+    assert_cb_fh_matches("CB_RECALL", send_recall, 0);
+    assert_cb_fh_matches("CB_NOTIFY", send_notify, 0);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -368,6 +563,9 @@ int main(void)
     test_cb_notify_null_session();
     test_cb_notify_null_args();
     test_cb_notify_bad_type_rejected();
+    /* Callback filehandle identity (RFC 8881 S20.2 / S20.3). */
+    test_cb_fh_matches_getfh_v1();
+    test_cb_fh_matches_getfh_v0();
 
     printf("test_nfs4_cb: %d passed, %d failed\n", pass_count, fail_count);
     return fail_count > 0 ? 1 : 0;
