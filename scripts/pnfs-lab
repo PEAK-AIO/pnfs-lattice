@@ -507,6 +507,9 @@ load_inventory() {
     LAB_MDS_CONF_DIR="${LAB_MDS_CONF_DIR:-/etc/pnfs-mds}"
     LAB_MDS_RUN_DIR="${LAB_MDS_RUN_DIR:-/var/lib/pnfs-mds}"
     LAB_MDS_DS_MOUNT_FMT="${LAB_MDS_DS_MOUNT_FMT:-/mnt/ds%u}"
+    LAB_MDS_HPC_MAX_STRIPE_COUNT="${LAB_MDS_HPC_MAX_STRIPE_COUNT:-128}"
+    LAB_MDS_STRIPE_UNIT_BYTES="${LAB_MDS_STRIPE_UNIT_BYTES:-65536}"
+    LAB_MDS_HPC_SERVE_LAYOUTS="${LAB_MDS_HPC_SERVE_LAYOUTS:-false}"
     LAB_CLIENT_MOUNT="${LAB_CLIENT_MOUNT:-/mnt/pnfs}"
     LAB_CLIENT_NCONNECT="${LAB_CLIENT_NCONNECT:-1}"
     LAB_CLIENT_MDS_ASSIGNMENT="${LAB_CLIENT_MDS_ASSIGNMENT:-first}"
@@ -746,6 +749,9 @@ $(render_ds_specs)
 ds_mount_path_fmt = ${LAB_MDS_DS_MOUNT_FMT}
 ds_transport = ${LAB_DS_TRANSPORT}
 ds_rdma_port = ${LAB_DS_RDMA_PORT}
+hpc_max_stripe_count = ${LAB_MDS_HPC_MAX_STRIPE_COUNT}
+stripe_unit_bytes = ${LAB_MDS_STRIPE_UNIT_BYTES}
+hpc_serve_layouts = ${LAB_MDS_HPC_SERVE_LAYOUTS}
 EOF
 }
 

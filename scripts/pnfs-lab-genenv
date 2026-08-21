@@ -24,6 +24,9 @@ Spec format (INI-like; '#' comments allowed):
     ds_export_subnet = 10.118.1.0/24
     ds_nconnect = 1
     ds_nfsd_threads = 32
+    hpc_max_stripe_count = 128
+    stripe_unit_bytes = 65536
+    hpc_serve_layouts = false
     rondb_data_dir = /var/lib/rondb
 
     [mds]
@@ -82,6 +85,9 @@ DEFAULTS = {
     "ds_nfsd_threads": "32",
     "ds_transport": "tcp",
     "ds_rdma_port": "20049",
+    "hpc_max_stripe_count": "128",
+    "stripe_unit_bytes": "65536",
+    "hpc_serve_layouts": "false",
     "client_mount": "/pnfs",
     "client_nconnect": "16",
     "client_mds_assignment": "first",
@@ -244,6 +250,9 @@ def generate(cluster, nodes):
     a('LAB_MDS_CONF_DIR="%s"' % c["conf_dir"])
     a('LAB_MDS_RUN_DIR="%s"' % c["run_dir"])
     a('LAB_MDS_DS_MOUNT_FMT="%s"' % c["ds_mount_fmt"])
+    a('LAB_MDS_HPC_MAX_STRIPE_COUNT="%s"' % c["hpc_max_stripe_count"])
+    a('LAB_MDS_STRIPE_UNIT_BYTES="%s"' % c["stripe_unit_bytes"])
+    a('LAB_MDS_HPC_SERVE_LAYOUTS="%s"' % c["hpc_serve_layouts"])
     a("")
     a(bash_array("LAB_DS_HOSTS", [h for h, _ in ds]))
     a(bash_array("LAB_DS_IPS", [i for _, i in ds]))
