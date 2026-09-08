@@ -277,8 +277,8 @@ int main(int argc, char *argv[])
 	struct mds_config cfg;
 	enum mds_status rc;
 	const char *config_path = "/etc/pnfs-mds/mds.conf";
+	uint64_t boot_epoch = 0;
 #ifdef HAVE_RONDB
-	uint64_t rondb_boot_epoch = 0;
 	pthread_t rondb_hb_thread;
 	bool rondb_hb_running = false;
 #endif
@@ -403,6 +403,12 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	struct timespec boot_ts;
+	clock_gettime(CLOCK_MONOTONIC, &boot_ts);
+	boot_epoch =
+		(uint64_t)boot_ts.tv_sec * 1000000000ULL +
+		(uint64_t)boot_ts.tv_nsec;
+
 #ifdef HAVE_RONDB
 	/* RonDB: auto-bootstrap on first start (probe fails = no tables).
 	 * Phase 10A: retry loop guards against concurrent bootstrap race
@@ -475,17 +481,10 @@ if (s_pt != NULL) {
 			}
 		}
 
-		/* Phase 9A: generate boot_epoch, register in node registry,
-		 * start heartbeat thread. */
-		{
-			struct timespec boot_ts;
-			clock_gettime(CLOCK_MONOTONIC, &boot_ts);
-			rondb_boot_epoch =
-				(uint64_t)boot_ts.tv_sec * 1000000000ULL +
-				(uint64_t)boot_ts.tv_nsec;
-		}
+		/* Phase 9A: register in node registry, start heartbeat thread.
+		 */
 		rc = catalogue_rondb_mds_register(cat, cfg.self.id,
-						  rondb_boot_epoch,
+						  boot_epoch,
 						  cfg.self.hostname,
 						  cfg.self.nfs_port,
 						  cfg.self.grpc_port);
@@ -498,7 +497,7 @@ if (s_pt != NULL) {
 				"RonDB node %u registered "
 				"(boot_epoch=%llu)",
 				(unsigned)cfg.self.id,
-				(unsigned long long)rondb_boot_epoch);
+				(unsigned long long)boot_epoch);
 		}
 
 		/* Phase 9A: heartbeat thread (5s interval).
@@ -506,7 +505,7 @@ if (s_pt != NULL) {
 		{
 			rondb_hb_arg_g.cat = cat;
 			rondb_hb_arg_g.mds_id = cfg.self.id;
-			rondb_hb_arg_g.boot_epoch = rondb_boot_epoch;
+			rondb_hb_arg_g.boot_epoch = boot_epoch;
 			rondb_hb_arg_g.running = &rondb_hb_flag;
 			rondb_hb_arg_g.smap = NULL; /* set after subtree_map_init */
 
@@ -1373,7 +1372,7 @@ if (s_pt != NULL) {
 #ifdef HAVE_RONDB
 	if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
 		if (ot != NULL) {
-			open_state_table_set_cat(ot, cat, rondb_boot_epoch);
+			open_state_table_set_cat(ot, cat, boot_epoch);
 			if (cfg.transient_state_cache) {
 				open_state_table_set_skip_ndb(ot, true);
 				MDS_LOG_INFO(LOG_COMP_MDS,
@@ -1382,7 +1381,7 @@ if (s_pt != NULL) {
 			}
 		}
 		if (lock_tbl != NULL) {
-			lock_table_set_cat(lock_tbl, cat, rondb_boot_epoch);
+			lock_table_set_cat(lock_tbl, cat, boot_epoch);
 		}
 		MDS_LOG_INFO(LOG_COMP_MDS,
 			"shared protocol state active "
@@ -1817,7 +1816,7 @@ if (s_pt != NULL) {
 #ifdef HAVE_RONDB
 				if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
 					deleg_table_set_cat(dt, cat,
-							    rondb_boot_epoch);
+							    boot_epoch);
 				}
 #endif
 				/* Wire the session table so deleg_recall_file()
@@ -1896,7 +1895,7 @@ if (s_pt != NULL) {
 			} else if (remove_manifest_init(cat, rpc_cfg.proxy,
 					rpc_cfg.lcache, rpc_cfg.lcommit_agg,
 					rpc_cfg.quota, cfg.self.id,
-					rondb_boot_epoch, 65536U,
+					boot_epoch, 65536U,
 					cfg.remove_async_workers,
 					cfg.remove_async_batch,
 					cfg.remove_async_poll_ms,
