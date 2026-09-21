@@ -14,9 +14,13 @@
 #include <ctype.h>
 
 #include "pnfs_mds.h"
+#include "catalogue_backend_names.h"
 
 /* Maximum config file line length */
 #define CFG_LINE_MAX 512
+
+/* Buffer for the "(known: a, b, c)" suffix of backend diagnostics. */
+#define CFG_BACKEND_NAMES_MAX 128
 
 /* -----------------------------------------------------------------------
  * Workload tuning profiles
@@ -200,7 +204,18 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     (void)snprintf(cfg->self.hostname, sizeof(cfg->self.hostname), "localhost");
     cfg->self.nfs_port = 2049;
     cfg->self.grpc_port = 50051;
+    /* catalogue_backend default: rondb whenever it is compiled in, so
+     * existing configs keep working.  Otherwise there is NO default --
+     * MDS_BACKEND_NONE is not constructible and mds_catalogue_open()
+     * refuses it with the list of available backends.  Never fall
+     * back to whatever backend happens to be built.  (HAVE_RONDB is
+     * the global build definition; this file must not depend on the
+     * catalogue core to learn what it was built with.) */
+#ifdef HAVE_RONDB
     cfg->catalogue_backend = MDS_BACKEND_RONDB;
+#else
+    cfg->catalogue_backend = MDS_BACKEND_NONE;
+#endif
     cfg->worker_threads = 16;
     cfg->rpc_listener_threads = 0;   /* 0 = auto: min(worker_threads, 4) */
     cfg->max_inflight_per_conn = 0;  /* 0 = RPC_DEFAULT_MAX_INFLIGHT (8) */
@@ -312,7 +327,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
      * Apply sane defaults here; INI keys override below. */
     cfg->inline_max_size = 65536;          /* 64 KiB */
     cfg->inode_cache_size = 0;             /* 0 = disabled; set >0 to enable */
-    cfg->dirent_cache_size = 0;     /* disabled by default: per-MDS namespace caches cannot stay coherent across the referral cluster */
+    /* dirent cache disabled by default: per-MDS namespace caches
+     * cannot stay coherent across the referral cluster. */
+    cfg->dirent_cache_size = 0;
     cfg->layout_cache_size = 0;     /* disabled by default */
     cfg->negative_cache_ttl_ms = 5000;
 
@@ -473,23 +490,27 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "workload_profile") == 0) {
             /* Already handled in first pass. */
         } else if (strcmp(key, "catalogue_backend") == 0) {
-            if (strcmp(val, "rondb") == 0) {
-#ifdef HAVE_RONDB
-                cfg->catalogue_backend = MDS_BACKEND_RONDB;
-#else
-                (void)fprintf(stderr,
-                    "ERROR: catalogue_backend=rondb but "
-                    "binary built without ENABLE_RONDB\n");
-                (void)fclose(fp);
-                return MDS_ERR_INVAL;
-#endif
-            } else {
+            /* An unknown name is a parse error.  A KNOWN name is
+             * accepted here even when this binary was built without
+             * that backend: availability is a property of the
+             * catalogue core, which this library must not depend on,
+             * and mds_catalogue_open() refuses such a backend with
+             * "not compiled in; available: ..." before the daemon has
+             * any side effect. */
+            enum mds_catalogue_backend be = MDS_BACKEND_NONE;
+
+            if (mds_catalogue_backend_from_name(val, &be) != MDS_OK) {
+                char known[CFG_BACKEND_NAMES_MAX];
+
+                (void)mds_catalogue_backend_known_names(known,
+                                                        sizeof(known));
                 (void)fprintf(stderr,
                     "ERROR: unknown catalogue_backend '%s' "
-                    "(expected rondb)\n", val);
+                    "(known: %s)\n", val, known);
                 (void)fclose(fp);
                 return MDS_ERR_INVAL;
             }
+            cfg->catalogue_backend = be;
         } else if (strcmp(key, "catalogue_backend_conf") == 0) {
             (void)snprintf(cfg->catalogue_backend_conf,
                 sizeof(cfg->catalogue_backend_conf), "%s", val);
@@ -778,7 +799,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             char *saveptr = NULL;
             char *tok = strtok_r(buf, ",", &saveptr);
             while (tok != NULL && cfg->admin_allowed_host_count < 32) {
-                char *h = strip_whitespace(tok);
+                const char *h = strip_whitespace(tok);
                 if (*h != '\0') {
                     (void)snprintf(
                         cfg->admin_allowed_hosts[cfg->admin_allowed_host_count],
@@ -931,29 +952,6 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             unsigned long v = strtoul(val, NULL, 10);
             if (v >= 16 && v <= 1048576) {
                 cfg->parent_touch_max_dirs = (uint32_t)v;
-            }
-        } else if (strcmp(key, "remove_async") == 0) {
-            cfg->remove_async =
-                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        } else if (strcmp(key, "remove_async_batch") == 0) {
-            unsigned long v = strtoul(val, NULL, 10);
-            if (v >= 1 && v <= 4096) {
-                cfg->remove_async_batch = (uint32_t)v;
-            }
-        } else if (strcmp(key, "remove_async_workers") == 0) {
-            unsigned long v = strtoul(val, NULL, 10);
-            if (v >= 1 && v <= 32) {
-                cfg->remove_async_workers = (uint32_t)v;
-            }
-        } else if (strcmp(key, "remove_async_poll_ms") == 0) {
-            unsigned long v = strtoul(val, NULL, 10);
-            if (v >= 10 && v <= 60000) {
-                cfg->remove_async_poll_ms = (uint32_t)v;
-            }
-        } else if (strcmp(key, "remove_async_claim_ttl_ms") == 0) {
-            unsigned long v = strtoul(val, NULL, 10);
-            if (v >= 1000 && v <= 600000) {
-                cfg->remove_async_claim_ttl_ms = (uint32_t)v;
             }
         } else if (strcmp(key, "remove_async") == 0) {
             cfg->remove_async =
@@ -1238,6 +1236,9 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "file_delegations_enabled") == 0) {
             cfg->file_delegations_enabled =
                 (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (strcmp(key, "hpc_pending_recovery_scan") == 0) {
+            cfg->hpc_pending_recovery_scan =
+                (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
         } else if (strcmp(key, "ndb_conn_pool_size") == 0) {
             unsigned long v = strtoul(val, NULL, 10);
             if (v > 0 && v <= 64) {
@@ -1250,6 +1251,41 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         } else if (strcmp(key, "ndb_async_writes") == 0) {
             cfg->ndb_async_writes = (strcmp(val, "true") == 0 ||
                                      strcmp(val, "1") == 0);
+
+        /* FoundationDB backend (see struct mds_config). */
+        } else if (strcmp(key, "fdb_cluster_file") == 0) {
+            (void)snprintf(cfg->fdb_cluster_file,
+                sizeof(cfg->fdb_cluster_file), "%s", val);
+        } else if (strcmp(key, "fdb_key_prefix") == 0) {
+            if (strlen(val) >= sizeof(cfg->fdb_key_prefix)) {
+                (void)fprintf(stderr,
+                    "ERROR: fdb_key_prefix longer than %zu bytes\n",
+                    sizeof(cfg->fdb_key_prefix) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->fdb_key_prefix,
+                sizeof(cfg->fdb_key_prefix), "%s", val);
+        } else if (strcmp(key, "fdb_op_deadline_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v > 0 && v <= 600000UL) {
+                cfg->fdb_op_deadline_ms = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: fdb_op_deadline_ms=%lu out of range "
+                    "(1..600000); using default\n", v);
+            }
+        } else if (strcmp(key, "fdb_txn_timeout_ms") == 0) {
+            /* One attempt must finish inside the 5 s FDB transaction
+             * window, so the cap is 4900 ms. */
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v > 0 && v <= 4900UL) {
+                cfg->fdb_txn_timeout_ms = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: fdb_txn_timeout_ms=%lu out of range "
+                    "(1..4900); using default\n", v);
+            }
         } else if (strcmp(key, "placement_policy") == 0) {
             if (strcmp(val, "rr") == 0) {
                 cfg->placement_policy = PLACEMENT_RR;

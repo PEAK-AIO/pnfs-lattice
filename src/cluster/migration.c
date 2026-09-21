@@ -816,31 +816,6 @@ static int cleanup_collect_dirent_cat(const struct mds_cat_dirent *entry,
     return 0;
 }
 
-static int cleanup_collect_dirent(uint64_t child_fileid, uint8_t type,
-                                  const char *name, size_t name_len,
-                                  void *arg)
-{
-    struct cleanup_dirent_ctx *ctx = arg;
-    (void)child_fileid;
-    (void)type;
-
-    if (ctx->count >= ctx->capacity) {
-        uint32_t new_cap = ctx->capacity == 0 ? 16 : ctx->capacity * 2;
-        void *tmp = realloc(ctx->names,
-                            (size_t)new_cap * (MDS_MAX_NAME + 1));
-        if (tmp == NULL) {
-            return -1;
-}
-        ctx->names = tmp;
-        ctx->capacity = new_cap;
-    }
-    size_t clen = name_len < MDS_MAX_NAME ? name_len : MDS_MAX_NAME;
-    memcpy(ctx->names[ctx->count], name, clen);
-    ctx->names[ctx->count][clen] = '\0';
-    ctx->count++;
-    return 0;
-}
-
 enum mds_status migration_cleanup(struct mds_catalogue *cat,
                                   uint64_t root_fileid)
 {

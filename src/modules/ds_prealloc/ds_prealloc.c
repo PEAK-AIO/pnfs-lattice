@@ -57,29 +57,8 @@
 #define DS_PREALLOC_DEFAULT_RING_COUNT   4U
 #define DS_PREALLOC_MAX_RING_COUNT       64U
 #define DS_PREALLOC_MIN_RING_DEPTH       8U
-#define DS_PREALLOC_REFILL_BACKOFF_NS    (20U * 1000U * 1000U) /* 20 ms */
-#define DS_PREALLOC_PLAN_CACHE           8U
-
-/*
- * Cached wide-batch placement decision.  Back-to-back CREATEs into the
- * same HPC profile reuse the same (ordered) DS spread so a striped file
- * family lands consistently, instead of being re-shuffled by the RR
- * cursor on every call.  Keyed by the request geometry/filter and
- * invalidated when the ONLINE DS count changes.
- */
-struct prealloc_plan {
-    bool      valid;
-    uint32_t  stripe_count;
-    uint32_t  mirror_count;
-    uint8_t   required_mode;
-    uint8_t   required_transport;
-    uint8_t   preferred_transport;
-    uint32_t  preferred_caps;
-    bool      strict_unique_ds;
-    uint32_t  ds_count_seen;
-    uint32_t  n;
-    uint32_t *ds_ids;          /* malloc'd, length n */
-};
+/* struct timespec.tv_nsec is a long: keep the arithmetic in long. */
+#define DS_PREALLOC_REFILL_BACKOFF_NS    (20L * 1000L * 1000L) /* 20 ms */
 
 struct prealloc_slot {
     uint64_t                fileid;
@@ -101,7 +80,6 @@ struct prealloc_ring {
     uint32_t                tail;
     uint32_t                count;
 
-    uint32_t                ds_rr;      /* RR cursor within the subset */
     pthread_t               refill;
     bool                    refill_started;
 };
@@ -119,10 +97,6 @@ struct ds_prealloc_ctx {
     struct prealloc_ring       *rings;
     uint32_t                    ring_count;
     _Atomic uint32_t            pop_rr;
-
-    pthread_mutex_t             plan_lock;
-    struct prealloc_plan        plans[DS_PREALLOC_PLAN_CACHE];
-    uint32_t                    plan_rr;
 
     _Atomic bool                stop;
     bool                        synthetic_fh;
@@ -158,12 +132,13 @@ static bool ds_belongs_to_ring(const struct ds_prealloc_ctx *ctx,
                                uint32_t ring_index, uint32_t p)
 {
     uint32_t csz = (ctx->cluster_size >= 1U) ? ctx->cluster_size : 1U;
+    uint32_t rings = (ctx->ring_count >= 1U) ? ctx->ring_count : 1U;
     uint32_t myslot = (ctx->self_mds_id >= 1U) ? (ctx->self_mds_id - 1U) : 0U;
 
     if ((p % csz) != (myslot % csz)) {
         return false;
     }
-    return (((p / csz) % ctx->ring_count) == ring_index);
+    return (((p / csz) % rings) == ring_index);
 }
 
 /*
@@ -172,8 +147,8 @@ static bool ds_belongs_to_ring(const struct ds_prealloc_ctx *ctx,
  * entry->ds_id set (FH zeroed), MDS_ERR_NOSPC if this ring owns no
  * ONLINE DS right now.
  */
-static enum mds_status ring_select_ds(struct ds_prealloc_ctx *ctx,
-                                      struct prealloc_ring *ring,
+static enum mds_status ring_select_ds(const struct ds_prealloc_ctx *ctx,
+                                      const struct prealloc_ring *ring,
                                       struct mds_ds_map_entry *entry)
 {
     struct mds_ds_info *ds_list = NULL;
@@ -227,7 +202,7 @@ static enum mds_status ring_select_ds(struct ds_prealloc_ctx *ctx,
  * row.  Returns 0 on success.
  */
 static int produce_slot(struct ds_prealloc_ctx *ctx,
-                        struct prealloc_ring *ring,
+                        const struct prealloc_ring *ring,
                         struct prealloc_slot *slot)
 {
     struct mds_ds_map_entry entry;
@@ -308,6 +283,25 @@ static void ring_push(struct prealloc_ring *ring,
         mfetch_add(&g_branch_metrics.prealloc_refill_entries, 1);
     }
     pthread_mutex_unlock(&ring->lock);
+}
+
+/* Take the oldest ready slot (consumer side) and wake the refill
+ * worker.  Returns false when the ring is empty; *slot is then left
+ * untouched. */
+static bool ring_pop(struct prealloc_ring *ring, struct prealloc_slot *slot)
+{
+    bool got = false;
+
+    pthread_mutex_lock(&ring->lock);
+    if (ring->count > 0) {
+        *slot = ring->slots[ring->head];
+        ring->head = (ring->head + 1U) % ring->cap;
+        ring->count--;
+        got = true;
+        pthread_cond_signal(&ring->not_full);
+    }
+    pthread_mutex_unlock(&ring->lock);
+    return got;
 }
 
 static void *refill_main(void *arg)
@@ -424,10 +418,6 @@ static void ctx_free(struct ds_prealloc_ctx *ctx)
     if (ctx == NULL) {
         return;
     }
-    for (uint32_t i = 0; i < DS_PREALLOC_PLAN_CACHE; i++) {
-        free(ctx->plans[i].ds_ids);
-    }
-    pthread_mutex_destroy(&ctx->plan_lock);
     if (ctx->rings != NULL) {
         for (uint32_t i = 0; i < ctx->ring_count; i++) {
             free(ctx->rings[i].slots);
@@ -505,9 +495,10 @@ static void recover_pool(struct ds_prealloc_ctx *ctx)
         ring_i++;
         restored++;
     }
-    fprintf(stderr,
-            "INFO: ds_prealloc recover_pool: restored %u slots, dropped "
-            "%u bad-ds_id rows (of %u scanned)\n", restored, dropped, n);
+    /* Diagnostic only: nothing to do if stderr is gone. */
+    (void)fprintf(stderr,
+                  "INFO: ds_prealloc recover_pool: restored %u slots, dropped "
+                  "%u bad-ds_id rows (of %u scanned)\n", restored, dropped, n);
     free(rows);
 }
 
@@ -564,7 +555,6 @@ int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
     ctx->self_mds_id = self_mds_id;
     ctx->cluster_size = (cluster_size >= 1U) ? cluster_size : 1U;
     atomic_store_explicit(&ctx->stop, false, memory_order_relaxed);
-    pthread_mutex_init(&ctx->plan_lock, NULL);
 
     if (pool_size == 0U) {
         pool_size = 128U;
@@ -645,39 +635,29 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
         struct prealloc_ring *r =
             &ctx->rings[(start + k) % ctx->ring_count];
         struct prealloc_slot slot;
-        bool got = false;
 
-        pthread_mutex_lock(&r->lock);
-        if (r->count > 0) {
-            slot = r->slots[r->head];
-            r->head = (r->head + 1U) % r->cap;
-            r->count--;
-            got = true;
-            pthread_cond_signal(&r->not_full);
+        if (!ring_pop(r, &slot)) {
+            continue;
         }
-        pthread_mutex_unlock(&r->lock);
-
-        if (got) {
-            if (slot.entry.ds_id >= 65536U) {
-                /* Corrupt cached slot: never persist a garbage ds_id
-                 * (wedges ds_gc + DS fencing). Drop it (and its pool row)
-                 * and keep looking; the ring-empty fallback recomputes a
-                 * valid DS via placement_select_ex. */
-                (void)mds_cat_prealloc_pool_delete(
-                    (struct mds_catalogue *)ctx->cat, slot.fileid);
-                continue;
-            }
-            *entry = slot.entry;
-            if (stripe_unit != NULL) { *stripe_unit = slot.stripe_unit; }
-            if (fileid_out != NULL) { *fileid_out = slot.fileid; }
+        if (slot.entry.ds_id >= 65536U) {
+            /* Corrupt cached slot: never persist a garbage ds_id
+             * (wedges ds_gc + DS fencing). Drop it (and its pool row)
+             * and keep looking; the ring-empty fallback recomputes a
+             * valid DS via placement_select_ex. */
             (void)mds_cat_prealloc_pool_delete(
                 (struct mds_catalogue *)ctx->cat, slot.fileid);
-            mfetch_add(&g_branch_metrics.prealloc_pops_ok, 1);
-            if (slot.entry.nfs_fh_len == 0) {
-                mfetch_add(&g_branch_metrics.prealloc_pops_fh_missing, 1);
-            }
-            return 0;
+            continue;
         }
+        *entry = slot.entry;
+        if (stripe_unit != NULL) { *stripe_unit = slot.stripe_unit; }
+        if (fileid_out != NULL) { *fileid_out = slot.fileid; }
+        (void)mds_cat_prealloc_pool_delete(
+            (struct mds_catalogue *)ctx->cat, slot.fileid);
+        mfetch_add(&g_branch_metrics.prealloc_pops_ok, 1);
+        if (slot.entry.nfs_fh_len == 0) {
+            mfetch_add(&g_branch_metrics.prealloc_pops_fh_missing, 1);
+        }
+        return 0;
     }
 
     /* All rings empty -- synchronous fallback. */
@@ -788,6 +768,132 @@ void ds_prealloc_destroy(struct ds_prealloc_ctx *ctx)
  * Wide pre-warm batch (HPC-Shared) -- synchronous all-or-nothing.
  * ----------------------------------------------------------------------- */
 
+/*
+ * Snapshot the ONLINE DS pool for a wide batch and overlay live
+ * weights when a DS cache is attached.  On MDS_OK the caller owns
+ * *ds_list; on MDS_ERR_NOSPC nothing is left allocated.
+ */
+static enum mds_status batch_list_ds(
+    const struct ds_prealloc_ctx *ctx,
+    const struct ds_prealloc_batch_request *req,
+    struct mds_ds_info **ds_list,
+    uint32_t *ds_count)
+{
+    enum mds_status st;
+
+    *ds_list = NULL;
+    *ds_count = 0;
+    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, ds_list,
+                         ds_count);
+    if (st != MDS_OK || *ds_list == NULL || *ds_count == 0) {
+        free(*ds_list);
+        *ds_list = NULL;
+        return MDS_ERR_NOSPC;
+    }
+    /* strict_unique_ds: every stripe must land on a distinct DS, so the
+     * online pool must be at least stripe_count wide. */
+    if (req->strict_unique_ds && *ds_count < req->stripe_count) {
+        free(*ds_list);
+        *ds_list = NULL;
+        return MDS_ERR_NOSPC;
+    }
+    if (ctx->cache != NULL) {
+        ds_cache_overlay_weights(ctx->cache, *ds_list, *ds_count);
+    }
+    return MDS_OK;
+}
+
+/*
+ * Place the batch.  Fileid-rotated RR spreads wide layouts across the
+ * pool; capacity/WRR would re-collapse onto the same hot N DSes.
+ * Any placement failure is reported as MDS_ERR_NOSPC.
+ */
+static enum mds_status batch_place(
+    const struct ds_prealloc_batch_request *req,
+    const struct mds_ds_info *ds_list,
+    uint32_t ds_count,
+    uint32_t stripe_unit,
+    uint64_t fileid,
+    struct mds_ds_map_entry *entries)
+{
+    uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+    uint32_t sc = req->stripe_count;
+    enum mds_status st;
+
+    st = placement_select_rr_at2(ds_list, ds_count, &sc, mc,
+                                 stripe_unit, fileid, entries);
+    if (st != MDS_OK) {
+        return MDS_ERR_NOSPC;
+    }
+    /* strict_unique_ds: refuse graceful degrade -- caller asked
+     * for a full-width unique spread and must see NOSPC rather
+     * than a silently narrower layout. */
+    if (req->strict_unique_ds && sc != req->stripe_count) {
+        return MDS_ERR_NOSPC;
+    }
+    return MDS_OK;
+}
+
+/*
+ * Parallel per-slot DS file create + FH capture (bounded
+ * fork-join; see mds_proxy_ensure_ds_file_fh_batch).  Sequential
+ * capture put stripe_count NFS round-trips on the OPEN(CREATE)
+ * critical path.  Slots the batch could not capture keep
+ * nfs_fh_len == 0; the per-slot synthetic fallback of the old
+ * sequential loop is preserved by fabricating FHs for exactly
+ * those slots afterwards.
+ *
+ * Returns MDS_OK when every slot ends up with a usable FH.  Otherwise
+ * the DS files that WERE created are rolled back (best-effort GC;
+ * failed slots left no durable state worth queueing) and
+ * MDS_ERR_NOSPC is returned so the caller never publishes a
+ * half-built layout.
+ */
+static enum mds_status batch_capture_fh(
+    const struct ds_prealloc_ctx *ctx,
+    const struct ds_prealloc_batch_request *req,
+    uint64_t fileid,
+    struct mds_ds_map_entry *entries,
+    uint32_t n)
+{
+    uint32_t failed;
+    uint32_t rb_mc;
+
+    if (ctx->proxy != NULL) {
+        failed = mds_proxy_ensure_ds_file_fh_batch(
+            ctx->proxy, fileid, req->stripe_count, entries, n);
+    } else {
+        failed = n;  /* No proxy: nothing was captured. */
+    }
+    if (failed > 0 && ctx->synthetic_fh) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (entries[i].nfs_fh_len == 0) {
+                synth_fh(&entries[i], fileid + i + 1U);
+            }
+        }
+        failed = 0;
+    }
+    if (failed == 0) {
+        return MDS_OK;
+    }
+
+    /* No usable FH for at least one stripe -- roll back.  Each row
+     * carries the requested geometry so the sweep probes every slot
+     * (wide layouts are not stripe-dense per DS). */
+    rb_mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
+    for (uint32_t j = 0; j < n; j++) {
+        if (entries[j].nfs_fh_len == 0) {
+            continue;
+        }
+        (void)mds_cat_gc_enqueue_hint(
+            (struct mds_catalogue *)ctx->cat, NULL, fileid,
+            entries[j].ds_id, entries[j].nfs_fh,
+            entries[j].nfs_fh_len,
+            MDS_GC_SWEEP_GEOM(req->stripe_count, rb_mc));
+    }
+    return MDS_ERR_NOSPC;
+}
+
 enum mds_status ds_prealloc_batch(
     struct ds_prealloc_ctx *ctx,
     const struct ds_prealloc_batch_request *req,
@@ -817,20 +923,9 @@ enum mds_status ds_prealloc_batch(
     stripe_unit = (req->stripe_unit != 0U) ? req->stripe_unit
                                            : ctx->stripe_unit;
 
-    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, &ds_list,
-                         &ds_count);
-    if (st != MDS_OK || ds_list == NULL || ds_count == 0) {
-        free(ds_list);
-        return MDS_ERR_NOSPC;
-    }
-    /* strict_unique_ds: every stripe must land on a distinct DS, so the
-     * online pool must be at least stripe_count wide. */
-    if (req->strict_unique_ds && ds_count < req->stripe_count) {
-        free(ds_list);
-        return MDS_ERR_NOSPC;
-    }
-    if (ctx->cache != NULL) {
-        ds_cache_overlay_weights(ctx->cache, ds_list, ds_count);
+    st = batch_list_ds(ctx, req, &ds_list, &ds_count);
+    if (st != MDS_OK) {
+        return st;
     }
     entries = calloc(n, sizeof(*entries));
     if (entries == NULL) {
@@ -856,80 +951,17 @@ enum mds_status ds_prealloc_batch(
         }
     }
 
-    {
-        uint32_t mc = (req->mirror_count == 0U) ? 1U : req->mirror_count;
-        uint32_t sc = req->stripe_count;
-
-        /* Fileid-rotated RR spreads wide layouts across the pool;
-         * capacity/WRR would re-collapse onto the same hot N DSes. */
-        st = placement_select_rr_at2(ds_list, ds_count, &sc, mc,
-                                     stripe_unit, fileid, entries);
-        if (st != MDS_OK) {
-            free(ds_list);
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
-        /* strict_unique_ds: refuse graceful degrade — caller asked
-         * for a full-width unique spread and must see NOSPC rather
-         * than a silently narrower layout. */
-        if (req->strict_unique_ds && sc != req->stripe_count) {
-            free(ds_list);
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
-    }
+    st = batch_place(req, ds_list, ds_count, stripe_unit, fileid, entries);
     free(ds_list);
+    if (st != MDS_OK) {
+        free(entries);
+        return st;
+    }
 
-    /*
-     * Parallel per-slot DS file create + FH capture (bounded
-     * fork-join; see mds_proxy_ensure_ds_file_fh_batch).  Sequential
-     * capture put stripe_count NFS round-trips on the OPEN(CREATE)
-     * critical path.  Slots the batch could not capture keep
-     * nfs_fh_len == 0; the per-slot synthetic fallback of the old
-     * sequential loop is preserved by fabricating FHs for exactly
-     * those slots afterwards.
-     */
-    {
-        uint32_t failed;
-
-        if (ctx->proxy != NULL) {
-            failed = mds_proxy_ensure_ds_file_fh_batch(
-                ctx->proxy, fileid, req->stripe_count, entries, n);
-        } else {
-            failed = n;  /* No proxy: nothing was captured. */
-        }
-        if (failed > 0 && ctx->synthetic_fh) {
-            for (uint32_t i = 0; i < n; i++) {
-                if (entries[i].nfs_fh_len == 0) {
-                    synth_fh(&entries[i], fileid + i + 1U);
-                }
-            }
-            failed = 0;
-        }
-        if (failed > 0) {
-            /* No usable FH for at least one stripe -- roll back the
-             * DS files that WERE created (best-effort GC; failed
-             * slots left no durable state worth queueing) and fail
-             * the whole batch so the caller never sees a half-built
-             * layout.  Each row carries the requested geometry so
-             * the sweep probes every slot (wide layouts are not
-             * stripe-dense per DS). */
-            uint32_t rb_mc = (req->mirror_count == 0U)
-                                 ? 1U : req->mirror_count;
-
-            for (uint32_t j = 0; j < n; j++) {
-                if (entries[j].nfs_fh_len == 0) {
-                    continue;
-                }
-                (void)mds_cat_gc_enqueue_hint(
-                    (struct mds_catalogue *)ctx->cat, NULL, fileid,
-                    entries[j].ds_id, entries[j].nfs_fh,
-                    entries[j].nfs_fh_len,
-                    MDS_GC_SWEEP_GEOM(req->stripe_count, rb_mc));
-            }
-            free(entries);
-            return MDS_ERR_NOSPC;
-        }
+    st = batch_capture_fh(ctx, req, fileid, entries, n);
+    if (st != MDS_OK) {
+        free(entries);
+        return st;
     }
 
     out->fileid = fileid;

@@ -29,7 +29,6 @@
 #include "health.h"
 #include "grace.h"
 #include "ds_prepare.h"
-#include "catalogue_rondb.h"
 #include "lock_state.h"
 #include "delegation.h"
 #include "dir_delegation.h"
@@ -285,10 +284,11 @@ enum nfs4_status op_open(struct compound_data *cd,
 	 * RFC 5661 S18.51.3: non-reclaim locking ops MUST be deferred
 	 * until RECLAIM_COMPLETE.  Return NFS4ERR_GRACE if the client
 	 * hasn't sent RECLAIM_COMPLETE yet.  CLAIM_PREVIOUS (reclaim)
-	 * is exempt.  Pynfs RECC3 testOpenBeforeRECC.
+	 * is exempt -- every CLAIM_PREVIOUS open has already returned
+	 * above, so re-add an explicit claim test here if that stub
+	 * ever falls through.  Pynfs RECC3 testOpenBeforeRECC.
 	 */
-	if (a->claim != CLAIM_PREVIOUS &&
-	    cd->st != NULL && cd->clientid != 0 &&
+	if (cd->st != NULL && cd->clientid != 0 &&
 	    !session_client_has_reclaimed(cd->st, cd->clientid)) {
 		return NFS4ERR_GRACE;
 	}
@@ -614,8 +614,11 @@ enum nfs4_status op_open(struct compound_data *cd,
 			} else {
 				/*
 				 * Direct-catalogue path (cd->cq == NULL).
-				 * Fused shim with per-op diagnostic tracing
-				 * enabled -- see docs/benchmark-schema-v6.md.
+				 * Fused create + layout pre-grant when the
+				 * backend implements the ns_create_with_layout
+				 * slot (RonDB: one NDB transaction, see
+				 * docs/benchmark-schema-v6.md); plain
+				 * cat_create otherwise.
 				 */
 				uint64_t lg_clientid = 0;
 				uint32_t lg_iomode = 0;
@@ -624,7 +627,9 @@ enum nfs4_status op_open(struct compound_data *cd,
 				bool do_fused = false;
 
 				memset(&lg_sid, 0, sizeof(lg_sid));
-				if (cd->prealloc != NULL && cd->ops != NULL) {
+				if (cd->prealloc != NULL && cd->ops != NULL &&
+				    mds_cat_ns_create_with_layout_supported(
+					    cd->cat)) {
 					uint32_t scan;
 					for (scan = cd->op_index + 1;
 					     scan < cd->op_count; scan++) {
@@ -671,7 +676,7 @@ enum nfs4_status op_open(struct compound_data *cd,
 					 * entirely (Fix 3 of the May-13 perf
 					 * pass).
 					 */
-					st = catalogue_rondb_ns_create_with_layout(
+					st = mds_cat_ns_create_with_layout(
 						cd->cat, cd->current_fh.fileid,
 						a->name, MDS_FTYPE_REG,
 						eff_mode, eff_uid, eff_gid,
@@ -1191,15 +1196,14 @@ open_existing:
 				case OPEN4_SHARE_ACCESS_WANT_ANY_DELEG:
 				case OPEN4_SHARE_ACCESS_WANT_NO_PREFERENCE:
 				default:
-					/* Server picks based on share_access. */
-					if (want_write && !want_read) {
+					/* Server picks based on share_access.
+					 * WRITE-only and mixed RW OPENs both get
+					 * a WRITE deleg (exclusive caching
+					 * authority); READ-only gets READ. */
+					if (want_write) {
 						deleg_type = OPEN_DELEGATE_WRITE;
-					} else if (want_read && !want_write) {
+					} else if (want_read) {
 						deleg_type = OPEN_DELEGATE_READ;
-					} else if (want_read && want_write) {
-						/* Mixed RW OPEN: WRITE deleg gives
-						 * exclusive caching authority. */
-						deleg_type = OPEN_DELEGATE_WRITE;
 					}
 					break;
 				}

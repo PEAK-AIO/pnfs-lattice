@@ -19,7 +19,7 @@
 #   4. cppcheck     -- Static analysis via cppcheck
 #   5. clang-tidy   -- Static analysis via clang-tidy
 #   6. unit-tests   -- Run unit tests
-#   7. valgrind     -- Run unit tests under valgrind (slow)
+#   7. valgrind     -- Run unit + conformance tests under valgrind (slow)
 #   8. integration  -- Run integration tests (requires running MDS)
 #
 # The script stops at the first gate failure unless --continue is given.
@@ -314,50 +314,121 @@ fi
 
 # ---------------------------------------------------------------------------
 # Gate 7: Valgrind (slow -- skipped with --quick)
+#
+# Exit codes of a test binary run under valgrind:
+#   0    clean run
+#   77   the test skipped itself: its backend is not built into this
+#        tree or not reachable (test_fdb_txn / test_fdb_ext /
+#        test_fdb_coord, conformance_fault and the harness-based
+#        catalogue tests; ctest registers 77 as SKIP_RETURN_CODE).
+#        Counted and printed, never a failure: a leak check cannot
+#        judge code that did not run.  valgrind still overrides the
+#        exit code with 99 when it saw an error before the skip.
+#   99   valgrind's --error-exitcode: memcheck reported an error or a
+#        leak (see the per-binary log)
+#   else the test itself failed (assertion, crash, unknown backend)
+#
+# The binaries are the tests ctest registered under the "unit" and
+# "conformance" labels (ctest --show-only=json-v1).  A
+# `find -name 'test_*'` over the build tree would silently include the
+# integration binaries (test_cluster, test_failover,
+# test_client_lifecycle), which gate themselves on external
+# infrastructure -- a no-op run without it, a live etcd / MDS cluster
+# with it, neither a leak check of this tree -- and would miss the
+# conformance_* suites, whose names carry no test_ prefix.
 # ---------------------------------------------------------------------------
+VALGRIND_SKIP_RC=77
+VALGRIND_ERROR_RC=99
+
+# Print one binary path per line: the command of every ctest test
+# labelled unit or conformance in ${BUILD_DIR_GCC}.  Those tests take
+# no arguments, so only the executable is kept.
+valgrind_test_binaries() {
+    (cd "${BUILD_DIR_GCC}" && ctest --show-only=json-v1 -L 'unit|conformance') | \
+        python3 -c '
+import json
+import sys
+
+for test in json.load(sys.stdin).get("tests", []):
+    command = test.get("command")
+    if command:
+        print(command[0])
+'
+}
+
 if should_run "valgrind"; then
     log_header "valgrind"
     if [[ ${QUICK} -eq 1 ]]; then
         gate_skip "valgrind" "--quick mode"
     elif ! command -v valgrind > /dev/null 2>&1; then
         gate_skip "valgrind" "valgrind not installed"
+    elif ! command -v python3 > /dev/null 2>&1; then
+        gate_skip "valgrind" "python3 not installed (reads ctest --show-only=json-v1)"
     elif [[ ! -d "${BUILD_DIR_GCC}" ]]; then
         gate_skip "valgrind" "build directory not found"
     else
         VALGRIND_FAIL=0
+        VG_TOTAL=0
+        VG_CLEAN=0
+        VG_SKIPPED=0
+        VG_ERRORS=0
+        VG_TEST_FAILED=0
         VALGRIND_LOG_DIR="${BUILD_DIR_GCC}/valgrind-logs"
         mkdir -p "${VALGRIND_LOG_DIR}"
 
-        # Suppress known leaks inside the in-memory test backend
-        # (tests/catalogue_memdb.c); production source is not covered
-        # by this file.
+        # Suppress known leaks of memdb handles abandoned by test
+        # fixtures (src/catalogue/catalogue_memdb.c constructors); no
+        # other production source is covered by this file.
         VALGRIND_SUPP_ARGS=()
         if [[ -f "${PROJECT_DIR}/tests/memdb.supp" ]]; then
             VALGRIND_SUPP_ARGS+=("--suppressions=${PROJECT_DIR}/tests/memdb.supp")
         fi
 
-        # Find all test binaries
-        while IFS= read -r -d '' test_bin; do
+        while IFS= read -r test_bin; do
             test_name="$(basename "${test_bin}")"
             vg_log="${VALGRIND_LOG_DIR}/${test_name}.log"
+            VG_TOTAL=$((VG_TOTAL + 1))
 
-            if ! valgrind \
+            rc=0
+            valgrind \
                 --leak-check=full \
                 --show-leak-kinds=all \
                 --errors-for-leak-kinds=all \
-                --error-exitcode=99 \
+                --error-exitcode="${VALGRIND_ERROR_RC}" \
                 --track-origins=yes \
                 "${VALGRIND_SUPP_ARGS[@]}" \
                 --log-file="${vg_log}" \
-                "${test_bin}" > /dev/null 2>&1; then
-                echo -e "    ${RED}[ ]${NC} ${test_name} -- see ${vg_log}"
-                VALGRIND_FAIL=1
-            else
-                echo -e "    ${GREEN}[x]${NC} ${test_name} -- clean"
-            fi
-        done < <(find "${BUILD_DIR_GCC}" -name 'test_*' -executable -type f -print0)
+                "${test_bin}" > /dev/null 2>&1 || rc=$?
 
-        if [[ ${VALGRIND_FAIL} -eq 0 ]]; then
+            case "${rc}" in
+                0)
+                    echo -e "    ${GREEN}[x]${NC} ${test_name} -- clean"
+                    VG_CLEAN=$((VG_CLEAN + 1))
+                    ;;
+                "${VALGRIND_SKIP_RC}")
+                    echo -e "    ${YELLOW}--${NC} ${test_name} -- SKIP (backend unavailable)"
+                    VG_SKIPPED=$((VG_SKIPPED + 1))
+                    ;;
+                "${VALGRIND_ERROR_RC}")
+                    echo -e "    ${RED}[ ]${NC} ${test_name} -- valgrind errors, see ${vg_log}"
+                    VG_ERRORS=$((VG_ERRORS + 1))
+                    VALGRIND_FAIL=1
+                    ;;
+                *)
+                    echo -e "    ${RED}[ ]${NC} ${test_name} -- test failed (exit ${rc})," \
+                            "see ${vg_log}"
+                    VG_TEST_FAILED=$((VG_TEST_FAILED + 1))
+                    VALGRIND_FAIL=1
+                    ;;
+            esac
+        done < <(valgrind_test_binaries)
+
+        echo "    ${VG_TOTAL} binaries: ${VG_CLEAN} clean, ${VG_SKIPPED} skipped," \
+             "${VG_ERRORS} with valgrind errors, ${VG_TEST_FAILED} failed"
+        if [[ ${VG_TOTAL} -eq 0 ]]; then
+            echo "    ERROR: ctest lists no unit or conformance tests in ${BUILD_DIR_GCC}"
+            gate_fail "valgrind"
+        elif [[ ${VALGRIND_FAIL} -eq 0 ]]; then
             gate_pass "valgrind"
         else
             gate_fail "valgrind"

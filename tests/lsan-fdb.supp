@@ -1,0 +1,18 @@
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# lsan-fdb.supp -- LeakSanitizer suppressions for the FoundationDB client.
+#
+# libfdb_c keeps a few allocations made on its network thread
+# (fdb_run_network: connection monitors, cluster-file watchers, the
+# multi-version client registry) for the life of the process; they are
+# not released by fdb_stop_network.  Every frame of those leak stacks
+# lies inside libfdb_c.so, so this file scopes LSan down to the tree's
+# own code: a leak in src/** or tests/** still fails the run.
+#
+# Usage (sanitizer configure of the fdb tree, see
+# tests/catalogue_conformance/CMakeLists.txt):
+#   LSAN_OPTIONS=suppressions=tests/lsan-fdb.supp ASAN_OPTIONS=detect_leaks=1 \
+#       ./build-fdb-asan/tests/catalogue_conformance/conformance_fault
+#
+leak:libfdb_c.so

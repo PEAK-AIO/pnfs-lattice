@@ -254,6 +254,26 @@ void cluster_transport_server_stop(struct cluster_server *srv);
  */
 uint16_t cluster_transport_server_port(const struct cluster_server *srv);
 
+/**
+ * @brief True when the admin RPC service accepts requests, i.e. the
+ *        cluster transport server is listening (grpc_service.c).
+ *
+ * @param srv  Cluster transport server handle (NULL -> false).
+ */
+bool admin_service_is_ready(const struct cluster_server *srv);
+
+/**
+ * @brief Render the admin service endpoint as "host:port".
+ *
+ * @param srv      Cluster transport server handle.
+ * @param buf      Output buffer (at least 8 bytes).
+ * @param buf_len  Capacity of @p buf.
+ * @return 0 on success, -1 when the server is not listening or the
+ *         arguments are invalid.
+ */
+int admin_service_endpoint(const struct cluster_server *srv,
+                           char *buf, size_t buf_len);
+
 /* -----------------------------------------------------------------------
  * TCP transport client
  * ----------------------------------------------------------------------- */

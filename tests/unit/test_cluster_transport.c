@@ -1193,9 +1193,7 @@ static void cleanup_rebal(void)
     snprintf(lockpath, sizeof(lockpath), "%s-lock", REBAL_DB);
     (void)unlink(lockpath);
     if (g_rebal_tmpdir[0] != '\0') {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", g_rebal_tmpdir);
-        (void)system(cmd);
+        test_rm_rf(g_rebal_tmpdir);
         g_rebal_tmpdir[0] = '\0';
     }
 }
@@ -1481,9 +1479,7 @@ static void test_ds_list_admin_wire(void)
     mds_catalogue_close(db);
 
     /* Cleanup tmpdir. */
-    char rm_cmd[512];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", tmpdir);
-    (void)system(rm_cmd);
+    test_rm_rf(tmpdir);
 
     fprintf(stdout, "PASS\n");
     passed++;
@@ -1576,9 +1572,7 @@ static void test_ds_add_set_state_remove_wire(void)
     commit_queue_destroy(cq);
     mds_catalogue_close(db);
 
-    char rm_cmd[512];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", tmpdir);
-    (void)system(rm_cmd);
+    test_rm_rf(tmpdir);
 
     fprintf(stdout, "PASS\n");
     passed++;
@@ -1762,9 +1756,7 @@ static void test_ds_add_v2_mode_transport(void)
     commit_queue_destroy(cq);
     mds_catalogue_close(db);
 
-    char rm_cmd[512];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", tmpdir);
-    (void)system(rm_cmd);
+    test_rm_rf(tmpdir);
 
     fprintf(stdout, "PASS\n");
     passed++;

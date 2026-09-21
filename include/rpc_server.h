@@ -232,7 +232,12 @@ void rpc_server_stop(struct rpc_server *srv);
  * Closes the listening socket, all client connections, and frees
  * memory.  Must not be called while the event loop is running
  * (call rpc_server_stop() first and wait for rpc_server_start()
- * to return).
+ * to return), and -- when a worker pool was configured -- only after
+ * that pool has been joined (threadpool_destroy): workers hold raw
+ * pointers to the server and its connections until their completion
+ * tail has run, and rpc_server_stop() only waits for the in-flight
+ * counts, not for the pool threads.  The daemon's shutdown order is
+ * stop -> join listener -> threadpool_destroy -> rpc_server_destroy.
  *
  * @param srv  Server handle.  NULL is tolerated.
  */

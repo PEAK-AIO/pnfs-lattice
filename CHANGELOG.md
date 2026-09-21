@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Backend-independent MDS, memdb backend, FoundationDB backend and a
+  catalogue conformance suite** — the MDS reached RonDB-specific entry
+  points directly from the cluster, failover and namespace code, so no
+  second catalogue backend could be built or tested.  Every backend
+  dependency now goes through the catalogue vtable, whose contract is
+  pinned in `include/catalogue_internal.h` (C1–C7: re-entrant slots,
+  callbacks never invoked from retry bodies, single-transaction
+  predicates, backend status codes passed through unchanged, truthful
+  capability bits, the transaction token as a grouping context only,
+  dispatcher-owned catalogue).  Cluster services (node registry,
+  heartbeat, partition map) sit behind `struct mds_cluster_ops`, gated by
+  `MDS_CAT_CAP_MULTI_PROCESS`; a backend registry
+  (`catalogue_factory.c`) selects the store from `catalogue_backend`,
+  and a name that is known but not compiled in is refused at start-up.
+  With RonDB not compiled in the key has no default and is mandatory.
+  Three backends ship: **RonDB** (production; its REMOVE, RENAME and
+  LINK now attach interpreted guards to the mutating transaction
+  instead of resolving in one transaction and mutating in another, and
+  registry fencing uses epoch guards with a start-up deadline and
+  duplicate-`mds_id` self-fencing); **memdb**
+  (`src/catalogue/catalogue_memdb.c`), the in-memory reference backend
+  — bounded, non-durable, single process, with real coordination tables
+  and in-process cluster ops, so the daemon runs without RonDB
+  (`catalogue_backend = memdb`) and the unit tests need no external
+  service; and **FoundationDB** (`ENABLE_FDB`, `libfdb_c`), selected
+  with `catalogue_backend = fdb` plus `fdb_cluster_file`,
+  `fdb_key_prefix`, `fdb_op_deadline_ms` and `fdb_txn_timeout_ms`.  The
+  FDB backend runs one FoundationDB transaction per catalogue call over
+  a single-byte-typed key space, keeps directory counters (nlink,
+  change, mtime, ctime) in atomic-ADD side keys so same-directory
+  CREATE/REMOVE do not conflict, mints per-dirent READDIR cookies from a
+  keyspace-wide allocator, and resolves `commit_unknown_result` with a
+  commit-outcome witness (a per-thread WITNESS slot blind-set by every
+  mutating body, fenced by a never-written anchor key with a read
+  version pinned before every commit); an outcome that cannot be
+  established surfaces as the new `MDS_ERR_INDOUBT`, mapped to
+  `NFS4ERR_IO` at every caller with no retry, compensation or split-path
+  fallback (`test_indoubt_mapping` pins the mapping).  It implements the
+  full slot matrix including cluster ops, so a two-MDS deployment runs
+  on it.  `tests/catalogue_conformance/` runs one contract against any
+  backend (`CATALOGUE_TEST_BACKEND=memdb|rondb|fdb`): slot matrix against
+  an expected capability table, transaction-token semantics, object
+  lifecycle, hard-link cookie pagination, contract checks and, for FDB,
+  a fault-injection suite (unknown commit results, stalls, timeouts and
+  restarts between attempt and probe, with exact double/partial-effect
+  counters).  `tests/integration/daemon_smoke.sh` starts the daemon on
+  memdb or FDB and probes it with pynfs.  Known limit: the RonDB
+  backend still uses cookie = fileid for READDIR, a documented expected
+  failure of the hard-link pagination test until the schema gains an
+  ordering column.  See `docs/architecture.md` §6 and §11.
 - **Find-style metadata search: `mds-find`, `mds-apid`, and
   `lattice-find`** — NFSv4 has no query verb, so answering "every file
   over 1 GiB changed in the last day" meant a `LOOKUP`/`READDIR`/

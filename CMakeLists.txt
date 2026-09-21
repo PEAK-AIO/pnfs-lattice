@@ -42,6 +42,8 @@ option(ENABLE_EBPF       "Build eBPF replication monitoring programs" ON)
 option(ENABLE_ADMIN_CLI  "Build the mds-admin CLI tool"               ON)
 option(ENABLE_TESTS      "Build unit and integration tests"           ON)
 option(ENABLE_RONDB      "Build RonDB catalogue backend"              ON)
+option(ENABLE_MEMDB_BACKEND "Build the in-memory catalogue backend"   ON)
+option(ENABLE_FDB        "Build the FoundationDB catalogue backend"   OFF)
 # Compile-time kill-switch for per-op latency / phase / cat-op
 # histograms.  OFF removes every observation site from the binary
 # (defines MDS_OP_METRICS_DISABLE), leaving only the dispatcher
@@ -229,7 +231,9 @@ include_directories(
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
-# LMDB removed -- RonDB is the only supported backend.
+# LMDB removed.  Catalogue backends are build options: ENABLE_RONDB,
+# ENABLE_MEMDB_BACKEND and ENABLE_FDB (see below); the daemon selects
+# one at startup through `catalogue_backend` in mds.conf.
 
 # pthreads
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -280,6 +284,27 @@ if(ENABLE_RONDB)
         message(WARNING "RonDB not found -- RonDB backend disabled")
         set(ENABLE_RONDB OFF)
     endif()
+endif()
+
+# FoundationDB -- optional distributed catalogue backend (fdb_c 7.3 client;
+# API version 730).  Headers: foundationdb/fdb_c.h; library: libfdb_c.so.
+# Missing dependencies are fatal when the option is ON: an operator who
+# asked for the backend must not silently get a binary without it.
+if(ENABLE_FDB)
+    find_path(FDB_INCLUDE_DIR foundationdb/fdb_c.h)
+    find_library(FDB_LIBRARY fdb_c)
+    if(NOT FDB_INCLUDE_DIR OR NOT FDB_LIBRARY)
+        message(FATAL_ERROR
+            "ENABLE_FDB=ON but the FoundationDB client was not found "
+            "(need foundationdb/fdb_c.h and libfdb_c); install the "
+            "foundationdb-clients package or pass -DFDB_INCLUDE_DIR= and "
+            "-DFDB_LIBRARY=")
+    endif()
+    # Global, like HAVE_RONDB: the backend factory, the test harness
+    # object library and the unit tests all branch on it.
+    add_compile_definitions(HAVE_FDB=1)
+    message(STATUS "FoundationDB client: ${FDB_LIBRARY} "
+                   "(${FDB_INCLUDE_DIR}) -- fdb catalogue backend enabled")
 endif()
 
 # libbpf -- eBPF replication monitoring (optional)

@@ -5,7 +5,8 @@
  * mds_catalogue.h -- Backend-neutral metadata catalogue interface.
  *
  * Decouples the NFS protocol layer from the storage engine.
- * The unit of work is a logical metadata transaction.
+ * The unit of work is ONE catalogue operation, committed by the
+ * backend on its own (see "Transaction control" below).
  *
  * State classes:
  *
@@ -42,14 +43,37 @@ struct mds_ds_info;
 struct mds_quota_rule;
 struct mds_quota_usage;
 struct mds_gc_entry;
+struct nfs4_stateid;
+struct catalog_image;
 
 /* -----------------------------------------------------------------------
  * Backend-neutral types
  * ----------------------------------------------------------------------- */
 
-/** Directory entry. */
+/**
+ * Directory entry as delivered by the readdir callbacks.
+ *
+ * cookie is the backend-assigned READDIR cookie for this entry.  Every
+ * producer (backend ns_readdir / ns_readdir_plus / ns_readdir_plus_from
+ * and any adapter that builds a dirent) MUST set it.  Contract:
+ *   - unique per entry within its directory (two hard links to one
+ *     inode in one directory get two different cookies);
+ *   - stable for the life of the dirent;
+ *   - never 0, 1 or 2 (RFC 8881 reserves them: 0 is "first page" and
+ *     1/2 are the "." / ".." conventions);
+ *   - a later page is fetched with ns_readdir_plus_from(start_after_
+ *     cookie) and returns the entries whose cookie is strictly
+ *     greater, in the backend's iteration order.
+ * The NFS layer hands the cookie to the client unchanged and never
+ * derives it from fileid.  memdb assigns a per-dirent sequence; the
+ * RonDB backend still assigns cookie = child fileid, which satisfies
+ * the contract except for hard links in one directory (documented
+ * expected failure until its schema change; see the
+ * ns_readdir_plus_from slot in catalogue_internal.h).
+ */
 struct mds_cat_dirent {
 	uint64_t fileid;
+	uint64_t cookie;
 	uint8_t  type;
 	char     name[MDS_MAX_NAME + 1];
 };
@@ -93,14 +117,49 @@ typedef int (*mds_xattr_list_cb)(const char *name, size_t name_len,
 /**
  * Open a metadata catalogue.
  *
- * The backend is selected by cfg.
+ * The backend is selected by cfg->catalogue_backend and looked up in
+ * the factory's registration table (catalogue_factory.c).
  *
  * @param cfg   MDS configuration.
  * @param out   Receives the catalogue handle.
- * @return MDS_OK on success.
+ * @return MDS_OK on success; MDS_ERR_INVAL for NULL arguments, for
+ *         MDS_BACKEND_NONE (no backend configured) and for a backend
+ *         that is known but not compiled into this binary (see
+ *         mds_catalogue_backend_available); otherwise the backend
+ *         constructor's status.
  */
 enum mds_status mds_catalogue_open(const struct mds_config *cfg,
 				   struct mds_catalogue **out);
+
+/* -----------------------------------------------------------------------
+ * Backend registry (catalogue_factory.c)
+ *
+ * One static table lists every KNOWN backend and, when it is compiled
+ * into this binary, its constructor.  The mds.conf name <-> enum
+ * mapping is deliberately NOT here but in pnfs_common
+ * (catalogue_backend_names.h: mds_catalogue_backend_from_name), so the
+ * config parser resolves names without depending on the catalogue
+ * core; it accepts every known name and leaves the availability
+ * question to mds_catalogue_open(), which refuses a known but not
+ * compiled-in backend with "not compiled in; available: ...".
+ * ----------------------------------------------------------------------- */
+
+/**
+ * True when @p backend is compiled into this binary, i.e.
+ * mds_catalogue_open() can construct it.  False for MDS_BACKEND_NONE
+ * and for any value not in the table.
+ */
+bool mds_catalogue_backend_available(enum mds_catalogue_backend backend);
+
+/**
+ * Write the comma-separated names of the available backends into
+ * @p buf ("rondb, memdb"), or "(none)" when nothing is compiled in.
+ * The output is truncated to fit; @p cap must be > 0.
+ *
+ * @return The number of available backends (not the string length);
+ *         0 also when buf is NULL or cap is 0.
+ */
+size_t mds_catalogue_backend_available_names(char *buf, size_t cap);
 
 /**
  * Close the catalogue and free all resources.
@@ -109,9 +168,98 @@ enum mds_status mds_catalogue_open(const struct mds_config *cfg,
  */
 void mds_catalogue_close(struct mds_catalogue *cat);
 
-/** Return the backend-private handle (e.g. RonDB shim handle).
- *  Returns NULL if cat is NULL or no backend is attached. */
+/**
+ * Release process-wide backend resources after the LAST catalogue handle
+ * of the process has been closed.
+ *
+ * Some client libraries hold once-per-process state that a handle
+ * close cannot release: the FoundationDB client runs one network
+ * thread per process and stopping it is terminal, so no open() may
+ * follow.  The daemon calls this exactly once, after its final
+ * mds_catalogue_close() and before the log is shut down; the test
+ * harness calls it at exit.  Backends that need it register a hook
+ * with mds_catalogue_register_process_shutdown() when they start their
+ * process-wide state; each registered hook runs once, in reverse
+ * registration order, and the table is emptied.  Safe to call with no
+ * hooks registered and safe to call more than once.  Backends without
+ * process-wide state (RonDB, memdb) register nothing.
+ */
+void mds_catalogue_process_shutdown(void);
+
+/**
+ * Register a backend's process-shutdown hook (backend constructors
+ * only).  Bounded static table; a hook already registered is not added
+ * twice.
+ *
+ * @return MDS_OK; MDS_ERR_INVAL for NULL; MDS_ERR_NOSPC when the table
+ *         is full.
+ */
+enum mds_status mds_catalogue_register_process_shutdown(void (*hook)(void));
+
+/** Return the backend's native client handle (e.g. RonDB shim handle)
+ *  for backend-specific tools.  Returns NULL if cat is NULL or the
+ *  backend exposes no native handle (in-memory test backend). */
 void *mds_catalogue_backend_handle(const struct mds_catalogue *cat);
+
+/**
+ * Idempotent schema bootstrap: create missing tables and seed the
+ * bootstrap rows (schema version, fileid counter, root inode).
+ *
+ * @return MDS_OK on success; MDS_ERR_NOSUPPORT when the backend has
+ *         nothing to bootstrap (see mds_catalogue_bootstrap_supported);
+ *         MDS_ERR_INVAL on a NULL handle.
+ */
+enum mds_status mds_catalogue_bootstrap(struct mds_catalogue *cat);
+
+/** True when the backend implements bootstrap. */
+bool mds_catalogue_bootstrap_supported(const struct mds_catalogue *cat);
+
+/**
+ * True when the catalogue is ONE authority shared by every MDS node,
+ * i.e. an inode is visible from all MDSes and a cross-subtree rename
+ * moves only the dirent (MDS_CAT_CAP_SHARED_AUTHORITY).  False for a
+ * NULL handle.
+ */
+bool mds_catalogue_shared_authority(const struct mds_catalogue *cat);
+
+/* -----------------------------------------------------------------------
+ * Changefeed / catalog-image feed (optional lifecycle slots)
+ *
+ * A backend that can replay other MDS nodes' mutations into a local
+ * catalog_image exposes a background feed.  The daemon starts it only
+ * when catalog_image_mode != off AND the backend has the slots;
+ * otherwise it runs authority-only.  The image is caller-owned and
+ * must outlive the feed (stop before destroying it).
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Start the backend's changefeed feed into @p image.
+ *
+ * @param cat               Catalogue handle.
+ * @param image             Caller-owned catalog image to apply deltas to.
+ * @param self_mds_id       This MDS's id (its own stream is skipped).
+ * @param poll_interval_ms  Polling cadence; 0 = backend default.
+ * @return MDS_OK; MDS_ERR_NOSUPPORT when the backend has no feed (see
+ *         mds_catalogue_image_feed_supported); MDS_ERR_INVAL on a NULL
+ *         handle or image; or the backend's status unchanged.
+ */
+enum mds_status mds_catalogue_image_feed_start(struct mds_catalogue *cat,
+					       struct catalog_image *image,
+					       uint32_t self_mds_id,
+					       uint32_t poll_interval_ms);
+
+/**
+ * Stop (and join) the backend's changefeed feed.  Safe when no feed
+ * is running.
+ *
+ * @return MDS_OK; MDS_ERR_NOSUPPORT when the backend has no feed;
+ *         MDS_ERR_INVAL on a NULL handle.
+ */
+enum mds_status mds_catalogue_image_feed_stop(struct mds_catalogue *cat);
+
+/** True when the backend implements both image feed slots.  False for
+ *  a NULL handle. */
+bool mds_catalogue_image_feed_supported(const struct mds_catalogue *cat);
 
 /**
  * Backend client-side behaviour counters (cumulative, monotonic).
@@ -156,13 +304,35 @@ enum mds_status mds_cat_backend_client_stats(
 /* -----------------------------------------------------------------------
  * Transaction control
  *
- * Every write operation is self-contained by default -- the backend
- * handles atomicity internally.  Explicit transactions are provided
- * for callers that need multi-operation atomicity (e.g., cross-
- * directory rename that also updates parent change counters).
+ * struct mds_cat_txn is a GROUPING CONTEXT, not a database
+ * transaction.  Every mds_cat_* / mds_coord_* write is self-contained:
+ * the backend commits it on its own, whether txn is NULL or not.  A
+ * non-NULL txn never joins operations into one atomic unit on any
+ * backend; mds_cat_txn_commit() and mds_cat_txn_abort() only free the
+ * token.  Consequently a sequence such as
  *
- * Read operations do not require a transaction handle.  Backends
- * may internally share a read snapshot within a request scope.
+ *     mds_cat_txn_begin(cat, MDS_CAT_TXN_WRITE, &txn);
+ *     mds_cat_inode_put(cat, txn, &inode);
+ *     mds_cat_dirent_put(cat, txn, parent, name, ...);
+ *     mds_cat_txn_abort(txn);
+ *
+ * leaves BOTH rows committed, and a crash between the two puts leaves
+ * exactly one of them.  Callers that need several records to change
+ * together must use a fused operation; multi-record atomicity exists
+ * ONLY there:
+ *
+ *     mds_cat_ns_create_wide          inode + dirent + stripe map +
+ *                                     parent touch
+ *     mds_cat_ns_create_with_layout   ns_create + layout_state row
+ *     mds_cat_ns_remove_known_gc      dirent + inode + GC rows
+ *     mds_cat_ns_rename[_flags]       both dirents + parents (+ victim)
+ *     mds_coord_layoutget_fused       stripe map read + layout_state row
+ *
+ * Every other operation is exactly as atomic as the backend makes
+ * that one call; atomicity never spans two calls.
+ *
+ * Read operations do not take a token and observe the backend's
+ * committed state at the time of the call.
  * ----------------------------------------------------------------------- */
 
 enum mds_cat_txn_flags {
@@ -171,27 +341,31 @@ enum mds_cat_txn_flags {
 };
 
 /**
- * Begin a logical transaction.
+ * Allocate a grouping token.  The token records the catalogue and the
+ * flags for callers that pass it through uniformly; it does not start
+ * anything in the backend.
  *
- * RonDB write calls are self-contained; the transaction handle is a
- * lightweight grouping context that lets callers use the catalogue
- * API uniformly.
+ * @return MDS_OK, MDS_ERR_INVAL on NULL arguments, MDS_ERR_NOMEM.
  */
 enum mds_status mds_cat_txn_begin(struct mds_catalogue *cat,
 				  enum mds_cat_txn_flags flags,
 				  struct mds_cat_txn **out);
 
-/** Commit a logical transaction. */
+/** Free the token.  Nothing is committed here: every operation issued
+ *  with it has already been committed by the backend individually.
+ *  @return MDS_OK, MDS_ERR_INVAL for NULL. */
 enum mds_status mds_cat_txn_commit(struct mds_cat_txn *txn);
 
-/** Abort a logical transaction. */
+/** Free the token.  Nothing is rolled back: every operation issued with
+ *  it has already been committed by the backend individually.  NULL is
+ *  ignored. */
 void mds_cat_txn_abort(struct mds_cat_txn *txn);
 
 /* -----------------------------------------------------------------------
  * Catalogue data -- Namespace
  *
- * Each operation is self-contained (atomic commit) when txn is NULL.
- * When txn is non-NULL, the operation joins the caller's transaction.
+ * Each operation is self-contained (atomic commit) whether txn is NULL
+ * or not; see "Transaction control" above.
  * ----------------------------------------------------------------------- */
 
 /** Create a file/directory: inode + dirent + parent touch. */
@@ -242,13 +416,64 @@ enum mds_status mds_cat_ns_create_wide(
 	const struct mds_ds_map_entry *entries,
 	bool *safe_to_discard);
 
+/**
+ * Fused CREATE + layout pre-grant in ONE backend transaction.
+ *
+ * ns_create semantics for the child (inode + dirent + parent touch +
+ * the 1x1 stripe map from the prealloc pop) plus, when
+ * @p layout_clientid != 0, the layout_state row and its indexes for
+ * the grant described by (iomode, offset, length, stateid, mds_id).
+ * A LAYOUTGET later in the same compound can then be served without a
+ * backend round trip.
+ *
+ * @param[out] layout_ok  True iff the layout grant was persisted.
+ *   Always written (false on error / NOSUPPORT).
+ * @param[out] layout_entry_out  Optional.  Receives the DS entry of
+ *   the single prealloc pop the transaction used; zeroed when no pop
+ *   happened.
+ * @param[out] layout_pop_stripe_unit_out  Optional.  Stripe unit of
+ *   that pop, exactly as persisted in the stripe-map header; 0 when no
+ *   pop happened.  Doubles as the "a pop happened" indicator.
+ * @return MDS_OK, MDS_ERR_EXISTS on name collision, MDS_ERR_NOSUPPORT
+ *   when the backend has no fused path (callers fall back to
+ *   mds_cat_ns_create; see mds_cat_ns_create_with_layout_supported),
+ *   or a backend error.
+ */
+enum mds_status mds_cat_ns_create_with_layout(
+	struct mds_catalogue *cat,
+	uint64_t parent_fileid, const char *name,
+	enum mds_file_type type,
+	uint32_t mode, uint64_t uid, uint64_t gid,
+	struct ds_prealloc_ctx *prealloc,
+	struct mds_inode *out,
+	uint64_t layout_clientid, uint32_t layout_iomode,
+	uint64_t layout_offset, uint64_t layout_length,
+	const struct nfs4_stateid *layout_stateid,
+	uint32_t layout_mds_id,
+	bool *layout_ok,
+	struct mds_ds_map_entry *layout_entry_out,
+	uint32_t *layout_pop_stripe_unit_out);
+
+/** True when the backend implements the fused create + layout grant. */
+bool mds_cat_ns_create_with_layout_supported(
+	const struct mds_catalogue *cat);
+
 /** Remove a dirent + inode (if nlink drops to 0) + parent touch. */
 enum mds_status mds_cat_ns_remove(struct mds_catalogue *cat,
 				  struct mds_cat_txn *txn,
 				  uint64_t parent_fileid,
 				  const char *name);
 
-/** Remove when the child inode was already looked up (skips re-read). */
+/**
+ * Remove when the child inode was already looked up (skips re-read).
+ *
+ * @p child is the caller's snapshot; a backend that re-validates it
+ * inside the removing transaction answers MDS_ERR_STALE -- nothing
+ * changed -- when the name no longer resolves to child->fileid or the
+ * live link count contradicts the final/non-final shape derived from
+ * child->nlink.  The caller re-resolves and decides again (a backend
+ * that resolves the name itself never answers STALE here).
+ */
 enum mds_status mds_cat_ns_remove_known(struct mds_catalogue *cat,
 					struct mds_cat_txn *txn,
 					uint64_t parent_fileid,
@@ -280,7 +505,9 @@ struct mds_ds_map_entry;
  * @return MDS_OK on success.  MDS_ERR_NOSUPPORT when the backend has
  *         no fused path (caller must run the legacy split path).
  *         MDS_ERR_STALE when the dirent no longer resolves to @child
- *         (concurrent replace; caller falls back and re-resolves).
+ *         (concurrent replace) or @child is no longer the final link
+ *         (concurrent LINK): nothing changed, *gc_folded is false, the
+ *         caller re-resolves.
  */
 enum mds_status mds_cat_ns_remove_known_gc(struct mds_catalogue *cat,
 					   struct mds_cat_txn *txn,
@@ -370,7 +597,9 @@ enum mds_status mds_cat_ns_readdir(struct mds_catalogue *cat,
 
 /**
  * Look up a directory entry name by child fileid within a parent.
- * Used to translate READDIR cookies (fileids) into start_after names.
+ * Used by the readdir_plus_from_cookie fallback to translate a
+ * cookie back into a start_after name; only meaningful while the
+ * backend assigns cookie = child fileid.
  */
 enum mds_status mds_cat_ns_dirent_name_for_child(
 	struct mds_catalogue *cat,
@@ -407,19 +636,21 @@ enum mds_status mds_cat_ns_readdir_plus(struct mds_catalogue *cat,
 					void *ctx);
 
 /**
- * Fused readdir_plus resumed by a READDIR cookie that encodes the last
- * child fileid seen (0 for the first page).  Entries are returned with
- * child_fileid strictly greater than @cookie, in ascending fileid
- * order, up to @max_entries.
+ * Fused readdir_plus resumed by a READDIR cookie: the
+ * struct mds_cat_dirent.cookie of the last entry the caller received
+ * (0 for the first page).  Entries whose cookie is strictly greater
+ * than @cookie are returned in the backend's iteration order, up to
+ * @max_entries; each carries its own cookie for the next resume.
  *
  * Fast path: backends exposing ns_readdir_plus_from satisfy this with
  * an indexed range scan (O(log N + page)).  Fallback: the cookie is
  * translated back to a name via dirent_name_for_child and the
  * name-order ns_readdir_plus resume is used, preserving behaviour on
- * backends without the fileid cursor.  A stale cookie (its entry was
- * removed) yields an empty, drained page on the fallback path; the
- * fast path is inherently safe because the resume is a strict
- * fileid > cookie range.
+ * backends without the cursor (valid only while that backend assigns
+ * cookie = child fileid).  A stale cookie (its entry was removed)
+ * yields an empty, drained page on the fallback path; the fast path is
+ * inherently safe because the resume is a strict cookie > @cookie
+ * range.
  */
 enum mds_status mds_cat_ns_readdir_plus_from_cookie(
 					struct mds_catalogue *cat,

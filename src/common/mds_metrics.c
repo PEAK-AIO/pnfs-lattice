@@ -227,6 +227,20 @@ int mds_metrics_prometheus(const struct mds_metrics_snapshot *snap,
     return n;
 }
 
+/*
+ * Advance the render cursor past one snprintf() block.  Returns false
+ * when the block did not fit (or snprintf failed); the caller maps
+ * that to -1 like every other renderer in this file.
+ */
+static bool advance_cursor(int *base, int extra, size_t cap)
+{
+    if (extra < 0 || ((size_t)*base + (size_t)extra) >= cap) {
+        return false;
+    }
+    *base += extra;
+    return true;
+}
+
 int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
                               const struct mds_branch_metrics *branch,
                               char *buf, size_t cap)
@@ -332,10 +346,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)atomic_load(&branch->remove_async_tombstone_hit),
         (unsigned long)atomic_load(&branch->remove_async_tombstone_scrubbed),
         (unsigned long)atomic_load(&branch->remove_async_depth));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /* Per-DS I/O limit prober (Wave 5 T5.1). */
     extra = snprintf(buf + base, cap - (size_t)base,
@@ -363,10 +376,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->ds_iolimit_min_read),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->ds_iolimit_min_write));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /* RonDB transient-retry pressure (Wave 6 T6.3). */
     extra = snprintf(buf + base, cap - (size_t)base,
@@ -405,10 +417,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->ds_fh_cache_hits),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->ds_fh_cache_misses));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /* Append DS-prepare counters. */
     extra = snprintf(buf + base, cap - (size_t)base,
@@ -431,10 +442,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->ds_prepare_queue_depth));
 
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /* Append DS prealloc + LAYOUTGET fallback counters (Phase 12 C). */
     extra = snprintf(buf + base, cap - (size_t)base,
@@ -495,10 +505,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->gc_pending));
 
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /* Append NFS operation counters. */
     extra = snprintf(buf + base, cap - (size_t)base,
@@ -545,10 +554,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->nfs_op_layoutget),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->nfs_op_rename));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_nfs_moved_total Operations rejected with "
@@ -563,10 +571,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->nfs_moved),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->rpc_parks));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /*
      * Per-phase latency for OP_OPEN on the CLAIM_NULL + create
@@ -595,10 +602,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->placement_heap_fallback_total),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->placement_degraded_total));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_io_advise_total Total IO_ADVISE ops served.\n"
@@ -615,10 +621,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
             (_Atomic uint64_t *)&branch->io_advise_willneed),
         (unsigned long)atomic_load(
             (_Atomic uint64_t *)&branch->io_advise_dontneed));
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_open_create_phase_ns_sum "
@@ -668,10 +673,9 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
      * unrendered bytes in the middle of every /metrics scrape and
      * over-reporting the rendered length.  Single-advance like
      * every other block. */
-    if (extra < 0 || ((size_t)base + (size_t)extra) >= cap) {
+    if (!advance_cursor(&base, extra, cap)) {
         return -1;
     }
-    base += extra;
 
     /*
      * Append the RPC dispatcher section if a threadpool has been

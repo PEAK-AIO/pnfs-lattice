@@ -11,6 +11,7 @@
  * Skips gracefully if no RonDB cluster is available.
  */
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,6 +94,35 @@ static void *server_thread(void *arg)
     return NULL;
 }
 
+/*
+ * A loopback port that is free right now.  rpc_server_create() treats
+ * port 0 as "use RPC_DEFAULT_PORT" (2049), not as an ephemeral bind, so
+ * asking it for 0 collides with any NFS server on the host (an MDS or
+ * knfsd) and the suite aborts in setup.  Reserve a kernel-chosen port
+ * with a throwaway socket and hand that number to the server; the
+ * window between close() and the server's bind() is the usual
+ * unit-test compromise.
+ */
+static uint16_t pick_free_port(void)
+{
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    uint16_t port;
+
+    VERIFY(fd >= 0);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    VERIFY(inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1);
+    VERIFY(bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    VERIFY(getsockname(fd, (struct sockaddr *)&addr, &alen) == 0);
+    port = ntohs(addr.sin_port);
+    VERIFY(port != 0);
+    close(fd);
+    return port;
+}
+
 static void setup_test(struct test_ctx *ctx)
 {
     struct rpc_server_config cfg;
@@ -108,7 +138,7 @@ static void setup_test(struct test_ctx *ctx)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.bind_addr = "127.0.0.1";
-    cfg.port = 0; /* Ephemeral port */
+    cfg.port = pick_free_port();
     cfg.cat = ctx->cat;
     cfg.st = ctx->st;  /* Sessions: EXCHANGE_ID/CREATE_SESSION/SEQUENCE. */
 
@@ -138,7 +168,7 @@ static void setup_test_pooled(struct test_ctx *ctx, uint32_t max_inflight)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.bind_addr = "127.0.0.1";
-    cfg.port = 0; /* Ephemeral port */
+    cfg.port = pick_free_port();
     cfg.cat = ctx->cat;
     cfg.tp = ctx->tp;
     cfg.max_inflight_per_conn = max_inflight;
@@ -155,12 +185,16 @@ static void teardown_test(struct test_ctx *ctx)
 {
     rpc_server_stop(ctx->srv);
     pthread_join(ctx->thread, NULL);
-    rpc_server_destroy(ctx->srv);
-    /* The pool must be destroyed only after the server (which uses it)
-     * is fully stopped + destroyed. */
+    /* Same order as the daemon (src/mds/main.c cleanup): the pool is
+     * joined BEFORE the server is destroyed.  Workers hold raw pointers
+     * to the server and its connections until their completion tail
+     * has run; nothing submits to the pool once the epoll loop has
+     * exited. */
     if (ctx->tp != NULL) {
         threadpool_destroy(ctx->tp);
+        ctx->tp = NULL;
     }
+    rpc_server_destroy(ctx->srv);
     open_state_table_destroy(ctx->ot);
     session_table_destroy(ctx->st);
     mds_catalogue_close(ctx->cat);
@@ -367,6 +401,100 @@ static void test_server_stop_clean(void)
     teardown_test(&ctx);
 }
 
+/** Open descriptors of this process (/proc/self/fd entries). */
+static int count_open_fds(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    struct dirent *de;
+    int n = 0;
+
+    VERIFY(d != NULL);
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] != '.') {
+            n++;
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+/** True when the file at @path contains @needle (short files only). */
+static int file_contains(const char *path, const char *needle)
+{
+    char buf[4096];
+    size_t n;
+    FILE *f = fopen(path, "r");
+
+    if (f == NULL) {
+        return 0;
+    }
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    (void)fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
+/*
+ * bind() failure path: a listener already owns the port (a plain
+ * socket without SO_REUSEPORT, so the server's SO_REUSEADDR /
+ * SO_REUSEPORT cannot share it).  rpc_server_create must fail, log the
+ * refusal with the address and port, and release everything it
+ * allocated: no descriptor stays open (the failed listen socket, the
+ * epoll fd and the stop pipe are the candidates) and, once the blocker
+ * is gone, the same port binds.
+ */
+static void test_create_on_occupied_port_fails_clean(void)
+{
+    struct rpc_server_config cfg;
+    struct rpc_server *srv = NULL;
+    struct sockaddr_in addr;
+    socklen_t alen = sizeof(addr);
+    int blocker = socket(AF_INET, SOCK_STREAM, 0);
+    int fds_before;
+    uint16_t port;
+    char log_path[128];
+    char expected[64];
+
+    VERIFY(blocker >= 0);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    VERIFY(inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1);
+    VERIFY(bind(blocker, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    VERIFY(listen(blocker, 1) == 0);
+    VERIFY(getsockname(blocker, (struct sockaddr *)&addr, &alen) == 0);
+    port = ntohs(addr.sin_port);
+    VERIFY(port != 0);
+
+    /* Capture the server's diagnostics: the logger is otherwise
+     * uninitialised in this suite and drops every record. */
+    (void)snprintf(log_path, sizeof(log_path), "/tmp/pnfs-rpc-bind-%d.log",
+                   (int)getpid());
+    (void)unlink(log_path);
+    mds_log_init(log_path);
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.bind_addr = "127.0.0.1";
+    cfg.port = port;
+
+    fds_before = count_open_fds();
+    ASSERT_EQ(rpc_server_create(&cfg, &srv), -1);
+    ASSERT_TRUE(srv == NULL);
+    ASSERT_EQ(count_open_fds(), fds_before);
+
+    mds_log_shutdown();
+    (void)snprintf(expected, sizeof(expected), "bind on 127.0.0.1:%u failed",
+                   (unsigned)port);
+    ASSERT_TRUE(file_contains(log_path, expected));
+    (void)unlink(log_path);
+
+    close(blocker);
+    ASSERT_EQ(rpc_server_create(&cfg, &srv), 0);
+    ASSERT_TRUE(srv != NULL);
+    ASSERT_EQ(rpc_server_port(srv), port);
+    rpc_server_destroy(srv);
+}
+
 static void test_multiple_connections(void)
 {
     struct test_ctx ctx;
@@ -492,6 +620,112 @@ static void test_close_during_pipeline(void)
     usleep(20000); /* let the server observe HUP and drain workers */
 
     /* Must not crash/hang: deferred finalize + inflight drain on stop. */
+    teardown_test(&ctx);
+}
+
+/*
+ * Disconnect-after-last-request stress: the worker completion tail
+ * against the epoll thread's close.
+ *
+ * A client sends its last request and closes the socket right after
+ * the reply (even rounds) or without waiting for it (odd rounds), so
+ * the epoll thread sees HUP while the worker that served the request
+ * is in its completion tail -- cap-unit release, EPOLLIN/EPOLLOUT
+ * re-arm on the fd, slot-unit release (rpc_work_fn).  Before the
+ * two-unit reference count that tail dereferenced a connection the
+ * epoll thread could already have finalized and recycled (send_lock
+ * destroyed and re-initialised under the worker, fd closed or reused
+ * before its re-arm).  Several client threads, many rounds, cap 1 so
+ * every request also crosses the cap disarm / re-arm path; the run
+ * must be clean under TSan and every slot must be recycled (a fresh
+ * connection is still served at the end).
+ */
+#define DISC_THREADS           4
+#define DISC_ROUNDS_PER_THREAD 150
+
+struct disc_client {
+    const struct test_ctx *ctx;
+    int                    failures;
+};
+
+static void *disc_client_main(void *arg)
+{
+    struct disc_client *dc = arg;
+    uint8_t req[256];
+    uint8_t reply[4096];
+
+    for (int round = 0; round < DISC_ROUNDS_PER_THREAD; round++) {
+        uint32_t reply_len = 0;
+        uint32_t req_len;
+        int fd = connect_to_server(dc->ctx);
+
+        if (fd < 0) {
+            dc->failures++;
+            continue;
+        }
+        req_len = build_null_call(req, sizeof(req), 0x6000U + (uint32_t)round);
+        if ((round & 1) == 0) {
+            /* Reply consumed, then close: HUP reaches the epoll thread
+             * while the worker that sent the reply runs its tail. */
+            if (send_and_recv(fd, req, req_len, reply, sizeof(reply),
+                              &reply_len) != 0 || reply_len < 4) {
+                dc->failures++;
+            }
+        } else if (send_record_only(fd, req, req_len) != 0) {
+            /* Close without reading: the worker may still be processing
+             * when HUP arrives -> deferred finalize via the close stack. */
+            dc->failures++;
+        }
+        close(fd);
+    }
+    return NULL;
+}
+
+static void test_disconnect_after_last_request(void)
+{
+    struct test_ctx ctx;
+    struct disc_client clients[DISC_THREADS];
+    pthread_t tids[DISC_THREADS];
+    int started = 0;
+    int failures = 0;
+
+    setup_test_pooled(&ctx, 1);
+    if (ctx.cat == NULL) {
+        fprintf(stdout, "SKIP (no RonDB)\n");
+        tests_passed++;
+        return;
+    }
+
+    for (int i = 0; i < DISC_THREADS; i++) {
+        clients[i].ctx = &ctx;
+        clients[i].failures = 0;
+        if (pthread_create(&tids[i], NULL, disc_client_main, &clients[i]) != 0) {
+            break;
+        }
+        started++;
+    }
+    for (int i = 0; i < started; i++) {
+        pthread_join(tids[i], NULL);
+        failures += clients[i].failures;
+    }
+    ASSERT_EQ(started, DISC_THREADS);
+    ASSERT_EQ(failures, 0);
+
+    /* Every closed connection was finalized and its slot recycled: a
+     * fresh connection is accepted and answered. */
+    {
+        uint8_t req[256];
+        uint8_t reply[4096];
+        uint32_t reply_len = 0;
+        int fd = connect_to_server(&ctx);
+        uint32_t req_len = build_null_call(req, sizeof(req), 0x6fff);
+
+        ASSERT_TRUE(fd >= 0);
+        ASSERT_EQ(send_and_recv(fd, req, req_len, reply, sizeof(reply),
+                                &reply_len), 0);
+        ASSERT_TRUE(reply_len >= 4);
+        close(fd);
+    }
     teardown_test(&ctx);
 }
 
@@ -719,9 +953,11 @@ int main(void)
 
     RUN_TEST(test_null_procedure);
     RUN_TEST(test_server_stop_clean);
+    RUN_TEST(test_create_on_occupied_port_fails_clean);
     RUN_TEST(test_multiple_connections);
     RUN_TEST(test_pipelined_requests);
     RUN_TEST(test_close_during_pipeline);
+    RUN_TEST(test_disconnect_after_last_request);
     RUN_TEST(test_rep_too_big_to_cache);
 
     fprintf(stdout, "\n  %d/%d tests passed\n",

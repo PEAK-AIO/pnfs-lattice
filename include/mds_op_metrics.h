@@ -177,8 +177,7 @@ void mds_cat_op_observe(enum mds_cat_op c, uint64_t ns);
 
 /** CLOCK_MONOTONIC reading, ns resolution.  Cheap helper that callers
  * outside catalogue_dispatch.c use to time isolated catalogue-class
- * calls (e.g. the direct catalogue_rondb_layoutget_fused entry from
- * compound_layout.c, which bypasses the vtable). */
+ * code regions (see MDS_TIME_CAT_OP below). */
 uint64_t mds_op_metrics_now_ns(void);
 
 /* Inline timing macro for ad-hoc probes outside catalogue_dispatch.c.
@@ -198,14 +197,14 @@ uint64_t mds_op_metrics_now_ns(void);
 	if (_mtco_en) {                                                 \
 		_mtco_t0 = mds_op_metrics_now_ns();                     \
 	}                                                               \
-	expr;                                                           \
+	(expr);                                                         \
 	if (_mtco_en) {                                                 \
 		mds_cat_op_observe((catop),                             \
 			mds_op_metrics_now_ns() - _mtco_t0);            \
 	}                                                               \
 } while (0)
 #else
-#define MDS_TIME_CAT_OP(catop, expr) do { (void)(catop); expr; } while (0)
+#define MDS_TIME_CAT_OP(catop, expr) do { (void)(catop); (expr); } while (0)
 #endif
 
 /* -----------------------------------------------------------------------
@@ -266,14 +265,14 @@ void mds_phase_end_op(enum mds_op_class c);
  * ----------------------------------------------------------------------- */
 #if MDS_OP_METRICS_BUILD_ENABLED
 
-static inline void mds_phase_scope_end(int *unused)
+static inline void mds_phase_scope_end(const int *unused)
 {
 	(void)unused;
 	mds_phase_leave();
 }
 
-#define MDS_PHASE_SCOPE_CONCAT_(a, b) a##b
-#define MDS_PHASE_SCOPE_CONCAT(a, b)  MDS_PHASE_SCOPE_CONCAT_(a, b)
+#define MDS_PHASE_SCOPE_CONCAT2(a, b) a##b
+#define MDS_PHASE_SCOPE_CONCAT(a, b)  MDS_PHASE_SCOPE_CONCAT2(a, b)
 
 #define MDS_PHASE_SCOPE(p)                                              \
 	int MDS_PHASE_SCOPE_CONCAT(_mds_phase_scope_, __LINE__)         \

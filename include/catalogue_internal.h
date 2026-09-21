@@ -14,6 +14,7 @@
 
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
+#include "mds_cluster.h"
 #include "catalog_stats.h"
 
 /* Forward declarations for vtable parameter types. */
@@ -28,6 +29,64 @@ struct catalog_delta_sink;
 struct catalog_image;
 
 /* -----------------------------------------------------------------------
+ * Slot contract -- binding on every backend that populates a vtable
+ * below (authority, coordination, lifecycle, cluster).  The dispatcher
+ * and every caller are written against these seven rules; a backend
+ * that breaks one is wrong even if the tests happen to pass.
+ *
+ * C1  Re-entrancy.  A caller's callback may call back into the SAME
+ *     catalogue handle from the same thread (layout_recall's byte-range
+ *     collector does, and so does the dispatcher's readdir_plus
+ *     fallback).  A backend therefore never holds a non-reentrant lock
+ *     across a callback and must tolerate a nested, independent
+ *     transaction on the same handle.  The required shape for a backend
+ *     with a mutex or a bounded transaction window is
+ *     materialise-then-deliver: fill a bounded page under the lock or
+ *     transaction, release it, then invoke the callbacks.
+ *
+ * C2  Callbacks never run inside a retry body.  A backend that retries
+ *     transactions delivers entries only after the attempt has
+ *     completed, so a retried attempt never redelivers entries or
+ *     delivers after partial progress.  Enumeration may page with one
+ *     transaction per page and an explicit cursor; the caller gets
+ *     page-consistent results.
+ *
+ * C3  Coherent-object predicates keep ONE consistency boundary.  The
+ *     stripe header plus its entries (stripe_map_get, layoutget_fused),
+ *     layout-grant validation (layout_grant_union read-modify-write),
+ *     directory emptiness for RMDIR and rename-over-directory, and the
+ *     ns_remove_known_gc re-validation are read and decided inside the
+ *     single transaction that mutates -- never across pages or across
+ *     two calls.
+ *
+ * C4  Status pass-through.  A dispatcher never flattens a slot's
+ *     status: what the slot returns is what the caller sees (e.g. a
+ *     node_heartbeat MDS_ERR_NOTFOUND reaches the heartbeat thread
+ *     unchanged).  Dispatchers add only MDS_ERR_INVAL for invalid
+ *     arguments and MDS_ERR_NOSUPPORT for an absent optional slot.
+ *
+ * C5  Capability truthfulness.  A populated slot implements the
+ *     operation; "present but returns NOSUPPORT" is forbidden, and a
+ *     dispatcher fallback for an absent slot must never silently weaken
+ *     a correctness property (a fallback may cost more round trips,
+ *     never less safety).  cat->caps states only properties the store
+ *     actually has.
+ *
+ * C6  Transaction-token semantics.  struct mds_cat_txn is a grouping
+ *     context: mds_cat_txn_begin allocates it, mds_cat_txn_commit and
+ *     mds_cat_txn_abort only free it, and a non-NULL txn never joins
+ *     operations on any backend.  Multi-record atomicity exists ONLY
+ *     inside the fused slots (ns_create_wide, ns_create_with_layout,
+ *     ns_remove_known_gc, ns_rename / ns_rename_flags, layoutget_fused);
+ *     a backend must not implement anything stronger for the token.
+ *
+ * C7  Ownership at close.  ops->close(cat) releases backend-owned
+ *     resources only (backend_private, connections, threads); the
+ *     dispatcher owns struct mds_catalogue and frees it after close
+ *     returns (mds_catalogue_close).  A backend never frees cat.
+ * ----------------------------------------------------------------------- */
+
+/* -----------------------------------------------------------------------
  * Transaction handle (opaque to callers via mds_catalogue.h)
  * ----------------------------------------------------------------------- */
 
@@ -39,12 +98,39 @@ struct mds_cat_txn {
 };
 
 /* -----------------------------------------------------------------------
- * Lifecycle ops (close + probe)
+ * Lifecycle ops (close + probe + optional bootstrap / native handle)
  * ----------------------------------------------------------------------- */
 
 struct mds_catalogue_ops {
     void (*close)(struct mds_catalogue *cat);
     enum mds_status (*probe)(struct mds_catalogue *cat);
+    /** Optional: idempotent schema bootstrap (create missing tables,
+     *  seed schema version / fileid counter / root inode).  Leave NULL
+     *  when the backend has nothing to bootstrap; the dispatcher then
+     *  returns MDS_ERR_NOSUPPORT and the daemon skips the
+     *  bootstrap-and-probe retry loop at startup. */
+    enum mds_status (*bootstrap)(struct mds_catalogue *cat);
+    /** Optional: the backend's native client handle (e.g. the RonDB
+     *  shim handle) for backend-specific tools.  Leave NULL when there
+     *  is nothing meaningful to expose; the dispatcher returns NULL. */
+    void *(*backend_handle)(const struct mds_catalogue *cat);
+    /**
+     * Optional changefeed / catalog-image feed lifecycle.  A backend
+     * that can replay other MDS nodes' mutations into a local
+     * catalog_image (RonDB: the mds_delta_broadcast poller) starts a
+     * background feed here and stops (joins) it in image_feed_stop.
+     * @image is caller-owned and must outlive the feed; @self_mds_id
+     * lets the feed skip this node's own stream; @poll_interval_ms is
+     * the polling cadence (0 = backend default).  Populate BOTH slots
+     * or neither: mds_catalogue_image_feed_supported() requires both,
+     * and the dispatchers return MDS_ERR_NOSUPPORT for a NULL slot.
+     * image_feed_stop must be idempotent and safe when no feed runs;
+     * the backend's close must also stop a feed still running.
+     */
+    enum mds_status (*image_feed_start)(struct mds_catalogue *cat,
+        struct catalog_image *image, uint32_t self_mds_id,
+        uint32_t poll_interval_ms);
+    void (*image_feed_stop)(struct mds_catalogue *cat);
 };
 
 /* -----------------------------------------------------------------------
@@ -69,6 +155,32 @@ struct mds_authority_ops {
         uint32_t mirror_count,
         const struct mds_ds_map_entry *entries,
         bool *safe_to_discard);
+    /**
+     * Optional fused CREATE + layout pre-grant: ns_create semantics
+     * (inode + dirent + parent touch + 1x1 stripe map from the
+     * prealloc pop) PLUS, when layout_clientid != 0, the layout_state
+     * row and its indexes, all committed in ONE backend transaction so
+     * a following LAYOUTGET in the same compound needs no backend
+     * round trip.  *layout_ok reports whether the grant was persisted.
+     * layout_entry_out / layout_pop_stripe_unit_out (both optional)
+     * receive the DS entry and stripe unit of the single prealloc pop
+     * the transaction used, so the caller's per-compound stripe cache
+     * reflects exactly the persisted placement (0 unit = no pop).
+     * Leave NULL when the backend cannot fuse; the dispatch wrapper
+     * returns MDS_ERR_NOSUPPORT and callers fall back to ns_create.
+     */
+    enum mds_status (*ns_create_with_layout)(struct mds_catalogue *cat,
+        uint64_t parent, const char *name,
+        enum mds_file_type type,
+        uint32_t mode, uint64_t uid, uint64_t gid,
+        struct ds_prealloc_ctx *prealloc, struct mds_inode *out,
+        uint64_t layout_clientid, uint32_t layout_iomode,
+        uint64_t layout_offset, uint64_t layout_length,
+        const struct nfs4_stateid *layout_stateid,
+        uint32_t layout_mds_id,
+        bool *layout_ok,
+        struct mds_ds_map_entry *layout_entry_out,
+        uint32_t *layout_pop_stripe_unit_out);
     enum mds_status (*ns_remove)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t parent,
         const char *name);
@@ -184,19 +296,34 @@ struct mds_authority_ops {
         struct mds_cat_txn *txn, mds_readdir_plus_cb cb, void *ctx);
 
     /**
-     * Optional fused readdir_plus resumed by a stable child-fileid
-     * cursor instead of a name prefix.  Returns entries whose
-     * child_fileid is strictly greater than @start_after_fileid, in
-     * ascending child_fileid order, up to @max_entries.  Backends that
-     * implement this over an ordered (parent, child_fileid) index make
+     * Optional fused readdir_plus resumed by a READDIR cookie.
+     *
+     * Every delivered dirent carries a backend-assigned cookie (struct
+     * mds_cat_dirent.cookie): unique per entry within the directory,
+     * stable for the life of the dirent, never 0, 1 or 2.  This slot
+     * returns the entries whose cookie is strictly greater than
+     * @start_after_cookie, in the backend's own iteration order (the
+     * order in which cookies increase), up to @max_entries; 0 means
+     * the first page.  A cookie whose entry was removed is safe by
+     * construction because the resume is a strict range.  Backends
+     * that implement this over an ordered (parent, cookie) index make
      * cookie resume O(log N + page) instead of O(N) per page.
      *
-     * Leave NULL when the backend cannot resume by fileid; the dispatch
+     * RonDB currently assigns cookie = child fileid and resumes over
+     * ix_dirents_parent_child in ascending child_fileid order.  This
+     * is a documented deviation: two hard links to one inode in one
+     * directory share a cookie, so a page boundary between them drops
+     * one name.  It stands until RonDB gains a per-dirent sequence
+     * column and ordered index (a separately approved schema change).
+     *
+     * Leave NULL when the backend cannot resume by cookie; the dispatch
      * wrapper (mds_cat_ns_readdir_plus_from_cookie) then falls back to
-     * the name-order ns_readdir_plus resume via a cookie->name lookup.
+     * the name-order ns_readdir_plus resume via a cookie->name lookup
+     * (dirent_name_for_child), which only works while cookies are
+     * child fileids.
      */
     enum mds_status (*ns_readdir_plus_from)(struct mds_catalogue *cat,
-        uint64_t parent, uint64_t start_after_fileid,
+        uint64_t parent, uint64_t start_after_cookie,
         uint32_t max_entries,
         struct mds_cat_txn *txn, mds_readdir_plus_cb cb, void *ctx);
 
@@ -410,15 +537,37 @@ struct mds_coordination_ops {
     /** Optional renewal variant: persist the saturating UNION of the
      * existing row's byte range and the new window (monotonic seqid)
      * so the row stays a superset of every range granted under the
-     * stateid (recall-coverage invariant).  Leave NULL when the
-     * backend has no read-modify-write path; the dispatch wrapper
-     * then falls back to the plain layout_grant overwrite. */
+     * stateid (recall-coverage invariant).  Every in-tree backend
+     * populates it; a NULL slot makes the dispatch wrapper return
+     * MDS_ERR_NOSUPPORT (C5).  There is no overwrite fallback: a plain
+     * layout_grant on renewal would narrow the persisted range and
+     * silently lose recall coverage. */
     enum mds_status (*layout_grant_union)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t clientid,
         uint64_t fileid, uint32_t iomode,
         uint64_t offset, uint64_t length,
         const struct nfs4_stateid *stateid,
         const uint32_t *ds_ids, uint32_t ds_count);
+    /**
+     * Optional fused LAYOUTGET: read the file's stripe map header +
+     * entries and persist the layout_state row (+ indexes) for the
+     * grant in ONE backend transaction.  Same output contract as
+     * stripe_map_get for (*stripe_count, *stripe_unit, *mirror_count,
+     * *entries -- caller frees) and the same MDS_ERR_NOTFOUND when the
+     * file has no stripe map (nothing is granted in that case).
+     * MDS_ERR_DELAY reports a transient failure after the backend's
+     * own bounded retry.  Leave NULL when the backend cannot fuse; the
+     * dispatch wrapper returns MDS_ERR_NOSUPPORT and callers fall back
+     * to stripe_map_get + layout_grant.
+     */
+    enum mds_status (*layoutget_fused)(struct mds_catalogue *cat,
+        uint64_t fileid,
+        uint32_t *stripe_count, uint32_t *stripe_unit,
+        uint32_t *mirror_count, struct mds_ds_map_entry **entries,
+        const struct nfs4_stateid *stateid,
+        uint64_t clientid, uint32_t iomode,
+        uint64_t offset, uint64_t length,
+        uint32_t mds_id);
     enum mds_status (*layout_return)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn,
         const uint8_t stateid_other[12],
@@ -531,14 +680,85 @@ struct mds_coordination_ops {
 };
 
 /* -----------------------------------------------------------------------
+ * Cluster ops vtable -- multi-MDS services (node registry, heartbeat,
+ * stale-peer scan, partition map)
+ *
+ * One function pointer per mds_cluster_* operation declared in
+ * mds_cluster.h; the semantics, target contract and current RonDB
+ * deviations are documented there.  Every slot is optional: NULL makes
+ * the dispatcher return MDS_ERR_NOSUPPORT.  A backend with no cluster
+ * services leaves cat->cluster_ops NULL altogether.
+ * ----------------------------------------------------------------------- */
+
+struct mds_cluster_ops {
+    /* Node registry */
+    enum mds_status (*node_register)(struct mds_catalogue *cat,
+        uint32_t mds_id, uint64_t boot_epoch, const char *hostname,
+        uint16_t nfs_port, uint16_t grpc_port);
+    enum mds_status (*node_heartbeat)(struct mds_catalogue *cat,
+        uint32_t mds_id, uint64_t boot_epoch);
+    /** boot_epoch is part of the signature from the start so the
+     *  conditional (epoch-matching) delete needs no signature change;
+     *  a slot that does not yet honour it must say so where it is
+     *  registered. */
+    enum mds_status (*node_deregister)(struct mds_catalogue *cat,
+        uint32_t mds_id, uint64_t boot_epoch);
+    enum mds_status (*node_list)(struct mds_catalogue *cat,
+        mds_cluster_node_cb cb, void *ctx);
+    enum mds_status (*node_scan_stale)(struct mds_catalogue *cat,
+        uint64_t threshold_ns, mds_cluster_stale_cb cb, void *ctx);
+
+    /* Partition map */
+    enum mds_status (*partition_list)(struct mds_catalogue *cat,
+        mds_cluster_partition_cb cb, void *ctx);
+    /** insert_only: true = MDS_ERR_EXISTS when the row exists (the
+     *  root claim), false = upsert.  Same signature-stability note as
+     *  node_deregister. */
+    enum mds_status (*partition_put)(struct mds_catalogue *cat,
+        uint32_t partition_id, uint32_t owner_mds_id, uint8_t state,
+        const char *subtree_path, bool insert_only);
+    /** Compare-and-swap the owner of one row: owner_mds_id becomes
+     *  @new_owner and state @new_state only while the row's owner is
+     *  @expected_owner.  MDS_ERR_NOTFOUND when the row is absent,
+     *  MDS_ERR_STALE when the owner differs; nothing is written in
+     *  either case.  The failover takeover's persistence step. */
+    enum mds_status (*partition_cas)(struct mds_catalogue *cat,
+        uint32_t partition_id, uint32_t expected_owner,
+        uint32_t new_owner, uint8_t new_state);
+};
+
+/* -----------------------------------------------------------------------
  * Catalogue handle
  * ----------------------------------------------------------------------- */
 
+/**
+ * Backend capability bits (struct mds_catalogue.caps), set once by the
+ * backend constructor.  Properties of the store that callers need to
+ * know but that are not expressed by the presence of a vtable slot.
+ * C5 applies: a bit is set only when the store really has the property.
+ */
+
+/** The catalogue is ONE authority shared by every MDS node: an inode
+ *  is visible from all MDSes, so a cross-subtree rename moves only
+ *  the dirent and never copies or deletes the inode. */
+#define MDS_CAT_CAP_SHARED_AUTHORITY   (1U << 0)
+
+/** The store is reachable from more than one process (a database
+ *  cluster, not a per-process memory image), so registry rows,
+ *  heartbeats and the partition map written by one MDS daemon are
+ *  observable by another.  Required, together with the cluster slots,
+ *  for mds_cluster_supported(); an in-process store never sets it even
+ *  when it populates cluster_ops for tests. */
+#define MDS_CAT_CAP_MULTI_PROCESS      (1U << 1)
+
 struct mds_catalogue {
     enum mds_catalogue_backend        backend;
+    uint32_t                          caps;      /**< MDS_CAT_CAP_*. */
     const struct mds_authority_ops    *auth_ops;
     const struct mds_coordination_ops *coord_ops;
     const struct mds_catalogue_ops    *ops;       /**< Lifecycle. */
+    /** Optional cluster services; NULL when the backend has none. */
+    const struct mds_cluster_ops      *cluster_ops;
     void                              *backend_private;
     struct catalog_stats               stats;
     struct catalog_delta_sink         *delta_sink;

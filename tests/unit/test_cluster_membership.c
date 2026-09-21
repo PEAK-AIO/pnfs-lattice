@@ -1137,11 +1137,6 @@ static void test_transport_status_topology_fields(void)
 
 /* etcd tests removed -- coordination is RonDB-native. */
 
-static void _unused_etcd_placeholder(void)
-{
-    (void)0;
-}
-
 #if 0  /* etcd test removed */
 static void test_etcd_restart_self_registration(void)
 {

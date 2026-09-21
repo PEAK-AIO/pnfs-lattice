@@ -179,6 +179,17 @@ enum mds_status {
     MDS_ERR_NOSPC      = -17,
     MDS_ERR_LAYOUTUNAVAIL = -18,
     MDS_ERR_NOSUPPORT  = -19,
+    /*
+     * The backend could not determine whether a commit landed: the
+     * mutation MAY or MAY NOT be persisted.  Never treat it as success
+     * and never retry the operation blindly (a landed CREATE/REMOVE
+     * would then come back EXISTS/NOENT and be misreported).  Callers
+     * must keep every resource the operation may have consumed
+     * (safe_to_discard = false), log the operation identity and
+     * surface a hard error to the client.  Appended: values are never
+     * renumbered.
+     */
+    MDS_ERR_INDOUBT    = -20,
 };
 
 /* -----------------------------------------------------------------------
@@ -251,9 +262,9 @@ struct mds_remove_pending_entry {
 	uint64_t child_fileid;      /**< Expected dirent target (guard). */
 	uint64_t child_generation;  /**< Expected inode generation (guard). */
 	uint64_t enqueued_ns;       /**< Wall-clock at ack time (diag only). */
-	uint32_t claim_mds_id;      /**< 0 = unclaimed; else owning MDS id. */
 	uint64_t claim_boot;        /**< Owning MDS's boot_epoch. */
 	uint64_t claim_expires_ns;  /**< Lease deadline; 0 if unclaimed. */
+	uint32_t claim_mds_id;      /**< 0 = unclaimed; else owning MDS id. */
 	uint32_t retries;           /**< Incremented on retryable drainer failure. */
 	char     name[MDS_MAX_NAME + 1]; /**< Dirent name being removed. */
 };
@@ -525,8 +536,21 @@ enum mds_workload_profile {
  * Catalogue backend selection
  * ----------------------------------------------------------------------- */
 
+/*
+ * Values are appended, never renumbered: the enum is logged as %d and
+ * compared against config, but never serialised.  MDS_BACKEND_NONE is
+ * what mds_catalogue_backend_type() reports for a NULL handle; it is
+ * not a selectable backend.
+ */
 enum mds_catalogue_backend {
     MDS_BACKEND_RONDB   = 0,  /**< Production: RonDB / NDB Cluster (distributed). */
+    MDS_BACKEND_MEMDB   = 1,  /**< In-memory reference backend
+                               *   (src/catalogue/catalogue_memdb.c); selectable
+                               *   via `catalogue_backend = memdb`.  Non-durable,
+                               *   single node, bounded capacity. */
+    MDS_BACKEND_FDB     = 2,  /**< FoundationDB backend (ENABLE_FDB builds). */
+    MDS_BACKEND_NONE    = 3,  /**< No catalogue: NULL handle sentinel, never
+                               *   selectable. */
 };
 
 /* -----------------------------------------------------------------------
@@ -863,7 +887,7 @@ struct mds_config {
                                                * (0 = engine default). */
 
     /* Inline data (small file acceleration) */
-    bool                inline_enabled;       /* Master switch (default true) */
+    bool                inline_enabled;       /* Master switch (default false) */
     uint32_t            inline_max_size;      /* Max bytes for inline storage (default 65536) */
 
     /* Commit pipeline (single-writer batch commit) */
@@ -1106,6 +1130,28 @@ struct mds_config {
      * conflict-recall (Mark's byte-range bug) is gated separately by
      * the layout_recall coordinator. */
     bool                file_delegations_enabled;
+
+    /*
+     * FoundationDB catalogue backend (catalogue_backend = fdb).
+     *
+     * fdb_cluster_file: path of the fdb.cluster file; empty selects the
+     * FDB_CLUSTER_FILE environment variable, then
+     * /etc/foundationdb/fdb.cluster.
+     * fdb_key_prefix: byte string prepended to every key so several
+     * independent catalogues (or test runs) can share one cluster;
+     * empty = the whole key space.
+     * fdb_op_deadline_ms: total budget of one catalogue operation across
+     * every transaction attempt and commit-outcome resolution (0 =
+     * default 8000).  Exhaustion yields MDS_ERR_DELAY when every attempt
+     * definitively aborted and MDS_ERR_INDOUBT when a commit outcome
+     * could not be resolved in time.
+     * fdb_txn_timeout_ms: FDB_TR_OPTION_TIMEOUT of one attempt (0 =
+     * default 4000); must stay under the 5 s transaction window.
+     */
+    char                fdb_cluster_file[MDS_MAX_PATH];
+    char                fdb_key_prefix[32];
+    uint32_t            fdb_op_deadline_ms;
+    uint32_t            fdb_txn_timeout_ms;
 
     /* RonDB connection pool */
     /* NDB connections per MDS (0 = auto, max 64). */

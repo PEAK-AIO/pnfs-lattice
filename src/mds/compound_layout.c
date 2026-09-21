@@ -27,7 +27,6 @@
 #include "ds_health.h"
 #include "commit_queue.h"
 #include "io_tracker.h"
-#include "catalogue_rondb.h"
 #include "mds_metrics.h"
 #include "layout_ds_ids.h"
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
@@ -37,7 +36,7 @@
 #include "lease_table.h"
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "synth_uid.h"           /* RFC 8435 §2.2.1 synthetic UID derivation */
-#include "mds_op_metrics.h" /* CAT_TIMED-equivalent for direct fused call */
+#include "mds_op_metrics.h" /* MDS_TIME_CAT_OP probes on the LAYOUTGET path */
 
 
 /* -----------------------------------------------------------------------
@@ -182,9 +181,10 @@ static pthread_once_t g_layout_sid_seed_once = PTHREAD_ONCE_INIT;
  *
  * This module-local table records every layout `other` we issue and
  * the latest seqid we returned for it.  Lookup is keyed on the 12-byte
- * `other`; chained hash with a striped mutex.  Entries persist for
- * the lifetime of the daemon -- same lifecycle as the layout itself
- * for transient mode.  Memory is bounded by the number of distinct
+ * `other`; chained hash with a striped mutex.  Entries persist until
+ * LAYOUTRETURN or until layout_seqid_table_destroy() sweeps the table
+ * at daemon shutdown -- same lifecycle as the layout itself for
+ * transient mode.  Memory is bounded by the number of distinct
  * granted stateids (one per (clientid, fileid) pair on most paths);
  * the hash overhead is sizeof(struct layout_seqid_entry) per entry.
  *
@@ -385,10 +385,10 @@ void layout_seqid_advance(const uint8_t other[NFS4_OTHER_SIZE],
 	pthread_mutex_lock(&g_layout_seqid_locks[stripe]);
 	for (e = g_layout_seqid_buckets[bucket]; e != NULL; e = e->hash_next) {
 		if (memcmp(e->other, other, NFS4_OTHER_SIZE) == 0) {
-			uint32_t next = e->seqid + 1U;
-			if (next == 0U) {
-				next = 1U;
-			}
+			/* 0xFFFFFFFF -> 1: seqid 0 is reserved (RFC 8881
+			 * S8.2.2). */
+			uint32_t next = (e->seqid == UINT32_MAX)
+				? 1U : e->seqid + 1U;
 			e->seqid = next;
 			*next_seqid = next;
 			*hit = true;
@@ -484,6 +484,44 @@ uint64_t layout_seqid_entry_count(void)
 bool layout_seqid_at_capacity(void)
 {
 	return layout_seqid_entry_count() >= LAYOUT_SEQID_MAX_ENTRIES;
+}
+
+/*
+ * Free every tracked entry and leave the table empty but usable.
+ *
+ * The stripe locks are taken in ascending order and all held while the
+ * bucket array is swept; every other entry point holds exactly one
+ * stripe lock at a time, so this cannot deadlock against a straggler
+ * -- but the contract (layout_recall.h) is that no other thread is
+ * inside the tracker any more, and the locks are only insurance.  The
+ * locks themselves are static storage and are deliberately left
+ * initialised so a later grant (or a second destroy call) is still
+ * well-defined.
+ */
+void layout_seqid_table_destroy(void)
+{
+	uint32_t i;
+
+	(void)pthread_once(&g_layout_seqid_init_once, layout_seqid_init);
+
+	for (i = 0; i < LAYOUT_SEQID_STRIPES; i++) {
+		pthread_mutex_lock(&g_layout_seqid_locks[i]);
+	}
+	for (i = 0; i < LAYOUT_SEQID_BUCKETS; i++) {
+		struct layout_seqid_entry *e = g_layout_seqid_buckets[i];
+
+		while (e != NULL) {
+			struct layout_seqid_entry *next = e->hash_next;
+
+			free(e);
+			e = next;
+		}
+		g_layout_seqid_buckets[i] = NULL;
+	}
+	atomic_store_explicit(&g_layout_seqid_count, 0, memory_order_relaxed);
+	for (i = LAYOUT_SEQID_STRIPES; i > 0; i--) {
+		pthread_mutex_unlock(&g_layout_seqid_locks[i - 1]);
+	}
 }
 
 static void seed_layout_sid_counter(void)
@@ -731,10 +769,9 @@ static void layout_pick_stateid(struct compound_data *cd,
 			&row_seqid);
 		if (st == MDS_OK && cd->current_fh_set &&
 		    row_fileid == cd->current_fh.fileid) {
-			uint32_t next = row_seqid + 1U;
-			if (next == 0U) {
-				next = 1U; /* RFC: skip reserved 0. */
-			}
+			/* RFC: skip reserved 0 on wrap. */
+			uint32_t next = (row_seqid == UINT32_MAX)
+				? 1U : row_seqid + 1U;
 			memset(out, 0, sizeof(*out));
 			out->seqid = next;
 			memcpy(out->other, client_sid->other,
@@ -760,8 +797,8 @@ static void layout_pick_stateid(struct compound_data *cd,
  * the newest window and the byte-range recall scanner -- which skips
  * holders whose row is disjoint from a recalled range -- would lose
  * coverage of earlier windows the client still holds (under-recall).
- * Backends without a union slot fall back to the overwrite inside the
- * dispatch wrapper, which is exactly the pre-change behaviour.
+ * A backend without a union slot gets MDS_ERR_NOSUPPORT from the
+ * dispatch wrapper (C5); there is no overwrite fallback.
  */
 static void layout_persist_grant(struct compound_data *cd,
 				 bool is_renewal,
@@ -1428,17 +1465,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		}
 	} else if (cd->lr != NULL && !cd->skip_transient_ndb) {
 		uint32_t recalled = 0;
-		uint32_t req_iomode_for_recall = a->iomode;
-
-		/* Promote READ to RW for the conflict scan when the
-		 * server is granting RW upgrades unconditionally
-		 * (matches the long-lived grant policy below): if we
-		 * are about to grant RW, any conflicting holder must
-		 * see a recall regardless of what the client asked
-		 * for. */
-		if (grant_iomode == LAYOUTIOMODE4_RW) {
-			req_iomode_for_recall = LAYOUTIOMODE4_RW;
-		}
+		/* Scan with the iomode we are about to grant (RW under
+		 * the long-lived grant policy above, see grant_iomode)
+		 * rather than what the client asked for: any holder
+		 * conflicting with an RW grant must see a recall
+		 * regardless of the requested iomode. */
+		const uint32_t req_iomode_for_recall = grant_iomode;
 
 		MDS_TIME_CAT_OP(MDS_CATOP_LAYOUT_RECALL_SCAN,
 			(void)layout_recall_byte_range_for_holders(
@@ -1473,12 +1505,12 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		 * logical lease range into per-stripe slices and conflict-
 		 * check each one against the lease table.  Slicing fails
 		 * closed -- on error we return TRYLATER. */
-		struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
-		uint32_t _slt_unit = cd->cfg_stripe_unit ? cd->cfg_stripe_unit : 65536U;
-		int _slt_n = lease_range_to_stripe_slices(
-			lease_offset, lease_length, _slt_unit,
-			_slt_slices, MDS_MAX_STRIPES);
-		if (_slt_n < 0) {
+		struct stripe_slice slt_slices[MDS_MAX_STRIPES];
+		uint32_t slt_unit = cd->cfg_stripe_unit ? cd->cfg_stripe_unit : 65536U;
+		int slt_n = lease_range_to_stripe_slices(
+			lease_offset, lease_length, slt_unit,
+			slt_slices, MDS_MAX_STRIPES);
+		if (slt_n < 0) {
 			return NFS4ERR_LAYOUTTRYLATER;
 		}
 		/* Patch 0007: contention-aware grant narrowing.
@@ -1487,19 +1519,19 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 		 * prefix so the client gets a smaller-but-usable layout
 		 * instead of NFS4ERR_LAYOUTTRYLATER.  prefix == 0 keeps
 		 * the legacy TRYLATER behaviour. */
-		uint64_t _slt_prefix = stripe_lease_prefix_conflict_free_length(
+		uint64_t slt_prefix = stripe_lease_prefix_conflict_free_length(
 			cd->slt,
-			_slt_slices, (uint32_t)_slt_n,
-			_slt_unit,
+			slt_slices, (uint32_t)slt_n,
+			slt_unit,
 			lease_offset, lease_length,
 			cd->current_fh.fileid, cd->clientid);
-		if (_slt_prefix == 0) {
+		if (slt_prefix == 0) {
 			return NFS4ERR_LAYOUTTRYLATER;
 		}
-		if (_slt_prefix < lease_length) {
-			lease_length = _slt_prefix;
-			if (grant_length > _slt_prefix) {
-				grant_length = _slt_prefix;
+		if (slt_prefix < lease_length) {
+			lease_length = slt_prefix;
+			if (grant_length > slt_prefix) {
+				grant_length = slt_prefix;
 			}
 		}
 	}
@@ -1787,44 +1819,27 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			}
 		}
 
-		/* Phase 2: Use fused stripe_get + layout_grant when
-		 * RonDB backend is active.  Saves 1 NDB round-trip.
-		 * Renewals are excluded: the fused write is a blind
-		 * overwrite of the layout_state row, which would narrow
-		 * the persisted range; they take the read + union path
-		 * below instead (same round-trip count). */
-#ifdef HAVE_RONDB
-		if (cd->cat != NULL &&
-		    mds_catalogue_backend_type(cd->cat) == MDS_BACKEND_RONDB &&
+		/* Phase 2: Use the fused stripe_get + layout_grant slot
+		 * when the backend implements it (RonDB: one NDB
+		 * transaction, saves 1 round-trip).  Renewals are
+		 * excluded: the fused write is a blind overwrite of the
+		 * layout_state row, which would narrow the persisted
+		 * range; they take the read + union path below instead
+		 * (same round-trip count). */
+		if (mds_coord_layoutget_fused_supported(cd->cat) &&
 		    !cd->skip_transient_ndb && !is_renewal) {
 			struct nfs4_stateid fused_sid;
 			layout_pick_stateid(cd, &client_sid, &fused_sid);
 
-		/* Direct-from-compound call: not in the catalogue vtable
-		 * (CAT_TIMED only wraps vtable dispatch), so we time it
-		 * inline.  Skipped cleanly when observability is off. */
-		{
-			bool _t = mds_op_metrics_enabled();
-			uint64_t _t0 = 0;
-
-			if (_t) {
-				_t0 = mds_op_metrics_now_ns();
-				mds_phase_enter(MDS_PHASE_CATALOGUE);
-			}
-			st = catalogue_rondb_layoutget_fused(
+			/* Dispatcher wraps the call in CAT_TIMED
+			 * (MDS_CATOP_LAYOUTGET_FUSED, CATALOGUE phase). */
+			st = mds_coord_layoutget_fused(
 				cd->cat, cd->current_fh.fileid,
 				&stripe_count, &stripe_unit,
 				&mirror_count, &entries,
 				&fused_sid, cd->clientid,
 				grant_iomode, grant_offset, grant_length,
 				cd->mds_id);
-			if (_t) {
-				mds_phase_leave();
-				mds_cat_op_observe(
-					MDS_CATOP_LAYOUTGET_FUSED,
-					mds_op_metrics_now_ns() - _t0);
-			}
-		}
 
 		if (st == MDS_OK) {
 			/* Layout grant already persisted in the fused txn. */
@@ -1858,10 +1873,30 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			}
 			goto fill_layoutget_result;
 		}
+		/*
+		 * Commit outcome unresolved (MDS_ERR_INDOUBT): the
+		 * layout_state row for fused_sid MAY have been written.
+		 * This is terminal for the operation -- NOT a member of
+		 * the fallback ladder below: a second grant through the
+		 * split path would mint another stateid for the same
+		 * client window and could leave two live rows, and a
+		 * revoke here would assume the row exists.  Grant
+		 * nothing and return the hard error the mapping gives
+		 * INDOUBT (NFS4ERR_IO, never DELAY).  fused_sid was never
+		 * handed to the client, so an orphan row is unreachable
+		 * by recall and is reclaimed by the client-expiry path
+		 * (layout_del_all_for_client).
+		 */
+		if (st == MDS_ERR_INDOUBT) {
+			free(entries);
+			return mds_status_to_nfs4(st);
+		}
 		/* Fused path failed.  Fall back to non-fused
-		 * (separate txns) for any transient or non-fatal error. */
+		 * (separate txns) for any transient or non-fatal error;
+		 * NOSUPPORT cannot happen after the capability check
+		 * above but is treated the same way for robustness. */
 		if (st == MDS_ERR_DELAY || st == MDS_ERR_IO ||
-		    st == MDS_ERR_INVAL) {
+		    st == MDS_ERR_INVAL || st == MDS_ERR_NOSUPPORT) {
 			st = cat_stripe_map_get(
 				cd, cd->current_fh.fileid,
 				&stripe_count, &stripe_unit,
@@ -1871,9 +1906,7 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 			/* NOTFOUND: fall through to placement. */
 			return mds_status_to_nfs4(st);
 		}
-		} else
-#endif /* HAVE_RONDB */
-		{
+		} else {
 			st = cat_stripe_map_get(cd, cd->current_fh.fileid,
 						     &stripe_count, &stripe_unit,
 						     &mirror_count, &entries);
@@ -2693,21 +2726,21 @@ fill_layoutget_result:
 			 * lease entry per stripe slice; best-effort -- the
 			 * conflict check at LAYOUTGET entry already ruled out
 			 * cross-client collisions. */
-			struct stripe_slice _slt_slices[MDS_MAX_STRIPES];
-			uint32_t _slt_unit = cd->cfg_stripe_unit
+			struct stripe_slice slt_slices[MDS_MAX_STRIPES];
+			uint32_t slt_unit = cd->cfg_stripe_unit
 				? cd->cfg_stripe_unit : 65536U;
-			int _slt_n = lease_range_to_stripe_slices(
-				lease_offset, lease_length, _slt_unit,
-				_slt_slices, MDS_MAX_STRIPES);
-			for (int _slt_i = 0; _slt_i < _slt_n; _slt_i++) {
+			int slt_n = lease_range_to_stripe_slices(
+				lease_offset, lease_length, slt_unit,
+				slt_slices, MDS_MAX_STRIPES);
+			for (int slt_i = 0; slt_i < slt_n; slt_i++) {
 				(void)stripe_lease_acquire(
 					cd->slt,
 					cd->current_fh.fileid,
 					cd->clientid,
 					0U, /* ds_id: tracing only */
-					_slt_slices[_slt_i].stripe_index,
-					_slt_slices[_slt_i].ds_offset,
-					_slt_slices[_slt_i].ds_length,
+					slt_slices[slt_i].stripe_index,
+					slt_slices[slt_i].ds_offset,
+					slt_slices[slt_i].ds_length,
 					cd->cfg_stripe_lease_duration_ms);
 			}
 		}
@@ -3349,8 +3382,23 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				merged_mask |= MDS_ATTR_FLAGS;
 			}
 
+			/*
+			 * RFC 8881 S18.42.3: the client MAY suggest a
+			 * modification time; when it does not (the Linux
+			 * client never sets loca_time_modify), the metadata
+			 * server uses the time of the LAYOUTCOMMIT.  pNFS
+			 * data writes go straight to the DSes, so this is the
+			 * only point where the MDS learns the file changed;
+			 * without it mtime stayed at the creation time for
+			 * every file written through a layout.  Same rule as
+			 * the aggregator branch above; folded into the one
+			 * masked write, no extra round trip.
+			 */
 			if (a->time_modify_set) {
 				lc_inode.mtime = a->time_modify;
+				merged_mask |= MDS_ATTR_MTIME;
+			} else if (a->new_offset) {
+				clock_gettime(CLOCK_REALTIME, &lc_inode.mtime);
 				merged_mask |= MDS_ATTR_MTIME;
 			}
 

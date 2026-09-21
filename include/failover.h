@@ -107,7 +107,14 @@ enum mds_status failover_init(const struct failover_cfg *cfg,
  * Returns MDS_OK on success.  Named error codes:
  *   MDS_ERR_PERM  -- not in STANDBY state, self-fenced,
  *                    replication unhealthy, or partner alive.
+ *   MDS_ERR_STALE -- the partner owned partitions but the store gave
+ *                    every one of them to another node first (lost
+ *                    the takeover race).  Nothing was taken; the role
+ *                    is back to STANDBY and the caller should keep
+ *                    watching rather than treat this as a failure of
+ *                    the store.
  *   MDS_ERR_IO    -- subtree takeover or recovery load failed.
+ * On every error the role is STANDBY again.
  *
  * @param ctx  Failover context (must be in STANDBY role).
  * @return MDS_OK on success, or error code.

@@ -309,7 +309,9 @@ static bool sleep_or_stop(int wake_fd, uint32_t ms)
 	rc = pselect(wake_fd + 1, &rfds, NULL, NULL, &ts, NULL);
 	if (rc > 0 && FD_ISSET(wake_fd, &rfds)) {
 		char drain;
-		(void)read(wake_fd, &drain, 1);
+		ssize_t n = read(wake_fd, &drain, 1);
+
+		(void)n; /* wake byte drained (or not): stop either way */
 		return false;
 	}
 	return true;
@@ -421,12 +423,16 @@ int ds_capacity_start(struct ds_cache *cache,
 void ds_capacity_stop(struct ds_capacity *cap)
 {
 	char wake = 'x';
+	ssize_t n;
 
 	if (cap == NULL) {
 		return;
 	}
 	atomic_store_explicit(&cap->running, false, memory_order_release);
-	(void)write(cap->stop_pipe[1], &wake, 1);
+	/* Best-effort wake: the running flag alone ends the loop at the
+	 * next poll tick if the byte is lost. */
+	n = write(cap->stop_pipe[1], &wake, 1);
+	(void)n;
 	(void)pthread_join(cap->thread, NULL);
 	close(cap->stop_pipe[0]);
 	close(cap->stop_pipe[1]);

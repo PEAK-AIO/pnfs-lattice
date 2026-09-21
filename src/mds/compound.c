@@ -216,6 +216,105 @@ static inline bool utf8_is_noncharacter(uint32_t cp)
 	return false;
 }
 
+/*
+ * One multi-byte sequence starting at p[i] whose lead byte selected the
+ * 2-, 3- or 4-byte form.  Each helper returns the sequence length, or 0
+ * when the sequence is truncated, malformed, overlong, a surrogate half
+ * or (3/4-byte forms) a noncharacter.
+ */
+static inline size_t utf8_seq2(const uint8_t *p, size_t i, size_t len)
+{
+	uint8_t c1;
+
+	if (i + 1 >= len) {
+		return 0;
+	}
+	c1 = p[i + 1];
+	if (c1 < 0x80u || c1 > 0xBFu) {
+		return 0;
+	}
+	/* 2-byte form encodes U+0080..U+07FF: no noncharacters
+	 * live in this range, no further check needed. */
+	return 2;
+}
+
+static inline size_t utf8_seq3(const uint8_t *p, size_t i, size_t len)
+{
+	uint8_t c = p[i];
+	uint8_t c1, c2;
+	uint32_t cp;
+
+	if (i + 2 >= len) {
+		return 0;
+	}
+	c1 = p[i + 1];
+	c2 = p[i + 2];
+	if (c == 0xE0u) {
+		if (c1 < 0xA0u || c1 > 0xBFu) {
+			return 0;
+		}
+	} else if (c == 0xEDu) {
+		if (c1 < 0x80u || c1 > 0x9Fu) {
+			return 0;
+		}
+	} else {
+		if (c1 < 0x80u || c1 > 0xBFu) {
+			return 0;
+		}
+	}
+	if (c2 < 0x80u || c2 > 0xBFu) {
+		return 0;
+	}
+	cp = ((uint32_t)(c & 0x0Fu) << 12) |
+	     ((uint32_t)(c1 & 0x3Fu) << 6) |
+	     (uint32_t)(c2 & 0x3Fu);
+	if (utf8_is_noncharacter(cp)) {
+		return 0;
+	}
+	return 3;
+}
+
+static inline size_t utf8_seq4(const uint8_t *p, size_t i, size_t len)
+{
+	uint8_t c = p[i];
+	uint8_t c1, c2, c3;
+	uint32_t cp;
+
+	if (i + 3 >= len) {
+		return 0;
+	}
+	c1 = p[i + 1];
+	c2 = p[i + 2];
+	c3 = p[i + 3];
+	if (c == 0xF0u) {
+		if (c1 < 0x90u || c1 > 0xBFu) {
+			return 0;
+		}
+	} else if (c == 0xF4u) {
+		if (c1 < 0x80u || c1 > 0x8Fu) {
+			return 0;
+		}
+	} else {
+		if (c1 < 0x80u || c1 > 0xBFu) {
+			return 0;
+		}
+	}
+	if (c2 < 0x80u || c2 > 0xBFu) {
+		return 0;
+	}
+	if (c3 < 0x80u || c3 > 0xBFu) {
+		return 0;
+	}
+	cp = ((uint32_t)(c & 0x07u) << 18) |
+	     ((uint32_t)(c1 & 0x3Fu) << 12) |
+	     ((uint32_t)(c2 & 0x3Fu) << 6) |
+	     (uint32_t)(c3 & 0x3Fu);
+	if (utf8_is_noncharacter(cp)) {
+		return 0;
+	}
+	return 4;
+}
+
 bool compound_is_valid_utf8(const char *buf, size_t len)
 {
 	const uint8_t *p;
@@ -227,8 +326,7 @@ bool compound_is_valid_utf8(const char *buf, size_t len)
 	p = (const uint8_t *)buf;
 	for (i = 0; i < len; ) {
 		uint8_t c = p[i];
-		uint8_t c1, c2, c3;
-		uint32_t cp;
+		size_t n;
 
 		if (c < 0x80u) {
 			i++;
@@ -238,85 +336,18 @@ bool compound_is_valid_utf8(const char *buf, size_t len)
 			return false;
 		}
 		if (c < 0xE0u) {
-			if (i + 1 >= len) {
-				return false;
-			}
-			c1 = p[i + 1];
-			if (c1 < 0x80u || c1 > 0xBFu) {
-				return false;
-			}
-			/* 2-byte form encodes U+0080..U+07FF: no noncharacters
-			 * live in this range, no further check needed. */
-			i += 2;
-			continue;
-		}
-		if (c < 0xF0u) {
-			if (i + 2 >= len) {
-				return false;
-			}
-			c1 = p[i + 1];
-			c2 = p[i + 2];
-			if (c == 0xE0u) {
-				if (c1 < 0xA0u || c1 > 0xBFu) {
-					return false;
-				}
-			} else if (c == 0xEDu) {
-				if (c1 < 0x80u || c1 > 0x9Fu) {
-					return false;
-				}
-			} else {
-				if (c1 < 0x80u || c1 > 0xBFu) {
-					return false;
-				}
-			}
-			if (c2 < 0x80u || c2 > 0xBFu) {
-				return false;
-			}
-			cp = ((uint32_t)(c & 0x0Fu) << 12) |
-			     ((uint32_t)(c1 & 0x3Fu) << 6) |
-			     (uint32_t)(c2 & 0x3Fu);
-			if (utf8_is_noncharacter(cp)) {
-				return false;
-			}
-			i += 3;
-			continue;
-		}
-		if (c >= 0xF5u) {
-			return false;
-		}
-		if (i + 3 >= len) {
-			return false;
-		}
-		c1 = p[i + 1];
-		c2 = p[i + 2];
-		c3 = p[i + 3];
-		if (c == 0xF0u) {
-			if (c1 < 0x90u || c1 > 0xBFu) {
-				return false;
-			}
-		} else if (c == 0xF4u) {
-			if (c1 < 0x80u || c1 > 0x8Fu) {
-				return false;
-			}
+			n = utf8_seq2(p, i, len);
+		} else if (c < 0xF0u) {
+			n = utf8_seq3(p, i, len);
+		} else if (c < 0xF5u) {
+			n = utf8_seq4(p, i, len);
 		} else {
-			if (c1 < 0x80u || c1 > 0xBFu) {
-				return false;
-			}
-		}
-		if (c2 < 0x80u || c2 > 0xBFu) {
 			return false;
 		}
-		if (c3 < 0x80u || c3 > 0xBFu) {
+		if (n == 0) {
 			return false;
 		}
-		cp = ((uint32_t)(c & 0x07u) << 18) |
-		     ((uint32_t)(c1 & 0x3Fu) << 12) |
-		     ((uint32_t)(c2 & 0x3Fu) << 6) |
-		     (uint32_t)(c3 & 0x3Fu);
-		if (utf8_is_noncharacter(cp)) {
-			return false;
-		}
-		i += 4;
+		i += n;
 	}
 	return true;
 }
@@ -334,9 +365,11 @@ enum nfs4_status compound_validate_name(const char *name)
 	     (name[1] == '.' && name[2] == '\0'))) {
 		return NFS4ERR_BADNAME;
 	}
+	/* name is NUL-terminated, so no byte below len can be NUL;
+	 * only the path separator needs rejecting here. */
 	len = strlen(name);
 	for (i = 0; i < len; i++) {
-		if (name[i] == '/' || name[i] == '\0') {
+		if (name[i] == '/') {
 			return NFS4ERR_INVAL;
 		}
 	}
@@ -536,64 +569,6 @@ static enum mds_status compound_cat_inode_get(
 		inode_cache_put(cd->icache, out);
 	}
 	return MDS_OK;
-}
-
-/**
- * Dirent read via catalogue (RonDB backend).
- * Checks the dirent cache first; populates on miss.
- * Caches negative (NOTFOUND) results with TTL.
- */
-static enum mds_status compound_cat_dirent_get(
-	struct compound_data *cd,
-	uint64_t parent_fileid, const char *name,
-	uint64_t *child_fileid, uint8_t *type)
-{
-	struct mds_inode child;
-	enum mds_status st;
-	uint64_t dcache_gen = 0;
-
-	/* Check dirent cache first. */
-	if (cd->dcache != NULL) {
-		int dc_rc = dirent_cache_get(cd->dcache, parent_fileid,
-					     name, child_fileid, type);
-		if (dc_rc == 0) {
-			return MDS_OK; /* positive hit */
-		}
-		if (dc_rc == 1) {
-			return MDS_ERR_NOTFOUND; /* negative hit */
-		}
-		/* dc_rc == -1: miss -- fall through to backend.  Snapshot
-		 * the invalidation generation BEFORE the backend read so
-		 * we can detect a racing CREATE/REMOVE and skip inserting
-		 * a stale negative entry below. */
-		dcache_gen = dirent_cache_read_gen(cd->dcache);
-	}
-
-	if (cd->cat == NULL) {
-		return MDS_ERR_INVAL;
-	}
-
-	st = mds_cat_ns_lookup(cd->cat, parent_fileid, name, &child);
-	if (st == MDS_OK) {
-		*child_fileid = child.fileid;
-		*type = (uint8_t)child.type;
-		if (cd->dcache != NULL) {
-			dirent_cache_put(cd->dcache, parent_fileid,
-					 name, child.fileid,
-					 (uint8_t)child.type);
-		}
-		return MDS_OK;
-	}
-	if (st == MDS_ERR_NOTFOUND && cd->dcache != NULL) {
-		/* Race-guarded negative insert: if any invalidate has run
-		 * since dcache_gen was sampled (in particular a CREATE on
-		 * this same (parent, name) that committed to NDB between
-		 * the gen sample and the backend read), the conditional
-		 * put skips and the next LOOKUP re-reads the backend. */
-		(void)dirent_cache_put_negative_if_unchanged(
-			cd->dcache, parent_fileid, name, dcache_gen);
-	}
-	return st;
 }
 
 /* -----------------------------------------------------------------------
@@ -961,6 +936,17 @@ enum nfs4_status mds_status_to_nfs4(enum mds_status st)
 	case MDS_ERR_GRACE:       return NFS4ERR_GRACE;
 	case MDS_ERR_MOVED:       return NFS4ERR_MOVED;
 	case MDS_ERR_DELAY:       return NFS4ERR_DELAY;
+	/*
+	 * The backend could not resolve whether its commit landed
+	 * (pnfs_mds.h).  This must stay a hard error: NFS4ERR_DELAY
+	 * would invite the client to retry under a new seqid, which
+	 * the DRC does not cover, so a CREATE / REMOVE that did land
+	 * would come back NFS4ERR_EXIST / NFS4ERR_NOENT and be
+	 * misreported.  NFS4_OK is never an option: the mutation may
+	 * not exist.  Explicit case so it can never drift into the
+	 * default branch or be folded into DELAY.
+	 */
+	case MDS_ERR_INDOUBT:     return NFS4ERR_IO;
 	case MDS_ERR_NOTEMPTY:    return NFS4ERR_NOTEMPTY;
 	case MDS_ERR_ISDIR:       return NFS4ERR_ISDIR;
 	case MDS_ERR_NOTDIR:      return NFS4ERR_NOTDIR;
@@ -1511,9 +1497,10 @@ static enum nfs4_status dispatch_op(struct compound_data *cd,
 		 * can encode the server's attrs with the same bitmap. */
 		{
 			XDR bm_xdr;
-			xdrmem_create(&bm_xdr,
-				(char *)(uintptr_t)vf->fattr_raw,
-				vf->fattr_raw_len, XDR_DECODE);
+			/* xdrmem_create() has no const-qualified form; the
+			 * stream is XDR_DECODE and never writes the buffer. */
+			xdrmem_create(&bm_xdr, (char *)vf->fattr_raw,
+				      vf->fattr_raw_len, XDR_DECODE);
 			memset(vf_bm, 0, sizeof(vf_bm));
 			if (!xdr_nfs4_bitmap_decode(&bm_xdr, vf_bm,
 						   NFS4_BITMAP_WORDS,
@@ -2458,6 +2445,118 @@ static const char *opnum_name(enum nfs_opnum4 op)
 	}
 }
 
+/*
+ * Per-op latency observability.  Captures wall-clock around
+ * dispatch_op (does NOT include XDR encode of the result -- that's
+ * RPC layer).  Phase tracker stays armed for the duration so any
+ * catalogue / state / ds_io scope inside the handler gets credited.
+ *
+ * Gated on mds_op_metrics_enabled() so disabling observability at
+ * runtime collapses the whole block to a bare dispatch_op call.
+ */
+static enum nfs4_status compound_dispatch_observed(struct compound_data *cd,
+						  const struct nfs4_op *op,
+						  struct nfs4_result *res)
+{
+	if (__builtin_expect(mds_op_metrics_enabled(), 1)) {
+		enum mds_op_class opc = mds_op_class_from_opnum(op->opnum);
+		struct timespec t_op_a, t_op_b;
+		enum nfs4_status status;
+		uint64_t ns;
+
+		clock_gettime(CLOCK_MONOTONIC, &t_op_a);
+		mds_phase_begin_op();
+		status = dispatch_op(cd, op, res);
+		mds_phase_end_op(opc);
+		clock_gettime(CLOCK_MONOTONIC, &t_op_b);
+		ns = (uint64_t)(t_op_b.tv_sec - t_op_a.tv_sec) * 1000000000ULL +
+		     (uint64_t)(t_op_b.tv_nsec - t_op_a.tv_nsec);
+		mds_op_observe_total(opc, ns);
+		return status;
+	}
+	return dispatch_op(cd, op, res);
+}
+
+/*
+ * Run op i of the compound: REP_TOO_BIG pre-check, dispatch, OP_ILLEGAL
+ * opnum fix-up and the response-size estimate update.  The result slot
+ * has already been destroyed/reset by the caller.
+ */
+static void compound_run_op(struct compound_data *cd,
+			    const struct nfs4_op *op,
+			    struct nfs4_result *res, uint32_t i)
+{
+	/*
+	 * RFC 8881 S2.10.6.1.3: before dispatching, check if the
+	 * accumulated response would exceed ca_maxresponsesize.
+	 * Only enforced after SEQUENCE has populated the cap.
+	 * Per-op estimate: 8 bytes (opnum+status) + 128 bytes
+	 * conservative body.  Pynfs CSESS26 (ca_maxresponsesize=400
+	 * with 4xGETATTR) drives this path.
+	 */
+	if (cd->max_response_size > 0 && i > 0) {
+		uint32_t op_est = 136; /* 8 + 128 body */
+		if (cd->response_size_est + op_est > cd->max_response_size) {
+			res->status = NFS4ERR_REP_TOO_BIG;
+			goto op_done;
+		}
+	}
+
+	res->status = compound_dispatch_observed(cd, op, res);
+
+	/*
+	 * RFC 8881 S2.10.6.4: if the operation is unknown, the
+	 * result MUST use OP_ILLEGAL as the opnum, not the raw
+	 * wire value the client sent.  Pynfs COMP5 testUndefined.
+	 */
+	if (res->status == NFS4ERR_OP_ILLEGAL) {
+		res->opnum = OP_ILLEGAL;
+	}
+
+op_done:
+	/* Update response size estimate for REP_TOO_BIG. */
+	if (cd->max_response_size > 0) {
+		cd->response_size_est += (res->status == NFS4_OK) ? 136U : 8U;
+	}
+}
+
+/* Log sampled compound timing (disabled when threshold == 0). */
+static void compound_log_sampled_perf(const struct nfs4_op *ops,
+				      uint32_t count,
+				      const uint64_t *op_us,
+				      const struct timespec *t_start,
+				      uint32_t perf_threshold)
+{
+	struct timespec t_end;
+	clock_gettime(CLOCK_MONOTONIC, &t_end);
+	int64_t total_us = (int64_t)(t_end.tv_sec - t_start->tv_sec) * 1000000LL
+			  + (int64_t)(t_end.tv_nsec - t_start->tv_nsec) / 1000LL;
+	if (total_us > (int64_t)perf_threshold) {
+		char buf[512];
+		int pos = snprintf(buf, sizeof(buf),
+			"PERF: compound %lluus [", (unsigned long long)total_us);
+		for (uint32_t j = 0; j < count && j < 64; j++) {
+			pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+				"%s=%lluus ", opnum_name(ops[j].opnum),
+				(unsigned long long)op_us[j]);
+			if (pos >= (int)sizeof(buf) - 20) { break; }
+		}
+		(void)snprintf(buf + pos,
+			sizeof(buf) - (size_t)pos, "]\n");
+		MDS_LOG_INFO(LOG_COMP_NFS, "%s", buf);
+	}
+}
+
+/* End-of-compound teardown shared by the early-exit and normal paths. */
+static void compound_finish(struct compound_data *cd)
+{
+	revoke_unused_pregrant(cd);
+	compound_ro_txn_reset(cd);
+	cd->ops = NULL;
+	cd->op_count = 0;
+	cd->op_index = 0;
+}
+
 uint32_t compound_process(struct compound_data *cd,
 			   const struct nfs4_op *ops,
 			   struct nfs4_result *results,
@@ -2504,76 +2603,7 @@ uint32_t compound_process(struct compound_data *cd,
 			clock_gettime(CLOCK_MONOTONIC, &t_op_start);
 		}
 
-		/*
-		 * RFC 8881 S2.10.6.1.3: before dispatching, check if the
-		 * accumulated response would exceed ca_maxresponsesize.
-		 * Only enforced after SEQUENCE has populated the cap.
-		 * Per-op estimate: 8 bytes (opnum+status) + 128 bytes
-		 * conservative body.  Pynfs CSESS26 (ca_maxresponsesize=400
-		 * with 4xGETATTR) drives this path.
-		 */
-		if (cd->max_response_size > 0 && i > 0) {
-			uint32_t op_est = 136; /* 8 + 128 body */
-			if (cd->response_size_est + op_est > cd->max_response_size) {
-				results[i].status = NFS4ERR_REP_TOO_BIG;
-				goto op_done;
-			}
-		}
-
-		{
-			/*
-			 * Per-op latency observability.  Captures wall-
-			 * clock around dispatch_op (does NOT include XDR
-			 * encode of the result -- that's RPC layer).
-			 * Phase tracker stays armed for the duration so
-			 * any catalogue / state / ds_io scope inside the
-			 * handler gets credited.
-			 *
-			 * Gated on mds_op_metrics_enabled() so disabling
-			 * observability at runtime collapses the whole
-			 * block to a bare dispatch_op call.
-			 */
-			if (__builtin_expect(mds_op_metrics_enabled(), 1)) {
-				enum mds_op_class _opc =
-					mds_op_class_from_opnum(ops[i].opnum);
-				struct timespec _t_op_a, _t_op_b;
-
-				clock_gettime(CLOCK_MONOTONIC, &_t_op_a);
-				mds_phase_begin_op();
-				results[i].status = dispatch_op(cd, &ops[i],
-								&results[i]);
-				mds_phase_end_op(_opc);
-				clock_gettime(CLOCK_MONOTONIC, &_t_op_b);
-				{
-					uint64_t _ns = (uint64_t)
-						(_t_op_b.tv_sec -
-						 _t_op_a.tv_sec) *
-						1000000000ULL +
-						(uint64_t)(_t_op_b.tv_nsec -
-							   _t_op_a.tv_nsec);
-					mds_op_observe_total(_opc, _ns);
-				}
-			} else {
-				results[i].status = dispatch_op(cd, &ops[i],
-								&results[i]);
-			}
-		}
-
-		/*
-		 * RFC 8881 S2.10.6.4: if the operation is unknown, the
-		 * result MUST use OP_ILLEGAL as the opnum, not the raw
-		 * wire value the client sent.  Pynfs COMP5 testUndefined.
-		 */
-		if (results[i].status == NFS4ERR_OP_ILLEGAL) {
-			results[i].opnum = OP_ILLEGAL;
-		}
-
-op_done:
-		/* Update response size estimate for REP_TOO_BIG. */
-		if (cd->max_response_size > 0) {
-			cd->response_size_est += (results[i].status == NFS4_OK)
-				? 136U : 8U;
-		}
+		compound_run_op(cd, &ops[i], &results[i], i);
 
 		if (do_sample && i < 64) {
 			clock_gettime(CLOCK_MONOTONIC, &t_op_end);
@@ -2593,41 +2623,16 @@ op_done:
 				cd, &ops[i], &results[i]);
 		}
 		if (results[i].status != NFS4_OK) {
-			revoke_unused_pregrant(cd);
-			compound_ro_txn_reset(cd);
-			cd->ops = NULL;
-			cd->op_count = 0;
-			cd->op_index = 0;
+			compound_finish(cd);
 			return i + 1;
 		}
 	}
 
-	/* Log sampled compound timing (disabled when threshold == 0). */
 	if (do_sample && count <= 64) {
-		struct timespec t_end;
-		clock_gettime(CLOCK_MONOTONIC, &t_end);
-		int64_t total_us = (int64_t)(t_end.tv_sec - t_start.tv_sec) * 1000000LL
-				  + (int64_t)(t_end.tv_nsec - t_start.tv_nsec) / 1000LL;
-		if (total_us > (int64_t)perf_threshold) {
-			char buf[512];
-			int pos = snprintf(buf, sizeof(buf),
-				"PERF: compound %lluus [", (unsigned long long)total_us);
-			for (uint32_t j = 0; j < count && j < 64; j++) {
-				pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-					"%s=%lluus ", opnum_name(ops[j].opnum),
-					(unsigned long long)op_us[j]);
-				if (pos >= (int)sizeof(buf) - 20) { break; }
-			}
-			(void)snprintf(buf + pos,
-				sizeof(buf) - (size_t)pos, "]\n");
-			MDS_LOG_INFO(LOG_COMP_NFS, "%s", buf);
-		}
+		compound_log_sampled_perf(ops, count, op_us, &t_start,
+					  perf_threshold);
 	}
 
-	revoke_unused_pregrant(cd);
-	compound_ro_txn_reset(cd);
-	cd->ops = NULL;
-	cd->op_count = 0;
-	cd->op_index = 0;
+	compound_finish(cd);
 	return count;
 }

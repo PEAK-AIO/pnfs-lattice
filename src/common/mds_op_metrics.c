@@ -386,7 +386,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 			"End-to-end latency of one NFS op handled by "
 			"COMPOUND dispatch (excludes RPC decode/encode).\n"
 		"# TYPE pnfs_mds_op_latency_seconds histogram\n");
-	if (n < 0 || (size_t)n >= cap - off) return -1;
+	if (n < 0 || (size_t)n >= cap - off) {
+		return -1;
+	}
 	off += (size_t)n;
 
 	for (i = 0; i < MDS_OPC__COUNT; i++) {
@@ -398,7 +400,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 		rc = render_labeled_hist(&g_op_total_hist[i],
 			"pnfs_mds_op_latency_seconds",
 			label, buf + off, cap - off);
-		if (rc < 0) return -1;
+		if (rc < 0) {
+			return -1;
+		}
 		off += (size_t)rc;
 	}
 
@@ -408,7 +412,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 			"Latency of a single catalogue vtable call "
 			"(== one RonDB roundtrip in the RonDB backend).\n"
 		"# TYPE pnfs_mds_cat_op_latency_seconds histogram\n");
-	if (n < 0 || (size_t)n >= cap - off) return -1;
+	if (n < 0 || (size_t)n >= cap - off) {
+		return -1;
+	}
 	off += (size_t)n;
 
 	for (i = 0; i < MDS_CATOP__COUNT; i++) {
@@ -424,7 +430,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 		rc = render_labeled_hist(&g_cat_op_hist[i],
 			"pnfs_mds_cat_op_latency_seconds",
 			label, buf + off, cap - off);
-		if (rc < 0) return -1;
+		if (rc < 0) {
+			return -1;
+		}
 		off += (size_t)rc;
 	}
 
@@ -436,7 +444,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 			"phase=protocol (default, includes RPC + state "
 			"hash lookups), catalogue (RonDB), state, ds_io.\n"
 		"# TYPE pnfs_mds_op_phase_seconds histogram\n");
-	if (n < 0 || (size_t)n >= cap - off) return -1;
+	if (n < 0 || (size_t)n >= cap - off) {
+		return -1;
+	}
 	off += (size_t)n;
 
 	for (i = 0; i < MDS_OPC__COUNT; i++) {
@@ -457,7 +467,9 @@ int mds_op_metrics_render(char *buf, size_t cap)
 			rc = render_labeled_hist(&g_op_phase_hist[i][p],
 				"pnfs_mds_op_phase_seconds",
 				label, buf + off, cap - off);
-			if (rc < 0) return -1;
+			if (rc < 0) {
+				return -1;
+			}
 			off += (size_t)rc;
 		}
 	}

@@ -63,13 +63,14 @@ static void usage(const char *prog, int rc)
         "shown as '?'.\n",
         prog, MDS_FIND_DEFAULT_CONF,
         (unsigned)FIND_LIMIT_MAX, (unsigned)FIND_LIMIT_DEFAULT);
-    exit(rc);
+    /* mds-find is single-threaded: exit() races no other thread. */
+    exit(rc); /* NOLINT(concurrency-mt-unsafe) */
 }
 
 static void die(const char *msg)
 {
     (void)fprintf(stderr, "mds-find: error: %s\n", msg);
-    exit(1);
+    exit(1); /* NOLINT(concurrency-mt-unsafe) */
 }
 
 struct emit_ctx {
@@ -95,7 +96,6 @@ static int emit_result(const struct find_result *r, void *arg)
 {
     struct emit_ctx *ec = arg;
     char mode[FIND_MODE_STR_LEN];
-    char tbuf[32];
     const char *name = (r->name[0] != '\0') ? r->name : "?";
 
     find_format_mode(r->mode, mode);
@@ -116,6 +116,8 @@ static int emit_result(const struct find_result *r, void *arg)
                      r->uid, r->gid, r->size, r->mtime_sec, r->ctime_sec,
                      r->parent_fileid, esc);
     } else {
+        char tbuf[32];
+
         format_short_time(r->mtime_sec, tbuf, sizeof(tbuf));
         (void)printf("%c%s %3u %5" PRIu64 " %5" PRIu64 " %12" PRIu64
                      " %s %10" PRIu64 " %s\n",

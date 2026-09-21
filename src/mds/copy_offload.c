@@ -91,6 +91,71 @@ static enum mds_status copy_worker_finish(struct copy_job *j,
     return MDS_OK;
 }
 
+/*
+ * Chunked read/write loop of copy_worker.  Copies up to copy_count
+ * bytes through buf (chunk bytes), publishing progress in
+ * j->bytes_done; stops early on cancellation, source EOF or error.
+ * *total receives the bytes copied.  Returns the last proxy status
+ * (MDS_OK when the loop ended by count, cancellation or EOF).
+ */
+static enum mds_status copy_worker_loop(struct copy_job *j,
+                                        const struct mds_inode *src_inode,
+                                        uint64_t copy_count,
+                                        uint8_t *buf, uint32_t chunk,
+                                        uint64_t *total)
+{
+    enum mds_status st = MDS_OK;
+
+    while (*total < copy_count) {
+        uint32_t want = chunk;
+        uint32_t nr = 0;
+        uint32_t nw = 0;
+        bool eof_flag = false;
+        bool cancelled = false;
+
+        pthread_mutex_lock(&j->mtx);
+        cancelled = (j->state == COPY_JOB_CANCELLED);
+        pthread_mutex_unlock(&j->mtx);
+        if (cancelled) {
+            break;
+        }
+
+        if (copy_count - *total < want) {
+            want = (uint32_t)(copy_count - *total);
+        }
+
+        st = mds_proxy_read(j->proxy, j->cat, j->src_fileid,
+                            src_inode->size,
+                            j->src_offset + *total, want,
+                            buf, &nr, &eof_flag);
+        if (st != MDS_OK || nr == 0) {
+            break;
+        }
+
+        st = mds_proxy_write(j->proxy, j->cat, j->dst_fileid,
+                             j->dst_offset + *total,
+                             buf, nr, &nw);
+        if (st != MDS_OK) {
+            break;
+        }
+        if (nw != nr) {
+            st = MDS_ERR_IO;
+            break;
+        }
+
+        *total += nw;
+
+        pthread_mutex_lock(&j->mtx);
+        j->bytes_done = *total;
+        pthread_mutex_unlock(&j->mtx);
+
+        if (eof_flag) {
+            break;
+        }
+    }
+    return st;
+}
+
 /* Worker thread entry point. */
 static void *copy_worker(void *arg)
 {
@@ -119,53 +184,7 @@ static void *copy_worker(void *arg)
         goto done;
     }
 
-    while (total < copy_count) {
-        uint32_t want = chunk;
-        uint32_t nr = 0;
-        uint32_t nw = 0;
-        bool eof_flag = false;
-        bool cancelled = false;
-
-        pthread_mutex_lock(&j->mtx);
-        cancelled = (j->state == COPY_JOB_CANCELLED);
-        pthread_mutex_unlock(&j->mtx);
-        if (cancelled) {
-            break;
-        }
-
-        if (copy_count - total < want) {
-            want = (uint32_t)(copy_count - total);
-        }
-
-        st = mds_proxy_read(j->proxy, j->cat, j->src_fileid,
-                            src_inode.size,
-                            j->src_offset + total, want,
-                            buf, &nr, &eof_flag);
-        if (st != MDS_OK || nr == 0) {
-            break;
-        }
-
-        st = mds_proxy_write(j->proxy, j->cat, j->dst_fileid,
-                             j->dst_offset + total,
-                             buf, nr, &nw);
-        if (st != MDS_OK) {
-            break;
-        }
-        if (nw != nr) {
-            st = MDS_ERR_IO;
-            break;
-        }
-
-        total += nw;
-
-        pthread_mutex_lock(&j->mtx);
-        j->bytes_done = total;
-        pthread_mutex_unlock(&j->mtx);
-
-        if (eof_flag) {
-            break;
-        }
-    }
+    st = copy_worker_loop(j, &src_inode, copy_count, buf, chunk, &total);
 
 done:
     free(buf);

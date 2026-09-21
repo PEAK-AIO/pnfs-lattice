@@ -23,25 +23,29 @@ target_link_libraries(mds-admin
         pthread
 )
 
-# Backend probe tool -- validates catalogue backend connectivity.
-add_executable(mds-backend-probe
-    mds_backend_probe.c
-)
+# Backend probe tool -- validates RonDB catalogue connectivity and
+# drives the RonDB bootstrap/cleanup.  RonDB-specific, so it is built
+# only when the RonDB backend is.
+if(ENABLE_RONDB)
+    add_executable(mds-backend-probe
+        mds_backend_probe.c
+    )
 
-target_include_directories(mds-backend-probe PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
-)
+    target_include_directories(mds-backend-probe PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+    )
 
-target_link_libraries(mds-backend-probe
-    PRIVATE
-        pnfs_mds_core
-        pnfs_cluster
-        pnfs_fsal_obj
-        pnfs_common
-        pnfs_mds_core
-        
-        pthread
-)
+    target_link_libraries(mds-backend-probe
+        PRIVATE
+            pnfs_mds_core
+            pnfs_cluster
+            pnfs_fsal_obj
+            pnfs_common
+            pnfs_mds_core
+
+            pthread
+    )
+endif()
 
 # Metadata search CLI -- find-style predicates answered by one backend
 # table scan instead of an NFS namespace walk.
@@ -99,27 +103,35 @@ target_link_libraries(mds-apid
 )
 
 # RonDB micro-benchmark: raw ns_create without NFS/XDR overhead.
-add_executable(bench-rondb-create
-    bench_rondb_create.c
-)
+# RonDB-specific (opens the backend directly), built only with it.
+if(ENABLE_RONDB)
+    add_executable(bench-rondb-create
+        bench_rondb_create.c
+    )
 
-target_include_directories(bench-rondb-create PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/src/catalogue
-)
+    target_include_directories(bench-rondb-create PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/catalogue
+    )
 
-target_link_libraries(bench-rondb-create
-    PRIVATE
-        pnfs_mds_core
-        pnfs_cluster
-        pnfs_fsal_obj
-        pnfs_common
-        pnfs_mds_core
-        pnfs_cluster
-        ${NTIRPC_LIB}
-        
-        pthread
-)
+    target_link_libraries(bench-rondb-create
+        PRIVATE
+            pnfs_mds_core
+            pnfs_cluster
+            pnfs_fsal_obj
+            pnfs_common
+            pnfs_mds_core
+            pnfs_cluster
+            ${NTIRPC_LIB}
+
+            pthread
+    )
+endif()
+
+# mds-find / mds-apid stay backend-neutral executables: their RonDB
+# table scans are compiled out in find_query.c without HAVE_RONDB
+# (the query core then reports MDS_ERR_NOSUPPORT for scan predicates
+# and still serves exact-fileid lookups through the dispatcher).
 
 if(ENABLE_RONDB)
     set_target_properties(mds-admin mds-backend-probe bench-rondb-create

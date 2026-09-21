@@ -51,8 +51,8 @@ struct stripe_lease_table {
 
 static uint32_t shard_index(uint64_t fileid, uint32_t stripe_index)
 {
-    const uint64_t GR = 0x9e3779b97f4a7c15ULL;
-    uint64_t mix = fileid ^ ((uint64_t)stripe_index * GR);
+    const uint64_t golden_ratio = 0x9e3779b97f4a7c15ULL;
+    uint64_t mix = fileid ^ ((uint64_t)stripe_index * golden_ratio);
     return (uint32_t)((mix ^ (mix >> 16)) & SLT_SHARD_MASK);
 }
 

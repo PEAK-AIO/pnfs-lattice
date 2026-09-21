@@ -120,10 +120,14 @@ Schema tables: `inodes`, `dirents`, `stripe_map`, `layout_state`,
 ### Pluggable Catalogue Layer
 
 Backend selection is determined at startup by `catalogue_backend` in the
-daemon config.  The catalogue vtable (`catalogue_dispatch.c`) routes all
-namespace operations to the active backend.  Adding a new backend requires
-implementing the `mds_cat_authority_ops` function table and a factory entry
-in `catalogue_factory.c`.
+daemon config (`rondb`, `memdb` or `fdb`).  The catalogue dispatcher
+(`catalogue_dispatch.c`) routes every namespace, coordination and cluster
+operation to the active backend and never names one.  Adding a new backend
+means implementing the slot tables of `include/catalogue_internal.h`
+(`mds_authority_ops`, `mds_coordination_ops`, `mds_cluster_ops`,
+`mds_catalogue_ops`), adding a registration entry in `catalogue_factory.c`,
+and running the conformance suite (`tests/catalogue_conformance/`) against
+it.
 
 ## Multi-MDS Concurrency
 
@@ -360,8 +364,8 @@ catalogue_backend_conf = /etc/pnfs-mds/rondb.conf
 
 # Data servers
 ds_count = 2
-ds_0     = ds0.internal:/srv/ds0
-ds_1     = ds1.internal:/srv/ds1
+ds[0]    = ds0.internal:/srv/ds0
+ds[1]    = ds1.internal:/srv/ds1
 
 # Layout
 stripe_unit_bytes    = 1048576
@@ -379,16 +383,18 @@ schema_name    = pnfs_mds
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `catalogue_backend` | `rondb` | Catalogue backend (only `rondb` is supported today) |
-| `catalogue_backend_conf` | — | Path to backend-specific config |
-| `worker_threads` | auto | RPC worker count |
+| `catalogue_backend` | `rondb` when built with `ENABLE_RONDB`, otherwise mandatory | Catalogue backend: `rondb`, `memdb` (in-memory reference, single node) or `fdb` (FoundationDB, `ENABLE_FDB` builds); a backend not compiled in is refused at startup |
+| `catalogue_backend_conf` | — | Path to backend-specific config (rondb) |
+| `fdb_cluster_file` / `fdb_key_prefix` | — | FoundationDB cluster file and per-catalogue key prefix (fdb) |
+| `worker_threads` | 16 | COMPOUND dispatch worker count |
 | `lease_time_sec` | 90 | NFSv4 lease time |
 | `grace_period_sec` | 90 | Grace period duration |
 | `workload_profile` | `default` | Tuning preset: `default`, `hpc`, `ai_training`, `genomics`, `media` |
 | `inline_enabled` | `false` | Small-file acceleration (must be false in RonDB mode) |
 | `catalog_image_mode` | `off` | Hot-read image: `off`, `shadow`, `compare`, `primary` |
 
-See `docs/architecture.md` for the full configuration reference.
+See `docs/config-keys.md` and the `mds.conf(5)` man page
+(`docs/man/mds.conf.5`) for the full configuration reference.
 
 
 ### Running Tests

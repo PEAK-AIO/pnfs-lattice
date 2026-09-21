@@ -29,6 +29,7 @@
 #include "layout_recall.h"
 #include "mds_catalogue.h"
 #include "test_helpers.h"
+#include "harness.h"        /* conformance_open_checked */
 #include "mds_coordination.h"
 #include "commit_queue.h"
 #include "xdr_codec.h"
@@ -105,6 +106,20 @@ static int collect_cb(uint64_t clientid, uint64_t fileid, void *ctx)
     return 0;
 }
 
+/* A fileid with no layout rows anywhere in the store.  Fixed literals
+ * (300, 400, ...) were fine on a fresh in-memory store but collide on a
+ * persistent one (RonDB keeps rows across runs and other suites grant
+ * on the same literals); fileids are allocated monotonically and never
+ * reused, so a fresh allocation is provably unencumbered. */
+static uint64_t fresh_fid(struct mds_catalogue *db)
+{
+    uint64_t fid = 0;
+
+    VERIFY(mds_cat_alloc_fileid(db, NULL, &fid) == MDS_OK);
+    VERIFY(fid != 0);
+    return fid;
+}
+
 /* -----------------------------------------------------------------------
  * Test 1: Recall coordinator lifecycle
  * ----------------------------------------------------------------------- */
@@ -116,7 +131,7 @@ static void test_recall_lifecycle(void)
     struct layout_recall *lr = NULL;
     char *path = make_temp_db_path();
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
 	cat = db;
 
     ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
@@ -142,7 +157,7 @@ static void test_recall_no_layouts(void)
     struct layout_recall *lr = NULL;
     char *path = make_temp_db_path();
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
 	cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
 
@@ -165,17 +180,19 @@ static void test_recall_revoke_no_session(void)
 	struct mds_catalogue *cat = NULL;
     struct layout_recall *lr = NULL;
     char *path = make_temp_db_path();
+    uint64_t fid;
     enum mds_status mst;
     struct mds_cat_txn *txn = NULL;
     struct nfs4_stateid sid;
     struct scan_result sr;
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
 	cat = db;
 
     ASSERT_EQ(layout_recall_init(cat, NULL, 1000, &lr), 0);
 
-    /* Create a layout + index entry for ds_id=5, clientid=100, fileid=200.
+    /* Create a layout + index entry for ds_id=5, clientid=100, a fresh fileid.
      * mds_coord_layout_grant creates both layout_state and ds_layout_idx. */
     uint32_t ds_ids[] = {5};
     mst = mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn);
@@ -183,7 +200,7 @@ static void test_recall_revoke_no_session(void)
 
     memset(&sid, 0, sizeof(sid));
     sid.seqid = 1;
-    mst = mds_coord_layout_grant(db, txn, 100, 200,
+    mst = mds_coord_layout_grant(db, txn, 100, fid,
                                  1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
                                  ds_ids, 1);
     ASSERT_EQ(mst, MDS_OK);
@@ -198,7 +215,7 @@ static void test_recall_revoke_no_session(void)
     /* Verify layout state was deleted (revoked). */
     {
         bool has_layout = false;
-        mst = mds_coord_layout_scan_for_file(db, 200, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -226,7 +243,7 @@ static void test_recall_for_file_no_layouts(void)
     struct layout_recall *lr = NULL;
     char *path = make_temp_db_path();
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
 	cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
 
@@ -288,7 +305,7 @@ struct mock_cb_server_args {
 
 static bool test_xdr_skip_opaque_body(XDR *xdrs, uint32_t max_len)
 {
-    uint32_t len;
+    uint32_t len = 0;
     uint32_t pos;
     uint32_t padded;
 
@@ -485,12 +502,14 @@ static void test_recall_with_cb_success(void)
     struct layout_recall *lr = NULL;
     struct session_table *st = NULL;
     char *path = make_temp_db_path();
+    uint64_t fid;
     enum mds_status mst;
     struct mds_cat_txn *txn = NULL;
     struct nfs4_stateid sid;
     struct scan_result sr;
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
 	cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 2000, &lr), 0);
 
@@ -531,7 +550,7 @@ static void test_recall_with_cb_success(void)
 
     memset(&sid, 0, sizeof(sid));
     sid.seqid = 1;
-    mst = mds_coord_layout_grant(db, txn, clientid, 300,
+    mst = mds_coord_layout_grant(db, txn, clientid, fid,
                                  1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
                                  ds_ids, 1);
     ASSERT_EQ(mst, MDS_OK);
@@ -554,7 +573,7 @@ static void test_recall_with_cb_success(void)
     /* Layout should be revoked (authoritative). */
     {
         bool has_layout = false;
-        mst = mds_coord_layout_scan_for_file(db, 300, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -585,12 +604,14 @@ static void test_recall_cb_fail_still_revokes(void)
     struct layout_recall *lr = NULL;
     struct session_table *st = NULL;
     char *path = make_temp_db_path();
+    uint64_t fid;
     enum mds_status mst;
     struct mds_cat_txn *txn = NULL;
     struct nfs4_stateid sid;
     struct scan_result sr;
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
 	cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 500, &lr), 0);
 
@@ -621,7 +642,7 @@ static void test_recall_cb_fail_still_revokes(void)
     ASSERT_EQ(mst, MDS_OK);
     memset(&sid, 0, sizeof(sid));
     sid.seqid = 1;
-    mst = mds_coord_layout_grant(db, txn, clientid, 400,
+    mst = mds_coord_layout_grant(db, txn, clientid, fid,
                                  1, 0, 0xFFFFFFFFFFFFFFFFULL, &sid,
                                  ds_ids, 1);
     ASSERT_EQ(mst, MDS_OK);
@@ -633,7 +654,7 @@ static void test_recall_cb_fail_still_revokes(void)
     /* Layout must be revoked. */
     {
         bool has_layout = false;
-        mst = mds_coord_layout_scan_for_file(db, 400, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -737,6 +758,7 @@ static void test_byte_range_recall_uses_latest_seqid(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -747,7 +769,8 @@ static void test_byte_range_recall_uses_latest_seqid(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -768,7 +791,7 @@ static void test_byte_range_recall_uses_latest_seqid(void)
 
     fill_test_layout_stateid(&sid, 1, 0xA0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 500,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -779,7 +802,7 @@ static void test_byte_range_recall_uses_latest_seqid(void)
     mock.fd = sv[1];
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 500, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -822,6 +845,7 @@ static void test_byte_range_recall_sends_overlap_range(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -832,7 +856,8 @@ static void test_byte_range_recall_sends_overlap_range(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -853,7 +878,7 @@ static void test_byte_range_recall_sends_overlap_range(void)
 
     fill_test_layout_stateid(&sid, 1, 0xA8);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 550,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 1024, 8192,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -863,7 +888,7 @@ static void test_byte_range_recall_sends_overlap_range(void)
     mock.fd = sv[1];
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 550, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    4096, 4096,
                                                    LAYOUT4_FLEX_FILES,
@@ -899,16 +924,18 @@ static void test_byte_range_recall_dedupes_clientid(void)
     struct nfs4_stateid sid_low;
     struct nfs4_stateid sid_high;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint32_t ds_ids[] = {10};
     uint32_t recalled = 0;
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
 
     fill_test_layout_stateid(&sid_low, 1, 0xB0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, 0x100, 600,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 0x100, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid_low, ds_ids, 1),
               MDS_OK);
@@ -916,13 +943,13 @@ static void test_byte_range_recall_dedupes_clientid(void)
 
     fill_test_layout_stateid(&sid_high, 5, 0xC0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, 0x100, 600,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 0x100, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid_high, ds_ids, 1),
               MDS_OK);
     ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 600, 0x200,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, 0x200,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -963,6 +990,7 @@ static void test_byte_range_recall_revokes_on_recallconflict(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -973,7 +1001,8 @@ static void test_byte_range_recall_revokes_on_recallconflict(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -995,7 +1024,7 @@ static void test_byte_range_recall_revokes_on_recallconflict(void)
     /* Persist a layout grant for the holder. */
     fill_test_layout_stateid(&sid, 1, 0xD0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 700,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -1009,7 +1038,7 @@ static void test_byte_range_recall_revokes_on_recallconflict(void)
 
     /* Drive the byte-range recall as if a peer had requested an
      * overlapping IOMODE_RW layout on the same fileid. */
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 700, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -1033,7 +1062,7 @@ static void test_byte_range_recall_revokes_on_recallconflict(void)
         bool has_layout = false;
         enum mds_status mst;
 
-        mst = mds_coord_layout_scan_for_file(db, 700, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -1064,6 +1093,7 @@ static void test_byte_range_recall_revokes_on_delay(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -1074,7 +1104,8 @@ static void test_byte_range_recall_revokes_on_delay(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -1095,7 +1126,7 @@ static void test_byte_range_recall_revokes_on_delay(void)
 
     fill_test_layout_stateid(&sid, 1, 0xE0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 800,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -1106,7 +1137,7 @@ static void test_byte_range_recall_revokes_on_delay(void)
     mock.reply_status = (uint32_t)NFS4ERR_DELAY;
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 800, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -1122,7 +1153,7 @@ static void test_byte_range_recall_revokes_on_delay(void)
         bool has_layout = false;
         enum mds_status mst;
 
-        mst = mds_coord_layout_scan_for_file(db, 800, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -1155,6 +1186,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -1165,7 +1197,8 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -1186,7 +1219,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
 
     fill_test_layout_stateid(&sid, 1, 0xF0);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 900,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -1197,7 +1230,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
     mock.reply_status = (uint32_t)NFS4ERR_BADSESSION;
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 900, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -1219,7 +1252,7 @@ static void test_byte_range_recall_revokes_on_terminal_status(void)
         bool has_layout = false;
         enum mds_status mst;
 
-        mst = mds_coord_layout_scan_for_file(db, 900, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -1251,6 +1284,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
     struct mock_cb_server_args mock;
     pthread_t tid;
     char *path = make_temp_db_path();
+    uint64_t fid;
     uint64_t clientid;
     uint32_t seqid;
     uint32_t flags_out;
@@ -1261,7 +1295,8 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
     uint32_t recalled = 0;
     int sv[2];
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -1282,7 +1317,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
 
     fill_test_layout_stateid(&sid, 1, 0xF1);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
-    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, 901,
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
                                      LAYOUTIOMODE4_RW, 0, 1024,
                                      &sid, ds_ids, 1),
               MDS_OK);
@@ -1293,7 +1328,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
     mock.reply_status = (uint32_t)NFS4ERR_NOMATCHING_LAYOUT;
     ASSERT_EQ(pthread_create(&tid, NULL, mock_cb_server_thread, &mock), 0);
 
-    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, 901, clientid + 1,
+    ASSERT_EQ(layout_recall_byte_range_for_holders(lr, fid, clientid + 1,
                                                    LAYOUTIOMODE4_RW,
                                                    0, 512,
                                                    LAYOUT4_FLEX_FILES,
@@ -1314,7 +1349,7 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
         bool has_layout = false;
         enum mds_status mst;
 
-        mst = mds_coord_layout_scan_for_file(db, 901, &has_layout);
+        mst = mds_coord_layout_scan_for_file(db, fid, &has_layout);
         ASSERT_EQ(mst, MDS_OK);
         ASSERT_EQ(has_layout, 0);
     }
@@ -1345,11 +1380,11 @@ static void test_byte_range_recall_revokes_on_nomatching_layout(void)
  * ----------------------------------------------------------------------- */
 
 static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
-                                             uint64_t fileid,
                                              uint32_t ds_id,
                                              uint8_t state_seed,
                                              const char *label)
 {
+    uint64_t fileid;
     struct mds_catalogue *db = NULL;
     struct mds_catalogue *cat = NULL;
     struct layout_recall *lr = NULL;
@@ -1371,7 +1406,8 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
 
     ds_ids[0] = ds_id;
 
-    db = open_test_catalogue(); VERIFY(db != NULL);
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fileid = fresh_fid(db);
     cat = db;
     ASSERT_EQ(layout_recall_init(cat, NULL, 3000, &lr), 0);
     ASSERT_EQ(session_table_init(0, 90, &st), 0);
@@ -1457,15 +1493,16 @@ int main(void)
     test_byte_range_recall_revokes_on_delay();
     test_byte_range_recall_revokes_on_terminal_status();
     test_byte_range_recall_revokes_on_nomatching_layout();
-    test_unlink_revoke_forces_revoke(0, 1000, 15, 0xF2,
+    test_unlink_revoke_forces_revoke(0, 15, 0xF2,
                                      "test_unlink_revoke_forces_revoke_on_ok");
     test_unlink_revoke_forces_revoke((uint32_t)NFS4ERR_RECALLCONFLICT,
-                                     1001, 16, 0xF3,
+                                     16, 0xF3,
                                      "test_unlink_revoke_forces_revoke_on_recallconflict");
     test_unlink_revoke_forces_revoke((uint32_t)NFS4ERR_DELAY,
-                                     1002, 17, 0xF4,
+                                     17, 0xF4,
                                      "test_unlink_revoke_forces_revoke_on_delay");
 
     printf("\n%d passed, %d failed\n", pass_count, fail_count);
+    conformance_shutdown();
     return fail_count > 0 ? 1 : 0;
 }

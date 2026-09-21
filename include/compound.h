@@ -2132,9 +2132,18 @@ void nfs4_result_destroy(struct nfs4_result *r);
  * reset between calls.  Always call compound_init() before each
  * new COMPOUND request to ensure clean state.
  *
+ * PRECONDITION on @p results: every entry must be zero-initialised
+ * (calloc / memset / `= {0}`) or have been reset by a previous
+ * compound_process() call on the same array.  Before reusing a slot
+ * this function calls nfs4_result_destroy(), which dispatches on the
+ * STORED opnum to free layoutget heap buffers left by the previous
+ * compound; an indeterminate opnum is undefined behaviour and, if it
+ * happens to read as OP_LAYOUTGET, frees garbage pointers.  The wire
+ * server satisfies this with calloc'd per-slot arrays.
+ *
  * @param cd       Compound context (initialised by compound_init).
  * @param ops      Array of operations.
- * @param results  Array of results (one per op).
+ * @param results  Array of results (one per op); see the precondition.
  * @param count    Number of operations.
  * @return Number of results written (always <= count).
  */

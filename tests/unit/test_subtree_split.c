@@ -103,6 +103,9 @@ static void cleanup_temp_db(const char *path)
 {
     char lock_path[512];
 
+    if (path == NULL) {
+        return;
+    }
     unlink(path);
     snprintf(lock_path, sizeof(lock_path), "%s-lock", path);
     unlink(lock_path);

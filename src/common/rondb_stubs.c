@@ -3,80 +3,13 @@
  * SPDX-License-Identifier: MIT
  *
  * rondb_stubs.c -- RonDB-specific fallback implementations for non-RonDB builds.
+ *
+ * Only the raw shim entry points that RonDB-specific tools link against
+ * live here.  The fused catalogue operations are vtable slots reached
+ * through the backend-neutral dispatcher and need no stub.
  */
 
-#include <string.h>
-
 #include "catalogue_rondb.h"
-
-/* NOLINTNEXTLINE(readability-non-const-parameter) */
-enum mds_status catalogue_rondb_layoutget_fused(
-    struct mds_catalogue *cat, uint64_t fileid,
-    uint32_t *stripe_count, uint32_t *stripe_unit, /* NOLINT */
-    uint32_t *mirror_count, struct mds_ds_map_entry **entries, /* NOLINT */
-    const struct nfs4_stateid *stateid,
-    uint64_t clientid, uint32_t iomode, uint64_t offset,
-    uint64_t length, uint32_t mds_id)
-{
-    (void)cat;
-    (void)fileid;
-    (void)stripe_count;
-    (void)stripe_unit;
-    (void)mirror_count;
-    (void)entries;
-    (void)stateid;
-    (void)clientid;
-    (void)iomode;
-    (void)offset;
-    (void)length;
-    (void)mds_id;
-
-    return MDS_ERR_NOSUPPORT;
-}
-
-enum mds_status catalogue_rondb_ns_create_with_layout(
-    struct mds_catalogue *cat,
-    uint64_t parent_fileid, const char *name,
-    enum mds_file_type type,
-    uint32_t mode, uint64_t uid, uint64_t gid,
-    struct ds_prealloc_ctx *prealloc,
-    struct mds_inode *out,
-    uint64_t layout_clientid, uint32_t layout_iomode,
-    uint64_t layout_offset, uint64_t layout_length,
-    const struct nfs4_stateid *layout_stateid,
-    uint32_t layout_mds_id,
-    bool *layout_ok,
-    struct mds_ds_map_entry *layout_entry_out,
-    uint32_t *layout_pop_stripe_unit_out)
-{
-    (void)cat;
-    (void)parent_fileid;
-    (void)name;
-    (void)type;
-    (void)mode;
-    (void)uid;
-    (void)gid;
-    (void)prealloc;
-    (void)out;
-    (void)layout_clientid;
-    (void)layout_iomode;
-    (void)layout_offset;
-    (void)layout_length;
-    (void)layout_stateid;
-    (void)layout_mds_id;
-    if (layout_entry_out != NULL) {
-        memset(layout_entry_out, 0, sizeof(*layout_entry_out));
-    }
-    if (layout_pop_stripe_unit_out != NULL) {
-        *layout_pop_stripe_unit_out = 0;
-    }
-
-    if (layout_ok != NULL) {
-        *layout_ok = false;
-    }
-
-    return MDS_ERR_NOSUPPORT;
-}
 
 /* NOLINTNEXTLINE(readability-non-const-parameter) */
 int rondb_shim_fileid_batch_alloc(void *handle, uint32_t batch_size,

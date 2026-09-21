@@ -1772,6 +1772,9 @@ static void test_readdir_result_encode(void)
     snprintf(result.res.readdir.entries[0].name,
              sizeof(result.res.readdir.entries[0].name), "file1");
     result.res.readdir.entries[0].fileid = 10;
+    /* Deliberately different from the fileid: the encoder must emit
+     * the backend-assigned cookie, never derive it from the fileid. */
+    result.res.readdir.entries[0].cookie = 42;
     result.res.readdir.entries[0].type = MDS_FTYPE_REG;
     result.res.readdir.entry_attrs_valid[0] = true;
     result.res.readdir.entry_attrs[0].fileid = 10;
@@ -1810,7 +1813,7 @@ static void test_readdir_result_encode(void)
     ASSERT_TRUE(xdr_getbool(&dec, &value_follows));
     ASSERT_EQ(value_follows, 1);
     ASSERT_TRUE(xdr_uint64_t(&dec, &cookie));
-    ASSERT_EQ(cookie, (uint64_t)10);
+    ASSERT_EQ(cookie, (uint64_t)42);
     ASSERT_TRUE(decode_test_counted_string(&dec, name, sizeof(name)));
     ASSERT_STR_EQ(name, "file1");
     ASSERT_TRUE(xdr_nfs4_bitmap_decode(&dec, actual, NFS4_BITMAP_WORDS, &words));

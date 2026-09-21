@@ -77,9 +77,11 @@ static bool xdr42_skip_netloc4(XDR *xdrs)
     case NL4_URL:
         return xdr42_skip_opaque(xdrs, 1024U);
     case NL4_NETADDR:
-        /* netaddr4: r_netid string + r_addr string. */
-        return xdr42_skip_opaque(xdrs, 256U) &&
-               xdr42_skip_opaque(xdrs, 256U);
+        /* netaddr4: r_netid string, then r_addr string. */
+        if (!xdr42_skip_opaque(xdrs, 256U)) {
+            return false;
+        }
+        return xdr42_skip_opaque(xdrs, 256U);
     default:
         /* Unknown discriminant: arm size unknowable. */
         return false;

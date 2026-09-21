@@ -18,11 +18,14 @@
 #include <time.h>
 #include <getopt.h>
 
+/* RonDB-specific tool (CMake builds it only with ENABLE_RONDB=ON); the
+ * HAVE_RONDB gate keeps a stray non-RonDB compile honest, in the same
+ * way as bench_rondb_create.c. */
+#ifdef HAVE_RONDB
+
 #include "pnfs_mds.h"
 #include "mds_catalogue.h"
-#ifdef HAVE_RONDB
 #include "catalogue_rondb.h"
-#endif
 
 static void usage(const char *prog)
 {
@@ -36,6 +39,39 @@ static void usage(const char *prog)
         "\n"
         "Backend is selected by CatalogueBackend in the config file.\n",
         prog);
+}
+
+/*
+ * Run the one-time schema bootstrap for the configured backend.
+ * Backends without a bootstrap entry point report MDS_ERR_INVAL.
+ */
+static enum mds_status run_bootstrap(const struct mds_config *cfg,
+                                     struct mds_catalogue *cat)
+{
+    if (cfg->catalogue_backend == MDS_BACKEND_RONDB) {
+        enum mds_status st = mds_rondb_bootstrap(cat);
+
+        (void)fprintf(stdout, "RonDB bootstrap: %s\n",
+                      st == MDS_OK ? "OK" : mds_status_str(st));
+        return st;
+    }
+    (void)fprintf(stdout, "Bootstrap: unsupported backend.\n");
+    return MDS_ERR_INVAL;
+}
+
+/* Tear the backend schema down (lab reset); same backend gating. */
+static enum mds_status run_cleanup(const struct mds_config *cfg,
+                                   struct mds_catalogue *cat)
+{
+    if (cfg->catalogue_backend == MDS_BACKEND_RONDB) {
+        enum mds_status st = mds_rondb_cleanup(cat);
+
+        (void)fprintf(stdout, "RonDB cleanup: %s\n",
+                      st == MDS_OK ? "OK" : mds_status_str(st));
+        return st;
+    }
+    (void)fprintf(stdout, "Cleanup: unsupported backend.\n");
+    return MDS_ERR_INVAL;
 }
 
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
@@ -109,22 +145,10 @@ int main(int argc, char *argv[])
 
     /* Bootstrap. */
     if (do_bootstrap) {
-        enum mds_status cmd_st = MDS_OK;
-        (void)fprintf(stdout, "Running bootstrap...\n");
-#ifdef HAVE_RONDB
-        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-            cmd_st = mds_rondb_bootstrap(cat);
-            (void)fprintf(stdout, "RonDB bootstrap: %s\n",
-                    cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));
-        }
-        else {
-#endif
-            cmd_st = MDS_ERR_INVAL;
-            (void)fprintf(stdout, "Bootstrap: unsupported backend.\n");
-#ifdef HAVE_RONDB
-        }
-#endif
+        enum mds_status cmd_st;
 
+        (void)fprintf(stdout, "Running bootstrap...\n");
+        cmd_st = run_bootstrap(&cfg, cat);
         if (cmd_st != MDS_OK) {
             final_st = cmd_st;
         }
@@ -154,23 +178,10 @@ int main(int argc, char *argv[])
 
     /* Cleanup. */
     if (do_cleanup) {
-        enum mds_status cmd_st = MDS_OK;
+        enum mds_status cmd_st;
 
         (void)fprintf(stdout, "Running cleanup...\n");
-#ifdef HAVE_RONDB
-        if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-            cmd_st = mds_rondb_cleanup(cat);
-            (void)fprintf(stdout, "RonDB cleanup: %s\n",
-                    cmd_st == MDS_OK ? "OK" : mds_status_str(cmd_st));
-        }
-        else {
-#endif
-            cmd_st = MDS_ERR_INVAL;
-            (void)fprintf(stdout, "Cleanup: unsupported backend.\n");
-#ifdef HAVE_RONDB
-        }
-#endif
-
+        cmd_st = run_cleanup(&cfg, cat);
         if (cmd_st != MDS_OK) {
             final_st = cmd_st;
         }
@@ -180,3 +191,13 @@ int main(int argc, char *argv[])
     (void)fprintf(stdout, "Done.\n");
     return (final_st == MDS_OK) ? 0 : 1;
 }
+
+#else /* !HAVE_RONDB */
+
+int main(void)
+{
+    (void)fprintf(stderr, "This tool requires ENABLE_RONDB=ON\n");
+    return 1;
+}
+
+#endif

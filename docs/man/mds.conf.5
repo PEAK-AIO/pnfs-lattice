@@ -158,17 +158,56 @@ address.
 .TP
 .B catalogue_backend
 .I enum
-.RI ( rondb )
+.RI ( rondb " | " memdb " | " fdb )
 (default
-.BR rondb ).
-Only
 .B rondb
-is supported on current builds.
+when the binary was built with RonDB support; otherwise the key is
+mandatory).
+A name that is known but not compiled into the binary is refused at
+startup with the list of available backends.
+.B rondb
+is the production distributed store;
+.B memdb
+is the in-memory reference backend (non-durable, single node, bounded
+capacity: never a multi-MDS cluster);
+.B fdb
+is the FoundationDB backend (ENABLE_FDB builds), configured through the
+.B fdb_*
+keys below.
 .TP
 .B catalogue_backend_conf
 .IR path .
 Backend-specific config file, e.g.
-.IR /etc/pnfs-mds/rondb.conf .
+.IR /etc/pnfs-mds/rondb.conf
+(rondb only).
+.TP
+.B fdb_cluster_file
+.IR path .
+FoundationDB cluster file; empty selects the
+.B FDB_CLUSTER_FILE
+environment variable, then
+.IR /etc/foundationdb/fdb.cluster .
+.TP
+.B fdb_key_prefix
+.IR string " (at most 31 bytes)."
+Prepended to every key so several independent catalogues can share one
+cluster; empty uses the whole key space.
+.TP
+.B fdb_op_deadline_ms
+.I integer
+.RI ( 1..600000 ,
+default
+.BR 8000 ).
+Total budget of one catalogue operation across every transaction
+attempt and commit-outcome resolution.
+.TP
+.B fdb_txn_timeout_ms
+.I integer
+.RI ( 1..4900 ,
+default
+.BR 4000 ).
+Timeout of one transaction attempt; must stay under FoundationDB's
+5 s transaction window.
 .TP
 .B catalog_image_mode
 .I enum
@@ -201,7 +240,7 @@ Enable image-vs-authority compare reads.
 .B ndb_conn_pool_size
 .IR uint ,
 range
-.I "1..32"
+.I "1..64"
 (default: auto-sized from worker count).
 NDB connections per MDS.
 .TP
@@ -357,8 +396,12 @@ design.
 .B inline_enabled
 .I bool
 (default
-.BR true ).
-Enable inline-data acceleration.
+.BR false ;
+the
+.IR hpc ", " ai_training ", " genomics " and " media
+profiles set it true).
+Enable inline-data acceleration.  The RonDB backend refuses
+.BR true .
 .TP
 .B inline_max_size
 .IR uint ,
@@ -627,6 +670,17 @@ pre-6.18 Linux clients in the fleet.
 forces multi-DS-per-mirror unconditionally; use only on fleets
 confirmed to be 6.18+ across the board.  Unknown values are
 rejected at parse time.
+.TP
+.B hpc_pending_recovery_scan
+.I bool
+(default
+.BR false ).
+Run the start-up scan that repairs PENDING wide-create inodes left
+by pre-atomic releases, which persisted the namespace rows
+separately from the stripe map.  The scan walks the whole namespace
+from the root before requests are accepted, so enable it once after
+upgrading from an affected release.  Lazy lookup-time recovery of
+such inodes is always active regardless of this key.
 .SS "Authentication"
 .TP
 .B nfs_auth_mode

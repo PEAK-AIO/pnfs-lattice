@@ -37,6 +37,15 @@ struct subtree_entry {
                                        *  (0 = unresolved).  Lets FH-based
                                        *  ancestry walks recognise a
                                        *  junction without a path. */
+    /** Catalogue partition-map row this entry mirrors.  pm_backed is
+     *  true only for entries loaded from partition_list or written to
+     *  the store by this node (root claim, shard seed); partition_id is
+     *  meaningful only then (0 is a valid id: root).  Ownership changes
+     *  of a pm_backed entry are persisted with mds_cluster_partition_cas
+     *  before the in-memory copy moves; entries added locally
+     *  (subtree_map_add, splits) stay memory-only. */
+    uint32_t            partition_id;
+    bool                pm_backed;
 };
 
 /* -----------------------------------------------------------------------
@@ -90,61 +99,83 @@ enum mds_status subtree_map_init(const char *etcd_endpoints,
 struct mds_catalogue;
 
 /**
- * @brief Initialise the subtree map from RonDB partition_map.
+ * @brief Initialise the subtree map from the catalogue's partition map.
  *
- * Loads subtree entries from mds_partition_map NDB table.  No etcd.
+ * Loads subtree entries through mds_cluster_partition_list() (the
+ * backend-neutral cluster service, mds_cluster.h).  The partition map
+ * is the authority for root ownership, so a failed list is never
+ * treated as an empty map: it is retried a small fixed number of times
+ * (3 attempts, 250 ms apart) and then fails the call -- the caller must
+ * treat that as fatal.  When the loaded map has no root row, "/" is
+ * claimed for @p self_id with an insert-only mds_cluster_partition_put()
+ * (exactly one node wins); MDS_ERR_EXISTS means another node owns root
+ * and the map is reloaded to learn the owner.  The local root entry is
+ * added only after the store accepted the insert, so no transient error
+ * can leave this node believing it owns root.
  *
- * @param cat             Catalogue handle (RonDB backend).
+ * @param cat             Catalogue handle whose backend populates the
+ *                        partition_list / partition_put cluster slots
+ *                        (see mds_cluster_supported()).
  * @param self_id         This MDS node's ID.
  * @param self_hostname   This node's hostname (for referrals).
- * @param[out] map        Receives the map handle.
- * @return MDS_OK on success.
+ * @param[out] out        Receives the map handle (untouched on failure).
+ * @return MDS_OK on success, MDS_ERR_INVAL for NULL arguments,
+ *         MDS_ERR_NOMEM, or the dispatcher's status of the last failed
+ *         attempt (e.g. MDS_ERR_IO, MDS_ERR_NOSUPPORT).
  */
-enum mds_status subtree_map_init_rondb(struct mds_catalogue *cat,
-                                      uint32_t self_id,
-                                      const char *self_hostname,
-                                      struct subtree_map **out);
+enum mds_status subtree_map_init_from_catalogue(struct mds_catalogue *cat,
+                                                uint32_t self_id,
+                                                const char *self_hostname,
+                                                struct subtree_map **out);
 
 /**
- * @brief Refresh the subtree map from RonDB partition_map.
+ * @brief Refresh the subtree map from the catalogue's partition map.
  *
- * Re-reads all entries from the partition_map table and upserts
- * them into the local cache.  New entries are added, changed
- * owners are updated.  Safe to call from background threads.
+ * Re-reads all entries via mds_cluster_partition_list() and upserts
+ * them into the local cache.  New entries are added, changed owners
+ * are updated.  Safe to call from background threads.
  *
- * @param map  Subtree map (must have been init'd with _rondb).
- * @param cat  Catalogue handle (must be RonDB backend).
- * @return MDS_OK on success.
+ * @param map  Subtree map (from either init path).
+ * @param cat  Catalogue handle with the partition_list cluster slot.
+ * @return MDS_OK on success, MDS_ERR_INVAL for NULL arguments, or the
+ *         dispatcher's status unchanged (MDS_ERR_NOSUPPORT when the
+ *         backend has no partition map).
  */
-enum mds_status subtree_map_refresh_rondb(struct subtree_map *map,
-                                          struct mds_catalogue *cat);
+enum mds_status subtree_map_refresh_from_catalogue(struct subtree_map *map,
+                                                   struct mds_catalogue *cat);
 
 /**
  * @brief Seed /shardN partition rows for a multi-MDS cluster.
  *
  * When @p cluster_size > 1 and the map still has only the root entry
- * (fresh RonDB install, or a prior release that never persisted shards),
+ * (fresh install, or a prior release that never persisted shards),
  * register `/shard1` .. `/shard{N}` owned by MDS 1..N in the in-memory
- * map **and** upsert the same rows into RonDB `mds_partition_map` so
- * subsequent restarts load them instead of re-seeding from scratch.
+ * map **and** upsert the same rows into the catalogue's partition map
+ * (mds_cluster_partition_put with insert_only == false) so subsequent
+ * restarts load them instead of re-seeding from scratch.
  *
- * Idempotent: existing in-memory paths are left alone; RonDB puts use
- * write-tuple upsert.  @p partition_id for `/shardK` is K (root uses 0).
+ * Idempotent: existing in-memory paths are left alone.  The puts are
+ * upserts (insert_only == false) -- the only upsert in the partition
+ * map -- because the initial shard layout is never-owned: every MDS
+ * racing the seed writes identical rows (/shardK owned by K), so there
+ * is no owner to protect.  Root, which does have an owner, is claimed
+ * insert-only by subtree_map_init_from_catalogue().
+ * @p partition_id for `/shardK` is K (root uses 0).
  *
  * Must run before @c subtree_map_set_membership — remote MDS IDs in the
  * seed are not yet membership-joined.
  *
- * @param map           Subtree map from @c subtree_map_init_rondb.
- * @param cat           RonDB catalogue handle.
+ * @param map           Subtree map from @c subtree_map_init_from_catalogue.
+ * @param cat           Catalogue handle with the partition_put slot.
  * @param cluster_size  Configured MDS count (number of /shardN rows).
  * @param peer_hosts    Optional IB/hostname list (index 0 = MDS 1); may
  *                      be NULL.  Used only to register referral nodes.
  * @param peer_count    Length of @p peer_hosts.
- * @return MDS_OK if every shard was added or already present (RonDB
- *         persist failures are logged as warnings but do not fail the
- *         call — the in-memory seed still enables referrals this boot).
+ * @return MDS_OK if every shard was added or already present (persist
+ *         failures are logged as warnings but do not fail the call —
+ *         the in-memory seed still enables referrals this boot).
  */
-enum mds_status subtree_map_seed_shards_rondb(
+enum mds_status subtree_map_seed_shards(
 	struct subtree_map *map,
 	struct mds_catalogue *cat,
 	uint32_t cluster_size,
@@ -616,24 +647,77 @@ enum mds_status subtree_map_transfer_owner_if_migrating(
 
 
 /**
- * @brief Failover-specific subtree takeover (supports etcd mode).
+ * @brief Move ownership of one subtree, store first.
  *
- * Unlike subtree_map_take_over(), this function works in etcd mode
- * by enumerating entries owned by old_owner and CAS-updating each
- * one individually via etcd_set_owner_by_path().  It also bypasses
- * the owner_role_ok() check because the promoting standby is not
- * yet ACTIVE_SERVING at the time of takeover.
+ * For a pm_backed entry the catalogue row is rewritten with
+ * mds_cluster_partition_cas(partition_id, expected_owner -> new_owner)
+ * BEFORE the in-memory entry changes; the entry moves only when the
+ * store accepted the write, so memory never claims an ownership the
+ * partition map does not record (a later refresh would otherwise
+ * revert it).  A memory-only entry, or @p cat == NULL, or a store
+ * without the CAS slot (MDS_ERR_NOSUPPORT, logged once as a WARN)
+ * moves in memory alone, exactly as before the CAS existed.
+ * Bypasses owner_role_ok(): the promoting standby is not yet
+ * ACTIVE_SERVING.
  *
- * In local mode, delegates to the existing subtree_map_take_over()
- * with role checks disabled.
+ * @param map             Map handle.
+ * @param cat             Catalogue with the partition_cas slot, or NULL.
+ * @param path            Exact subtree path.
+ * @param expected_owner  Owner the entry (and row) must currently have.
+ * @param new_owner       Owner to record.
+ * @return MDS_OK when the entry moved; MDS_ERR_NOTFOUND when no entry
+ *         (or, for a pm_backed entry, no row) exists; MDS_ERR_STALE
+ *         when the row or entry is no longer owned by @p expected_owner
+ *         (nothing changed); MDS_ERR_INVAL on NULL map/path; or the
+ *         catalogue's status when the CAS failed for another reason
+ *         (nothing changed in memory).
+ */
+enum mds_status subtree_map_failover_transfer(struct subtree_map *map,
+                                              struct mds_catalogue *cat,
+                                              const char *path,
+                                              uint32_t expected_owner,
+                                              uint32_t new_owner);
+
+/**
+ * @brief Failover-specific subtree takeover.
+ *
+ * Enumerates the entries owned by @p old_owner and moves each with
+ * subtree_map_failover_transfer(): the partition-map row is CAS'd to
+ * @p new_owner first, then the in-memory entry follows.  An entry whose
+ * CAS answers MDS_ERR_STALE or MDS_ERR_NOTFOUND (another node took the
+ * partition, or the row is gone) is skipped and logged, never moved in
+ * memory.  Bypasses the owner_role_ok() check because the promoting
+ * standby is not yet ACTIVE_SERVING at the time of takeover.
+ *
+ * Three outcomes when the partner owned at least one entry:
+ *   MDS_OK         at least one partition moved (count_out > 0); the
+ *                  ones the store refused stay the partner's in memory.
+ *   MDS_ERR_STALE  the store refused every CAS (STALE / NOTFOUND): it
+ *                  gave the partner's partitions to another node, or
+ *                  the rows are gone.  Nothing moved; the caller lost
+ *                  the takeover race and must not become primary.
+ *   MDS_ERR_IO     nothing moved and at least one CAS could not be
+ *                  decided because the store was unreachable.
+ * When the partner owned nothing in the map the call is MDS_OK with
+ * count_out == 0: there was nothing to take and nothing to lose to
+ * another node.
  *
  * @param map        Map handle.
+ * @param cat        Catalogue with the partition_cas slot, or NULL for
+ *                   a memory-only takeover (local mode, tests).
  * @param old_owner  MDS ID of the failed primary.
  * @param new_owner  MDS ID of the promoting standby.
- * @param count_out  Receives number of subtrees taken over.
- * @return MDS_OK on success, MDS_ERR_IO on etcd CAS failure.
+ * @param count_out  Receives number of subtrees taken over (0 on any
+ *                   error).
+ * @return MDS_OK, MDS_ERR_STALE or MDS_ERR_IO as above; MDS_ERR_INVAL
+ *         on a NULL map or count_out; MDS_ERR_NOMEM when the partner's
+ *         entries could not be snapshotted (nothing moved).
+ *
+ * Ownership: nothing is retained.  Thread safety: safe; the map lock is
+ * taken per entry and never held across the catalogue call.
  */
 enum mds_status subtree_map_failover_take_over(struct subtree_map *map,
+                                               struct mds_catalogue *cat,
                                                uint32_t old_owner,
                                                uint32_t new_owner,
                                                uint32_t *count_out);

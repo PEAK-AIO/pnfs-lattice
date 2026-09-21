@@ -198,66 +198,118 @@ static bool parse_epoch(const char *v, int64_t *out)
     return true;
 }
 
+/* Parse @v as an unsigned bound into *field and raise its presence flag. */
+static bool set_u64_param(const char *v, uint64_t *field, bool *flag)
+{
+    if (!find_parse_u64(v, field)) {
+        return false;
+    }
+    *flag = true;
+    return true;
+}
+
+/* Parse @v as epoch seconds into *field and raise its presence flag. */
+static bool set_epoch_param(const char *v, int64_t *field, bool *flag)
+{
+    if (!parse_epoch(v, field)) {
+        return false;
+    }
+    *flag = true;
+    return true;
+}
+
+static bool set_type_param(struct find_filter *f, const char *v)
+{
+    int t = find_parse_type_char(v);
+
+    if (t < 0) {
+        return false;
+    }
+    f->type = (uint8_t)t;
+    return true;
+}
+
+static bool set_name_param(struct find_filter *f, const char *v)
+{
+    if (v[0] == '\0') {
+        return false;
+    }
+    f->name_glob = v;               /* borrowed from the query string */
+    return true;
+}
+
+/* inum selects an exact fileid unless inum_max (either order) widens it. */
+static bool set_inum_param(struct find_filter *f, const char *v)
+{
+    if (!find_parse_u64(v, &f->inum_min)) {
+        return false;
+    }
+    if (!f->has_inum) {
+        f->inum_max = f->inum_min;  /* exact match unless inum_max follows */
+    }
+    f->has_inum = true;
+    return true;
+}
+
+static bool set_limit_param(struct find_filter *f, const char *v)
+{
+    uint64_t u = 0U;
+
+    if (!find_parse_u64(v, &u) || u == 0U ||
+        u > (uint64_t)FIND_LIMIT_MAX) {
+        return false;
+    }
+    f->limit = (uint32_t)u;
+    return true;
+}
+
 /**
  * Apply one recognised parameter to the filter.
  *
  * @return true when the key is known and the value is valid.
  */
-static bool apply_param(struct find_filter *f, const char *k, char *v)
+static bool apply_param(struct find_filter *f, const char *k, const char *v)
 {
     if (strcmp(k, "type") == 0) {
-        int t = find_parse_type_char(v);
-
-        if (t < 0) { return false; }
-        f->type = (uint8_t)t;
-    } else if (strcmp(k, "name") == 0) {
-        if (v[0] == '\0') { return false; }
-        f->name_glob = v;               /* borrowed from the query string */
-    } else if (strcmp(k, "size_gt") == 0) {
-        if (!find_parse_u64(v, &f->size_min)) { return false; }
-        f->has_size_min = true;
-    } else if (strcmp(k, "size_lt") == 0) {
-        if (!find_parse_u64(v, &f->size_max)) { return false; }
-        f->has_size_max = true;
-    } else if (strcmp(k, "mtime_after") == 0) {
-        if (!parse_epoch(v, &f->mtime_min)) { return false; }
-        f->has_mtime_min = true;
-    } else if (strcmp(k, "mtime_before") == 0) {
-        if (!parse_epoch(v, &f->mtime_max)) { return false; }
-        f->has_mtime_max = true;
-    } else if (strcmp(k, "ctime_after") == 0) {
-        if (!parse_epoch(v, &f->ctime_min)) { return false; }
-        f->has_ctime_min = true;
-    } else if (strcmp(k, "ctime_before") == 0) {
-        if (!parse_epoch(v, &f->ctime_max)) { return false; }
-        f->has_ctime_max = true;
-    } else if (strcmp(k, "uid") == 0) {
-        if (!find_parse_u64(v, &f->uid)) { return false; }
-        f->has_uid = true;
-    } else if (strcmp(k, "gid") == 0) {
-        if (!find_parse_u64(v, &f->gid)) { return false; }
-        f->has_gid = true;
-    } else if (strcmp(k, "inum") == 0) {
-        if (!find_parse_u64(v, &f->inum_min)) { return false; }
-        if (!f->has_inum) {
-            f->inum_max = f->inum_min;  /* exact match unless inum_max follows */
-        }
-        f->has_inum = true;
-    } else if (strcmp(k, "inum_max") == 0) {
-        if (!find_parse_u64(v, &f->inum_max)) { return false; }
-        f->has_inum = true;
-    } else if (strcmp(k, "limit") == 0) {
-        uint64_t u = 0U;
-
-        if (!find_parse_u64(v, &u) || u == 0U ||
-            u > (uint64_t)FIND_LIMIT_MAX) {
-            return false;
-        }
-        f->limit = (uint32_t)u;
-    } else {
-        return false;
+        return set_type_param(f, v);
     }
-    return true;
+    if (strcmp(k, "name") == 0) {
+        return set_name_param(f, v);
+    }
+    if (strcmp(k, "size_gt") == 0) {
+        return set_u64_param(v, &f->size_min, &f->has_size_min);
+    }
+    if (strcmp(k, "size_lt") == 0) {
+        return set_u64_param(v, &f->size_max, &f->has_size_max);
+    }
+    if (strcmp(k, "mtime_after") == 0) {
+        return set_epoch_param(v, &f->mtime_min, &f->has_mtime_min);
+    }
+    if (strcmp(k, "mtime_before") == 0) {
+        return set_epoch_param(v, &f->mtime_max, &f->has_mtime_max);
+    }
+    if (strcmp(k, "ctime_after") == 0) {
+        return set_epoch_param(v, &f->ctime_min, &f->has_ctime_min);
+    }
+    if (strcmp(k, "ctime_before") == 0) {
+        return set_epoch_param(v, &f->ctime_max, &f->has_ctime_max);
+    }
+    if (strcmp(k, "uid") == 0) {
+        return set_u64_param(v, &f->uid, &f->has_uid);
+    }
+    if (strcmp(k, "gid") == 0) {
+        return set_u64_param(v, &f->gid, &f->has_gid);
+    }
+    if (strcmp(k, "inum") == 0) {
+        return set_inum_param(f, v);
+    }
+    if (strcmp(k, "inum_max") == 0) {
+        return set_u64_param(v, &f->inum_max, &f->has_inum);
+    }
+    if (strcmp(k, "limit") == 0) {
+        return set_limit_param(f, v);
+    }
+    return false;
 }
 
 bool apid_parse_query(char *qs, struct find_filter *f, const char **why)

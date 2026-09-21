@@ -9,7 +9,7 @@ add_library(pnfs_cluster STATIC
     migration.c
     subtree_map.c
     failover.c
-    failover_rondb.c
+    failover_watchdog.c
     # health.c moved to src/modules/replication/ (gated by ENABLE_REPLICATION)
     subtree_split.c
     cluster_membership.c

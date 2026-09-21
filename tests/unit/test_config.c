@@ -237,6 +237,28 @@ static void test_rpc_listener_threads_key(void)
     unlink(path);
 }
 
+static void test_hpc_pending_recovery_scan_key(void)
+{
+    char path[128];
+    struct mds_config cfg;
+    /* Opt-in start-up scan: off unless the key says otherwise.  The
+     * daemon reads cfg.hpc_pending_recovery_scan, so the key must
+     * actually reach the struct (it was advertised but not parsed). */
+    ASSERT_EQ(write_tmp_ini("", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.hpc_pending_recovery_scan, 0);
+    ASSERT_EQ(write_tmp_ini("hpc_pending_recovery_scan = true\n", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.hpc_pending_recovery_scan, 1);
+    ASSERT_EQ(write_tmp_ini("hpc_pending_recovery_scan = 1\n", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.hpc_pending_recovery_scan, 1);
+    ASSERT_EQ(write_tmp_ini("hpc_pending_recovery_scan = no\n", path), 0);
+    ASSERT_EQ(mds_config_load(path, &cfg), MDS_OK);
+    ASSERT_EQ((int)cfg.hpc_pending_recovery_scan, 0);
+    unlink(path);
+}
+
 static void test_mountd_compat_defaults(void)
 {
     char path[128];
@@ -448,6 +470,7 @@ int main(void)
     RUN_TEST(test_promoted_knob_defaults);
     RUN_TEST(test_out_of_range_rejected);
     RUN_TEST(test_rpc_listener_threads_key);
+    RUN_TEST(test_hpc_pending_recovery_scan_key);
 
     /* mountd_compat keys. */
     RUN_TEST(test_mountd_compat_defaults);

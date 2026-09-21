@@ -141,7 +141,7 @@ void find_format_mode(uint32_t mode, char *out)
     }
     for (i = 0U; i < 9U; i++) {
         /* Bit 8 is owner-read, descending to bit 0 = other-execute. */
-        out[i] = ((mode & (1U << (8U - i))) != 0U) ? rwx[i % 3U] : '-';
+        out[i] = (char)(((mode & (1U << (8U - i))) != 0U) ? rwx[i % 3U] : '-');
     }
     /* setuid / setgid / sticky replace the matching execute slot. */
     if ((mode & 04000U) != 0U) { out[2] = ((mode & 0100U) != 0U) ? 's' : 'S'; }

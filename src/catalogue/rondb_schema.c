@@ -68,7 +68,10 @@ int rondb_inode_serialize(const struct mds_inode *inode,
         if (fhl < MDS_NFS_FH_MAX) {
             memset(p + fhl, 0, (size_t)(MDS_NFS_FH_MAX - fhl));
         }
-        p += MDS_NFS_FH_MAX;
+        /* Last field: the bytes from here up to RONDB_INODE_FIXED_SIZE
+         * are the reserved slack pinned by test_rondb_schema.c (2d);
+         * they are deliberately left untouched, so the cursor is not
+         * advanced further. */
     }
 
     return RONDB_INODE_FIXED_SIZE;
@@ -133,7 +136,8 @@ int rondb_inode_deserialize(const uint8_t *buf, size_t len,
         if (inode->inline_fh_len > 0) {
             memcpy(inode->inline_fh, p, inode->inline_fh_len);
         }
-        p += MDS_NFS_FH_MAX;
+        /* Last trailer: the bytes up to RONDB_INODE_FIXED_SIZE are
+         * reserved slack, so the cursor is not advanced further. */
     }
 
     return 0;
@@ -160,9 +164,10 @@ int rondb_stripe_entry_serialize(const struct mds_ds_map_entry *entry,
                                       memory_order_relaxed) < 16U) {
             void *bt[32];
             int nb = backtrace(bt, 32);
-            fprintf(stderr, "WARN: stripe write out-of-range ds_id=%u "
-                    "fh_len=%u -- origin backtrace:\n",
-                    entry->ds_id, entry->nfs_fh_len);
+            /* Diagnostic only: nothing to do if stderr is gone. */
+            (void)fprintf(stderr, "WARN: stripe write out-of-range ds_id=%u "
+                          "fh_len=%u -- origin backtrace:\n",
+                          entry->ds_id, entry->nfs_fh_len);
             backtrace_symbols_fd(bt, nb, 2);
         }
     }
