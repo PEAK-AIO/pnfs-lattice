@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pNFS 元数据后端迁移至 FoundationDB：可行性分析执行框架</title>
+  <style>
+    :root {
+      --ink: #182428;
+      --muted: #607176;
+      --paper: #f5f1e8;
+      --surface: #fffdf8;
+      --line: #d7d2c6;
+      --teal: #0b6b68;
+      --teal-dark: #064f4d;
+      --coral: #e7674b;
+      --gold: #d5a536;
+      --blue: #2c607e;
+      --shadow: 0 14px 36px rgba(24, 36, 40, .09);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 6%, rgba(11,107,104,.10), transparent 27rem),
+        radial-gradient(circle at 92% 20%, rgba(231,103,75,.08), transparent 25rem),
+        var(--paper);
+      font-family: Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+      line-height: 1.72;
+    }
+
+    a { color: inherit; }
+    button, input { font: inherit; }
+    code {
+      padding: .12rem .35rem;
+      border: 1px solid #ddd7ca;
+      border-radius: 6px;
+      background: #f2eee5;
+      font-family: "Cascadia Code", Consolas, monospace;
+      font-size: .9em;
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .75rem clamp(1rem, 4vw, 4rem);
+      border-bottom: 1px solid rgba(24,36,40,.12);
+      background: rgba(245,241,232,.88);
+      backdrop-filter: blur(14px);
+    }
+
+    .brand { font-weight: 800; letter-spacing: .02em; }
+    .brand span { color: var(--teal); }
+    .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+    .btn {
+      padding: .55rem .85rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      background: var(--surface);
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--teal); color: var(--teal-dark); }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(4rem, 8vw, 7rem) clamp(1.25rem, 6vw, 7rem) 4rem;
+      color: #fff;
+      background: #123b3d;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: -25% -10%;
+      background:
+        linear-gradient(115deg, transparent 35%, rgba(255,255,255,.07) 35.2%, transparent 35.5%),
+        radial-gradient(circle at 78% 38%, rgba(213,165,54,.35), transparent 20rem),
+        radial-gradient(circle at 18% 4%, rgba(44,96,126,.65), transparent 26rem);
+    }
+    .hero-inner { position: relative; max-width: 1180px; margin: auto; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: .55rem;
+      padding: .35rem .75rem;
+      border: 1px solid rgba(255,255,255,.3);
+      border-radius: 999px;
+      color: #d9f2ef;
+      font-size: .82rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--coral); }
+    h1 {
+      max-width: 900px;
+      margin: 1.4rem 0 1rem;
+      font-family: Georgia, "Noto Serif SC", serif;
+      font-size: clamp(2.4rem, 6vw, 5rem);
+      line-height: 1.08;
+      letter-spacing: -.035em;
+    }
+    .hero p { max-width: 780px; margin: 0; color: #d7e4e3; font-size: clamp(1rem, 2vw, 1.22rem); }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; margin-top: 2.2rem; color: #bcd0cf; font-size: .9rem; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      gap: 2.25rem;
+      width: min(1440px, 100%);
+      margin: auto;
+      padding: 2.5rem clamp(1rem, 4vw, 4rem) 6rem;
+    }
+    aside { align-self: start; position: sticky; top: 5.3rem; }
+    .toc {
+      padding: 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,253,248,.75);
+      box-shadow: 0 8px 22px rgba(24,36,40,.05);
+    }
+    .toc strong { display: block; margin-bottom: .65rem; font-size: .82rem; letter-spacing: .08em; color: var(--muted); }
+    .toc a { display: block; padding: .4rem .55rem; border-radius: 8px; text-decoration: none; font-size: .92rem; }
+    .toc a:hover, .toc a.active { color: var(--teal-dark); background: #e5efec; }
+    .progress-wrap { margin-top: 1rem; }
+    .progress-label { display: flex; justify-content: space-between; margin-bottom: .4rem; color: var(--muted); font-size: .75rem; }
+    .progress { height: 7px; overflow: hidden; border-radius: 999px; background: #e2ddd2; }
+    .progress > span { display: block; width: 0; height: 100%; background: linear-gradient(90deg, var(--teal), var(--gold)); transition: width .25s; }
+
+    main { min-width: 0; }
+    section { scroll-margin-top: 5.4rem; margin-bottom: 3.25rem; }
+    .section-head { display: grid; grid-template-columns: 72px 1fr; gap: 1rem; align-items: start; margin-bottom: 1.25rem; }
+    .section-no {
+      color: var(--coral);
+      font-family: Georgia, serif;
+      font-size: 2.3rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    h2 { margin: 0; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(1.65rem, 3vw, 2.45rem); line-height: 1.2; }
+    .section-kicker { margin-top: .35rem; color: var(--muted); }
+    h3 { margin: 0 0 .65rem; font-size: 1.12rem; }
+    h4 { margin: 0 0 .4rem; font-size: .95rem; }
+
+    .card {
+      padding: clamp(1rem, 2vw, 1.5rem);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .card + .card { margin-top: 1rem; }
+    .notice {
+      position: relative;
+      padding: 1.2rem 1.3rem 1.2rem 1.6rem;
+      border: 1px solid #b8cfca;
+      border-radius: 14px;
+      background: #ecf5f1;
+    }
+    .notice::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 5px; border-radius: 14px 0 0 14px; background: var(--teal); }
+    .notice strong { color: var(--teal-dark); }
+    .warn { border-color: #e7ccb5; background: #fff4e8; }
+    .warn::before { background: var(--coral); }
+
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 1rem; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+    .mini { padding: 1.05rem; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,253,248,.72); }
+    .mini .tag { margin-bottom: .6rem; }
+    .mini p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .tag {
+      display: inline-block;
+      padding: .24rem .55rem;
+      border-radius: 999px;
+      color: var(--teal-dark);
+      background: #dcebe7;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+    }
+    .tag.orange { color: #7f341e; background: #f8dfd6; }
+    .tag.gold { color: #624a08; background: #f3e8c7; }
+    .tag.blue { color: #234d66; background: #dce8ef; }
+
+    .question { margin: 0; padding-left: 1.2rem; }
+    .question li { margin: .4rem 0; }
+    .clean { list-style: none; padding: 0; margin: 0; }
+    .clean li { position: relative; padding: .35rem 0 .35rem 1.25rem; }
+    .clean li::before { content: "→"; position: absolute; left: 0; color: var(--coral); font-weight: 800; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: .7rem;
+      margin-top: 1rem;
+    }
+    .step {
+      position: relative;
+      min-height: 138px;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface);
+    }
+    .step:not(:last-child)::after { content: "›"; position: absolute; z-index: 2; top: 45%; right: -.56rem; color: var(--coral); font-size: 1.5rem; font-weight: 800; }
+    .step b { display: block; color: var(--teal); font-size: .78rem; letter-spacing: .08em; }
+    .step strong { display: block; margin: .35rem 0; line-height: 1.3; }
+    .step span { color: var(--muted); font-size: .82rem; line-height: 1.45; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; min-width: 780px; }
+    th, td { padding: .82rem .9rem; border-bottom: 1px solid #e7e1d6; text-align: left; vertical-align: top; font-size: .86rem; }
+    th { position: sticky; top: 0; color: #fff; background: var(--teal-dark); font-size: .78rem; letter-spacing: .03em; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #f4f7f2; }
+    td:first-child { font-weight: 700; }
+
+    details { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+    details + details { margin-top: .7rem; }
+    summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.1rem; cursor: pointer; font-weight: 800; }
+    summary::after { content: "+"; color: var(--coral); font-size: 1.35rem; }
+    details[open] summary::after { content: "−"; }
+    summary::-webkit-details-marker { display: none; }
+    .detail-body { padding: 0 1.1rem 1.1rem; }
+    .detail-grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 1rem; }
+    .detail-grid > div { padding-top: .8rem; border-top: 1px solid #e8e1d5; }
+    .detail-grid p, .detail-grid ul { margin: 0; font-size: .88rem; }
+
+    .matrix-note { color: var(--muted); font-size: .84rem; }
+    .editable {
+      min-height: 76px;
+      padding: .8rem;
+      border: 1px dashed #aaa293;
+      border-radius: 10px;
+      outline: none;
+      background: #fffefa;
+    }
+    .editable:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(11,107,104,.12); }
+    .editable:empty::before { content: attr(data-placeholder); color: #9c968c; }
+
+    .checklist { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .65rem; }
+    .check {
+      display: flex;
+      align-items: flex-start;
+      gap: .7rem;
+      padding: .8rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fffefa;
+    }
+    .check input { width: 1.05rem; height: 1.05rem; margin-top: .23rem; accent-color: var(--teal); }
+    .check span { font-size: .88rem; }
+
+    .score-grid { display: grid; grid-template-columns: 1.4fr .8fr .8fr .7fr; gap: .55rem; align-items: center; }
+    .score-grid > div { padding: .55rem .65rem; border-bottom: 1px solid #e6dfd3; font-size: .88rem; }
+    .score-grid .head { color: #fff; border: 0; background: var(--teal-dark); font-size: .78rem; font-weight: 800; }
+    input[type="number"] { width: 100%; padding: .4rem; border: 1px solid var(--line); border-radius: 8px; background: white; }
+    .score-total { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1rem; padding: 1rem; border-radius: 12px; color: #fff; background: var(--teal-dark); }
+
+    .decision-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; }
+    .decision { padding: 1rem; border-top: 5px solid var(--teal); border-radius: 10px; background: #fff; box-shadow: 0 8px 20px rgba(24,36,40,.06); }
+    .decision:nth-child(2) { border-color: var(--gold); }
+    .decision:nth-child(3) { border-color: var(--blue); }
+    .decision:nth-child(4) { border-color: var(--coral); }
+    .decision p { margin-bottom: 0; color: var(--muted); font-size: .85rem; }
+
+    .footer { padding: 2.5rem 1rem 3.5rem; color: #cadaD9; background: #123b3d; text-align: center; }
+    .footer strong { color: #fff; }
+
+    @media (max-width: 1120px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { position: static; }
+      .toc nav { display: grid; grid-template-columns: repeat(3,1fr); }
+      .flow { grid-template-columns: repeat(3,1fr); }
+      .step:nth-child(3)::after { display: none; }
+      .grid-4, .decision-grid { grid-template-columns: repeat(2,1fr); }
+    }
+    @media (max-width: 720px) {
+      .topbar { align-items: flex-start; }
+      .brand { display: none; }
+      .hero { padding-top: 3.5rem; }
+      .section-head { grid-template-columns: 50px 1fr; }
+      .grid-2, .grid-3, .grid-4, .decision-grid, .checklist, .detail-grid { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr 1fr; }
+      .step:nth-child(3)::after { display: block; }
+      .step:nth-child(even)::after { display: none; }
+      .toc nav { grid-template-columns: repeat(2,1fr); }
+      .score-grid { grid-template-columns: 1.2fr .8fr .8fr; }
+      .score-grid > div:nth-child(4n+4) { display: none; }
+      .score-grid > div { font-size: .8rem; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .topbar, aside, .actions, .progress-wrap { display: none !important; }
+      .hero { padding: 2.2rem; background: #123b3d !important; print-color-adjust: exact; }
+      .layout { display: block; padding: 1.4rem; }
+      section { break-inside: avoid; margin-bottom: 2rem; }
+      .card, details, .mini { box-shadow: none; }
+      details { break-inside: avoid; }
+      details > .detail-body { display: block; }
+      .flow { grid-template-columns: repeat(3,1fr); }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PEAK:AIO <span>× Lattice</span></div>
+    <div class="actions">
+      <button class="btn" id="expandAll">展开全部维度</button>
+      <button class="btn" id="resetProgress">清除勾选</button>
+      <button class="btn" onclick="window.print()">打印 / 导出 PDF</button>
+    </div>
+  </header>
+
+  <div class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">Feasibility Study Playbook · v1.0</div>
+      <h1>从 MySQL NDB 到 FoundationDB</h1>
+      <p>面向 PEAK:AIO pNFS Server / Lattice 元数据后端的可行性分析执行框架：定义要问什么、如何取证、怎样验证以及何时做出决策。本报告不预设技术结论。</p>
+      <div class="hero-meta">
+        <span>文档类型：分析计划与证据模板</span>
+        <span>目标读者：架构、开发、性能、SRE、测试团队</span>
+        <span>生成日期：2026-09-30</span>
+        <span>状态：待执行</span>
+        <span>唯一衡量标准：真实目标环境验证</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside>
+      <div class="toc">
+        <strong>分析导航</strong>
+        <nav>
+          <a href="#charter">01 研究章程</a>
+          <a href="#boundary">02 系统边界</a>
+          <a href="#dimensions">03 分析维度</a>
+          <a href="#workloads">04 工作负载</a>
+          <a href="#method">05 执行方法</a>
+          <a href="#experiments">06 实验矩阵</a>
+          <a href="#migration">07 迁移验证</a>
+          <a href="#score">08 评分与决策</a>
+          <a href="#deliverables">09 交付与检查</a>
+        </nav>
+        <div class="progress-wrap">
+          <div class="progress-label"><span>执行清单进度</span><span id="progressText">0%</span></div>
+          <div class="progress"><span id="progressBar"></span></div>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <section id="charter">
+        <div class="section-head"><div class="section-no">01</div><div><h2>研究章程：先定义“可行”的含义</h2><div class="section-kicker">避免把数据库能力对比误当成系统级可行性结论。</div></div></div>
+        <div class="notice">
+          <strong>边界声明：</strong>本文只提供分析框架、验证问题、实验设计和结论模板；不会判断 FoundationDB 适合或不适合。<strong>真实目标环境中的可复现实测是唯一衡量标准</strong>；源码、官方文档、理论推演、实验室模拟和通用 benchmark 只能形成待验证假设，不能计分，也不能支撑最终可行性结论。
+        </div>
+        <div class="grid-2" style="margin-top:1rem">
+          <div class="card">
+            <h3>核心决策问题</h3>
+            <p>在满足 pNFS/NFSv4 元数据正确性、目标性能、故障恢复与运维约束的前提下，是否值得将当前 RonDB / MySQL NDB 后端替换为 FoundationDB？若值得，应采用何种数据模型、接入方式和迁移策略？</p>
+          </div>
+          <div class="card">
+            <h3>必须提前量化的验收线</h3>
+            <ul class="clean">
+              <li>不可妥协的正确性与一致性条件</li>
+              <li>关键操作的吞吐、P50/P95/P99 延迟预算</li>
+              <li>允许的故障窗口、RTO、RPO 与降级行为</li>
+              <li>迁移停机窗口、回滚时间与数据校验标准</li>
+              <li>三至五年总成本、团队技能与支持要求</li>
+            </ul>
+          </div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>“真实目标环境”的最低定义</h3>
+          <div class="grid-3">
+            <div class="mini"><span class="tag">基础设施真实</span><p>使用目标生产版本、服务器规格、CPU/内存/磁盘、网络链路、故障域、安全配置以及实际部署拓扑。</p></div>
+            <div class="mini"><span class="tag blue">数据与流量真实</span><p>使用脱敏生产数据或经校验等价的数据全集，并回放真实操作组合、热点分布、并发、峰值、后台任务和增长模式。</p></div>
+            <div class="mini"><span class="tag orange">运行条件真实</span><p>纳入真实客户端、MDS/DS 数量、监控告警、值班流程、升级恢复、资源争用与计划内外故障；保留完整原始证据。</p></div>
+          </div>
+          <p class="matrix-note">若任一关键条件与目标生产环境不一致，该结果只能标记为“预验证”，不得进入评分。无法在生产系统直接注入的破坏性故障，应在与生产配置一致、经环境等价性验收的隔离真实集群中执行，并明确记录唯一差异。</p>
+        </div>
+        <div class="grid-4" style="margin-top:1rem">
+          <div class="mini"><span class="tag">IN SCOPE</span><h3>生产语义</h3><p>命名空间、状态、布局、协调、GC、注册表等全部生产数据路径。</p></div>
+          <div class="mini"><span class="tag">IN SCOPE</span><h3>全生命周期</h3><p>开发、部署、升级、扩容、备份恢复、监控、应急与迁移。</p></div>
+          <div class="mini"><span class="tag orange">OUTCOME</span><h3>多种结论</h3><p>不是简单二选一，允许全量替换、局部采用、延后或否决。</p></div>
+          <div class="mini"><span class="tag gold">EVIDENCE</span><h3>实测唯一</h3><p>只有真实目标环境中的可复现实测可作为结论证据；其他材料仅用于准备验证。</p></div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>分析前提登记区</h3>
+          <div class="grid-3">
+            <div><h4>业务与规模假设</h4><div class="editable" contenteditable="true" data-key="assumption-scale" data-placeholder="填写文件数、目录规模、客户端数、MDS 数、地域与增长率……"></div></div>
+            <div><h4>SLO 与硬约束</h4><div class="editable" contenteditable="true" data-key="assumption-slo" data-placeholder="填写延迟、吞吐、可用性、RTO/RPO、预算……"></div></div>
+            <div><h4>版本与环境基线</h4><div class="editable" contenteditable="true" data-key="assumption-version">2026-09-30 已建立 FDB 目标环境（PVE 10.131.9.20 上 3 台 VM，VMID 601/602/603，fdb-node1/2/3）：
+- 集群：FoundationDB 7.4.8（GitHub 官方 deb），triple 冗余 / ssd-2 存储引擎，3 进程 / 3 机器，coordinators 3
+- 网络：10.131.9.44/.45/.46:4500，集群文件 /etc/foundationdb/fdb.cluster = found:1@10.131.9.44:4500,10.131.9.45:4500,10.131.9.46:4500（7.3+ 语法：desc:ID@addr,addr,addr）
+- 规格：每台 4C x86-64-v3 / 8GB RAM / 40GB 盘（pool_1t）；OS Ubuntu 24.04（libc 2.39）
+- 运维：/etc/systemd/system/fdbmonitor.service（Type=simple，enable，重启自启已验证）；基础镜像源为 PVE 镜像
+- 状态：status 全绿，Replication Healthy，KV 读写冒烟通过
+- 注意：本环境为基准测试环境，非生产拓扑；40GB 盘仅够小数据集压测</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="boundary">
+        <div class="section-head"><div class="section-no">02</div><div><h2>系统边界：按责任域拆解，而不是按表名迁移</h2><div class="section-kicker">先建立当前后端承担的完整责任清单，再映射到候选设计。</div></div></div>
+        <div class="card">
+          <h3>代码与架构取证入口</h3>
+          <div class="grid-3">
+            <div class="mini"><span class="tag">接口面</span><p><code>include/catalogue_internal.h</code>、<code>include/mds_catalogue.h</code>、<code>include/mds_coordination.h</code>：枚举 vtable 契约、事务边界和返回语义。</p></div>
+            <div class="mini"><span class="tag blue">实现面</span><p><code>src/catalogue/catalogue_dispatch.c</code>、<code>catalogue_rondb*.{c,cpp}</code>：定位合并操作、重试、锁、批量读与后端特化。</p></div>
+            <div class="mini"><span class="tag orange">验证面</span><p><code>tests/</code>、<code>docs/</code>、部署脚本与运行指标：提炼真实行为、基线和故障经验。</p></div>
+          </div>
+        </div>
+        <div class="table-wrap" style="margin-top:1rem">
+          <table>
+            <thead><tr><th>责任域</th><th>典型对象 / 操作</th><th>分析时必须回答</th><th>建议证据</th></tr></thead>
+            <tbody>
+              <tr><td>命名空间权威</td><td>inode、dirent、create/remove/rename/link、属性与 xattr</td><td>原子不变量、并发冲突、唯一性、目录顺序与 cookie 语义如何保持？</td><td>调用图、事务追踪、并发测试、模型检查</td></tr>
+              <tr><td>pNFS 布局状态</td><td>stripe map、layout grant/return、DS 索引</td><td>布局发放、召回、恢复和数据服务器变化如何与元数据一致？</td><td>NFS 协议场景、故障注入、跨 MDS 测试</td></tr>
+              <tr><td>NFSv4 有状态协议</td><td>client/session/slot、open/lock/delegation、recovery</td><td>幂等、租约、重放缓存、owner 冲突和 grace 恢复是否完整？</td><td>协议测试、重放测试、MDS 重启演练</td></tr>
+              <tr><td>集群协调</td><td>node registry、heartbeat、journal、partition/shard map</td><td>成员关系、租约、领导/所有权转移及脑裂防护采用什么机制？</td><td>时钟/网络故障矩阵、时序图、可观测性</td></tr>
+              <tr><td>后台工作流</td><td>GC、remove pending、preallocation、rebalance、resilver</td><td>队列 claim、重复执行、饥饿、重试和扫描成本是否可控？</td><td>积压压测、worker 崩溃测试、长稳测试</td></tr>
+              <tr><td>查询与加速</td><td>READDIR、搜索 API、catalog image、changefeed</td><td>范围读、分页、快照、增量传播和缓存失效如何实现？</td><td>大目录基准、热点分布、延迟与滞后指标</td></tr>
+              <tr><td>平台与运维</td><td>配置、schema、备份、升级、容量、监控</td><td>部署拓扑、自动化、恢复流程和人员能力是否达到生产要求？</td><td>runbook 演练、恢复计时、容量与成本清单</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="dimensions">
+        <div class="section-head"><div class="section-no">03</div><div><h2>十三个分析维度</h2><div class="section-kicker">每个维度都要产出：问题 → 证据 → 方法 → 判定条件。</div></div></div>
+
+        <details open>
+          <summary><span>1. 功能覆盖与接口契约</span><span class="tag">FUNCTION</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>所有 authority / coordination vtable 操作能否表达？哪些仅在 RonDB 实现中隐含？</li><li>错误码、幂等性、可选能力、事务嵌套与回调行为是否等价？</li><li>管理、诊断、搜索、catalog image 和工具链是否依赖 SQL/NDB 特性？</li></ul></div>
+            <div><h4>验证方法</h4><p>生成接口清单与调用图；逐操作建立“现状语义—候选实现—测试用例”追踪矩阵；对 fallback 路径单独标记。</p></div>
+            <div><h4>产出 / 闸门</h4><p>100% 接口归类；所有 Must-have 有实现路线及自动化验收；任何未覆盖操作不得被“可编译”掩盖。</p></div>
+          </div></div>
+        </details>
+
+        <details open>
+          <summary><span>2. 数据模型与键空间设计</span><span class="tag blue">MODEL</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>inode、dirent、状态表、二级索引和计数器如何编码为键值与有序子空间？</li><li>路径深度、大目录、长文件名、xattr、热点父目录如何影响键长、值大小与分片？</li><li>版本、schema 演进、兼容读取、孤儿与索引修复如何设计？</li></ul></div>
+            <div><h4>验证方法</h4><p>画 keyspace 与访问路径；按操作估算读写集合、字节数和冲突范围；构造倾斜/热点数据集。</p></div>
+            <div><h4>产出 / 闸门</h4><p>Keyspace 规范、编码规范、索引维护规则、版本策略，以及每个访问模式的成本表。</p></div>
+          </div></div>
+        </details>
+
+        <details open>
+          <summary><span>3. 事务、一致性与并发语义</span><span class="tag orange">CORRECTNESS</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>create/remove/rename/link/setattr/nlink 调整的跨记录不变量是什么？</li><li>读写冲突、原子计数、CAS、锁语义与当前行锁/解释更新如何对应？</li><li>事务冲突重试后，NFS 请求副作用、外部 DS 操作和响应重放是否仍幂等？</li><li>事务大小、持续时间、读版本保留和单操作放大是否越界？</li></ul></div>
+            <div><h4>验证方法</h4><p>为每个复合操作画事务时序图；建立不变量清单；高并发交错测试、故障点注入和历史一致性检查。</p></div>
+            <div><h4>产出 / 闸门</h4><p>事务语义映射、冲突处理规范、重试预算；零已知不变量破坏，冲突率与尾延迟在验收线内。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>4. 性能与可扩展性</span><span class="tag gold">PERFORMANCE</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>单操作 round trip、批量/范围读、读写放大与序列化成本如何变化？</li><li>单父目录、单文件、全局 fileid、队列头部等热点上限在哪里？</li><li>MDS 横向扩展后数据库吞吐、冲突率、P99/P99.9 是否线性或可预测？</li><li>大目录 READDIR、扫描/搜索和后台 GC 是否干扰前台业务？</li></ul></div>
+            <div><h4>验证方法</h4><p>同硬件、同数据、同客户端的 A/B 基准；微基准 + NFS 端到端 + soak；记录服务时间分解与数据库内部指标。</p></div>
+            <div><h4>产出 / 闸门</h4><p>基线对比、扩展曲线、容量模型、热点画像、资源效率及可解释的瓶颈归因。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>5. 可靠性、可用性与故障语义</span><span class="tag orange">RESILIENCE</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>进程、主机、磁盘、网络分区、丢包/延迟、机架与站点故障的外显行为是什么？</li><li>仲裁、复制、故障域、读写可用性与数据持久性目标如何配置和证明？</li><li>MDS 与数据库故障时的超时、退避、熔断、恢复风暴和客户端错误映射是否合理？</li></ul></div>
+            <div><h4>验证方法</h4><p>基于故障树的 chaos 矩阵；在负载中注入故障；校验线性化历史、RTO/RPO、积压与自动恢复。</p></div>
+            <div><h4>产出 / 闸门</h4><p>故障模式表、可用性预算、恢复证据与人工步骤清单；未知故障语义必须显式登记。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>6. NFSv4 / pNFS 协议正确性</span><span class="tag">PROTOCOL</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>stateid、sequence slot、open/lock owner、delegation、layout recall/return 如何跨 MDS 持久化？</li><li>重放、重复请求、MDS 重启、grace/reclaim 和客户端恢复是否与后端重试组合正确？</li><li>目录 cookie、change attribute、文件句柄稳定性与 rename/link 语义是否保持？</li></ul></div>
+            <div><h4>验证方法</h4><p>协议覆盖矩阵；Linux 客户端互操作；多 MDS 并发；网络中断、重启与重放测试；抓包对照。</p></div>
+            <div><h4>产出 / 闸门</h4><p>协议场景测试报告、状态机覆盖率、错误映射表和恢复证明。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>7. 运维、可观测性与可支持性</span><span class="tag blue">OPERATIONS</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>安装、拓扑、配置、扩缩容、滚动升级、证书、备份恢复与容量预警复杂度如何？</li><li>是否有生产所需指标、trace、日志、诊断包、慢事务和热点定位能力？</li><li>团队能否值守；上游社区、商业支持、版本节奏与生命周期是否匹配？</li></ul></div>
+            <div><h4>验证方法</h4><p>由非实现作者在真实目标环境按 runbook 独立部署与恢复；计时并记录人工决策点；以真实告警完成故障定位。</p></div>
+            <div><h4>产出 / 闸门</h4><p>生产 runbook、监控面板、告警规则、升级/回滚演练记录与技能差距计划。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>8. 数据迁移、兼容与回滚</span><span class="tag gold">MIGRATION</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>全量导入、增量追平、双写、影子读或停机迁移分别需要什么前提？</li><li>如何生成一致快照、保存版本/状态、校验引用完整性并处理切换期间写入？</li><li>回滚会不会丢失新后端独有写入；回滚点与不可逆点在哪里？</li></ul></div>
+            <div><h4>验证方法</h4><p>生产量级数据迁移彩排；逐表/逐不变量校验；切换与回切演练；注入中断、重复和乱序。</p></div>
+            <div><h4>产出 / 闸门</h4><p>迁移方案、校验器、状态机、时间预算、Go/No-Go 清单和可演练回滚路径。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>9. 安全、合规与供应链</span><span class="tag orange">SECURITY</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>认证、传输/静态加密、最小权限、租户隔离、密钥轮换与审计是否满足要求？</li><li>C/C++ 客户端依赖、打包、SBOM、漏洞响应、许可证与再分发条件有何影响？</li><li>备份、日志、诊断数据是否暴露文件名、UID/GID 或访问模式？</li></ul></div>
+            <div><h4>验证方法</h4><p>威胁建模、配置审计、依赖扫描、许可证审查、凭证轮换和越权测试。</p></div>
+            <div><h4>产出 / 闸门</h4><p>威胁与控制矩阵、依赖清单、法律审查结果、残余风险签署。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>10. 工程集成与长期维护</span><span class="tag">ENGINEERING</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>新增后端是否真正局限于 vtable/factory，还是存在 RonDB 旁路与硬编码？</li><li>C API、线程模型、连接/事务池、异步能力、取消和 shutdown 如何接入？</li><li>测试替身、CI、跨平台构建、包体、升级兼容和调试体验成本如何？</li></ul></div>
+            <div><h4>验证方法</h4><p>dependency scan；实现最小垂直切片；评审代码增量、耦合、测试覆盖和错误处理。</p></div>
+            <div><h4>产出 / 闸门</h4><p>组件设计、改动热区、估算与风险区间、维护责任边界和弃用计划。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>11. 成本、容量与资源效率</span><span class="tag gold">ECONOMICS</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>计算、内存、磁盘、网络、备份、跨域流量和冗余容量的三至五年 TCO 如何？</li><li>为满足相同 SLO，各方案需要多少节点、预留和工程投入？</li><li>迁移期间双集群、双写、压测环境与培训支持的成本是否计入？</li></ul></div>
+            <div><h4>验证方法</h4><p>基于实测资源曲线建模；给出基准/高增长/故障冗余三种情景；做敏感性分析。</p></div>
+            <div><h4>产出 / 闸门</h4><p>统一口径 TCO、单位成本（每百万操作/每十亿对象）、峰值容量和不确定性区间。</p></div>
+          </div></div>
+        </details>
+
+        <details>
+          <summary><span>12. 战略适配、生态与退出成本</span><span class="tag blue">STRATEGY</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>候选方案是否支持未来分片、多地域、更多元数据服务和云/本地部署方向？</li><li>专用 keyspace、绑定 API 或运维工具会形成何种锁定？</li><li>若未来再次迁移，数据导出、抽象层和兼容协议能否降低退出成本？</li></ul></div>
+            <div><h4>验证方法</h4><p>三年路线图访谈；退出演练设计；对关键上游依赖做成熟度和 bus factor 评估。</p></div>
+            <div><h4>产出 / 闸门</h4><p>战略契合度、可逆性设计、依赖风险与触发重新评估的条件。</p></div>
+          </div></div>
+        </details>
+
+        <details open>
+          <summary><span>13. 异常处理与错误语义</span><span class="tag orange">ERROR HANDLING</span></summary>
+          <div class="detail-body"><div class="detail-grid">
+            <div><h4>关键问题</h4><ul class="question"><li>数据库异常如何分为可重试、不可重试、调用方错误、数据损坏、资源耗尽和运维配置错误？</li><li>FoundationDB 客户端错误如何稳定映射到内部 <code>mds_status</code>、NFSv4 错误码以及管理接口响应，是否会误报或吞错？</li><li>事务冲突、超时、未知提交结果、版本过旧、网络中断、集群不可用时，重试是否满足次数、总时限、退避、抖动与取消约束？</li><li>重试后 create/remove/rename、状态更新、GC 入队和外部 DS 副作用是否保持幂等，未知提交结果如何对账？</li><li>部分成功、进程崩溃、队列毒任务、数据解码失败、schema/版本不兼容和资源耗尽时如何隔离、补偿或安全停机？</li><li>异常是否携带 operation、transaction、fileid/clientid、重试次数与根因链等诊断上下文，同时避免泄露敏感数据？</li></ul></div>
+            <div><h4>验证方法</h4><p>建立错误分类与映射表；在事务边界和每个外部副作用前后设置故障点；注入冲突、超时、断网、未知提交结果、损坏值、OOM/磁盘满模拟及配置错误；验证重试、补偿、熔断、降级、告警和恢复。</p></div>
+            <div><h4>产出 / 闸门</h4><p>错误目录、映射规范、重试策略、异常时序图、补偿与人工处置 runbook；禁止无限重试、静默数据丢失、错误码漂移及无法判定的重复副作用。</p></div>
+          </div></div>
+        </details>
+      </section>
+
+      <section id="workloads">
+        <div class="section-head"><div class="section-no">04</div><div><h2>工作负载与语义矩阵</h2><div class="section-kicker">以真实操作族为轴，避免只测随机 KV 或单行 CRUD。</div></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>工作负载族</th><th>代表场景</th><th>主指标</th><th>正确性观察点</th><th>压力变体</th></tr></thead>
+            <tbody>
+              <tr><td>只读元数据</td><td>LOOKUP、GETATTR、路径解析、热点 inode</td><td>ops/s，P50/P99，读字节，缓存命中</td><td>版本一致、文件句柄稳定、错误码</td><td>冷/热缓存，多 MDS，读写混合</td></tr>
+              <tr><td>目录扫描</td><td>READDIR/PLUS、分页、百万级目录</td><td>首批/全量耗时，扫描放大，内存</td><td>cookie 连续性、无重/漏、并发变更语义</td><td>均匀/倾斜名称、跨分页 rename</td></tr>
+              <tr><td>创建与删除</td><td>CREATE/MKDIR/REMOVE/RMDIR</td><td>吞吐、冲突率、重试次数、尾延迟</td><td>dirent/inode 原子性、nlink/change、GC 入队</td><td>同父目录、分散目录、创建风暴</td></tr>
+              <tr><td>重命名与硬链接</td><td>跨目录 rename、overwrite、LINK、环检测</td><td>P99，事务读写集，冲突率</td><td>引用完整性、原子可见、nlink、恢复</td><td>双向 rename、热点文件、故障中断</td></tr>
+              <tr><td>属性与扩展属性</td><td>SETATTR、并发掩码更新、xattr list/get/put</td><td>延迟、值大小敏感度、冲突</td><td>无丢失更新、权限/时间/change 语义</td><td>高争用、大小边界、混合字段</td></tr>
+              <tr><td>布局与条带</td><td>LAYOUTGET/RETURN、stripe map、DS 变化</td><td>授权延迟、每文件状态量、召回速度</td><td>stateid、范围合并、DS 索引一致</td><td>海量客户端、热点文件、DS 故障</td></tr>
+              <tr><td>有状态协议</td><td>session slot、open/lock/delegation、replay</td><td>更新延迟、恢复速率、状态容量</td><td>exactly-once 外观、owner 冲突、grace</td><td>MDS 重启、客户端重连、重放风暴</td></tr>
+              <tr><td>后台队列</td><td>GC/remove pending、prealloc、recovery scan</td><td>积压、处理率、前台干扰、扫描成本</td><td>claim 幂等、无丢失、无重复副作用</td><td>worker 崩溃、毒任务、长期积压</td></tr>
+              <tr><td>集群协调</td><td>heartbeat、成员检测、所有权转移</td><td>检测/收敛时间、写放大、误判率</td><td>单一所有权、fencing、脑裂防护</td><td>时钟漂移、网络抖动、站点隔离</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="matrix-note">每一行都必须在真实目标环境分别执行当前 RonDB 基线与 FoundationDB 候选实现，覆盖低/中/高负载、稳态与故障态；任何环境、数据或流量差异均须记录并完成等价性评审。</p>
+      </section>
+
+      <section id="method">
+        <div class="section-head"><div class="section-no">05</div><div><h2>六阶段执行方法</h2><div class="section-kicker">从事实盘点逐步推进，前一阶段不通过则不扩大投入。</div></div></div>
+        <div class="flow">
+          <div class="step"><b>PHASE 0</b><strong>冻结目标</strong><span>场景、规模、SLO、版本、硬约束、权重与决策人。</span></div>
+          <div class="step"><b>PHASE 1</b><strong>现状取证</strong><span>接口、事务、不变量、数据量、性能、故障与运维基线。</span></div>
+          <div class="step"><b>PHASE 2</b><strong>纸面映射</strong><span>keyspace、访问路径、事务预算、能力差距与风险假设。</span></div>
+          <div class="step"><b>PHASE 3</b><strong>预验证实现</strong><span>实现高风险操作族、校验器和故障点；结果只用于完善真实实验。</span></div>
+          <div class="step"><b>PHASE 4</b><strong>真实环境验证</strong><span>在目标条件下完成端到端性能、长稳、故障、恢复、运维与迁移彩排。</span></div>
+          <div class="step"><b>PHASE 5</b><strong>决策评审</strong><span>证据评级、评分、残余风险、方案选择与下一步。</span></div>
+        </div>
+        <div class="grid-3" style="margin-top:1rem">
+          <div class="card"><h3>决策证据：REAL</h3><p><strong>真实目标环境的可复现实测。</strong> 环境等价性记录、自动化脚本、生产型数据与流量、原始结果、版本和责任人齐全；这是唯一允许计分和形成结论的证据。</p></div>
+          <div class="card"><h3>准备材料：REFERENCE</h3><p><strong>源码与权威文档。</strong> 仅用于识别接口、不变量、能力边界和设计实验；未经真实环境验证不得转化为评分或结论。</p></div>
+          <div class="card"><h3>待证假设：HYPOTHESIS</h3><p><strong>PoC、模拟、通用 benchmark、推断、访谈或经验。</strong> 只负责产生验证任务；即使结果良好也不得支撑 Go/No-Go。</p></div>
+        </div>
+        <div class="notice warn" style="margin-top:1rem">
+          <strong>优先验证高风险假设：</strong>预验证顺序可从跨目录 rename、热点目录并发、READDIR 分页、状态重放、后台队列 claim、MDS/数据库故障恢复开始；但最终必须在真实目标环境重新完整执行。不要以单键 get/set、实验室 PoC 或模拟结果替代系统判断。
+        </div>
+      </section>
+
+      <section id="experiments">
+        <div class="section-head"><div class="section-no">06</div><div><h2>实验矩阵与度量规范</h2><div class="section-kicker">实验必须可比较、可复现、可解释。</div></div></div>
+        <div class="grid-2">
+          <div class="card">
+            <h3>真实环境统一实验设计</h3>
+            <ul class="question">
+              <li>使用真实目标硬件、网络、MDS/DS 配置、客户端与生产型数据集；记录所有版本、参数与环境差异。</li>
+              <li>预热、测量、冷却阶段分离；至少多轮运行并报告方差和置信区间。</li>
+              <li>负载从单客户端逐级扩展到瓶颈；同时测试均匀与 Zipf/热点分布。</li>
+              <li>前台/后台、读/写、操作类型按生产占比混合；保留单操作诊断基准。</li>
+              <li>原始结果、日志、trace、配置、脚本与 commit SHA 一并归档。</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>必须同时采集的指标</h3>
+            <div class="grid-2">
+              <div><h4>用户面</h4><p>成功率、NFS 错误码、ops/s、P50/P95/P99/P99.9、超时与重试。</p></div>
+              <div><h4>MDS 面</h4><p>线程/队列、CPU、RSS、连接池、每类操作耗时、cache、重放与积压。</p></div>
+              <div><h4>数据库面</h4><p>事务提交/冲突/重试、读写字节、延迟、热点、队列、存储与网络。</p></div>
+              <div><h4>正确性面</h4><p>不变量检查、丢失/重复、孤儿、索引差异、状态泄漏与恢复完整性。</p></div>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap" style="margin-top:1rem">
+          <table>
+            <thead><tr><th>实验组</th><th>变量</th><th>观测</th><th>通过标准（执行前填写）</th></tr></thead>
+            <tbody>
+              <tr><td>微基准</td><td>键/值大小、读写集、范围长度、并发度、热点率</td><td>单事务成本、冲突、重试、尾延迟</td><td>根据操作预算填写，不采用数据库默认 benchmark 门槛</td></tr>
+              <tr><td>NFS 端到端</td><td>MDS 数、客户端数、目录分布、操作混合</td><td>客户端体验、MDS/DB 分解、扩展效率</td><td>相对当前基线及业务 SLO 双重判断</td></tr>
+              <tr><td>大规模数据</td><td>对象数、目录宽深、状态量、索引量</td><td>容量、扫描、启动、恢复、空间放大</td><td>目标规模 + 安全余量下仍达标</td></tr>
+              <tr><td>长稳测试</td><td>24h/72h/7d，混合前后台负载</td><td>泄漏、漂移、积压、尾延迟、数据一致</td><td>无持续退化；所有不变量持续成立</td></tr>
+              <tr><td>故障注入</td><td>进程/节点/磁盘/网络/站点/慢节点</td><td>错误窗口、RTO/RPO、恢复风暴、客户端行为</td><td>逐故障模式定义明确上限</td></tr>
+              <tr><td>运维演练</td><td>安装、扩缩容、升级、备份恢复、证书轮换</td><td>耗时、人工步骤、出错率、可观测性</td><td>非开发人员按 runbook 可重复完成</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>异常处理专项验证矩阵</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>异常类别</th><th>注入位置 / 示例</th><th>期望系统行为</th><th>必须验证</th></tr></thead>
+              <tbody>
+                <tr><td>事务冲突与瞬时错误</td><td>热点 dirent、并发 nlink/setattr、提交冲突</td><td>有界退避重试，不突破请求 deadline，不放大风暴</td><td>重试次数、总耗时、P99、最终不变量</td></tr>
+                <tr><td>未知提交结果</td><td>提交请求发出后断网、客户端进程退出</td><td>通过幂等键或读后确认判定结果，避免重复副作用</td><td>create/remove/rename、状态与队列记录均无重漏</td></tr>
+                <tr><td>数据库不可达 / 集群降级</td><td>网络分区、集群重启、代理或节点不可用</td><td>快速失败或受控等待；错误映射稳定；恢复后无请求风暴</td><td>NFS 错误码、超时、熔断、恢复斜坡和客户端行为</td></tr>
+                <tr><td>事务边界超限</td><td>大目录批量、超大 xattr、过长事务、读版本过旧</td><td>预检、分批或明确拒绝，不留下半成品</td><td>边界值、错误可诊断性、清理与重试策略</td></tr>
+                <tr><td>数据与 schema 异常</td><td>缺键、坏编码、索引不一致、未知版本</td><td>隔离损坏范围，阻止错误扩散，触发校验/修复流程</td><td>不会崩溃或静默返回错误数据；告警包含定位信息</td></tr>
+                <tr><td>资源耗尽</td><td>内存、线程、连接/事务池、队列、磁盘或日志空间</td><td>背压、有界队列、拒绝策略和安全降级</td><td>无死锁/OOM 连锁；前台与后台资源隔离有效</td></tr>
+                <tr><td>进程与后台任务异常</td><td>MDS/worker 在 claim、写入或补偿中崩溃</td><td>租约/claim 可回收，任务幂等续跑，毒任务可隔离</td><td>积压最终收敛，无永久锁定及重复外部删除</td></tr>
+                <tr><td>启动与配置异常</td><td>错误 cluster file、权限、版本不兼容、迁移未完成</td><td>启动前校验并 fail closed，给出可操作诊断</td><td>不会以错误配置对外服务，修复后可正常恢复</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="migration">
+        <div class="section-head"><div class="section-no">07</div><div><h2>迁移策略的验证树</h2><div class="section-kicker">先验证可逆性，再讨论上线速度。</div></div></div>
+        <div class="decision-grid">
+          <div class="decision"><h3>停机迁移</h3><p>适用于可接受明确停机窗口的情景。重点测量一致快照、导入速率、校验和回滚总时长。</p></div>
+          <div class="decision"><h3>全量 + 增量追平</h3><p>重点验证变更捕获的完备顺序、切换水位、重复应用与追平期间的写放大。</p></div>
+          <div class="decision"><h3>双写 + 影子读</h3><p>重点验证原子性缺口、失败补偿、差异检测、对线上延迟的影响和双写退出条件。</p></div>
+          <div class="decision"><h3>按域 / 分区渐进</h3><p>重点验证跨后端事务、路由、共享状态和跨边界 rename/link 是否允许渐进切换。</p></div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>每条迁移路线都必须回答</h3>
+          <div class="checklist">
+            <label class="check"><input type="checkbox"><span>一致快照或迁移水位如何定义、生成和验证？</span></label>
+            <label class="check"><input type="checkbox"><span>表/键映射、编码、缺省值和版本如何转换？</span></label>
+            <label class="check"><input type="checkbox"><span>inode-dirent、索引、nlink、状态引用如何全量校验？</span></label>
+            <label class="check"><input type="checkbox"><span>迁移进程崩溃后如何幂等续传，不产生重/漏？</span></label>
+            <label class="check"><input type="checkbox"><span>切换期间写流量由谁阻断、缓存如何失效？</span></label>
+            <label class="check"><input type="checkbox"><span>回滚时新写入如何反向同步，何时进入不可逆点？</span></label>
+            <label class="check"><input type="checkbox"><span>生产量级迁移的时间、网络和临时容量预算是多少？</span></label>
+            <label class="check"><input type="checkbox"><span>谁有 Go/No-Go 权限，观察窗口和触发阈值是什么？</span></label>
+          </div>
+        </div>
+      </section>
+
+      <section id="score">
+        <div class="section-head"><div class="section-no">08</div><div><h2>评分模型与决策规则</h2><div class="section-kicker">权重在实验前冻结；评分必须附证据等级与未决风险。</div></div></div>
+        <div class="card">
+          <p style="margin-top:0">下方权重仅是启动模板，可由决策委员会调整至合计 100。评分建议采用 0–5：0=不可满足，1=重大缺口，2=需高风险改造，3=达到最低线，4=良好，5=显著优于目标。<strong>只有附带真实目标环境实验编号与原始证据位置的维度才允许输入分数；未完成真实验证一律保持“待评”，不得用文档、PoC 或模拟结果代填。</strong></p>
+          <div class="score-grid" id="scoreGrid">
+            <div class="head">维度</div><div class="head">权重 %</div><div class="head">评分 0–5</div><div class="head">加权分</div>
+            <div>功能与协议正确性</div><div><input type="number" class="weight" min="0" max="100" value="18"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>事务与一致性</div><div><input type="number" class="weight" min="0" max="100" value="16"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>性能与扩展</div><div><input type="number" class="weight" min="0" max="100" value="15"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>可靠性与恢复</div><div><input type="number" class="weight" min="0" max="100" value="12"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>异常处理与错误语义</div><div><input type="number" class="weight" min="0" max="100" value="8"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>迁移与回滚</div><div><input type="number" class="weight" min="0" max="100" value="9"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>运维与可观测性</div><div><input type="number" class="weight" min="0" max="100" value="8"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>工程与维护</div><div><input type="number" class="weight" min="0" max="100" value="6"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>安全与合规</div><div><input type="number" class="weight" min="0" max="100" value="3"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+            <div>TCO 与战略适配</div><div><input type="number" class="weight" min="0" max="100" value="5"></div><div><input type="number" class="rating" min="0" max="5" step="0.1" placeholder="待评"></div><div class="weighted">—</div>
+          </div>
+          <div class="score-total"><span>权重合计：<strong id="weightTotal">100%</strong></span><span>综合得分：<strong id="scoreTotal">待评</strong></span></div>
+        </div>
+        <div class="grid-2" style="margin-top:1rem">
+          <div class="card"><h3>评分不能覆盖的硬闸门</h3><ul class="question"><li>任一关键维度缺少真实目标环境验证，整体结论只能是“证据不足”</li><li>任何协议/数据不变量无法满足</li><li>关键场景无法回滚或无法验证数据一致</li><li>关键 SLO 在目标规模下不可达</li><li>存在无限重试、错误码误映射、未知提交结果无法对账或重复副作用风险</li><li>灾难恢复、许可或安全存在不可接受阻断项</li></ul></div>
+          <div class="card"><h3>允许的最终决策</h3><ul class="question"><li><strong>Go：</strong>全量替换，进入工程化与生产试点</li><li><strong>Conditional Go：</strong>完成限定风险消减后再进入试点</li><li><strong>Hybrid：</strong>仅在部分责任域或新场景采用</li><li><strong>Defer / No-Go：</strong>延后复评或维持现状，并记录触发条件</li></ul></div>
+        </div>
+      </section>
+
+      <section id="deliverables">
+        <div class="section-head"><div class="section-no">09</div><div><h2>最终交付包与启动清单</h2><div class="section-kicker">后续最终可行性报告应能从这些证据直接组装。</div></div></div>
+        <div class="grid-3">
+          <div class="mini"><span class="tag">D1</span><h3>现状基线</h3><p>接口/表/事务/不变量清单、生产规模、性能、拓扑、故障与运维成本。</p></div>
+          <div class="mini"><span class="tag">D2</span><h3>目标设计</h3><p>keyspace、索引、事务、冲突处理、连接模型、schema 演进与组件图。</p></div>
+          <div class="mini"><span class="tag">D3</span><h3>真实验证资产</h3><p>环境等价性清单、代码、自动化脚本、生产型数据、不变量校验器、原始结果与复现实录。</p></div>
+          <div class="mini"><span class="tag blue">D4</span><h3>性能容量报告</h3><p>A/B 数据、尾延迟、热点、扩展曲线、瓶颈归因、容量与资源模型。</p></div>
+          <div class="mini"><span class="tag blue">D5</span><h3>可靠性与运维</h3><p>故障矩阵、恢复结果、runbook、告警面板、备份恢复和升级演练。</p></div>
+          <div class="mini"><span class="tag orange">D6</span><h3>异常处理与决策包</h3><p>错误目录、映射与重试规范、异常注入结果、迁移/回滚、TCO、风险、评分及路线图。</p></div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>开始执行前</h3>
+          <div class="checklist">
+            <label class="check"><input type="checkbox"><span>确定决策人、技术负责人、性能负责人、SRE、测试与安全参与者</span></label>
+            <label class="check"><input type="checkbox"><span>冻结目标版本、部署拓扑、硬件、数据集、操作混合与 SLO</span></label>
+            <label class="check"><input type="checkbox"><span>完成真实目标环境等价性验收，逐项记录硬件、网络、拓扑、版本、数据、流量和运维差异</span></label>
+            <label class="check"><input type="checkbox" checked><span>从源码生成 catalogue / coordination 接口与调用点清单</span></label>
+            <label class="check"><input type="checkbox"><span>提取 RonDB 现状基线及真实生产/实验室工作负载画像</span></label>
+            <label class="check"><input type="checkbox"><span>建立跨后端不变量校验器和结果归档目录</span></label>
+            <label class="check"><input type="checkbox"><span>建立数据库错误 → mds_status → NFSv4 错误码的映射与有界重试规范</span></label>
+            <label class="check"><input type="checkbox"><span>为未知提交结果、部分失败和后台毒任务设计幂等、对账与补偿测试</span></label>
+            <label class="check"><input type="checkbox"><span>冻结评分权重、硬闸门、证据等级和争议裁决规则</span></label>
+            <label class="check"><input type="checkbox"><span>先评审 keyspace 与事务设计，再批准候选实现及真实环境验证</span></label>
+            <label class="check"><input type="checkbox"><span>把真实环境的迁移与回滚彩排纳入验证完成定义，而非上线后补做</span></label>
+          </div>
+        </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>最终报告结论页模板</h3>
+          <div class="grid-2">
+            <div><h4>推荐决策与适用边界</h4><div class="editable" contenteditable="true" data-key="final-decision" data-placeholder="待完成全部分析后填写：Go / Conditional Go / Hybrid / Defer / No-Go……"></div></div>
+            <div><h4>最关键的三项真实证据</h4><div class="editable" contenteditable="true" data-key="final-evidence" data-placeholder="引用真实目标环境实验编号、环境等价性记录和原始结果位置……"></div></div>
+            <div><h4>残余风险与责任人</h4><div class="editable" contenteditable="true" data-key="final-risk" data-placeholder="列出风险、概率、影响、缓解措施、owner 与截止日期……"></div></div>
+            <div><h4>下一阶段与退出条件</h4><div class="editable" contenteditable="true" data-key="final-next" data-placeholder="列出试点范围、时间、预算、成功与终止条件……"></div></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <strong>这是一份“如何分析”的执行框架，不是可行性结论。</strong><br>
+    所有决策必须回溯到真实目标环境中的可复现实测、故障演练和明确的业务验收线；其他材料只用于提出待验证假设。
+  </footer>
+
+  <script>
+    const checks = [...document.querySelectorAll('input[type="checkbox"]')];
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+
+    function updateProgress() {
+      const done = checks.filter(c => c.checked).length;
+      const pct = checks.length ? Math.round(done / checks.length * 100) : 0;
+      progressBar.style.width = pct + '%';
+      progressText.textContent = pct + '%';
+      localStorage.setItem('fdb-plan-checks', JSON.stringify(checks.map(c => c.checked)));
+    }
+    const savedChecks = JSON.parse(localStorage.getItem('fdb-plan-checks') || '[]');
+    checks.forEach((c, i) => { c.checked = !!savedChecks[i]; c.addEventListener('change', updateProgress); });
+    updateProgress();
+
+    document.getElementById('resetProgress').addEventListener('click', () => {
+      checks.forEach(c => c.checked = false);
+      updateProgress();
+    });
+
+    const details = [...document.querySelectorAll('details')];
+    let expanded = false;
+    document.getElementById('expandAll').addEventListener('click', (e) => {
+      expanded = !expanded;
+      details.forEach(d => d.open = expanded);
+      e.currentTarget.textContent = expanded ? '收起全部维度' : '展开全部维度';
+    });
+
+    document.querySelectorAll('.editable').forEach(el => {
+      const key = 'fdb-plan-' + el.dataset.key;
+      el.innerHTML = localStorage.getItem(key) || '';
+      el.addEventListener('input', () => localStorage.setItem(key, el.innerHTML));
+    });
+
+    function calcScore() {
+      const rows = [...document.querySelectorAll('#scoreGrid .weight')].map(w => {
+        const rating = w.parentElement.nextElementSibling.querySelector('.rating');
+        const out = rating.parentElement.nextElementSibling;
+        const weight = Number(w.value) || 0;
+        const score = rating.value === '' ? null : Number(rating.value);
+        out.textContent = score === null ? '—' : (weight * score / 100).toFixed(2);
+        return { weight, score };
+      });
+      const weightTotal = rows.reduce((a, r) => a + r.weight, 0);
+      const allRated = rows.every(r => r.score !== null);
+      const total = rows.reduce((a, r) => a + r.weight * (r.score || 0) / 100, 0);
+      document.getElementById('weightTotal').textContent = weightTotal + '%';
+      document.getElementById('weightTotal').style.color = weightTotal === 100 ? '#fff' : '#ffd17b';
+      document.getElementById('scoreTotal').textContent = allRated ? total.toFixed(2) + ' / 5' : '待评';
+    }
+    document.querySelectorAll('.weight,.rating').forEach(input => input.addEventListener('input', calcScore));
+    calcScore();
+
+    const links = [...document.querySelectorAll('.toc a')];
+    const sections = [...document.querySelectorAll('main section')];
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + entry.target.id));
+        }
+      });
+    }, { rootMargin: '-25% 0px -65% 0px' });
+    sections.forEach(s => observer.observe(s));
+  </script>
+</body>
+</html>
