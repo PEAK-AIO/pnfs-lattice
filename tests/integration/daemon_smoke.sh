@@ -3,17 +3,21 @@
 # SPDX-License-Identifier: MIT
 #
 # daemon_smoke.sh -- unprivileged end-to-end smoke of pnfs-mds on the
-# in-memory catalogue backend (default) or on FoundationDB.
+# in-memory catalogue backend (default), on FoundationDB or on DAOS.
 #
 # Usage: daemon_smoke.sh <build-dir>
 #        DAEMON_SMOKE_BACKEND=fdb [FDB_CLUSTER_FILE=...] daemon_smoke.sh <build-dir>
+#        DAEMON_SMOKE_BACKEND=daos DAOS_POOL=<pool> DAOS_CONT=<cont> [DAOS_SYS=...] \
+#            daemon_smoke.sh <build-dir>
 #
 # Writes a temporary mds.conf selecting `catalogue_backend = memdb` (or
 # `fdb` with the cluster file and a private, run-unique fdb_key_prefix
-# that is cleared again at exit), an unprivileged NFS port and an
-# unprivileged cluster-transport port, starts <build-dir>/src/mds/pnfs-mds
-# in the background, waits (bounded) for the NFS port to accept
-# connections and then probes it:
+# that is cleared again at exit, or `daos` with the operator-provided
+# pool and container, which the daemon bootstraps and the script never
+# clears), an unprivileged NFS port and an unprivileged
+# cluster-transport port, starts <build-dir>/src/mds/pnfs-mds in the
+# background, waits (bounded) for the NFS port to accept connections
+# and then probes it:
 #
 #   * with pynfs when PYNFS_DIR/nfs4.1/testserver.py runs (default:
 #     a pynfs checkout next to this repository) -- EXCHANGE_ID,
@@ -26,16 +30,19 @@
 #   0   daemon started on the selected backend and answered the probe
 #   77  skipped: running as root, no daemon binary, the daemon refused
 #       the selected `catalogue_backend` (binary without that backend /
-#       factory), or DAEMON_SMOKE_BACKEND=fdb without a readable cluster
-#       file -- registered as SKIP_RETURN_CODE in ctest
+#       factory), DAEMON_SMOKE_BACKEND=fdb without a readable cluster
+#       file, or DAEMON_SMOKE_BACKEND=daos without both DAOS_POOL and
+#       DAOS_CONT -- registered as SKIP_RETURN_CODE in ctest
 #   1   failure (daemon died for another reason, port never came up,
 #       probe failed); the daemon log tail is printed
 #
 # Side effects: creates and removes one temporary directory under
 # ${TMPDIR:-/tmp}; starts one pnfs-mds process and kills it on exit; on
 # fdb, writes under its private key prefix and clears that prefix at
-# exit (fdbcli clearrange, best effort).  Never touches port 2049 or
-# any other privileged port.
+# exit (fdbcli clearrange, best effort); on daos, bootstraps the named
+# container (one catalogue) and leaves it as the operator's property --
+# nothing is destroyed.  Never touches port 2049 or any other
+# privileged port.
 
 set -euo pipefail
 
@@ -77,11 +84,14 @@ fi
 MDS_BIN="${BUILD_DIR}/src/mds/pnfs-mds"
 [[ -x "${MDS_BIN}" ]] || skip "daemon binary not found at ${MDS_BIN}"
 
-# --- backend selection (DAEMON_SMOKE_BACKEND=memdb|fdb) -------------------
+# --- backend selection (DAEMON_SMOKE_BACKEND=memdb|fdb|daos) --------------
 
 SMOKE_BACKEND="${DAEMON_SMOKE_BACKEND:-memdb}"
 SMOKE_FDB_PREFIX=""
 SMOKE_FDB_CLUSTER=""
+SMOKE_DAOS_POOL=""
+SMOKE_DAOS_CONT=""
+SMOKE_DAOS_SYS=""
 case "${SMOKE_BACKEND}" in
     memdb) ;;
     fdb)
@@ -92,8 +102,17 @@ case "${SMOKE_BACKEND}" in
         # clearrange end key is the same prefix with that letter bumped.
         SMOKE_FDB_PREFIX="smoke-$$-a"
         ;;
+    daos)
+        # The container is the operator's: one catalogue, created
+        # beforehand, bootstrapped by the daemon, never cleared here.
+        SMOKE_DAOS_POOL="${DAOS_POOL:-}"
+        SMOKE_DAOS_CONT="${DAOS_CONT:-}"
+        SMOKE_DAOS_SYS="${DAOS_SYS:-}"
+        [[ -n "${SMOKE_DAOS_POOL}" && -n "${SMOKE_DAOS_CONT}" ]] || \
+            skip "DAEMON_SMOKE_BACKEND=daos but DAOS_POOL and DAOS_CONT are not both set"
+        ;;
     *)
-        echo "unknown DAEMON_SMOKE_BACKEND '${SMOKE_BACKEND}' (memdb|fdb)" >&2
+        echo "unknown DAEMON_SMOKE_BACKEND '${SMOKE_BACKEND}' (memdb|fdb|daos)" >&2
         exit 2
         ;;
 esac
@@ -103,6 +122,13 @@ render_backend_config() {
         printf 'catalogue_backend = fdb\n'
         printf 'fdb_cluster_file = %s\n' "${SMOKE_FDB_CLUSTER}"
         printf 'fdb_key_prefix = %s\n' "${SMOKE_FDB_PREFIX}"
+    elif [[ "${SMOKE_BACKEND}" == "daos" ]]; then
+        printf 'catalogue_backend = daos\n'
+        printf 'daos_pool = %s\n' "${SMOKE_DAOS_POOL}"
+        printf 'daos_cont = %s\n' "${SMOKE_DAOS_CONT}"
+        if [[ -n "${SMOKE_DAOS_SYS}" ]]; then
+            printf 'daos_sys = %s\n' "${SMOKE_DAOS_SYS}"
+        fi
     else
         printf 'catalogue_backend = memdb\n'
     fi

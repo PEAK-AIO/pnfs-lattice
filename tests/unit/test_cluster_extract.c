@@ -1352,6 +1352,15 @@ static bool fdb_compiled_in(void)
 #endif
 }
 
+static bool daos_compiled_in(void)
+{
+#ifdef HAVE_DAOS
+    return true;
+#else
+    return false;
+#endif
+}
+
 static void test_backend_names(void)
 {
     enum mds_catalogue_backend be = MDS_BACKEND_NONE;
@@ -1364,6 +1373,8 @@ static void test_backend_names(void)
     ASSERT_EQ((int)be, (int)MDS_BACKEND_MEMDB);
     ASSERT_EQ(mds_catalogue_backend_from_name("fdb", &be), MDS_OK);
     ASSERT_EQ((int)be, (int)MDS_BACKEND_FDB);
+    ASSERT_EQ(mds_catalogue_backend_from_name("daos", &be), MDS_OK);
+    ASSERT_EQ((int)be, (int)MDS_BACKEND_DAOS);
 
     /* Unknown names leave *out untouched; the lookup is exact. */
     be = MDS_BACKEND_NONE;
@@ -1378,13 +1389,14 @@ static void test_backend_names(void)
     ASSERT_STREQ(mds_catalogue_backend_name(MDS_BACKEND_RONDB), "rondb");
     ASSERT_STREQ(mds_catalogue_backend_name(MDS_BACKEND_MEMDB), "memdb");
     ASSERT_STREQ(mds_catalogue_backend_name(MDS_BACKEND_FDB), "fdb");
+    ASSERT_STREQ(mds_catalogue_backend_name(MDS_BACKEND_DAOS), "daos");
     ASSERT_TRUE(mds_catalogue_backend_name(MDS_BACKEND_NONE) == NULL);
     ASSERT_TRUE(mds_catalogue_backend_name((enum mds_catalogue_backend)77)
                 == NULL);
 
     /* Every known name, in table order, independent of the build. */
-    ASSERT_EQ(mds_catalogue_backend_known_names(names, sizeof(names)), 3U);
-    ASSERT_STREQ(names, "rondb, memdb, fdb");
+    ASSERT_EQ(mds_catalogue_backend_known_names(names, sizeof(names)), 4U);
+    ASSERT_STREQ(names, "rondb, memdb, fdb, daos");
 
     /* join: order preserved, empty set spelled out, bad ids marked. */
     ASSERT_EQ(mds_catalogue_backend_join_names(two, 2, names, sizeof(names)),
@@ -1399,7 +1411,7 @@ static void test_backend_names(void)
     ASSERT_STREQ(names, "?");
     /* Truncation stays inside the buffer and keeps the count. */
     memset(names, 'X', sizeof(names));
-    ASSERT_EQ(mds_catalogue_backend_known_names(names, 4), 3U);
+    ASSERT_EQ(mds_catalogue_backend_known_names(names, 4), 4U);
     ASSERT_TRUE(strlen(names) < 4);
     ASSERT_EQ(mds_catalogue_backend_known_names(NULL, 8), 0U);
     ASSERT_EQ(mds_catalogue_backend_known_names(names, 0), 0U);
@@ -1415,11 +1427,13 @@ static void test_backend_registry(void)
     ASSERT_TRUE(!mds_catalogue_backend_available(MDS_BACKEND_NONE));
     ASSERT_TRUE(!mds_catalogue_backend_available(
                     (enum mds_catalogue_backend)77));
-    /* rondb / fdb availability follows the build flavour exactly. */
+    /* rondb / fdb / daos availability follows the build flavour exactly. */
     ASSERT_EQ((int)mds_catalogue_backend_available(MDS_BACKEND_RONDB),
               (int)rondb_compiled_in());
     ASSERT_EQ((int)mds_catalogue_backend_available(MDS_BACKEND_FDB),
               (int)fdb_compiled_in());
+    ASSERT_EQ((int)mds_catalogue_backend_available(MDS_BACKEND_DAOS),
+              (int)daos_compiled_in());
 
     /* The name list agrees with the availability predicate. */
     if (mds_catalogue_backend_available(MDS_BACKEND_RONDB)) {
@@ -1429,6 +1443,9 @@ static void test_backend_registry(void)
         expect++;
     }
     if (mds_catalogue_backend_available(MDS_BACKEND_FDB)) {
+        expect++;
+    }
+    if (mds_catalogue_backend_available(MDS_BACKEND_DAOS)) {
         expect++;
     }
     n = mds_catalogue_backend_available_names(names, sizeof(names));
@@ -1443,6 +1460,8 @@ static void test_backend_registry(void)
                   (int)mds_catalogue_backend_available(MDS_BACKEND_MEMDB));
         ASSERT_EQ((int)(strstr(names, "fdb") != NULL),
                   (int)mds_catalogue_backend_available(MDS_BACKEND_FDB));
+        ASSERT_EQ((int)(strstr(names, "daos") != NULL),
+                  (int)mds_catalogue_backend_available(MDS_BACKEND_DAOS));
     }
     ASSERT_EQ(mds_catalogue_backend_available_names(NULL, 8), 0U);
     ASSERT_EQ(mds_catalogue_backend_available_names(names, 0), 0U);
@@ -1468,6 +1487,16 @@ static void test_open_unavailable_backend(void)
         stderr_capture_end(&cap, err, sizeof(err));
         ASSERT_TRUE(cat == (struct mds_catalogue *)&fake_feed);
         ASSERT_TRUE(strstr(err, "catalogue_backend fdb not compiled in")
+                    != NULL);
+        ASSERT_TRUE(strstr(err, "available:") != NULL);
+    }
+    if (!daos_compiled_in()) {
+        cfg.catalogue_backend = MDS_BACKEND_DAOS;
+        ASSERT_EQ(stderr_capture_begin(&cap), 0);
+        ASSERT_EQ(mds_catalogue_open(&cfg, &cat), MDS_ERR_INVAL);
+        stderr_capture_end(&cap, err, sizeof(err));
+        ASSERT_TRUE(cat == (struct mds_catalogue *)&fake_feed);
+        ASSERT_TRUE(strstr(err, "catalogue_backend daos not compiled in")
                     != NULL);
         ASSERT_TRUE(strstr(err, "available:") != NULL);
     }
@@ -1789,6 +1818,10 @@ static void test_config_backend_parsing(void)
                                err, sizeof(err));
     ASSERT_EQ(st, MDS_OK);
     ASSERT_EQ((int)cfg.catalogue_backend, (int)MDS_BACKEND_RONDB);
+    st = load_capturing_stderr("catalogue_backend = daos\n", &cfg,
+                               err, sizeof(err));
+    ASSERT_EQ(st, MDS_OK);
+    ASSERT_EQ((int)cfg.catalogue_backend, (int)MDS_BACKEND_DAOS);
     /* Last key wins, like every other key. */
     st = load_capturing_stderr("catalogue_backend = fdb\n"
                                "catalogue_backend = memdb\n", &cfg,
@@ -1802,7 +1835,7 @@ static void test_config_backend_parsing(void)
                                err, sizeof(err));
     ASSERT_EQ(st, MDS_ERR_INVAL);
     ASSERT_TRUE(strstr(err, "unknown catalogue_backend 'bogus'") != NULL);
-    ASSERT_TRUE(strstr(err, "known: rondb, memdb, fdb") != NULL);
+    ASSERT_TRUE(strstr(err, "known: rondb, memdb, fdb, daos") != NULL);
     st = load_capturing_stderr("catalogue_backend = RonDB\n", &cfg,
                                err, sizeof(err));
     ASSERT_EQ(st, MDS_ERR_INVAL);

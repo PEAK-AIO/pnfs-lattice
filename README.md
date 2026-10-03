@@ -120,7 +120,7 @@ Schema tables: `inodes`, `dirents`, `stripe_map`, `layout_state`,
 ### Pluggable Catalogue Layer
 
 Backend selection is determined at startup by `catalogue_backend` in the
-daemon config (`rondb`, `memdb` or `fdb`).  The catalogue dispatcher
+daemon config (`rondb`, `memdb`, `fdb` or `daos`).  The catalogue dispatcher
 (`catalogue_dispatch.c`) routes every namespace, coordination and cluster
 operation to the active backend and never names one.  Adding a new backend
 means implementing the slot tables of `include/catalogue_internal.h`
@@ -128,6 +128,13 @@ means implementing the slot tables of `include/catalogue_internal.h`
 `mds_catalogue_ops`), adding a registration entry in `catalogue_factory.c`,
 and running the conformance suite (`tests/catalogue_conformance/`) against
 it.
+
+The optional backends share the dispatcher and the conformance suite with
+RonDB: **FoundationDB** (`ENABLE_FDB`, one FoundationDB transaction per
+catalogue call) and **DAOS** (`ENABLE_DAOS`, one DAOS container per
+catalogue, one serializable transaction per call, deterministic object
+ids derived from the entity id).  Both are multi-process capable; see
+`docs/architecture.md` §6 for their designs and §17 for their status.
 
 ## Multi-MDS Concurrency
 
@@ -321,6 +328,9 @@ journalctl -u pnfs-mds -f        # Live logs
 - CMocka (tests)
 - libbpf (`ENABLE_EBPF=ON`)
 - gRPC + protobuf (optional admin API stub)
+- FoundationDB client 7.3 (`ENABLE_FDB=ON`: `foundationdb-clients`)
+- DAOS client 2.6 and libuuid headers (`ENABLE_DAOS=ON`: `daos-client` and
+  `daos-devel`, plus `uuid-dev` / `libuuid-devel`)
 
 ### Compile
 
@@ -338,6 +348,10 @@ cmake -B build \
     -DENABLE_ADMIN_CLI=ON \
     -DENABLE_TESTS=ON
 ```
+
+`-DENABLE_FDB=ON` and `-DENABLE_DAOS=ON` add the FoundationDB and DAOS
+catalogue backends.  Both default to OFF, and a missing client library is
+a configure error rather than a silently smaller binary.
 
 ### Install
 
@@ -379,13 +393,41 @@ connect_string = ndb-mgmd0.internal:1186
 schema_name    = pnfs_mds
 ```
 
+### Minimal DAOS Example
+
+```ini
+mds_id            = 0
+hostname          = mds0.internal
+nfs_port          = 2049
+
+# Backend: one container is one catalogue.  The operator creates the
+# container; the daemon bootstraps it on first start.
+catalogue_backend = daos
+daos_pool         = lattice-pool
+daos_cont         = lattice-catalogue
+# daos_sys        = daos_server      # default
+# daos_oclass     = S1               # single-engine development pool
+
+ds_count = 2
+ds[0]    = ds0.internal:/srv/ds0
+ds[1]    = ds1.internal:/srv/ds1
+```
+
+The default object classes (`RP_3G1` for inodes and registries, `RP_3GX`
+for the point-access state objects) need three fault domains; a
+single-engine pool takes `daos_oclass = S1`.  The classes and the
+directory counter shard count are stamped on the container at bootstrap
+and verified at every open.
+
 ### Key Configuration Reference
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `catalogue_backend` | `rondb` when built with `ENABLE_RONDB`, otherwise mandatory | Catalogue backend: `rondb`, `memdb` (in-memory reference, single node) or `fdb` (FoundationDB, `ENABLE_FDB` builds); a backend not compiled in is refused at startup |
+| `catalogue_backend` | `rondb` when built with `ENABLE_RONDB`, otherwise mandatory | Catalogue backend: `rondb`, `memdb` (in-memory reference, single node), `fdb` (FoundationDB, `ENABLE_FDB` builds) or `daos` (DAOS, `ENABLE_DAOS` builds); a backend not compiled in is refused at startup |
 | `catalogue_backend_conf` | — | Path to backend-specific config (rondb) |
 | `fdb_cluster_file` / `fdb_key_prefix` | — | FoundationDB cluster file and per-catalogue key prefix (fdb) |
+| `daos_pool` / `daos_cont` | — | DAOS pool and container label or UUID; one container is one catalogue (daos) |
+| `daos_oclass` / `daos_oclass_spread` | `RP_3G1` / `RP_3GX` | Object classes of the entity and the point-access objects, stamped on the container at bootstrap (daos) |
 | `worker_threads` | 16 | COMPOUND dispatch worker count |
 | `lease_time_sec` | 90 | NFSv4 lease time |
 | `grace_period_sec` | 90 | Grace period duration |

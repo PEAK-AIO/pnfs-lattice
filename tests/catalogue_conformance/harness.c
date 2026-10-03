@@ -25,6 +25,11 @@
 #include "catalogue_internal.h"
 #include "fdb_txn.h"
 #endif
+#ifdef HAVE_DAOS
+#include <daos.h>
+
+#include "daos_txn.h"
+#endif
 
 /* Bounded table of scratch directories created by this process so the
  * cleanup helper can remove them by (root, name) again.  Beyond the
@@ -100,7 +105,7 @@ static enum mds_status open_memdb(struct mds_catalogue **out)
     return st;
 }
 
-static enum mds_status open_rondb(struct mds_catalogue **out)
+static enum mds_status open_rondb(uint32_t self_id, struct mds_catalogue **out)
 {
 #ifdef HAVE_RONDB
     const char *conf = getenv(CONFORMANCE_RONDB_CONF_ENV);
@@ -119,7 +124,7 @@ static enum mds_status open_rondb(struct mds_catalogue **out)
     cfg->catalogue_backend = MDS_BACKEND_RONDB;
     (void)snprintf(cfg->catalogue_backend_conf,
                    sizeof(cfg->catalogue_backend_conf), "%s", conf);
-    cfg->self.id = 1;
+    cfg->self.id = self_id;
     (void)snprintf(cfg->self.hostname, sizeof(cfg->self.hostname),
                    "localhost");
     cfg->cluster_size = 1;
@@ -132,6 +137,7 @@ static enum mds_status open_rondb(struct mds_catalogue **out)
     free(cfg);
     return st;
 #else
+    (void)self_id;
     (void)out;
     conformance_skip("RonDB backend not compiled in (ENABLE_RONDB=OFF)");
 #endif
@@ -285,7 +291,7 @@ static fdb_error_t fdb_sweep_prefix(const struct fdb_backend *b, int *remaining,
     return err != 0 ? err : rerr;
 }
 
-static void fdb_fill_cfg(struct mds_config *cfg)
+static void fdb_fill_cfg(struct mds_config *cfg, uint32_t self_id)
 {
     const char *cluster = getenv("FDB_CLUSTER_FILE");
 
@@ -296,7 +302,7 @@ static void fdb_fill_cfg(struct mds_config *cfg)
     }
     (void)snprintf(cfg->fdb_key_prefix, sizeof(cfg->fdb_key_prefix), "%s",
                    g_fdb_prefix);
-    cfg->self.id = 1;
+    cfg->self.id = self_id;
     cfg->cluster_size = 1;
 }
 
@@ -322,7 +328,7 @@ static void fdb_teardown_once(void)
 
     cfg = calloc(1, sizeof(*cfg));
     if (cfg != NULL) {
-        fdb_fill_cfg(cfg);
+        fdb_fill_cfg(cfg, 1);
         if (mds_catalogue_open(cfg, &cat) == MDS_OK) {
             (void)catalogue_fdb_keyspace_clear(cat);
             err = fdb_sweep_prefix(cat->backend_private, &remaining, &more);
@@ -378,7 +384,7 @@ static enum mds_status fdb_prepare_once(void)
         pthread_mutex_unlock(&g_fdb_lock);
         return MDS_ERR_NOMEM;
     }
-    fdb_fill_cfg(cfg);
+    fdb_fill_cfg(cfg, 1);
     st = mds_catalogue_open(cfg, &cat);
     free(cfg);
     if (st != MDS_OK) {
@@ -399,7 +405,7 @@ static enum mds_status fdb_prepare_once(void)
 }
 #endif /* HAVE_FDB */
 
-static enum mds_status open_fdb(struct mds_catalogue **out)
+static enum mds_status open_fdb(uint32_t self_id, struct mds_catalogue **out)
 {
 #ifdef HAVE_FDB
     struct mds_config *cfg;
@@ -426,17 +432,263 @@ static enum mds_status open_fdb(struct mds_catalogue **out)
     if (cfg == NULL) {
         return MDS_ERR_NOMEM;
     }
-    fdb_fill_cfg(cfg);
+    fdb_fill_cfg(cfg, self_id);
     st = mds_catalogue_open(cfg, out);
     free(cfg);
     return st;
 #else
+    (void)self_id;
     (void)out;
     conformance_skip("fdb backend not compiled in (ENABLE_FDB=OFF)");
 #endif
 }
 
-enum mds_status conformance_open(struct mds_catalogue **out)
+#ifdef HAVE_DAOS
+/*
+ * DAOS: one container per process.  Every open of the process shares
+ * one container on the pool named by DAOS_POOL (system DAOS_SYS,
+ * default daos_server): the one named by CATALOGUE_TEST_CONT -- an
+ * operator-owned container that is neither created nor destroyed here
+ * and keeps its rows across runs like a RonDB cluster, so the unit
+ * tests that expect an empty catalogue need a fresh one -- or a private
+ * container labelled ct-<pid>-<nsec> that the first open creates with
+ * daos_cont_create_with_label and conformance_shutdown() destroys
+ * (force, so a handle a test leaked cannot keep it alive).  Concurrent
+ * binaries against one pool therefore never see each other's rows and
+ * leave nothing behind.  The container is bootstrapped on the first
+ * open; the teardown finally runs mds_catalogue_process_shutdown.  An
+ * atexit() hook runs the same teardown for a main that exits without
+ * the explicit call.
+ *
+ * The create and the destroy are bare libdaos calls outside any
+ * catalogue handle.  daos_init / daos_fini are reference counted, so
+ * the harness holds its own count and pool connection from the create
+ * to the destroy, independent of the backend's own use of the library;
+ * the backend's handles are all closed by the time the destroy runs.
+ */
+static pthread_mutex_t g_daos_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_daos_pool[128];
+static char            g_daos_cont[128];
+static char            g_daos_sys[16];
+static daos_handle_t   g_daos_poh;
+static bool            g_daos_connected;    /* harness init + pool connection held */
+static bool            g_daos_cont_private; /* created here: destroyed at teardown */
+static bool            g_daos_prepared;
+static bool            g_daos_torn_down;
+
+/* Copy the pool, system and (optional) container names from the
+ * environment.  False when DAOS_POOL is unset. */
+static bool conf_daos_env(void)
+{
+    const char *pool = getenv(CONFORMANCE_DAOS_POOL_ENV);
+    const char *sys = getenv(CONFORMANCE_DAOS_SYS_ENV);
+    const char *cont = getenv(CONFORMANCE_DAOS_CONT_ENV);
+
+    if (pool == NULL || pool[0] == '\0') {
+        return false;
+    }
+    (void)snprintf(g_daos_pool, sizeof(g_daos_pool), "%s", pool);
+    (void)snprintf(g_daos_sys, sizeof(g_daos_sys), "%s",
+                   (sys != NULL && sys[0] != '\0') ? sys : DAOS_SYS_DEFAULT);
+    if (cont != NULL && cont[0] != '\0') {
+        (void)snprintf(g_daos_cont, sizeof(g_daos_cont), "%s", cont);
+        g_daos_cont_private = false;
+    } else {
+        struct timespec ts;
+
+        (void)clock_gettime(CLOCK_REALTIME, &ts);
+        (void)snprintf(g_daos_cont, sizeof(g_daos_cont), "ct-%ld-%08lx", (long)getpid(),
+                       (unsigned long)ts.tv_nsec);
+        g_daos_cont_private = true;
+    }
+    return true;
+}
+
+/* The harness's own library count and pool connection (private
+ * container only).  0, or the -DER_* code of the step that failed. */
+static int conf_daos_connect(void)
+{
+    int rc = daos_init();
+
+    if (rc != 0) {
+        return rc;
+    }
+    rc = daos_pool_connect(g_daos_pool, g_daos_sys, DAOS_PC_RW, &g_daos_poh, NULL, NULL);
+    if (rc != 0) {
+        (void)daos_fini();
+        return rc;
+    }
+    g_daos_connected = true;
+    return 0;
+}
+
+static void conf_daos_disconnect(void)
+{
+    if (!g_daos_connected) {
+        return;
+    }
+    (void)daos_pool_disconnect(g_daos_poh, NULL);
+    (void)daos_fini();
+    g_daos_connected = false;
+}
+
+/* Destroy the private container (force: a leaked handle must not keep
+ * it alive).  0 or -DER_*. */
+static int conf_daos_cont_destroy(void)
+{
+    return daos_cont_destroy(g_daos_poh, g_daos_cont, 1, NULL);
+}
+
+static void conf_daos_fill_cfg(struct mds_config *cfg, uint32_t self_id)
+{
+    const char *sys = getenv(CONFORMANCE_DAOS_SYS_ENV);
+
+    cfg->catalogue_backend = MDS_BACKEND_DAOS;
+    (void)snprintf(cfg->daos_pool, sizeof(cfg->daos_pool), "%s", g_daos_pool);
+    (void)snprintf(cfg->daos_cont, sizeof(cfg->daos_cont), "%s", g_daos_cont);
+    if (sys != NULL && sys[0] != '\0') {
+        (void)snprintf(cfg->daos_sys, sizeof(cfg->daos_sys), "%s", sys);
+    }
+    cfg->self.id = self_id;
+    cfg->cluster_size = 1;
+}
+
+/* Once per process, after the last test handle is closed: destroy the
+ * private container, drop the harness connection, then finalise the
+ * backend's library state. */
+static void conf_daos_teardown_once(void)
+{
+    int rc;
+
+    pthread_mutex_lock(&g_daos_lock);
+    if (!g_daos_prepared || g_daos_torn_down) {
+        pthread_mutex_unlock(&g_daos_lock);
+        return;
+    }
+    g_daos_torn_down = true;
+    pthread_mutex_unlock(&g_daos_lock);
+
+    if (g_daos_cont_private && g_daos_connected) {
+        rc = conf_daos_cont_destroy();
+        if (rc == 0) {
+            (void)printf("conformance: daos container '%s' destroyed\n", g_daos_cont);
+        } else {
+            (void)fprintf(stderr, "conformance: daos container '%s' not destroyed: %d %s\n",
+                          g_daos_cont, rc, daos_errstr(rc));
+        }
+        conf_daos_disconnect();
+    }
+    mds_catalogue_process_shutdown();
+}
+
+/* Safety net for a main that exits without conformance_shutdown(). */
+static void conf_daos_atexit(void)
+{
+    conf_daos_teardown_once();
+}
+
+/* Bootstrap the container through a throwaway handle. */
+static enum mds_status conf_daos_bootstrap(void)
+{
+    struct mds_config *cfg = calloc(1, sizeof(*cfg));
+    struct mds_catalogue *cat = NULL;
+    enum mds_status st;
+
+    if (cfg == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    conf_daos_fill_cfg(cfg, 1);
+    st = mds_catalogue_open(cfg, &cat);
+    free(cfg);
+    if (st != MDS_OK) {
+        return st;
+    }
+    st = mds_catalogue_bootstrap(cat);
+    mds_catalogue_close(cat);
+    return st;
+}
+
+/* Once per process: read the environment, create the private
+ * container (when no CATALOGUE_TEST_CONT), bootstrap it.  A failure
+ * before the container is usable is reported as a status the caller
+ * turns into a skip; nothing of this process is left on the pool. */
+static enum mds_status conf_daos_prepare_once(void)
+{
+    enum mds_status st = MDS_OK;
+    int rc;
+
+    pthread_mutex_lock(&g_daos_lock);
+    if (g_daos_prepared) {
+        pthread_mutex_unlock(&g_daos_lock);
+        return MDS_OK;
+    }
+    if (!conf_daos_env()) {
+        pthread_mutex_unlock(&g_daos_lock);
+        return MDS_ERR_INVAL;
+    }
+    if (g_daos_cont_private) {
+        rc = conf_daos_connect();
+        if (rc == 0) {
+            rc = daos_cont_create_with_label(g_daos_poh, g_daos_cont, NULL, NULL, NULL);
+            if (rc != 0) {
+                conf_daos_disconnect();
+            }
+        }
+        if (rc != 0) {
+            (void)fprintf(stdout, "SKIP: DAOS pool '%s' not usable: %d %s\n", g_daos_pool, rc,
+                          daos_errstr(rc));
+            pthread_mutex_unlock(&g_daos_lock);
+            return MDS_ERR_IO;
+        }
+    }
+    st = conf_daos_bootstrap();
+    if (st == MDS_OK) {
+        g_daos_prepared = true;
+        (void)atexit(conf_daos_atexit);
+    } else if (g_daos_cont_private) {
+        (void)conf_daos_cont_destroy();
+        conf_daos_disconnect();
+    }
+    pthread_mutex_unlock(&g_daos_lock);
+    return st;
+}
+#endif /* HAVE_DAOS */
+
+static enum mds_status open_daos(uint32_t self_id, struct mds_catalogue **out)
+{
+#ifdef HAVE_DAOS
+    struct mds_config *cfg;
+    const char *pool;
+    enum mds_status st;
+
+    if (!mds_catalogue_backend_available(MDS_BACKEND_DAOS)) {
+        conformance_skip("daos backend not compiled in (ENABLE_DAOS=OFF)");
+    }
+    pool = getenv(CONFORMANCE_DAOS_POOL_ENV);
+    if (pool == NULL || pool[0] == '\0') {
+        conformance_skip(CONFORMANCE_DAOS_POOL_ENV " is not set");
+    }
+    st = conf_daos_prepare_once();
+    if (st != MDS_OK) {
+        (void)fprintf(stdout, "SKIP: DAOS container not usable (%d)\n", (int)st);
+        conformance_skip("DAOS pool unreachable or container not usable");
+    }
+    cfg = calloc(1, sizeof(*cfg));
+    if (cfg == NULL) {
+        return MDS_ERR_NOMEM;
+    }
+    conf_daos_fill_cfg(cfg, self_id);
+    st = mds_catalogue_open(cfg, out);
+    free(cfg);
+    return st;
+#else
+    (void)self_id;
+    (void)out;
+    conformance_skip("daos backend not compiled in (ENABLE_DAOS=OFF)");
+#endif
+}
+
+enum mds_status conformance_open_as(uint32_t self_id, struct mds_catalogue **out)
 {
     const char *name;
 
@@ -450,16 +702,24 @@ enum mds_status conformance_open(struct mds_catalogue **out)
         return open_memdb(out);
     }
     if (strcmp(name, "rondb") == 0) {
-        return open_rondb(out);
+        return open_rondb(self_id, out);
     }
     if (strcmp(name, "fdb") == 0) {
-        return open_fdb(out);
+        return open_fdb(self_id, out);
+    }
+    if (strcmp(name, "daos") == 0) {
+        return open_daos(self_id, out);
     }
 
     (void)fprintf(stderr,
                   "conformance: unknown " CONFORMANCE_BACKEND_ENV
-                  " '%s' (expected memdb|rondb|fdb)\n", name);
+                  " '%s' (expected memdb|rondb|fdb|daos)\n", name);
     exit(1);
+}
+
+enum mds_status conformance_open(struct mds_catalogue **out)
+{
+    return conformance_open_as(1, out);
 }
 
 void conformance_shutdown(void)
@@ -467,8 +727,11 @@ void conformance_shutdown(void)
 #ifdef HAVE_FDB
     fdb_teardown_once();
 #endif
+#ifdef HAVE_DAOS
+    conf_daos_teardown_once();
+#endif
     /* No hooks are registered on memdb / rondb: a no-op there, and
-     * idempotent after the fdb teardown above. */
+     * idempotent after the fdb / daos teardown above. */
     mds_catalogue_process_shutdown();
 }
 

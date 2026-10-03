@@ -26,6 +26,7 @@ static const struct catalogue_backend_name catalogue_backend_names[] = {
 	{ "rondb", MDS_BACKEND_RONDB },
 	{ "memdb", MDS_BACKEND_MEMDB },
 	{ "fdb",   MDS_BACKEND_FDB },
+	{ "daos",  MDS_BACKEND_DAOS },
 };
 
 #define CATALOGUE_BACKEND_NAME_COUNT \
@@ -36,7 +37,8 @@ static const struct catalogue_backend_name catalogue_backend_names[] = {
  * anything constructible. */
 _Static_assert(MDS_BACKEND_NONE != MDS_BACKEND_RONDB &&
 	       MDS_BACKEND_NONE != MDS_BACKEND_MEMDB &&
-	       MDS_BACKEND_NONE != MDS_BACKEND_FDB,
+	       MDS_BACKEND_NONE != MDS_BACKEND_FDB &&
+	       MDS_BACKEND_NONE != MDS_BACKEND_DAOS,
 	       "MDS_BACKEND_NONE collides with a named backend");
 
 enum mds_status mds_catalogue_backend_from_name(

@@ -18,6 +18,14 @@
  *                      the process shares one isolated key prefix
  *                      (CATALOGUE_TEST_KEY_PREFIX, or one generated per
  *                      process) that conformance_shutdown() wipes
+ *   daos               DAOS via mds_catalogue_open() when the binary
+ *                      was built with ENABLE_DAOS; the pool comes from
+ *                      DAOS_POOL (mandatory), the system name from
+ *                      DAOS_SYS (default daos_server), and every open of
+ *                      the process shares one container: the one named
+ *                      by CATALOGUE_TEST_CONT (operator-owned, kept), or
+ *                      a private container the first open creates and
+ *                      conformance_shutdown() destroys
  *
  * A backend that is unavailable in the running binary or environment
  * is a SKIP, never a pass or a fail: the harness prints the reason and
@@ -44,6 +52,13 @@
 /** Environment variable naming the RonDB config file (rondb only). */
 #define CONFORMANCE_RONDB_CONF_ENV "RONDB_CONF"
 
+/** Environment variables of the daos backend: the pool label or UUID
+ *  (mandatory), the DAOS system name (default daos_server) and an
+ *  operator-owned container to use instead of a private one. */
+#define CONFORMANCE_DAOS_POOL_ENV "DAOS_POOL"
+#define CONFORMANCE_DAOS_SYS_ENV  "DAOS_SYS"
+#define CONFORMANCE_DAOS_CONT_ENV "CATALOGUE_TEST_CONT"
+
 /**
  * Open a catalogue on the selected backend.
  *
@@ -55,6 +70,21 @@
 enum mds_status conformance_open(struct mds_catalogue **out);
 
 /**
+ * conformance_open() as MDS @p self_id: a further handle of the SAME
+ * store this process prepared -- the fdb key prefix, the daos
+ * container, the configured RonDB cluster -- for tests that exercise
+ * owner-scoped rows (GC owner filter, recovery ownership, registry
+ * epochs) from several MDS identities.  conformance_open() is this
+ * call with self_id 1.  On memdb every open is an independent
+ * instance and the id is ignored.
+ *
+ * @param self_id  cfg->self.id of the new handle.
+ * @param out      Receives the handle on MDS_OK.
+ * @return As conformance_open().
+ */
+enum mds_status conformance_open_as(uint32_t self_id, struct mds_catalogue **out);
+
+/**
  * conformance_open() for tests whose fixture cannot proceed without a
  * handle: exits 1 with a diagnostic when the open fails (a genuine
  * failure, never a skip).
@@ -63,7 +93,7 @@ enum mds_status conformance_open(struct mds_catalogue **out);
  */
 struct mds_catalogue *conformance_open_checked(void);
 
-/** Name of the selected backend ("memdb", "rondb" or "fdb"). */
+/** Name of the selected backend ("memdb", "rondb", "fdb" or "daos"). */
 const char *conformance_backend_name(void);
 
 /** True when the selected backend name equals @p name. */
@@ -77,8 +107,11 @@ _Noreturn void conformance_skip(const char *reason);
  * handle is closed and immediately before returning.  On fdb it wipes
  * the run's rows and stops and joins the client network
  * (mds_catalogue_process_shutdown), which is terminal for the process:
- * no conformance_open() may follow.  On memdb / rondb it is a no-op.
- * Idempotent; an atexit() safety net covers a main that exits early.
+ * no conformance_open() may follow.  On daos it destroys the private
+ * container the process created (never one named by
+ * CATALOGUE_TEST_CONT) and finalises the client library.  On memdb /
+ * rondb it is a no-op.  Idempotent; an atexit() safety net covers a
+ * main that exits early.
  */
 void conformance_shutdown(void);
 

@@ -724,6 +724,51 @@ set_tests_properties(test_fdb_coord PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77
 # End of fdb-coord track block.
 
 # -------------------------------------------------------------------
+# daos track -- DAOS backend.  test_daos_txn pins the DAOS behaviours
+# the object model relies on (sorted lexical dkeys, strict list resume,
+# per-akey conditional insert, fetch of an absent / oversized value)
+# and then the transaction runner (daos_txn.[ch]); test_daos_ext the
+# extended authority slots (catalogue_daos_ext.c); test_daos_coord the
+# coordination and cluster slots (catalogue_daos_coord.c,
+# catalogue_daos_cluster.c).  Each binary opens its handles through the
+# conformance harness on the daos backend -- a private container per
+# process on the pool named by DAOS_POOL, destroyed at exit (see
+# tests/catalogue_conformance/harness.c) -- so it links the harness
+# object like the harness-track tests above, and it exits 77 without
+# ENABLE_DAOS, without DAOS_POOL or when the pool is unreachable.  Same
+# link line as test_fdb_txn.  Appended block.
+# -------------------------------------------------------------------
+foreach(daos_test test_daos_txn test_daos_ext test_daos_coord)
+    add_executable(${daos_test} unit/${daos_test}.c
+                                $<TARGET_OBJECTS:conformance_harness>)
+    target_include_directories(${daos_test} PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src/catalogue
+        ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/tests/catalogue_conformance
+    )
+    if(ENABLE_DAOS)
+        target_include_directories(${daos_test} SYSTEM PRIVATE
+            ${DAOS_INCLUDE_DIR}
+            ${UUID_INCLUDE_DIR})
+    endif()
+    target_link_libraries(${daos_test} PRIVATE
+        pnfs_mds_core
+        pnfs_cluster
+        pnfs_fsal_obj
+        pnfs_common
+        pnfs_mds_core
+        pnfs_cluster
+        pnfs_mds_core
+        rondb_schema
+        pthread
+    )
+    add_test(NAME ${daos_test} COMMAND ${daos_test})
+    set_tests_properties(${daos_test} PROPERTIES LABELS "unit" SKIP_RETURN_CODE 77)
+endforeach()
+# End of daos track block.
+
+# -------------------------------------------------------------------
 # Sanitizer suppressions for the FoundationDB client (ENABLE_FDB).
 #
 # pnfs_mds_core links libfdb_c PUBLIC, so every test that links the

@@ -90,7 +90,7 @@ The worker pool is sized by `worker_threads` (config); the listener pool by
 ```text path=null start=null
 src/
 ├── mds/         # NFSv4.1/4.2 protocol surface and per-op handlers
-├── catalogue/   # Pluggable metadata backends (RonDB, in-memory memdb, FoundationDB)
+├── catalogue/   # Pluggable metadata backends (RonDB, in-memory memdb, FoundationDB, DAOS)
 ├── cluster/     # Cross-MDS coordination (transport, membership, 2PC)
 ├── common/      # Shared utilities: config, fh codec, endian helpers
 ├── fsal_obj/    # FSAL-style object abstractions used by the MDS
@@ -101,7 +101,7 @@ proto/           # gRPC service definitions for cluster transport
 tests/
 ├── unit/        # Per-module C unit tests
 ├── integration/ # End-to-end tests against a memdb catalogue
-└── catalogue_conformance/ # Backend contract suite (memdb / rondb / fdb)
+└── catalogue_conformance/ # Backend contract suite (memdb / rondb / fdb / daos)
 ```
 The boundary between `mds/` and the rest is intentional.  `mds/` knows about
 NFSv4 ops; everything below is protocol-agnostic and could in principle be
@@ -168,7 +168,7 @@ Each op returns an `enum nfs4_status`; the encoder (`xdr_codec.c`) turns the
 result union into a wire reply.
 ## 6. Catalogue (metadata backend)
 Lattice abstracts its metadata store behind a small C ABI in
-`include/mds_catalogue.h`.  Three backends ship in tree:
+`include/mds_catalogue.h`.  Four backends ship in tree:
 - **RonDB / NDB** (production) — `src/catalogue/catalogue_rondb_shim.cpp`
   wraps the NDB C++ API behind a narrow C surface.  The shim opens NDB
   cluster connections, manages a per-thread `Ndb` object, and exposes a
@@ -184,9 +184,28 @@ Lattice abstracts its metadata store behind a small C ABI in
   timed-out commits instead of replaying them (`MDS_ERR_INDOUBT` when it
   cannot).  Multi-process capable like RonDB; selected with
   `catalogue_backend = fdb` plus the `fdb_*` keys.
+- **DAOS** (`ENABLE_DAOS`) — `src/catalogue/catalogue_daos*.c` over the
+  libdaos object API: one DAOS container is one catalogue, object ids are
+  derived from the entity id and a table tag rather than allocated
+  (`daos_keys.h`), and every entity (inode, client, registry, queue) is
+  one object whose state lives in sorted lexical dkeys, so inode-local
+  operations stay on one shard group and an entity is removed by
+  punching its dkeys.
+  There is no atomic add, so a directory's nlink / change / mtime / ctime
+  are K counter shards (`daos_dir_counter_shards`) that concurrent
+  creates update independently and GETATTR composes in one fetch.  Every
+  slot is one serializable transaction (`daos_txn.[ch]`: read waves,
+  blind writes, one commit; a conflict restarts the body) and a commit
+  whose outcome the client cannot determine surfaces as
+  `MDS_ERR_INDOUBT`.  Dirent names are hashed akeys, so `ns_readdir`
+  walks a directory in the store's hash order while NFS READDIR cookies
+  come from a container-wide sequence and stay strictly ascending
+  (`ns_readdir_plus_from`).  Multi-process capable; selected with
+  `catalogue_backend = daos` plus the `daos_*` keys.
 All backends implement the same vtables (`include/catalogue_internal.h`);
 the conformance suite under `tests/catalogue_conformance/` runs the same
-contract tests against each of them (`CATALOGUE_TEST_BACKEND=memdb|rondb|fdb`).
+contract tests against each of them
+(`CATALOGUE_TEST_BACKEND=memdb|rondb|fdb|daos`).
 Tables (logical, not literal NDB DDL):
 | Table | Purpose |
 |---|---|
@@ -397,15 +416,21 @@ gRPC over TCP for the cluster transport (`src/cluster/cluster_transport.c`,
   The RonDB backend is enabled with `-DENABLE_RONDB=ON` (the option
   defines `HAVE_RONDB` for the sources) and links against `libndbclient`;
   the FoundationDB backend with `-DENABLE_FDB=ON` (`HAVE_FDB`, links
-  `libfdb_c`).  memdb is always built.
+  `libfdb_c`); the DAOS backend with `-DENABLE_DAOS=ON` (`HAVE_DAOS`,
+  links `libdaos` and `libgurt`, needs `uuid/uuid.h`).  memdb is always
+  built.
 - **Unit tests.**  `tests/unit/` against the memdb backend; one binary per
   module.  No external services required.
 - **Integration tests.**  `tests/integration/` exercises multi-component
   flows still against memdb.
 - **Conformance tests.**  `tests/catalogue_conformance/` runs one contract
-  against every backend; `CATALOGUE_TEST_BACKEND=memdb|rondb|fdb` selects
-  the store (memdb by default; a backend that is not built or not
-  reachable exits 77 = skipped).
+  against every backend; `CATALOGUE_TEST_BACKEND=memdb|rondb|fdb|daos`
+  selects the store (memdb by default; a backend that is not built or not
+  reachable exits 77 = skipped).  The daos backend takes its pool from
+  `DAOS_POOL` and gives every test process a private container that is
+  destroyed at exit; `test_daos_txn`, `test_daos_ext` and
+  `test_daos_coord` pin the DAOS behaviours the design relies on and the
+  per-unit slot semantics the same way.
 - **QA gates.**  `scripts/qa-check.sh --quick` runs style, gcc + clang
   builds, cppcheck, clang-tidy, and the `unit`-labelled ctest suite.  The
   full mode adds Valgrind over every `test_*` binary.  The script's
@@ -530,6 +555,10 @@ change moves an item between the states below.
   (non-durable, single node).  FoundationDB (`ENABLE_FDB`) passes the
   conformance suite (slot matrix, contract, fault injection) and runs the
   daemon; it has not had the production soak the RonDB backend has.
+  DAOS (`ENABLE_DAOS`) implements the full slot matrix including the
+  cluster slots and is syntax-checked against the DAOS 2.6 headers; the
+  conformance suite and the `test_daos_*` pins have not yet been run
+  against a live pool, so it stands as unverified until that lab run.
 - **Feature-gated / not a supported configuration:** the hard-link 2PC
   path (cross-subtree LINK returns `NFS4ERR_XDEV`) and the multi-cluster
   rename 2PC module, which exists as a building block only (§6, §13).
