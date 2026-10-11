@@ -551,6 +551,8 @@ enum mds_catalogue_backend {
     MDS_BACKEND_FDB     = 2,  /**< FoundationDB backend (ENABLE_FDB builds). */
     MDS_BACKEND_NONE    = 3,  /**< No catalogue: NULL handle sentinel, never
                                *   selectable. */
+    /* Values are appended after the sentinel, never renumbered. */
+    MDS_BACKEND_DAOS    = 4,  /**< DAOS backend (ENABLE_DAOS builds). */
 };
 
 /* -----------------------------------------------------------------------
@@ -1152,6 +1154,36 @@ struct mds_config {
     char                fdb_key_prefix[32];
     uint32_t            fdb_op_deadline_ms;
     uint32_t            fdb_txn_timeout_ms;
+
+    /*
+     * DAOS catalogue backend (catalogue_backend = daos).  One container
+     * is one catalogue.
+     *
+     * daos_pool: pool label or UUID (required).
+     * daos_cont: container label or UUID (required; created by the
+     * operator, bootstrapped by the daemon).
+     * daos_sys: DAOS system name (empty = "daos_server").
+     * daos_op_deadline_ms: total budget of one catalogue operation across
+     * every transaction attempt (0 = default 8000).  Exhaustion yields
+     * MDS_ERR_DELAY; a commit whose outcome the client could not
+     * determine yields MDS_ERR_INDOUBT.
+     * daos_oclass: object class of the entity objects (inodes, clients,
+     * registries, queues); must be a single-group class (empty = RP_3G1;
+     * S1 on a single-engine development pool).
+     * daos_oclass_spread: object class of the point-access state objects
+     * (layouts, opens, delegations, sessions, journal, GC rows; empty =
+     * RP_3GX).
+     * daos_dir_counter_shards: counter shards per directory, 1..256
+     * (0 = default 16).  Every value above is stamped on the container at
+     * bootstrap and verified at open.
+     */
+    char                daos_pool[128];
+    char                daos_cont[128];
+    char                daos_sys[16];
+    uint32_t            daos_op_deadline_ms;
+    char                daos_oclass[32];
+    char                daos_oclass_spread[32];
+    uint32_t            daos_dir_counter_shards;
 
     /* RonDB connection pool */
     /* NDB connections per MDS (0 = auto, max 64). */

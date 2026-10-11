@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **DAOS catalogue backend** (`ENABLE_DAOS`, libdaos 2.6) — a fourth
+  store behind the catalogue vtable, selected with
+  `catalogue_backend = daos` plus `daos_pool`, `daos_cont`, `daos_sys`,
+  `daos_op_deadline_ms`, `daos_oclass`, `daos_oclass_spread` and
+  `daos_dir_counter_shards`.  One DAOS container is one catalogue.
+  Object ids are derived from the entity id and a table tag, never
+  allocated or mapped; every entity (inode, client, registry, queue) is
+  one object with sorted lexical dkeys, so inode-local operations stay
+  on one shard group and the by-file indexes (layouts, opens,
+  delegations, locks) are one akey enumeration on that object, while
+  point-access state (layout, open, delegation, session, journal and GC
+  rows) lives in hashed objects.  A directory's nlink, change, mtime and
+  ctime are counter shards (default 16) updated independently by
+  concurrent creates and composed by GETATTR in one fetch, replacing the
+  atomic adds DAOS lacks.  Every slot is one serializable transaction
+  (`daos_txn.[ch]`): read waves on a borrowed event queue, blind writes,
+  one commit, the body re-run on a conflict; CREATE's duplicate check is
+  a conditional akey insert, not a read.  A commit whose outcome the
+  client cannot determine surfaces as `MDS_ERR_INDOUBT`; there is no
+  witness protocol in this version, the runner counts the case so a lab
+  run decides whether one is worth adding.  Both object classes and the
+  shard count are stamped on the container at bootstrap and verified at
+  open, since a changed class would address a different namespace.
+  `ns_readdir` walks a directory in the store's hash order while READDIR
+  cookies come from a container-wide sequence and stay ascending.  The
+  full slot matrix including the cluster slots is implemented;
+  `tests/catalogue_conformance/` gains a `daos` backend (a private
+  container per test process on `DAOS_POOL`, destroyed at exit),
+  `test_daos_txn` pins the DAOS behaviours the design depends on before
+  the runner is trusted, `test_daos_ext` / `test_daos_coord` pin the
+  slot semantics, and `daemon_smoke.sh` gains `DAEMON_SMOKE_BACKEND=daos`.
+  The option defaults to OFF; every DAOS test exits 77 without a pool.
+  Status: syntax-checked against the DAOS 2.6 headers, not yet run
+  against a live pool (`docs/architecture.md` §17).
 - **Backend-independent MDS, memdb backend, FoundationDB backend and a
   catalogue conformance suite** — the MDS reached RonDB-specific entry
   points directly from the cluster, failover and namespace code, so no

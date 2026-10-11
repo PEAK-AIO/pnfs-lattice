@@ -129,6 +129,36 @@ if(ENABLE_FDB)
     target_link_libraries(pnfs_mds_core PUBLIC ${FDB_LIBRARY})
 endif()
 
+# DAOS backend (ENABLE_DAOS).  Compiled into the core archive like the
+# other backends (HAVE_DAOS=1 is the global definition set next to the
+# option).  The value formats shared with the FoundationDB backend live
+# in fdb_codec.c (pure C, no client dependency): it is added here only
+# when ENABLE_FDB did not already add it, so the TU is compiled once.
+# libdaos and libgurt are linked PUBLIC because every consumer of
+# pnfs_mds_core (daemon, tests, tools) must resolve the daos_* / d_*
+# symbols the backend calls.
+if(ENABLE_DAOS)
+    target_sources(pnfs_mds_core PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/catalogue/catalogue_daos.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/catalogue_daos_ns.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/catalogue_daos_ext.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/catalogue_daos_coord.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/catalogue_daos_cluster.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/daos_codec.c
+        ${PROJECT_SOURCE_DIR}/src/catalogue/daos_txn.c
+    )
+    if(NOT ENABLE_FDB)
+        target_sources(pnfs_mds_core PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/catalogue/fdb_codec.c
+        )
+    endif()
+    target_include_directories(pnfs_mds_core SYSTEM PRIVATE
+        ${DAOS_INCLUDE_DIR}
+        ${UUID_INCLUDE_DIR}
+    )
+    target_link_libraries(pnfs_mds_core PUBLIC ${DAOS_LIBRARY} ${DAOS_GURT_LIBRARY})
+endif()
+
 target_include_directories(pnfs_mds_core
     PUBLIC ${PROJECT_SOURCE_DIR}/include
     PRIVATE ${PROJECT_SOURCE_DIR}/src/catalogue

@@ -17,12 +17,21 @@ are logged as `WARN:` and the default is kept.
 - `require_mtls` — bool; require peer mTLS.  Default: false.
 - `admin_allowed_hosts` — comma-separated IPv4 addresses (up to 32, no CIDR) allowed to connect to the admin transport in addition to `cluster_peer[N]`, so monitoring / UI hosts need not be cluster members.  Default: empty.
 ## Catalogue
-- `catalogue_backend` — `rondb|memdb|fdb`.  Default: rondb when compiled in, otherwise mandatory; a known backend that is not compiled in is refused at startup.
+- `catalogue_backend` — `rondb|memdb|fdb|daos`.  Default: rondb when compiled in, otherwise mandatory; a known backend that is not compiled in is refused at startup.
 - `catalogue_backend_conf` — backend-specific config path (rondb).
 - `fdb_cluster_file` — FoundationDB cluster file (fdb).  Default: `FDB_CLUSTER_FILE`, then `/etc/foundationdb/fdb.cluster`.
 - `fdb_key_prefix` — key prefix of this catalogue inside the cluster, at most 31 bytes (fdb).  Default: empty.
 - `fdb_op_deadline_ms` — per-operation budget across attempts, 1..600000 (fdb).  Default: 8000.
 - `fdb_txn_timeout_ms` — per-attempt transaction timeout, 1..4900 (fdb).  Default: 4000.
+- `daos_pool` — DAOS pool label or UUID, at most 127 bytes (daos).  Required; a longer value is a parse error.
+- `daos_cont` — DAOS container label or UUID holding this catalogue, at most 127 bytes (daos).  Required; one container is one catalogue, created by the operator and bootstrapped by the daemon on first start.
+- `daos_sys` — DAOS system name, at most 15 bytes (daos).  Default: `daos_server`.
+- `daos_op_deadline_ms` — per-operation budget across transaction attempts, 1..600000 (daos).  Default: 8000.  Exhaustion yields `MDS_ERR_DELAY`; a commit whose outcome the client could not determine yields `MDS_ERR_INDOUBT`.
+- `daos_oclass` — object class of the entity objects (inodes, clients, registries, queues), at most 31 bytes (daos).  Default: `RP_3G1`.  Must be a single-group class (`...G1`, or `S1` on a single-engine development pool): sorted enumeration and the bootstrap claim hold only within one redundancy group.
+- `daos_oclass_spread` — object class of the point-access state objects (layouts, opens, delegations, sessions, journal, GC rows), at most 31 bytes (daos).  Default: `RP_3GX`.
+- `daos_dir_counter_shards` — counter shards per directory, 1..256 (daos).  Default: 16.  More shards mean fewer transaction restarts between concurrent creates in one directory and a wider GETATTR fetch.
+
+  Both classes and the shard count are stamped on the container at bootstrap together with the schema version and verified at every open: the class is encoded in every object id, so a changed value would address a different, empty namespace, and the daemon refuses the open instead.
 - `catalog_image_mode` — `off|shadow|compare|primary`.  Default: off.
 - `catalog_compare_reads` — enable image-vs-authority compare reads.  Default: false.
 - `catalog_replay_mode` — `off|log|journal`.  Default: off.

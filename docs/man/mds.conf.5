@@ -158,7 +158,7 @@ address.
 .TP
 .B catalogue_backend
 .I enum
-.RI ( rondb " | " memdb " | " fdb )
+.RI ( rondb " | " memdb " | " fdb " | " daos )
 (default
 .B rondb
 when the binary was built with RonDB support; otherwise the key is
@@ -173,6 +173,11 @@ capacity: never a multi-MDS cluster);
 .B fdb
 is the FoundationDB backend (ENABLE_FDB builds), configured through the
 .B fdb_*
+keys below;
+.B daos
+is the DAOS backend (ENABLE_DAOS builds), one container per catalogue,
+configured through the
+.B daos_*
 keys below.
 .TP
 .B catalogue_backend_conf
@@ -208,6 +213,69 @@ default
 .BR 4000 ).
 Timeout of one transaction attempt; must stay under FoundationDB's
 5 s transaction window.
+.TP
+.B daos_pool
+.IR string " (at most 127 bytes)."
+DAOS pool label or UUID.  Required for
+.BR daos ;
+a longer value is a configuration error.
+.TP
+.B daos_cont
+.IR string " (at most 127 bytes)."
+DAOS container label or UUID holding this catalogue.  Required for
+.BR daos .
+One container is one catalogue: the operator creates it, the daemon
+bootstraps it on first start.
+.TP
+.B daos_sys
+.IR string " (at most 15 bytes,"
+default
+.BR daos_server ).
+DAOS system name passed to the pool connection.
+.TP
+.B daos_op_deadline_ms
+.I integer
+.RI ( 1..600000 ,
+default
+.BR 8000 ).
+Total budget of one catalogue operation across every transaction
+attempt; exhaustion is reported as a retryable delay.  A commit whose
+outcome the DAOS client could not determine is reported as
+indeterminate, never as success.
+.TP
+.B daos_oclass
+.IR string " (at most 31 bytes,"
+default
+.BR RP_3G1 ).
+DAOS object class of the entity objects (inodes, clients, registries,
+queues).  Must be a single-group class (a
+.B G1
+class, or
+.B S1
+on a single-engine development pool): sorted key enumeration and the
+bootstrap claim hold only within one redundancy group.
+.TP
+.B daos_oclass_spread
+.IR string " (at most 31 bytes,"
+default
+.BR RP_3GX ).
+DAOS object class of the point-access state objects (layouts, opens,
+delegations, sessions, journal, GC rows).
+.TP
+.B daos_dir_counter_shards
+.I integer
+.RI ( 1..256 ,
+default
+.BR 16 ).
+Counter shards per directory.  Concurrent creates in one directory
+conflict only when they pick the same shard; GETATTR of a directory
+reads every shard in one fetch.
+.IP
+Both object classes and the shard count are stamped on the container at
+bootstrap, together with the schema version, and verified at every
+open.  The class is encoded in every object id, so a changed value
+would address a different, empty namespace; the daemon refuses the
+open instead.
 .TP
 .B catalog_image_mode
 .I enum

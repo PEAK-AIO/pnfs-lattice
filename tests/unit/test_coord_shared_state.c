@@ -558,11 +558,13 @@ static void test_backend_type_null_is_none(void)
     ASSERT_EQ(mds_catalogue_backend_type(&cat), MDS_BACKEND_RONDB);
     cat.backend = MDS_BACKEND_MEMDB;
     ASSERT_EQ(mds_catalogue_backend_type(&cat), MDS_BACKEND_MEMDB);
-    /* Appended values keep the existing numbering. */
+    /* Appended values keep the existing numbering; a backend added
+     * after the sentinel takes the next value, never the sentinel's. */
     ASSERT_EQ((int)MDS_BACKEND_RONDB, 0);
     ASSERT_EQ((int)MDS_BACKEND_MEMDB, 1);
     ASSERT_EQ((int)MDS_BACKEND_FDB, 2);
     ASSERT_EQ((int)MDS_BACKEND_NONE, 3);
+    ASSERT_EQ((int)MDS_BACKEND_DAOS, 4);
 }
 
 /* --- Cluster ops: NULL table / NULL slots -> NOSUPPORT ---------------- */

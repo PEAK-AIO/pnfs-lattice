@@ -1286,6 +1286,74 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
                     "WARN: fdb_txn_timeout_ms=%lu out of range "
                     "(1..4900); using default\n", v);
             }
+
+        /* DAOS backend (see struct mds_config).  The string keys are
+         * bounded copies: a value that does not fit its field is a
+         * parse error, like fdb_key_prefix. */
+        } else if (strcmp(key, "daos_pool") == 0) {
+            if (strlen(val) >= sizeof(cfg->daos_pool)) {
+                (void)fprintf(stderr,
+                    "ERROR: daos_pool longer than %zu bytes\n",
+                    sizeof(cfg->daos_pool) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->daos_pool, sizeof(cfg->daos_pool), "%s", val);
+        } else if (strcmp(key, "daos_cont") == 0) {
+            if (strlen(val) >= sizeof(cfg->daos_cont)) {
+                (void)fprintf(stderr,
+                    "ERROR: daos_cont longer than %zu bytes\n",
+                    sizeof(cfg->daos_cont) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->daos_cont, sizeof(cfg->daos_cont), "%s", val);
+        } else if (strcmp(key, "daos_sys") == 0) {
+            if (strlen(val) >= sizeof(cfg->daos_sys)) {
+                (void)fprintf(stderr,
+                    "ERROR: daos_sys longer than %zu bytes\n",
+                    sizeof(cfg->daos_sys) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->daos_sys, sizeof(cfg->daos_sys), "%s", val);
+        } else if (strcmp(key, "daos_op_deadline_ms") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v > 0 && v <= 600000UL) {
+                cfg->daos_op_deadline_ms = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: daos_op_deadline_ms=%lu out of range "
+                    "(1..600000); using default\n", v);
+            }
+        } else if (strcmp(key, "daos_oclass") == 0) {
+            if (strlen(val) >= sizeof(cfg->daos_oclass)) {
+                (void)fprintf(stderr,
+                    "ERROR: daos_oclass longer than %zu bytes\n",
+                    sizeof(cfg->daos_oclass) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->daos_oclass, sizeof(cfg->daos_oclass), "%s", val);
+        } else if (strcmp(key, "daos_oclass_spread") == 0) {
+            if (strlen(val) >= sizeof(cfg->daos_oclass_spread)) {
+                (void)fprintf(stderr,
+                    "ERROR: daos_oclass_spread longer than %zu bytes\n",
+                    sizeof(cfg->daos_oclass_spread) - 1);
+                (void)fclose(fp);
+                return MDS_ERR_INVAL;
+            }
+            (void)snprintf(cfg->daos_oclass_spread,
+                sizeof(cfg->daos_oclass_spread), "%s", val);
+        } else if (strcmp(key, "daos_dir_counter_shards") == 0) {
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v > 0 && v <= 256UL) {
+                cfg->daos_dir_counter_shards = (uint32_t)v;
+            } else {
+                (void)fprintf(stderr,
+                    "WARN: daos_dir_counter_shards=%lu out of range "
+                    "(1..256); using default\n", v);
+            }
         } else if (strcmp(key, "placement_policy") == 0) {
             if (strcmp(val, "rr") == 0) {
                 cfg->placement_policy = PLACEMENT_RR;

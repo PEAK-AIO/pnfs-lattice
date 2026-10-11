@@ -31,16 +31,16 @@
  * Accessors generated from the expected table
  * ----------------------------------------------------------------------- */
 
-#define AUTH_ACCESSOR(name, m, r, f)                                  \
+#define AUTH_ACCESSOR(name, m, r, f, d)                               \
     static bool auth_has_##name(const struct mds_catalogue *c)        \
     { return c->auth_ops != NULL && c->auth_ops->name != NULL; }
-#define COORD_ACCESSOR(name, m, r, f)                                 \
+#define COORD_ACCESSOR(name, m, r, f, d)                              \
     static bool coord_has_##name(const struct mds_catalogue *c)       \
     { return c->coord_ops != NULL && c->coord_ops->name != NULL; }
-#define CLUSTER_ACCESSOR(name, m, r, f)                               \
+#define CLUSTER_ACCESSOR(name, m, r, f, d)                            \
     static bool cluster_has_##name(const struct mds_catalogue *c)     \
     { return c->cluster_ops != NULL && c->cluster_ops->name != NULL; }
-#define LIFECYCLE_ACCESSOR(name, m, r, f)                             \
+#define LIFECYCLE_ACCESSOR(name, m, r, f, d)                          \
     static bool lifecycle_has_##name(const struct mds_catalogue *c)   \
     { return c->ops != NULL && c->ops->name != NULL; }
 
@@ -54,6 +54,7 @@ enum matrix_column {
     COL_MEMDB,
     COL_RONDB,
     COL_FDB,
+    COL_DAOS,
 };
 
 struct slot_row {
@@ -63,12 +64,17 @@ struct slot_row {
     bool expect_memdb;
     bool expect_rondb;
     bool expect_fdb;
+    bool expect_daos;
 };
 
-#define AUTH_ROW(name, m, r, f)      { "auth",      #name, auth_has_##name, m, r, f },
-#define COORD_ROW(name, m, r, f)     { "coord",     #name, coord_has_##name, m, r, f },
-#define CLUSTER_ROW(name, m, r, f)   { "cluster",   #name, cluster_has_##name, m, r, f },
-#define LIFECYCLE_ROW(name, m, r, f) { "lifecycle", #name, lifecycle_has_##name, m, r, f },
+#define AUTH_ROW(name, m, r, f, d)                                        \
+    { "auth",      #name, auth_has_##name,      m, r, f, d },
+#define COORD_ROW(name, m, r, f, d)                                       \
+    { "coord",     #name, coord_has_##name,     m, r, f, d },
+#define CLUSTER_ROW(name, m, r, f, d)                                     \
+    { "cluster",   #name, cluster_has_##name,   m, r, f, d },
+#define LIFECYCLE_ROW(name, m, r, f, d)                                   \
+    { "lifecycle", #name, lifecycle_has_##name, m, r, f, d },
 
 static const struct slot_row auth_rows[] = {
     CONFORMANCE_AUTH_SLOTS(AUTH_ROW)
@@ -122,7 +128,10 @@ static bool expected_of(const struct slot_row *row, enum matrix_column col)
     if (col == COL_RONDB) {
         return row->expect_rondb;
     }
-    return row->expect_fdb;
+    if (col == COL_FDB) {
+        return row->expect_fdb;
+    }
+    return row->expect_daos;
 }
 
 static void check_rows(const struct mds_catalogue *cat, enum matrix_column col,
@@ -187,6 +196,12 @@ int main(void)
         expect_caps = CONFORMANCE_CAPS_FDB;
         expect_cluster = CONFORMANCE_CLUSTER_SUPPORTED_FDB;
         expect_shared = CONFORMANCE_SHARED_STATE_SUPPORTED_FDB;
+    } else if (conformance_backend_is("daos")) {
+        col = COL_DAOS;
+        expect_type = MDS_BACKEND_DAOS;
+        expect_caps = CONFORMANCE_CAPS_DAOS;
+        expect_cluster = CONFORMANCE_CLUSTER_SUPPORTED_DAOS;
+        expect_shared = CONFORMANCE_SHARED_STATE_SUPPORTED_DAOS;
     } else {
         conformance_skip("no expected slot table for this backend");
     }

@@ -9,9 +9,11 @@
 # tests/CMakeLists.txt: pnfs_cluster calls back into pnfs_mds_core so
 # the core archive is scanned again after it.
 #
-# Backend selection at run time: CATALOGUE_TEST_BACKEND=memdb|rondb|fdb
-# (default memdb); rondb additionally needs RONDB_CONF.  A backend the
-# binary or environment cannot provide exits 77, registered below as
+# Backend selection at run time:
+# CATALOGUE_TEST_BACKEND=memdb|rondb|fdb|daos (default memdb); rondb
+# additionally needs RONDB_CONF, daos needs DAOS_POOL (and uses
+# DAOS_SYS / CATALOGUE_TEST_CONT when set).  A backend the binary or
+# environment cannot provide exits 77, registered below as
 # SKIP_RETURN_CODE so ctest reports "Not Run" instead of pass or fail.
 #
 # Labels:
@@ -45,6 +47,13 @@ target_include_directories(conformance_harness PRIVATE
 # The fdb teardown sweeps the run prefix with bare fdb_c calls.
 if(ENABLE_FDB)
     target_include_directories(conformance_harness SYSTEM PRIVATE ${FDB_INCLUDE_DIR})
+endif()
+# The daos branch creates and destroys the run's private container with
+# bare libdaos calls (daos.h pulls in cart/, gurt/ and uuid/uuid.h).
+if(ENABLE_DAOS)
+    target_include_directories(conformance_harness SYSTEM PRIVATE
+        ${DAOS_INCLUDE_DIR}
+        ${UUID_INCLUDE_DIR})
 endif()
 
 set(CONFORMANCE_LINK_LIBS
