@@ -184,7 +184,7 @@ Every system call, library call, and internal function that can fail
   Explain WHAT changed and WHY. Not HOW — the diff shows how.
   Reference architecture.md section numbers when relevant.
 
-  Update docs/architecture.md §23 status for affected items.
+  Update docs/architecture.md §17 Status for affected items.
   ```
   Commits are authored as `Eyal Lemberger <eyal.lemberger@peakaio.com>`.
   Do not add `Co-Authored-By`, `Authored-By`, or any other attribution
@@ -279,7 +279,7 @@ Before submitting code for review, verify:
 - [ ] No UB: no signed overflow, no NULL deref, no OOB access
 - [ ] Tests cover happy path, error paths, and edge cases
 - [ ] Commit is bisectable (compiles + tests pass in isolation)
-- [ ] architecture.md §23 updated with status change
+- [ ] architecture.md §17 Status updated when an item changes state
 
 ---
 

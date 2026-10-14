@@ -225,7 +225,8 @@ static struct file_locks *find_or_create_file(struct lock_stripe *st,
 }
 
 /** Find the file_locks bucket without creating it. */
-static struct file_locks *find_file(struct lock_stripe *st, uint64_t fileid)
+static struct file_locks *find_file(const struct lock_stripe *st,
+                                    uint64_t fileid)
 {
     uint32_t idx = fhash(fileid);
     struct file_locks *fl;
@@ -700,7 +701,7 @@ int lock_test(struct lock_table *lt,
               struct lock_conflict *conflict)
 {
     uint32_t s, eff_type;
-    struct file_locks *fl;
+    const struct file_locks *fl;
     struct lock_stripe *st;
     const struct lock_owner_state *cos;
     const struct lock_range *cr = NULL;
@@ -813,6 +814,22 @@ int lock_release(struct lock_table *lt,
     return 0;
 }
 
+/** Remove an owner state from the per-stripe sid hash.  Lock held. */
+static void sid_hash_unlink(struct lock_stripe *st,
+                            const struct lock_owner_state *os)
+{
+    uint32_t si = shash(os->stateid.other);
+    struct lock_owner_state **sp = &st->sid_hash[si];
+
+    while (*sp != NULL) {
+        if (*sp == os) {
+            *sp = os->sid_next;
+            break;
+        }
+        sp = &(*sp)->sid_next;
+    }
+}
+
 /** Unlink an owner state from both per-stripe tables.  Lock held. */
 static void owner_state_unlink(struct lock_stripe *st,
                                struct lock_owner_state *os)
@@ -832,17 +849,7 @@ static void owner_state_unlink(struct lock_stripe *st,
         }
         break;
     }
-    {
-        uint32_t si = shash(os->stateid.other);
-        struct lock_owner_state **sp = &st->sid_hash[si];
-        while (*sp != NULL) {
-            if (*sp == os) {
-                *sp = os->sid_next;
-                break;
-            }
-            sp = &(*sp)->sid_next;
-        }
-    }
+    sid_hash_unlink(st, os);
 }
 
 int lock_free_stateid(struct lock_table *lt,
@@ -908,18 +915,7 @@ void lock_release_all_for_client(struct lock_table *lt, uint64_t clientid)
                     }
                     *pp = os->file_next;
                     /* Remove from per-stripe sid hash. */
-                    {
-                        uint32_t si = shash(os->stateid.other);
-                        struct lock_owner_state **sp =
-                            &st->sid_hash[si];
-                        while (*sp != NULL) {
-                            if (*sp == os) {
-                                *sp = os->sid_next;
-                                break;
-                            }
-                            sp = &(*sp)->sid_next;
-                        }
-                    }
+                    sid_hash_unlink(st, os);
                     owner_state_free(os);
                 }
             }
@@ -1015,8 +1011,7 @@ int lock_revoke_expired_for_file(struct lock_table *lt,
     pthread_mutex_lock(&st->lock);
     {
         struct file_locks *fl = find_file(st, fileid);
-        struct lock_owner_state **pp =
-            (fl != NULL) ? &fl->head : NULL;
+        struct lock_owner_state **pp = (fl != NULL) ? &fl->head : NULL;
 
         while (pp != NULL && *pp != NULL) {
             struct lock_owner_state *os = *pp;
@@ -1027,24 +1022,14 @@ int lock_revoke_expired_for_file(struct lock_table *lt,
                     break;
                 }
             }
-            if (!is_expired) {
-                pp = &(*pp)->file_next;
-                continue;
+            if (is_expired) {
+                *pp = os->file_next;
+                sid_hash_unlink(st, os);
+                owner_state_free(os);
+                revoked++;
+            } else {
+                pp = &os->file_next;
             }
-            *pp = os->file_next;
-            {
-                uint32_t si = shash(os->stateid.other);
-                struct lock_owner_state **sp = &st->sid_hash[si];
-                while (*sp != NULL) {
-                    if (*sp == os) {
-                        *sp = os->sid_next;
-                        break;
-                    }
-                    sp = &(*sp)->sid_next;
-                }
-            }
-            owner_state_free(os);
-            revoked++;
         }
     }
     pthread_mutex_unlock(&st->lock);

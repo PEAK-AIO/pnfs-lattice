@@ -236,6 +236,7 @@ static void test_allocate_no_fh(void)
     struct nfs4_result res[2];
 
     memset(ops, 0, sizeof(ops));
+    memset(res, 0, sizeof(res));
     ops[0].opnum = OP_SEQUENCE;
     ops[1].opnum = OP_ALLOCATE;
     ops[1].arg.allocate.offset = 0;
@@ -262,6 +263,7 @@ static void test_seek_no_fh(void)
     struct nfs4_result res[2];
 
     memset(ops, 0, sizeof(ops));
+    memset(res, 0, sizeof(res));
     ops[0].opnum = OP_SEQUENCE;
     ops[1].opnum = OP_SEEK;
     ops[1].arg.seek.what = NFS4_CONTENT_DATA;

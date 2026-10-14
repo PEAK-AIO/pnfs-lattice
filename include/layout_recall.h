@@ -252,4 +252,24 @@ void layout_seqid_remove(const uint8_t other[12]);
  * introspection. */
 uint64_t layout_seqid_entry_count(void);
 
+/**
+ * Free every entry of the process-wide layout-seqid tracker.
+ *
+ * The tracker is module-global state in compound_layout.c with no
+ * owner handle; entries otherwise live until LAYOUTRETURN or process
+ * exit.  The daemon calls this once at shutdown after the COMPOUND
+ * path, the layout-recall coordinator and the DS health monitor are
+ * down; test binaries call it before returning from main() so the
+ * valgrind gate (which counts still-reachable blocks as errors) sees
+ * no outstanding entries.
+ *
+ * Afterwards the table is empty and remains usable: a later grant
+ * re-populates it and a second call is a no-op.
+ *
+ * Thread safety: NOT safe against concurrent tracker use.  Callers
+ * must guarantee that no other thread can still be granting,
+ * advancing, peeking or returning layout stateids.
+ */
+void layout_seqid_table_destroy(void);
+
 #endif /* LAYOUT_RECALL_H */

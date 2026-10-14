@@ -1,0 +1,27 @@
+# Copyright (c) 2026 PeakAIO
+# SPDX-License-Identifier: MIT
+#
+# tsan-fdb.supp -- ThreadSanitizer suppressions for the FoundationDB client.
+#
+# libfdb_c.so is not instrumented.  A transaction's outcome travels from
+# the client's network thread to the caller through an FDBFuture: the
+# network thread writes the result and marks the future ready, the
+# caller returns from fdb_future_block_until_ready and reads it.  That
+# completion is a happens-before edge, but the client establishes it
+# with its own atomics and spin locks inside the library, which TSan
+# cannot see; the only events it does see are the intercepted libc
+# calls (memcpy, memset, ...) the network thread makes while filling
+# the result.  Every read of a result therefore looks like a race
+# between the network thread and the caller.
+#
+# called_from_lib ignores every interceptor invoked from inside
+# libfdb_c.so, so the network thread's writes are never recorded and
+# the false pair disappears; a race between two threads of this tree's
+# own code is still reported.
+#
+# Usage (sanitizer configure of the fdb tree; tests/CMakeLists.txt hands
+# the file to every fdb-linked ctest through TSAN_OPTIONS):
+#   TSAN_OPTIONS=suppressions=tests/tsan-fdb.supp \
+#       ./build-fdb-tsan/tests/catalogue_conformance/conformance_fault
+#
+called_from_lib:libfdb_c.so

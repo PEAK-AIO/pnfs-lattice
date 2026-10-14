@@ -101,6 +101,17 @@ int parse_ds_filename(const char *name, uint64_t *fileid,
                       uint32_t *stripe, uint32_t *mirror);
 
 /**
+ * Thread-safe strerror(3) for diagnostics.
+ *
+ * @param err  errno value to describe.
+ * @param buf  Scratch buffer the message may be written into.
+ * @param cap  Capacity of @p buf.
+ * @return NUL-terminated message text, valid at least as long as
+ *         @p buf is (it may point into @p buf or at a static string).
+ */
+const char *admin_errno_text(int err, char *buf, size_t cap);
+
+/**
  * Resolve an MDS namespace path (e.g. "/data/subdir") to a fileid.
  * Walks the directory tree from root.
  */

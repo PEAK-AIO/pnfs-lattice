@@ -42,6 +42,9 @@ option(ENABLE_EBPF       "Build eBPF replication monitoring programs" ON)
 option(ENABLE_ADMIN_CLI  "Build the mds-admin CLI tool"               ON)
 option(ENABLE_TESTS      "Build unit and integration tests"           ON)
 option(ENABLE_RONDB      "Build RonDB catalogue backend"              ON)
+option(ENABLE_MEMDB_BACKEND "Build the in-memory catalogue backend"   ON)
+option(ENABLE_FDB        "Build the FoundationDB catalogue backend"   OFF)
+option(ENABLE_DAOS       "Build the DAOS catalogue backend"           OFF)
 # Compile-time kill-switch for per-op latency / phase / cat-op
 # histograms.  OFF removes every observation site from the binary
 # (defines MDS_OP_METRICS_DISABLE), leaving only the dispatcher
@@ -229,7 +232,9 @@ include_directories(
 # ---------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
-# LMDB removed -- RonDB is the only supported backend.
+# LMDB removed.  Catalogue backends are build options: ENABLE_RONDB,
+# ENABLE_MEMDB_BACKEND, ENABLE_FDB and ENABLE_DAOS (see below); the
+# daemon selects one at startup through `catalogue_backend` in mds.conf.
 
 # pthreads
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -280,6 +285,53 @@ if(ENABLE_RONDB)
         message(WARNING "RonDB not found -- RonDB backend disabled")
         set(ENABLE_RONDB OFF)
     endif()
+endif()
+
+# FoundationDB -- optional distributed catalogue backend (fdb_c 7.3 client;
+# API version 730).  Headers: foundationdb/fdb_c.h; library: libfdb_c.so.
+# Missing dependencies are fatal when the option is ON: an operator who
+# asked for the backend must not silently get a binary without it.
+if(ENABLE_FDB)
+    find_path(FDB_INCLUDE_DIR foundationdb/fdb_c.h)
+    find_library(FDB_LIBRARY fdb_c)
+    if(NOT FDB_INCLUDE_DIR OR NOT FDB_LIBRARY)
+        message(FATAL_ERROR
+            "ENABLE_FDB=ON but the FoundationDB client was not found "
+            "(need foundationdb/fdb_c.h and libfdb_c); install the "
+            "foundationdb-clients package or pass -DFDB_INCLUDE_DIR= and "
+            "-DFDB_LIBRARY=")
+    endif()
+    # Global, like HAVE_RONDB: the backend factory, the test harness
+    # object library and the unit tests all branch on it.
+    add_compile_definitions(HAVE_FDB=1)
+    message(STATUS "FoundationDB client: ${FDB_LIBRARY} "
+                   "(${FDB_INCLUDE_DIR}) -- fdb catalogue backend enabled")
+endif()
+
+# DAOS -- optional distributed catalogue backend (libdaos 2.6 client).
+# Headers: daos.h (which pulls in cart/ and gurt/ headers and
+# uuid/uuid.h); libraries: libdaos.so and libgurt.so (d_errstr).
+# Missing dependencies are fatal when the option is ON: an operator who
+# asked for the backend must not silently get a binary without it.
+if(ENABLE_DAOS)
+    find_path(DAOS_INCLUDE_DIR daos.h)
+    find_library(DAOS_LIBRARY daos)
+    find_library(DAOS_GURT_LIBRARY gurt)
+    find_path(UUID_INCLUDE_DIR uuid/uuid.h)
+    if(NOT DAOS_INCLUDE_DIR OR NOT DAOS_LIBRARY OR NOT DAOS_GURT_LIBRARY
+            OR NOT UUID_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "ENABLE_DAOS=ON but the DAOS client was not found "
+            "(need daos.h, libdaos, libgurt and uuid/uuid.h); install the "
+            "daos-client and daos-devel packages plus libuuid headers "
+            "(uuid-dev / libuuid-devel), or pass -DDAOS_INCLUDE_DIR=, "
+            "-DDAOS_LIBRARY=, -DDAOS_GURT_LIBRARY= and -DUUID_INCLUDE_DIR=")
+    endif()
+    # Global, like HAVE_RONDB and HAVE_FDB: the backend factory, the
+    # test harness object library and the unit tests all branch on it.
+    add_compile_definitions(HAVE_DAOS=1)
+    message(STATUS "DAOS client: ${DAOS_LIBRARY} ${DAOS_GURT_LIBRARY} "
+                   "(${DAOS_INCLUDE_DIR}) -- daos catalogue backend enabled")
 endif()
 
 # libbpf -- eBPF replication monitoring (optional)

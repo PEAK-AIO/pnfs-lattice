@@ -493,7 +493,7 @@ void layout_recall_set_proxy(struct layout_recall *lr,
  * the authoritative layout-state delete.
  */
 static void fence_ds_file_for_fileid(
-    struct mds_proxy_ctx *proxy,
+    const struct mds_proxy_ctx *proxy,
     struct mds_catalogue *cat,
     uint64_t fileid)
 {
@@ -778,6 +778,165 @@ struct byte_range_collect_ctx {
     bool                      keep_duplicate_rows;
 };
 
+/* DEBUG-RECALL trace of a per-holder decision; returns @rc so callers
+ * can `return br_trace_rc(rc, "...")` from the iterator callbacks. */
+static int br_trace_rc(int rc, const char *why)
+{
+    MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> %s", why);
+    return rc;
+}
+
+/* One (offset, length, stateid, ...) snapshot of a holder entry. */
+struct byte_range_hold {
+    struct nfs4_stateid stateid;   /* effective (seqid-clamped) */
+    uint32_t            iomode;
+    uint64_t            hold_off;
+    uint64_t            hold_len;
+    uint64_t            inter_off;
+    uint64_t            inter_len;
+};
+
+/*
+ * Resolve the holder's effective stateid and byte range.
+ *
+ * Only the byte-range conflict path needs the holder's actual
+ * (offset, length): it intersects them against the requester's
+ * range.  The final-unlink path (require_range_overlap == false)
+ * recalls the whole file regardless, so the per-holder lookup there
+ * is pure overhead -- and mds_coord_layout_get_by_stateid is a
+ * layout_state scan, so skipping it removes one scan per holder from
+ * the unlink hot path.  The row's seqid equals the seqid the
+ * iterator already delivered (same layout_state row), so dropping
+ * the lookup does not change the effective stateid; the in-memory
+ * layout_seqid_peek clamp still applies.
+ */
+static void byte_range_resolve_hold(const struct byte_range_collect_ctx *c,
+                                    const struct nfs4_stateid *stateid,
+                                    struct byte_range_hold *h)
+{
+    uint32_t latest_seqid = 0;
+
+    h->stateid = *stateid;
+    if (c->require_range_overlap && c->cat != NULL) {
+        uint64_t scratch_clientid = 0;
+        uint64_t scratch_fileid = 0;
+        uint32_t scratch_iomode = 0;
+        uint32_t scratch_seqid = 0;
+        enum mds_status st;
+
+        st = mds_coord_layout_get_by_stateid(c->cat,
+                                              stateid->other,
+                                              &scratch_clientid,
+                                              &scratch_fileid,
+                                              &scratch_iomode,
+                                              &h->hold_off, &h->hold_len,
+                                              &scratch_seqid);
+        if (st != MDS_OK) {
+            /* Stale or partially-persisted state -- fall back to
+             * whole-file recall to be safe. */
+            h->hold_off = 0;
+            h->hold_len = UINT64_MAX;
+        } else if (scratch_seqid > h->stateid.seqid) {
+            h->stateid.seqid = scratch_seqid;
+        }
+    } else {
+        /* Whole-file recall (final unlink) or no catalogue: no need
+         * to fetch the holder's byte range. */
+        h->hold_off = 0;
+        h->hold_len = UINT64_MAX;
+    }
+
+    if (layout_seqid_peek(h->stateid.other, &latest_seqid) &&
+        latest_seqid > h->stateid.seqid) {
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "DBG-RECALL:  -> stateid seqid clamp row=%u latest=%u",
+            h->stateid.seqid, latest_seqid);
+        h->stateid.seqid = latest_seqid;
+    }
+}
+
+/* Populate a holder slot from the resolved snapshot. */
+static void byte_range_holder_set(struct byte_range_holder *dst,
+                                  const struct byte_range_collect_ctx *c,
+                                  uint64_t clientid,
+                                  const struct byte_range_hold *h,
+                                  bool send_cb)
+{
+    dst->clientid       = clientid;
+    dst->fileid         = c->fileid;
+    dst->stateid        = h->stateid;
+    dst->iomode         = h->iomode;
+    dst->offset         = h->hold_off;
+    dst->length         = h->hold_len;
+    dst->recall_offset  = h->inter_off;
+    dst->recall_length  = h->inter_len;
+    dst->send_cb        = send_cb;
+    dst->layout_type    = c->req_layout_type;
+    dst->owner_mds_id   = c->owner_mds_id;
+    dst->generation     = c->generation;
+}
+
+static void br_dedup_trace(bool replaced, uint32_t k)
+{
+    MDS_LOG_DEBUG(LOG_COMP_MDS,
+        "DBG-RECALL:  -> DEDUP %s holder[%u] (%s)",
+        replaced ? "replaced" : "kept", k,
+        replaced ? "higher seqid" : "existing seqid >=");
+}
+
+/*
+ * Dedupe by clientid (Mark's MDS_BUGS_2026-05-04 Bug A defensive
+ * guard).  Step 3 of layout_pick_stateid prevents new duplicate
+ * rows from being persisted on the grant path; this guard handles
+ * the rows that were already persisted by older daemon builds and
+ * have not yet been cycled out by client LAYOUTRETURN / lease
+ * expiry.  Without this dedupe the helper would issue one CB per
+ * legacy row, and at least N-1 of them would carry a stateid the
+ * client no longer recognises (rejected with NFS4ERR_OLD_STATEID
+ * / NFS4ERR_BAD_STATEID).
+ *
+ * Behaviour: if a holder entry already exists for this clientid,
+ * keep the row with the highest stateid->seqid -- most recent
+ * grant.  Discard older rows: their stateids are dead from the
+ * client's perspective.
+ *
+ * Returns true when the row was absorbed into an existing entry (the
+ * caller appends nothing); false when a new entry must be appended
+ * with *send_cb (keep_duplicate_rows mode marks superseded rows so
+ * only the newest stateid per client gets a CB).
+ */
+static bool byte_range_dedupe_holder(struct byte_range_collect_ctx *c,
+                                     uint64_t clientid,
+                                     const struct byte_range_hold *h,
+                                     bool *send_cb)
+{
+    *send_cb = true;
+    for (uint32_t k = 0; k < c->count; k++) {
+        if (c->holders[k].clientid != clientid) {
+            continue;
+        }
+        if (!c->keep_duplicate_rows) {
+            bool replaced = h->stateid.seqid > c->holders[k].stateid.seqid;
+
+            if (replaced) {
+                byte_range_holder_set(&c->holders[k], c, clientid, h,
+                                      true);
+            }
+            br_dedup_trace(replaced, k);
+            return true;
+        }
+
+        if (h->stateid.seqid > c->holders[k].stateid.seqid) {
+            if (c->holders[k].send_cb) {
+                c->holders[k].send_cb = false;
+            }
+        } else if (c->holders[k].send_cb) {
+            *send_cb = false;
+        }
+    }
+    return false;
+}
+
 /*
  * Per-holder iterator callback for mds_coord_layout_iter_file.  We
  * receive (clientid, stateid, iomode) and look up (offset, length)
@@ -789,22 +948,14 @@ static int byte_range_collect_cb(uint64_t clientid,
                                  uint32_t iomode, void *ctx)
 {
     struct byte_range_collect_ctx *c = ctx;
-    uint64_t hold_off = 0;
-    uint64_t hold_len = 0;
-    uint64_t inter_off = 0;
-    uint64_t inter_len = 0;
-    uint64_t scratch_clientid = 0;
-    uint64_t scratch_fileid = 0;
-    uint32_t scratch_iomode = 0;
-    uint32_t scratch_seqid = 0;
-    uint32_t latest_seqid = 0;
-    struct nfs4_stateid effective_stateid;
-    enum mds_status st;
+    struct byte_range_hold h;
+    bool send_cb;
 
     if (c == NULL || stateid == NULL) {
         return 0;
     }
-    effective_stateid = *stateid;
+    memset(&h, 0, sizeof(h));
+    h.iomode = iomode;
     /* DEBUG-RECALL: log every holder seen for this fileid. */
     MDS_LOG_DEBUG(LOG_COMP_MDS,
         "DBG-RECALL: iter fileid=%llu  holder_clientid=0x%llx "
@@ -814,148 +965,46 @@ static int byte_range_collect_cb(uint64_t clientid,
         (unsigned long long)c->req_clientid,
         iomode, c->req_iomode);
     if (c->skip_req_client && clientid == c->req_clientid) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP self");
-        return 0; /* self -- skip */
+        return br_trace_rc(0, "SKIP self"); /* self -- skip */
     }
     if (c->require_iomode_conflict &&
         !iomode_conflicts(iomode, c->req_iomode)) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP iomode-no-conflict");
-        return 0;
+        return br_trace_rc(0, "SKIP iomode-no-conflict");
     }
     if (c->count >= c->capacity) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> STOP capacity reached");
-        return 1; /* stop scan; defer surplus to next call */
+        /* stop scan; defer surplus to next call */
+        return br_trace_rc(1, "STOP capacity reached");
     }
 
-    /*
-     * Only the byte-range conflict path needs the holder's actual
-     * (offset, length): it intersects them against the requester's
-     * range below.  The final-unlink path (require_range_overlap ==
-     * false) recalls the whole file regardless, so the per-holder
-     * lookup there is pure overhead -- and mds_coord_layout_get_by_stateid
-     * is a layout_state scan, so skipping it removes one scan per holder
-     * from the unlink hot path.  The row's seqid equals the seqid the
-     * iterator already delivered (same layout_state row), so dropping
-     * the lookup does not change the effective stateid; the in-memory
-     * layout_seqid_peek clamp below still applies.
-     */
-    if (c->require_range_overlap && c->cat != NULL) {
-        st = mds_coord_layout_get_by_stateid(c->cat,
-                                              stateid->other,
-                                              &scratch_clientid,
-                                              &scratch_fileid,
-                                              &scratch_iomode,
-                                              &hold_off, &hold_len,
-                                              &scratch_seqid);
-        if (st != MDS_OK) {
-            /* Stale or partially-persisted state -- fall back to
-             * whole-file recall to be safe. */
-            hold_off = 0;
-            hold_len = UINT64_MAX;
-        } else if (scratch_seqid > effective_stateid.seqid) {
-            effective_stateid.seqid = scratch_seqid;
-        }
-    } else {
-        /* Whole-file recall (final unlink) or no catalogue: no need
-         * to fetch the holder's byte range. */
-        hold_off = 0;
-        hold_len = UINT64_MAX;
-    }
-
-    if (layout_seqid_peek(effective_stateid.other, &latest_seqid) &&
-        latest_seqid > effective_stateid.seqid) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS,
-            "DBG-RECALL:  -> stateid seqid clamp row=%u latest=%u",
-            effective_stateid.seqid, latest_seqid);
-        effective_stateid.seqid = latest_seqid;
-    }
+    byte_range_resolve_hold(c, stateid, &h);
 
     MDS_LOG_DEBUG(LOG_COMP_MDS,
         "DBG-RECALL:  -> stateid_lookup hold_off=%llu hold_len=%llu "
         "req_off=%llu req_len=%llu",
-        (unsigned long long)hold_off, (unsigned long long)hold_len,
+        (unsigned long long)h.hold_off, (unsigned long long)h.hold_len,
         (unsigned long long)c->req_offset,
         (unsigned long long)c->req_length);
     if (c->require_range_overlap) {
         if (!range_intersect(c->req_offset, c->req_length,
-                              hold_off, hold_len,
-                              &inter_off, &inter_len)) {
-            MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP disjoint range");
-            return 0; /* disjoint ranges -- no conflict */
+                              h.hold_off, h.hold_len,
+                              &h.inter_off, &h.inter_len)) {
+            /* disjoint ranges -- no conflict */
+            return br_trace_rc(0, "SKIP disjoint range");
         }
     } else {
-        inter_off = c->req_offset;
-        inter_len = c->req_length;
+        h.inter_off = c->req_offset;
+        h.inter_len = c->req_length;
     }
     MDS_LOG_DEBUG(LOG_COMP_MDS,
         "DBG-RECALL:  -> ACCEPT inter_off=%llu inter_len=%llu",
-        (unsigned long long)inter_off, (unsigned long long)inter_len);
+        (unsigned long long)h.inter_off, (unsigned long long)h.inter_len);
 
-    /*
-     * Dedupe by clientid (Mark's MDS_BUGS_2026-05-04 Bug A defensive
-     * guard).  Step 3 of layout_pick_stateid prevents new duplicate
-     * rows from being persisted on the grant path; this guard handles
-     * the rows that were already persisted by older daemon builds and
-     * have not yet been cycled out by client LAYOUTRETURN / lease
-     * expiry.  Without this dedupe the helper would issue one CB per
-     * legacy row, and at least N-1 of them would carry a stateid the
-     * client no longer recognises (rejected with NFS4ERR_OLD_STATEID
-     * / NFS4ERR_BAD_STATEID).
-     *
-     * Behaviour: if a holder entry already exists for this clientid,
-     * keep the row with the highest stateid->seqid -- most recent
-     * grant.  Discard older rows: their stateids are dead from the
-     * client's perspective.
-     */
-    bool send_cb = true;
-    for (uint32_t k = 0; k < c->count; k++) {
-        if (c->holders[k].clientid != clientid) {
-            continue;
-        }
-        if (!c->keep_duplicate_rows) {
-            if (effective_stateid.seqid > c->holders[k].stateid.seqid) {
-                c->holders[k].stateid       = effective_stateid;
-                c->holders[k].iomode        = iomode;
-                c->holders[k].offset        = hold_off;
-                c->holders[k].length        = hold_len;
-                c->holders[k].recall_offset = inter_off;
-                c->holders[k].recall_length = inter_len;
-                c->holders[k].send_cb       = true;
-                c->holders[k].layout_type   = c->req_layout_type;
-                c->holders[k].owner_mds_id  = c->owner_mds_id;
-                c->holders[k].generation    = c->generation;
-                MDS_LOG_DEBUG(LOG_COMP_MDS,
-                    "DBG-RECALL:  -> DEDUP replaced "
-                    "holder[%u] (higher seqid)", k);
-            } else {
-                MDS_LOG_DEBUG(LOG_COMP_MDS,
-                    "DBG-RECALL:  -> DEDUP kept "
-                    "holder[%u] (existing seqid >=)", k);
-            }
-            return 0;
-        }
-
-        if (effective_stateid.seqid > c->holders[k].stateid.seqid) {
-            if (c->holders[k].send_cb) {
-                c->holders[k].send_cb = false;
-            }
-        } else if (c->holders[k].send_cb) {
-            send_cb = false;
-        }
+    if (byte_range_dedupe_holder(c, clientid, &h, &send_cb)) {
+        return 0;
     }
 
-    c->holders[c->count].clientid       = clientid;
-    c->holders[c->count].fileid         = c->fileid;
-    c->holders[c->count].stateid        = effective_stateid;
-    c->holders[c->count].iomode         = iomode;
-    c->holders[c->count].offset         = hold_off;
-    c->holders[c->count].length         = hold_len;
-    c->holders[c->count].recall_offset  = inter_off;
-    c->holders[c->count].recall_length  = inter_len;
-    c->holders[c->count].send_cb        = send_cb;
-    c->holders[c->count].layout_type    = c->req_layout_type;
-    c->holders[c->count].owner_mds_id   = c->owner_mds_id;
-    c->holders[c->count].generation     = c->generation;
+    byte_range_holder_set(&c->holders[c->count], c, clientid, &h,
+                          send_cb);
     c->count++;
     return 0;
 }
@@ -1002,36 +1051,16 @@ struct byte_range_one_cb_ctx {
     int                             cb_status;
 };
 
-static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
-                                    void *ctx)
+/*
+ * Resolve and dup() the holder session's backchannel fd.  Returns -1
+ * (with c->cb_status = CB_NOT_SENT) when no live backchannel exists.
+ */
+static int byte_range_cb_dup_fd(const struct session_cb_snap *snap,
+                                struct byte_range_one_cb_ctx *c)
 {
-    struct byte_range_one_cb_ctx *c = ctx;
-    struct nfs4_cb_layoutrecall_args args;
-    struct nfs4_stateid recall_stateid;
-    uint32_t recall_seqid = 0;
-    bool seqid_hit = false;
     int fd;
     int dup_fd;
-    int rc;
 
-    if (snap == NULL || c == NULL || c->holder == NULL) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS,
-            "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p",
-            (void *)snap, (void *)c);
-        return 0;
-    }
-    MDS_LOG_DEBUG(LOG_COMP_MDS,
-        "DBG-RECALL: cb_one_holder snap.clientid=0x%llx holder.clientid=0x%llx cb_conn=%p",
-        (unsigned long long)snap->clientid,
-        (unsigned long long)c->holder->clientid,
-        (void*)snap->cb_conn);
-    /* Defensive: per-clientid iterator already filters by clientid,
-     * but a same-process race could in theory invoke this from the
-     * global iterator path -- keep the explicit check. */
-    if (c->holder->clientid != snap->clientid) {
-        MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP clientid mismatch");
-        return 0;
-    }
     fd = rpc_conn_get_fd(snap->cb_conn);
     MDS_LOG_DEBUG(LOG_COMP_MDS, "DBG-RECALL:  -> rpc_conn_get_fd = %d", fd);
     if (fd < 0) {
@@ -1040,40 +1069,61 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
          * deliver the recall.  The kernel will discover the
          * revoke on its next op against the layout stateid. */
         c->cb_status = CB_NOT_SENT;
-        return 0;
+        return -1;
     }
     dup_fd = dup(fd);
     if (dup_fd < 0) {
         MDS_LOG_ERROR(LOG_COMP_MDS, "DBG-RECALL:  -> SKIP dup failed errno=%d", errno);
         c->cb_status = CB_NOT_SENT;
-        return 0;
+        return -1;
     }
-    /*
-     * RFC 8881 S12.5.3: CB_LAYOUTRECALL is one of the operations
-     * that advances the layout stateid seqid.  The holder row carries
-     * the latest seqid issued by LAYOUTGET/LAYOUTRETURN; the recall
-     * itself must send the next value, otherwise Linux rejects the CB
-     * with NFS4ERR_OLD_STATEID and never returns the layout.
-     */
-    recall_stateid = c->holder->stateid;
-    layout_seqid_record_at(recall_stateid.other, recall_stateid.seqid);
-    layout_seqid_advance(recall_stateid.other, &seqid_hit, &recall_seqid);
+    return dup_fd;
+}
+
+/*
+ * RFC 8881 S12.5.3: CB_LAYOUTRECALL is one of the operations
+ * that advances the layout stateid seqid.  The holder row carries
+ * the latest seqid issued by LAYOUTGET/LAYOUTRETURN; the recall
+ * itself must send the next value, otherwise Linux rejects the CB
+ * with NFS4ERR_OLD_STATEID and never returns the layout.
+ */
+static void byte_range_recall_stateid(const struct nfs4_stateid *holder_sid,
+                                      struct nfs4_stateid *recall_stateid)
+{
+    uint32_t recall_seqid = 0;
+    bool seqid_hit = false;
+
+    *recall_stateid = *holder_sid;
+    layout_seqid_record_at(recall_stateid->other, recall_stateid->seqid);
+    layout_seqid_advance(recall_stateid->other, &seqid_hit, &recall_seqid);
     if (seqid_hit) {
-        recall_stateid.seqid = recall_seqid;
+        recall_stateid->seqid = recall_seqid;
     } else {
-        recall_stateid.seqid++;
-        if (recall_stateid.seqid == 0) {
-            recall_stateid.seqid = 1;
+        recall_stateid->seqid++;
+        if (recall_stateid->seqid == 0) {
+            recall_stateid->seqid = 1;
         }
-        layout_seqid_record_at(recall_stateid.other, recall_stateid.seqid);
+        layout_seqid_record_at(recall_stateid->other,
+                               recall_stateid->seqid);
     }
+}
+
+/* Encode and send the CB_LAYOUTRECALL on dup_fd (closed here); the
+ * transport / client status lands in c->cb_status. */
+static void byte_range_cb_send(const struct session_cb_snap *snap,
+                               struct byte_range_one_cb_ctx *c,
+                               int dup_fd,
+                               const struct nfs4_stateid *recall_stateid)
+{
+    struct nfs4_cb_layoutrecall_args args;
+    int rc;
 
     memset(&args, 0, sizeof(args));
     args.layout_type = c->holder->layout_type;
     args.iomode      = c->holder->iomode;
     args.recall_type = LAYOUTRECALL4_FILE;
     args.fileid      = c->holder->fileid;
-    args.stateid     = recall_stateid;
+    args.stateid     = *recall_stateid;
     args.offset      = c->holder->recall_offset;
     args.length      = c->holder->recall_length;
     /* Filehandle identity resolved at collect time.  The client matches
@@ -1105,6 +1155,38 @@ static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
             (unsigned long long)args.length, rc);
     }
     (void)close(dup_fd);
+}
+
+static int byte_range_cb_one_holder(const struct session_cb_snap *snap,
+                                    void *ctx)
+{
+    struct byte_range_one_cb_ctx *c = ctx;
+    struct nfs4_stateid recall_stateid;
+    int dup_fd;
+
+    if (snap == NULL || c == NULL || c->holder == NULL) {
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "DBG-RECALL: cb_one_holder NULL arg snap=%p ctx=%p",
+            (void *)snap, (void *)c);
+        return 0;
+    }
+    MDS_LOG_DEBUG(LOG_COMP_MDS,
+        "DBG-RECALL: cb_one_holder snap.clientid=0x%llx holder.clientid=0x%llx cb_conn=%p",
+        (unsigned long long)snap->clientid,
+        (unsigned long long)c->holder->clientid,
+        (void*)snap->cb_conn);
+    /* Defensive: per-clientid iterator already filters by clientid,
+     * but a same-process race could in theory invoke this from the
+     * global iterator path -- keep the explicit check. */
+    if (c->holder->clientid != snap->clientid) {
+        return br_trace_rc(0, "SKIP clientid mismatch");
+    }
+    dup_fd = byte_range_cb_dup_fd(snap, c);
+    if (dup_fd < 0) {
+        return 0;
+    }
+    byte_range_recall_stateid(&c->holder->stateid, &recall_stateid);
+    byte_range_cb_send(snap, c, dup_fd, &recall_stateid);
 
     /*
      * Return 1 ("snap consumed") so session_invoke_cb_locked()
@@ -1210,6 +1292,42 @@ static int byte_range_collect_holders(struct layout_recall *lr,
     return 0;
 }
 
+/* Send the CB for holder i (unless it was deduplicated) and record
+ * its status in cb_status[i]. */
+static void byte_range_dispatch_one(struct layout_recall *lr,
+                                    const struct byte_range_holder *holders,
+                                    uint32_t i, int *cb_status)
+{
+    struct byte_range_one_cb_ctx one_ctx = {
+        .holder = &holders[i],
+        .timeout_ms = lr->revoke_ms,
+        .cb_status = CB_NOT_SENT,
+    };
+    int n;
+
+    if (!holders[i].send_cb) {
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "DBG-RECALL:  -> SKIP duplicate CB holder[%u] "
+            "clientid=0x%llx fileid=%llu",
+            i,
+            (unsigned long long)holders[i].clientid,
+            (unsigned long long)holders[i].fileid);
+        return;
+    }
+
+    MDS_LOG_DEBUG(LOG_COMP_MDS,
+        "DBG-RECALL: session_for_each_with_cb_for_clientid "
+        "holder[%u].clientid=0x%llx",
+        i, (unsigned long long)holders[i].clientid);
+    n = session_for_each_with_cb_for_clientid(
+        lr->st, holders[i].clientid,
+        byte_range_cb_one_holder, &one_ctx);
+    MDS_LOG_DEBUG(LOG_COMP_MDS,
+        "DBG-RECALL:  -> session iterator returned n=%d "
+        "cb_status=%d", n, one_ctx.cb_status);
+    cb_status[i] = one_ctx.cb_status;
+}
+
 static void byte_range_dispatch_cb_each(struct layout_recall *lr,
                                         const struct byte_range_holder *holders,
                                         uint32_t holder_count,
@@ -1234,34 +1352,7 @@ static void byte_range_dispatch_cb_each(struct layout_recall *lr,
     }
 
     for (i = 0; i < holder_count; i++) {
-        struct byte_range_one_cb_ctx one_ctx = {
-            .holder = &holders[i],
-            .timeout_ms = lr->revoke_ms,
-            .cb_status = CB_NOT_SENT,
-        };
-        int n;
-
-        if (!holders[i].send_cb) {
-            MDS_LOG_DEBUG(LOG_COMP_MDS,
-                "DBG-RECALL:  -> SKIP duplicate CB holder[%u] "
-                "clientid=0x%llx fileid=%llu",
-                i,
-                (unsigned long long)holders[i].clientid,
-                (unsigned long long)holders[i].fileid);
-            continue;
-        }
-
-        MDS_LOG_DEBUG(LOG_COMP_MDS,
-            "DBG-RECALL: session_for_each_with_cb_for_clientid "
-            "holder[%u].clientid=0x%llx",
-            i, (unsigned long long)holders[i].clientid);
-        n = session_for_each_with_cb_for_clientid(
-            lr->st, holders[i].clientid,
-            byte_range_cb_one_holder, &one_ctx);
-        MDS_LOG_DEBUG(LOG_COMP_MDS,
-            "DBG-RECALL:  -> session iterator returned n=%d "
-            "cb_status=%d", n, one_ctx.cb_status);
-        cb_status[i] = one_ctx.cb_status;
+        byte_range_dispatch_one(lr, holders, i, cb_status);
     }
 }
 
@@ -1270,6 +1361,43 @@ static bool byte_range_cb_status_transient(int cb_status)
     return (cb_status == 0) ||
            (cb_status == (int)NFS4ERR_DELAY) ||
            (cb_status == (int)NFS4ERR_RECALLCONFLICT);
+}
+
+/* Revoke holder i unless its CB status is transient (and transient
+ * revocation was not forced). */
+static void byte_range_revoke_one(struct layout_recall *lr,
+                                  const struct byte_range_holder *holder,
+                                  uint32_t i, int s, bool revoke_transient)
+{
+    if (!revoke_transient && byte_range_cb_status_transient(s)) {
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "DBG-RECALL:  -> SKIP revoke holder[%u] "
+            "clientid=0x%llx fileid=%llu cb_status=%d "
+            "(transient \\u2014 awaiting LAYOUTRETURN)",
+            i,
+            (unsigned long long)holder->clientid,
+            (unsigned long long)holder->fileid, s);
+        return;
+    }
+
+    MDS_LOG_DEBUG(LOG_COMP_MDS,
+        "DBG-RECALL:  -> revoke holder[%u] "
+        "clientid=0x%llx fileid=%llu cb_status=%d%s",
+        i,
+        (unsigned long long)holder->clientid,
+        (unsigned long long)holder->fileid, s,
+        revoke_transient ? " (forced)" : "");
+    revoke_layout(lr, holder->stateid.other,
+                  holder->clientid, holder->fileid, 0);
+    layout_seqid_remove(holder->stateid.other);
+
+    /* RFC 8435 §14: fence the DS backing files so the revoked
+     * client's stale credentials fail at the DS POSIX layer. */
+    if (lr->proxy != NULL) {
+        fence_ds_file_for_fileid(lr->proxy,
+                                (struct mds_catalogue *)lr->cat,
+                                holder->fileid);
+    }
 }
 
 static void byte_range_revoke_holders(struct layout_recall *lr,
@@ -1287,35 +1415,7 @@ static void byte_range_revoke_holders(struct layout_recall *lr,
     for (i = 0; i < holder_count; i++) {
         const int s = (cb_status != NULL) ? cb_status[i] : CB_NOT_SENT;
 
-        if (!revoke_transient && byte_range_cb_status_transient(s)) {
-            MDS_LOG_DEBUG(LOG_COMP_MDS,
-                "DBG-RECALL:  -> SKIP revoke holder[%u] "
-                "clientid=0x%llx fileid=%llu cb_status=%d "
-                "(transient \\u2014 awaiting LAYOUTRETURN)",
-                i,
-                (unsigned long long)holders[i].clientid,
-                (unsigned long long)holders[i].fileid, s);
-            continue;
-        }
-
-        MDS_LOG_DEBUG(LOG_COMP_MDS,
-            "DBG-RECALL:  -> revoke holder[%u] "
-            "clientid=0x%llx fileid=%llu cb_status=%d%s",
-            i,
-            (unsigned long long)holders[i].clientid,
-            (unsigned long long)holders[i].fileid, s,
-            revoke_transient ? " (forced)" : "");
-        revoke_layout(lr, holders[i].stateid.other,
-                      holders[i].clientid, holders[i].fileid, 0);
-        layout_seqid_remove(holders[i].stateid.other);
-
-        /* RFC 8435 §14: fence the DS backing files so the revoked
-         * client's stale credentials fail at the DS POSIX layer. */
-        if (lr->proxy != NULL) {
-            fence_ds_file_for_fileid(lr->proxy,
-                                    (struct mds_catalogue *)lr->cat,
-                                    holders[i].fileid);
-        }
+        byte_range_revoke_one(lr, &holders[i], i, s, revoke_transient);
     }
 }
 
@@ -1383,10 +1483,8 @@ int layout_recall_revoke_all_for_unlink(struct layout_recall *lr,
      * gone) or NFS4ERR_STALE (inode gone) — both are safe terminal
      * outcomes in Linux NFSv4.1+.
      */
-    {
-        uint32_t _ri;
-        for (_ri = 0; _ri < holder_count; _ri++)
-            cb_status[_ri] = CB_NOT_SENT;
+    for (uint32_t ri = 0; ri < holder_count; ri++) {
+        cb_status[ri] = CB_NOT_SENT;
     }
     byte_range_revoke_holders(lr, holders, holder_count, cb_status, true);
 

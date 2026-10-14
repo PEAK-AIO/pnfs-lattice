@@ -138,6 +138,9 @@ static size_t mc_put_xdr_string(uint8_t *out, size_t cap, const char *s)
     }
     mc_put_u32(out, (uint32_t)len);
     if (len > 0) {
+        /* XDR opaque<> carries an explicit length and is never a C
+         * string on the wire: no terminator belongs here. */
+        /* NOLINTNEXTLINE(bugprone-not-null-terminated-result) */
         memcpy(out + 4, s, len);
     }
     if (padded > len) {
@@ -338,6 +341,27 @@ static int mc_parse_call_header(const uint8_t *in, size_t in_len,
  * Public dispatch entry point.
  * ----------------------------------------------------------------------- */
 
+/* Publish an emitted reply of @a n bytes: 0 on success, -1 when the
+ * emitter reported overflow (n == 0). */
+static int mc_finish_reply(size_t n, size_t *out_len)
+{
+    if (n == 0) {
+        return -1;
+    }
+    *out_len = n;
+    return 0;
+}
+
+/* Same for a header (@a hdr bytes, already emitted) plus @a body. */
+static int mc_finish_reply_body(size_t hdr, size_t body, size_t *out_len)
+{
+    if (body == 0) {
+        return -1;
+    }
+    *out_len = hdr + body;
+    return 0;
+}
+
 int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
                                 const uint8_t *in, size_t in_len,
                                 uint8_t *out, size_t out_cap,
@@ -360,12 +384,8 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
                                   &xid, &prog, &vers, &proc,
                                   &auth_flavor, &args_off);
     if (hr == -2) {
-        size_t n = mc_emit_rpc_mismatch(out, out_cap, xid);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
+        return mc_finish_reply(mc_emit_rpc_mismatch(out, out_cap, xid),
+                               out_len);
     }
     if (hr != 0) {
         return -1;                              /* drop */
@@ -377,30 +397,21 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
      * is rejected with AUTH_TOOWEAK so well-behaved clients can fall
      * back. */
     if (auth_flavor != RPC_AUTH_NONE && auth_flavor != RPC_AUTH_UNIX) {
-        size_t n = mc_emit_auth_error(out, out_cap, xid, RPC_AUTH_TOOWEAK);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
+        return mc_finish_reply(mc_emit_auth_error(out, out_cap, xid,
+                                                  RPC_AUTH_TOOWEAK),
+                               out_len);
     }
 
     if (prog != MOUNTD_PROG) {
-        size_t n = mc_emit_accepted(out, out_cap, xid, ACCEPT_PROG_UNAVAIL);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
+        return mc_finish_reply(mc_emit_accepted(out, out_cap, xid,
+                                                ACCEPT_PROG_UNAVAIL),
+                               out_len);
     }
     if (vers != MOUNTD_VERS3) {
-        size_t n = mc_emit_prog_mismatch(out, out_cap, xid,
-                                         MOUNTD_VERS3, MOUNTD_VERS3);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
+        return mc_finish_reply(mc_emit_prog_mismatch(out, out_cap, xid,
+                                                     MOUNTD_VERS3,
+                                                     MOUNTD_VERS3),
+                               out_len);
     }
 
     /* All MOUNT3 procedures except NULL, EXPORT and DUMP take args
@@ -409,50 +420,35 @@ int mountd_compat_handle_packet(const struct mountd_compat_exports *exports,
     (void)args_off;
 
     switch (proc) {
-    case MOUNTPROC3_NULL: {
-        size_t n = mc_emit_accepted(out, out_cap, xid, ACCEPT_SUCCESS);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
-    }
+    case MOUNTPROC3_NULL:
+        return mc_finish_reply(mc_emit_accepted(out, out_cap, xid,
+                                                ACCEPT_SUCCESS),
+                               out_len);
     case MOUNTPROC3_EXPORT: {
         size_t n = mc_emit_accepted(out, out_cap, xid, ACCEPT_SUCCESS);
         if (n == 0) {
             return -1;
         }
-        size_t body = mc_emit_exportlist(out + n, out_cap - n, exports);
-        if (body == 0) {
-            return -1;
-        }
-        *out_len = n + body;
-        return 0;
+        return mc_finish_reply_body(
+            n, mc_emit_exportlist(out + n, out_cap - n, exports),
+            out_len);
     }
     case MOUNTPROC3_DUMP: {
         size_t n = mc_emit_accepted(out, out_cap, xid, ACCEPT_SUCCESS);
         if (n == 0) {
             return -1;
         }
-        size_t body = mc_emit_empty_dump(out + n, out_cap - n);
-        if (body == 0) {
-            return -1;
-        }
-        *out_len = n + body;
-        return 0;
+        return mc_finish_reply_body(
+            n, mc_emit_empty_dump(out + n, out_cap - n), out_len);
     }
     /* MNT, UMNT, UMNTALL, anything else -> PROC_UNAVAIL. */
     case MOUNTPROC3_MNT:
     case MOUNTPROC3_UMNT:
     case MOUNTPROC3_UMNTALL:
-    default: {
-        size_t n = mc_emit_accepted(out, out_cap, xid, ACCEPT_PROC_UNAVAIL);
-        if (n == 0) {
-            return -1;
-        }
-        *out_len = n;
-        return 0;
-    }
+    default:
+        return mc_finish_reply(mc_emit_accepted(out, out_cap, xid,
+                                                ACCEPT_PROC_UNAVAIL),
+                               out_len);
     }
 }
 
@@ -736,6 +732,65 @@ static int mc_tcp_write_record(int fd, const uint8_t *body, size_t body_len)
     return 0;
 }
 
+/* Classify a non-blocking recv() result: 1 = bytes received,
+ * 0 = would block (keep the connection), -1 = peer closed or error. */
+static int mc_recv_status(ssize_t n)
+{
+    if (n > 0) {
+        return 1;
+    }
+    if (n == 0) {
+        return -1;
+    }
+    return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+}
+
+/* Step 1 of mc_tcp_drain: accumulate the 4-byte record mark.
+ * Returns 1 once the mark is complete, 0 to wait for more bytes,
+ * -1 to close the connection. */
+static int mc_tcp_read_rm(struct mc_tcp_conn *c)
+{
+    ssize_t n = recv(c->fd, c->rm + c->rm_have,
+                     4U - c->rm_have, MSG_DONTWAIT);
+    int rs = mc_recv_status(n);
+
+    if (rs <= 0) {
+        return rs;
+    }
+    c->rm_have += (uint8_t)n;
+    if (c->rm_have < 4U) {
+        return 0;
+    }
+    uint32_t marker = mc_get_u32(c->rm);
+    c->last_fragment = (marker & 0x80000000U) != 0U;
+    uint32_t frag_len = marker & 0x7FFFFFFFU;
+    if ((uint64_t)c->have_bytes + frag_len > MOUNTD_MAX_PKT) {
+        /* Record too large -- drop the connection. */
+        return -1;
+    }
+    c->need_bytes = frag_len;
+    c->have_rm    = true;
+    return 1;
+}
+
+/* Step 2 of mc_tcp_drain: accumulate the fragment body.  Same return
+ * convention as mc_tcp_read_rm. */
+static int mc_tcp_read_body(struct mc_tcp_conn *c)
+{
+    while (c->need_bytes > 0) {
+        ssize_t n = recv(c->fd, c->body + c->have_bytes,
+                         c->need_bytes, MSG_DONTWAIT);
+        int rs = mc_recv_status(n);
+
+        if (rs <= 0) {
+            return rs;
+        }
+        c->have_bytes += (uint32_t)n;
+        c->need_bytes -= (uint32_t)n;
+    }
+    return 1;
+}
+
 /**
  * Read available bytes from @a c->fd into the pending record-mark
  * header / body, and dispatch any complete records.
@@ -745,43 +800,20 @@ static int mc_tcp_drain(struct mountd_compat_ctx *ctx,
                         struct mc_tcp_conn *c)
 {
     for (;;) {
+        int r;
+
         /* 1. Record-mark header. */
         if (!c->have_rm) {
-            ssize_t n = recv(c->fd, c->rm + c->rm_have,
-                             4U - c->rm_have, MSG_DONTWAIT);
-            if (n == 0) {
-                return -1;
+            r = mc_tcp_read_rm(c);
+            if (r <= 0) {
+                return r;
             }
-            if (n < 0) {
-                return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
-            }
-            c->rm_have += (uint8_t)n;
-            if (c->rm_have < 4U) {
-                return 0;
-            }
-            uint32_t marker = mc_get_u32(c->rm);
-            c->last_fragment = (marker & 0x80000000U) != 0U;
-            uint32_t frag_len = marker & 0x7FFFFFFFU;
-            if ((uint64_t)c->have_bytes + frag_len > MOUNTD_MAX_PKT) {
-                /* Record too large -- drop the connection. */
-                return -1;
-            }
-            c->need_bytes = frag_len;
-            c->have_rm    = true;
         }
 
         /* 2. Record body. */
-        while (c->need_bytes > 0) {
-            ssize_t n = recv(c->fd, c->body + c->have_bytes,
-                             c->need_bytes, MSG_DONTWAIT);
-            if (n == 0) {
-                return -1;
-            }
-            if (n < 0) {
-                return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
-            }
-            c->have_bytes += (uint32_t)n;
-            c->need_bytes -= (uint32_t)n;
+        r = mc_tcp_read_body(c);
+        if (r <= 0) {
+            return r;
         }
 
         /* 3. End of fragment.  If not the last, loop for the next
@@ -890,6 +922,41 @@ static void mc_sweep_idle(struct mountd_compat_ctx *ctx)
     }
 }
 
+/* Dispatch one epoll event to the listener / wake / connection path. */
+static void mc_handle_event(struct mountd_compat_ctx *ctx,
+                            const struct epoll_event *ev)
+{
+    void *p = ev->data.ptr;
+    if (p == &ctx->udp_fd) {
+        mc_handle_udp(ctx);
+        return;
+    }
+    if (p == &ctx->tcp_fd) {
+        mc_handle_accept(ctx);
+        return;
+    }
+    if (p == &ctx->wake_fd) {
+        /* Drain wake pipe; the loop condition check in mc_thread
+         * already saw 'running == 0' so it will exit. */
+        uint8_t drain[16];
+        ssize_t n = read(ctx->wake_fd, drain, sizeof(drain));
+
+        (void)n; /* drain only; 'running' decides */
+        return;
+    }
+    /* TCP connection event. */
+    struct mc_tcp_conn *c = p;
+    if (ev->events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+        mc_conn_close(ctx, c);
+        return;
+    }
+    if (ev->events & EPOLLIN) {
+        if (mc_tcp_drain(ctx, c) != 0) {
+            mc_conn_close(ctx, c);
+        }
+    }
+}
+
 static void *mc_thread(void *arg)
 {
     struct mountd_compat_ctx *ctx = arg;
@@ -906,33 +973,7 @@ static void *mc_thread(void *arg)
             break;
         }
         for (int i = 0; i < n; i++) {
-            void *p = events[i].data.ptr;
-            if (p == &ctx->udp_fd) {
-                mc_handle_udp(ctx);
-                continue;
-            }
-            if (p == &ctx->tcp_fd) {
-                mc_handle_accept(ctx);
-                continue;
-            }
-            if (p == &ctx->wake_fd) {
-                /* Drain wake pipe; the loop condition check above
-                 * already saw 'running == 0' so we'll exit. */
-                uint8_t drain[16];
-                (void)read(ctx->wake_fd, drain, sizeof(drain));
-                continue;
-            }
-            /* TCP connection event. */
-            struct mc_tcp_conn *c = p;
-            if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                mc_conn_close(ctx, c);
-                continue;
-            }
-            if (events[i].events & EPOLLIN) {
-                if (mc_tcp_drain(ctx, c) != 0) {
-                    mc_conn_close(ctx, c);
-                }
-            }
+            mc_handle_event(ctx, &events[i]);
         }
         mc_sweep_idle(ctx);
     }
@@ -970,6 +1011,112 @@ static int mc_validate_and_copy_exports(const struct mds_config *cfg,
     return 0;
 }
 
+/* Bind the UDP and TCP listeners on the configured address/port.
+ * Returns 0 with ctx->bound_port set, -1 on failure (fds left for
+ * mc_ctx_close_fds). */
+static int mc_bind_listeners(const struct mds_config *cfg,
+                             struct mountd_compat_ctx *ctx)
+{
+    uint16_t udp_port = 0;
+    uint16_t tcp_port = 0;
+    char errbuf[64];
+
+    ctx->udp_fd = mc_open_udp(cfg->mountd_compat_bind_addr,
+                              cfg->mountd_compat_port, &udp_port);
+    if (ctx->udp_fd < 0) {
+        const char *msg = strerror_r(errno, errbuf, sizeof(errbuf));
+
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: UDP bind %s:%u failed: %s",
+            cfg->mountd_compat_bind_addr,
+            (unsigned)cfg->mountd_compat_port, msg);
+        return -1;
+    }
+
+    /* If port 0 was requested, the OS gave us one; bind TCP to the
+     * same number so showmount sees a single registered port. */
+    uint16_t requested_tcp = cfg->mountd_compat_port == 0U
+                             ? udp_port
+                             : cfg->mountd_compat_port;
+    ctx->tcp_fd = mc_open_tcp(cfg->mountd_compat_bind_addr,
+                              requested_tcp, &tcp_port);
+    if (ctx->tcp_fd < 0) {
+        const char *msg = strerror_r(errno, errbuf, sizeof(errbuf));
+
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: TCP bind %s:%u failed: %s",
+            cfg->mountd_compat_bind_addr,
+            (unsigned)requested_tcp, msg);
+        return -1;
+    }
+    if (tcp_port != udp_port) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "mountd_compat: UDP and TCP bound to different "
+            "ports (udp=%u tcp=%u); rpcbind clients may pick TCP",
+            (unsigned)udp_port, (unsigned)tcp_port);
+    }
+    ctx->bound_port = tcp_port;
+    return 0;
+}
+
+/* Wake pipe + epoll set with the two listeners and the wake fd
+ * registered.  Returns 0 or -1 (fds left for mc_ctx_close_fds). */
+static int mc_setup_epoll(struct mountd_compat_ctx *ctx)
+{
+    /* Wake pipe for prompt shutdown without waiting on epoll timeout. */
+    int wp[2];
+    if (pipe(wp) != 0) {
+        return -1;
+    }
+    ctx->wake_fd       = wp[0];
+    ctx->wake_write_fd = wp[1];
+    if (mc_set_nonblock(ctx->wake_fd) < 0) {
+        return -1;
+    }
+
+    ctx->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (ctx->epoll_fd < 0) {
+        return -1;
+    }
+
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events   = EPOLLIN;
+    ev.data.ptr = &ctx->udp_fd;
+    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->udp_fd, &ev) != 0) {
+        return -1;
+    }
+    ev.data.ptr = &ctx->tcp_fd;
+    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->tcp_fd, &ev) != 0) {
+        return -1;
+    }
+    ev.data.ptr = &ctx->wake_fd;
+    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->wake_fd, &ev) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Close every listener / epoll / wake descriptor the ctx owns. */
+static void mc_ctx_close_fds(struct mountd_compat_ctx *ctx)
+{
+    if (ctx->wake_write_fd >= 0) {
+        close(ctx->wake_write_fd);
+    }
+    if (ctx->wake_fd >= 0) {
+        close(ctx->wake_fd);
+    }
+    if (ctx->epoll_fd >= 0) {
+        close(ctx->epoll_fd);
+    }
+    if (ctx->udp_fd >= 0) {
+        close(ctx->udp_fd);
+    }
+    if (ctx->tcp_fd >= 0) {
+        close(ctx->tcp_fd);
+    }
+}
+
 int mountd_compat_start(const struct mds_config *cfg,
                         struct mountd_compat_ctx **out)
 {
@@ -998,72 +1145,10 @@ int mountd_compat_start(const struct mds_config *cfg,
         return -1;
     }
 
-    uint16_t udp_port = 0;
-    uint16_t tcp_port = 0;
-
-    ctx->udp_fd = mc_open_udp(cfg->mountd_compat_bind_addr,
-                              cfg->mountd_compat_port, &udp_port);
-    if (ctx->udp_fd < 0) {
-        MDS_LOG_WARN(LOG_COMP_MDS,
-            "mountd_compat: UDP bind %s:%u failed: %s",
-            cfg->mountd_compat_bind_addr,
-            (unsigned)cfg->mountd_compat_port,
-            strerror(errno));
+    if (mc_bind_listeners(cfg, ctx) != 0) {
         goto fail;
     }
-
-    /* If port 0 was requested, the OS gave us one; bind TCP to the
-     * same number so showmount sees a single registered port. */
-    uint16_t requested_tcp = cfg->mountd_compat_port == 0U
-                             ? udp_port
-                             : cfg->mountd_compat_port;
-    ctx->tcp_fd = mc_open_tcp(cfg->mountd_compat_bind_addr,
-                              requested_tcp, &tcp_port);
-    if (ctx->tcp_fd < 0) {
-        MDS_LOG_WARN(LOG_COMP_MDS,
-            "mountd_compat: TCP bind %s:%u failed: %s",
-            cfg->mountd_compat_bind_addr,
-            (unsigned)requested_tcp,
-            strerror(errno));
-        goto fail;
-    }
-    if (tcp_port != udp_port) {
-        MDS_LOG_WARN(LOG_COMP_MDS,
-            "mountd_compat: UDP and TCP bound to different "
-            "ports (udp=%u tcp=%u); rpcbind clients may pick TCP",
-            (unsigned)udp_port, (unsigned)tcp_port);
-    }
-    ctx->bound_port = tcp_port;
-
-    /* Wake pipe for prompt shutdown without waiting on epoll timeout. */
-    int wp[2];
-    if (pipe(wp) != 0) {
-        goto fail;
-    }
-    ctx->wake_fd       = wp[0];
-    ctx->wake_write_fd = wp[1];
-    if (mc_set_nonblock(ctx->wake_fd) < 0) {
-        goto fail;
-    }
-
-    ctx->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (ctx->epoll_fd < 0) {
-        goto fail;
-    }
-
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.events   = EPOLLIN;
-    ev.data.ptr = &ctx->udp_fd;
-    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->udp_fd, &ev) != 0) {
-        goto fail;
-    }
-    ev.data.ptr = &ctx->tcp_fd;
-    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->tcp_fd, &ev) != 0) {
-        goto fail;
-    }
-    ev.data.ptr = &ctx->wake_fd;
-    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->wake_fd, &ev) != 0) {
+    if (mc_setup_epoll(ctx) != 0) {
         goto fail;
     }
 
@@ -1089,21 +1174,7 @@ int mountd_compat_start(const struct mds_config *cfg,
     return 0;
 
 fail:
-    if (ctx->wake_write_fd >= 0) {
-        close(ctx->wake_write_fd);
-    }
-    if (ctx->wake_fd >= 0) {
-        close(ctx->wake_fd);
-    }
-    if (ctx->epoll_fd >= 0) {
-        close(ctx->epoll_fd);
-    }
-    if (ctx->udp_fd >= 0) {
-        close(ctx->udp_fd);
-    }
-    if (ctx->tcp_fd >= 0) {
-        close(ctx->tcp_fd);
-    }
+    mc_ctx_close_fds(ctx);
     free(ctx);
     return -1;
 }
@@ -1117,7 +1188,11 @@ void mountd_compat_stop(struct mountd_compat_ctx *ctx)
 
     if (ctx->wake_write_fd >= 0) {
         uint8_t b = 0;
-        (void)write(ctx->wake_write_fd, &b, 1);
+        /* Best-effort wake: the epoll timeout bounds the wait when
+         * the byte is lost. */
+        ssize_t n = write(ctx->wake_write_fd, &b, 1);
+
+        (void)n;
     }
     if (ctx->thread_started) {
         (void)pthread_join(ctx->thread, NULL);
@@ -1135,20 +1210,6 @@ void mountd_compat_stop(struct mountd_compat_ctx *ctx)
         mc_rpcbind_set(ctx->bound_port, false);
     }
 
-    if (ctx->wake_write_fd >= 0) {
-        close(ctx->wake_write_fd);
-    }
-    if (ctx->wake_fd >= 0) {
-        close(ctx->wake_fd);
-    }
-    if (ctx->epoll_fd >= 0) {
-        close(ctx->epoll_fd);
-    }
-    if (ctx->udp_fd >= 0) {
-        close(ctx->udp_fd);
-    }
-    if (ctx->tcp_fd >= 0) {
-        close(ctx->tcp_fd);
-    }
+    mc_ctx_close_fds(ctx);
     free(ctx);
 }

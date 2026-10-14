@@ -159,6 +159,11 @@ static enum mds_status decode_wire_status(uint8_t wire_byte)
 #define CT_MAX_PEERS 128  /* Must be >= MDS_MAX_NODES for full-mesh clusters */
 
 struct cluster_server {
+    /* Written by cluster_transport_server_start before server_thread
+     * exists and by cluster_transport_server_stop after it has been
+     * joined; server_thread only reads it.  The stop path signals the
+     * thread through `running` and shutdown(), never through the fd
+     * value. */
     int                listen_fd;
     uint16_t           port;
     struct mds_catalogue *cat;
@@ -2059,16 +2064,22 @@ void cluster_transport_server_stop(struct cluster_server *srv)
 
     atomic_store(&srv->running, false);
     /*
-     * Shut down the listen socket so poll() returns immediately,
-     * then close and join.  shutdown() is more reliable than bare
-     * close() for unblocking poll/accept under valgrind.
+     * Shut down the listen socket so a poll()/accept() in progress
+     * returns immediately (shutdown() is more reliable than bare
+     * close() for unblocking them under valgrind), join the thread,
+     * and only then close the socket and clear the field: the thread
+     * reads listen_fd on every iteration, so the writer must be alone.
+     * Even without the wake-up the join is bounded by the thread's
+     * 200 ms poll timeout and its re-check of `running`.
      */
     if (srv->listen_fd >= 0) {
         shutdown(srv->listen_fd, SHUT_RDWR);
+    }
+    pthread_join(srv->thread, NULL);
+    if (srv->listen_fd >= 0) {
         close(srv->listen_fd);
         srv->listen_fd = -1;
     }
-    pthread_join(srv->thread, NULL);
 
     /*
      * Force-unwind any connection threads blocked in recv() by
@@ -6333,34 +6344,10 @@ void cluster_transport_server_set_sharding(struct cluster_server *srv,
 
 /* -----------------------------------------------------------------------
  * Split evaluator client requests (Tier 3 Phase 1)
+ *
+ * All client requests connect through ct_client_connect(), which
+ * applies the TLS/peer settings; there is no separate plain-TCP path.
  * ----------------------------------------------------------------------- */
-
-static int admin_connect(const char *host, uint16_t port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in addr;
-
-    if (fd < 0) { return -1; }
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        struct addrinfo hints = {0}, *res = NULL;
-        hints.ai_family = AF_INET;
-        if (getaddrinfo(host, NULL, &hints, &res) != 0 || res == NULL) {
-            close(fd); return -1;
-        }
-        memcpy(&addr.sin_addr,
-               &((struct sockaddr_in *)res->ai_addr)->sin_addr,
-               sizeof(addr.sin_addr));
-        freeaddrinfo(res);
-    }
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        close(fd); return -1;
-    }
-    { int flag = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)); }
-    return fd;
-}
 
 enum mds_status cluster_transport_request_split_proposals(
     const char *mds_host, uint16_t mds_port,

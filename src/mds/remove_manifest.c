@@ -241,15 +241,70 @@ static void rm_remove_locked(struct remove_manifest *rm,
  * state.  Idempotent: re-running after a crash no-ops on NOTFOUND and
  * the GC drainer tolerates missing DS files.
  * ----------------------------------------------------------------------- */
+/*
+ * GC-enqueue one sweep per unique DS in the stripe map (sm holds
+ * sc * mc entries).  Bounded: at most 64 distinct DSes and 64 * 64
+ * slots are examined per inode.
+ */
+static void rm_gc_enqueue_stripe_map(struct remove_manifest *rm,
+				     const struct mds_inode *ino,
+				     const struct mds_ds_map_entry *sm,
+				     uint32_t sc, uint32_t mc)
+{
+	uint32_t total = sc * mc;
+	uint32_t seen[64];
+	uint32_t seen_n = 0;
+	uint32_t i;
+
+	for (i = 0; i < total && i < 64U * 64U; i++) {
+		uint32_t ds_id = sm[i % (sc * mc)].ds_id;
+		bool dup = false;
+		uint32_t k;
+
+		for (k = 0; k < seen_n; k++) {
+			if (seen[k] == ds_id) {
+				dup = true;
+				break;
+			}
+		}
+		if (dup || seen_n >= 64U) {
+			continue;
+		}
+		seen[seen_n++] = ds_id;
+		{
+			uint32_t fhl = sm[i].nfs_fh_len;
+
+			if (fhl > MDS_NFS_FH_MAX) {
+				fhl = MDS_NFS_FH_MAX;
+			}
+			/* Geometry hint: sweep all (s, m) slots on
+			 * this DS -- wide layouts are not stripe-
+			 * dense per DS. */
+			(void)mds_cat_gc_enqueue_hint(
+				rm->cat, NULL, ino->fileid, ds_id,
+				sm[i].nfs_fh, fhl,
+				MDS_GC_SWEEP_GEOM(sc, mc));
+		}
+	}
+}
+
 static void rm_finalize_inode(struct remove_manifest *rm,
 			      const struct mds_inode *ino)
 {
-	struct mds_ds_map_entry *sm = NULL;
+	/*
+	 * Ownership: heap_sm is the ONLY pointer ever passed to free().
+	 * It stays NULL unless mds_cat_stripe_map_get() succeeded (both
+	 * backends leave *entries NULL/untouched on failure and hand
+	 * the caller a heap array on success).  sm is a borrowed view
+	 * of either heap_sm or the stack-resident inline_sm and is
+	 * never freed.
+	 */
+	struct mds_ds_map_entry *heap_sm = NULL;
 	struct mds_ds_map_entry inline_sm;
+	const struct mds_ds_map_entry *sm = NULL;
 	uint32_t sc = 0;
 	uint32_t su = 0;
 	uint32_t mc = 0;
-	bool own_sm = false;
 
 	if (ino == NULL || ino->fileid == 0) {
 		return;
@@ -278,47 +333,14 @@ static void rm_finalize_inode(struct remove_manifest *rm,
 		mc = 1;
 		su = ino->stripe_unit;
 	} else if (mds_cat_stripe_map_get(rm->cat, ino->fileid, &sc, &su,
-					  &mc, &sm) == MDS_OK && sm != NULL) {
-		own_sm = true;
+					  &mc, &heap_sm) == MDS_OK &&
+		   heap_sm != NULL) {
+		sm = heap_sm;
 	}
 	(void)su;
 
 	if (sm != NULL && sc != 0 && mc != 0) {
-		uint32_t total = sc * mc;
-		uint32_t seen[64];
-		uint32_t seen_n = 0;
-		uint32_t i;
-
-		for (i = 0; i < total && i < 64U * 64U; i++) {
-			uint32_t ds_id = sm[i % (sc * mc)].ds_id;
-			bool dup = false;
-			uint32_t k;
-
-			for (k = 0; k < seen_n; k++) {
-				if (seen[k] == ds_id) {
-					dup = true;
-					break;
-				}
-			}
-			if (dup || seen_n >= 64U) {
-				continue;
-			}
-			seen[seen_n++] = ds_id;
-			{
-				uint32_t fhl = sm[i].nfs_fh_len;
-
-				if (fhl > MDS_NFS_FH_MAX) {
-					fhl = MDS_NFS_FH_MAX;
-				}
-				/* Geometry hint: sweep all (s, m) slots on
-				 * this DS -- wide layouts are not stripe-
-				 * dense per DS. */
-				(void)mds_cat_gc_enqueue_hint(
-					rm->cat, NULL, ino->fileid, ds_id,
-					sm[i].nfs_fh, fhl,
-					MDS_GC_SWEEP_GEOM(sc, mc));
-			}
-		}
+		rm_gc_enqueue_stripe_map(rm, ino, sm, sc, mc);
 	}
 
 	/* Inline-stripe inodes have no side-table rows: the stripe map
@@ -332,9 +354,7 @@ static void rm_finalize_inode(struct remove_manifest *rm,
 		(void)mds_quota_update_remove(rm->quota, ino->uid,
 					      ino->gid, ino->size);
 	}
-	if (own_sm) {
-		free(sm);
-	}
+	free(heap_sm);
 }
 
 /* -----------------------------------------------------------------------
@@ -438,7 +458,19 @@ static bool rm_execute(struct remove_manifest *rm,
 		/* Retryable backend failure (NDB unavailable, timeout,
 		 * NOSUPPORT on a downgraded backend).  Leave the row;
 		 * the claim lease lapse re-queues it here or on a
-		 * peer. */
+		 * peer.
+		 *
+		 * MDS_ERR_INDOUBT deliberately takes this branch too.
+		 * Re-running the guarded remove after an unresolved
+		 * commit is safe because the operation is idempotent by
+		 * construction: the guard is (child_fileid, generation),
+		 * so when the first attempt landed the re-run sees
+		 * STALE / NOTFOUND and the branch above finalizes the
+		 * DELETE_PENDING inode instead of removing anything
+		 * twice, and when it did not land the re-run is the first
+		 * real execution.  No client is waiting on this path, so
+		 * the retry is a server-internal lease lapse, not a
+		 * retry-inviting DELAY. */
 		MDS_BRANCH_ADD(remove_async_drain_fail, 1U);
 		(void)mds_cat_remove_pending_bump_retry(rm->cat,
 							w->remove_seq);
@@ -558,10 +590,22 @@ int remove_manifest_submit(struct remove_manifest *rm,
 	}
 	pthread_mutex_lock(&st->lock);
 	if (cst != MDS_OK) {
+		/*
+		 * Roll the tombstone back on EVERY non-OK outcome, the
+		 * in-doubt one included: a tombstone whose seq was never
+		 * published (seq == 0) is skipped by the orphan scrub, so
+		 * keeping it for a row that did not land would hide a
+		 * live name forever.  If the row did land the drainer
+		 * finds it by its own peek and completes it (its guard is
+		 * the row's fileid + generation, not this tombstone).
+		 * The in-doubt case differs only in what the caller may
+		 * do next: never the synchronous remove.
+		 */
 		rm_remove_locked(rm, st, dir_fileid, name);
 		pthread_mutex_unlock(&st->lock);
 		MDS_BRANCH_ADD(remove_async_manifest_insert_fail, 1U);
-		return -1;
+		return (cst == MDS_ERR_INDOUBT)
+			? REMOVE_MANIFEST_SUBMIT_INDOUBT : -1;
 	}
 	e = rm_find_locked(st, dir_fileid, name);
 	if (e != NULL) {
@@ -928,6 +972,89 @@ static void *rm_worker_thread(void *arg)
  * here; anything else (lease held elsewhere, transient error)
  * leaves the entry for a later pass.
  * ----------------------------------------------------------------------- */
+/*
+ * Collect up to @cap PENDING tombstones older than @min_age_ns from
+ * one stripe, marking each DRAINING so no drainer races the probe.
+ * Takes and releases the stripe lock.  Returns the number collected.
+ */
+static uint32_t rm_scrub_collect(struct rm_stripe *st, uint64_t now,
+				 uint64_t min_age_ns,
+				 struct mds_remove_pending_entry *cand,
+				 uint32_t cap)
+{
+	uint32_t n = 0;
+	uint32_t b;
+	struct rm_tombstone *e;
+
+	pthread_mutex_lock(&st->lock);
+	for (b = 0; b < st->bucket_count && n < cap; b++) {
+		for (e = st->buckets[b];
+		     e != NULL && n < cap;
+		     e = e->hash_next) {
+			if (e->state != RM_PENDING ||
+			    e->seq == 0 ||
+			    now - e->created_ns < min_age_ns) {
+				continue;
+			}
+			memset(&cand[n], 0, sizeof(cand[n]));
+			cand[n].remove_seq = e->seq;
+			cand[n].dir_fileid = e->dir_fileid;
+			cand[n].child_fileid = e->child_fileid;
+			cand[n].child_generation =
+				e->child_generation;
+			memcpy(cand[n].name, e->name,
+			       sizeof(cand[n].name));
+			e->state = RM_DRAINING;
+			n++;
+		}
+	}
+	pthread_mutex_unlock(&st->lock);
+	return n;
+}
+
+/*
+ * Probe one collected candidate's manifest row with a claim.  Returns
+ * 1 when the stale tombstone was dropped (row gone), 0 otherwise (row
+ * drained right here, or entry reverted to PENDING for a later pass).
+ */
+static int rm_scrub_probe(struct remove_manifest *rm,
+			  struct rm_stripe *st,
+			  const struct mds_remove_pending_entry *cand,
+			  uint64_t now)
+{
+	enum mds_status cst;
+	int scrubbed = 0;
+
+	cst = mds_cat_remove_pending_claim(rm->cat,
+			cand->remove_seq, rm->mds_id,
+			rm->boot_epoch, now,
+			rm->claim_ttl_ns);
+	if (cst == MDS_OK) {
+		/* Row exists and is overdue: drain it. */
+		(void)rm_execute_and_clear(rm, cand);
+		return 0;
+	}
+	pthread_mutex_lock(&st->lock);
+	if (cst == MDS_ERR_NOTFOUND) {
+		/* Row gone: a peer drained it. */
+		rm_remove_locked(rm, st, cand->dir_fileid, cand->name);
+		MDS_BRANCH_ADD(remove_async_tombstone_scrubbed, 1U);
+		scrubbed = 1;
+	} else {
+		/* Lease held elsewhere / transient:
+		 * revert for a later pass. */
+		struct rm_tombstone *e =
+			rm_find_locked(st, cand->dir_fileid, cand->name);
+
+		if (e != NULL) {
+			e->state = RM_PENDING;
+			pthread_cond_broadcast(&st->cond);
+		}
+	}
+	pthread_mutex_unlock(&st->lock);
+	return scrubbed;
+}
+
 int remove_manifest_scrub_orphans(struct remove_manifest *rm,
 				  uint64_t min_age_ns)
 {
@@ -943,69 +1070,12 @@ int remove_manifest_scrub_orphans(struct remove_manifest *rm,
 	for (si = 0; si < RM_STRIPES; si++) {
 		struct rm_stripe *st = &rm->stripes[si];
 		struct mds_remove_pending_entry cand[32];
-		uint32_t n = 0;
-		uint32_t b;
+		uint32_t n;
 		uint32_t k;
-		struct rm_tombstone *e;
 
-		pthread_mutex_lock(&st->lock);
-		for (b = 0; b < st->bucket_count && n < 32U; b++) {
-			for (e = st->buckets[b];
-			     e != NULL && n < 32U;
-			     e = e->hash_next) {
-				if (e->state != RM_PENDING ||
-				    e->seq == 0 ||
-				    now - e->created_ns < min_age_ns) {
-					continue;
-				}
-				memset(&cand[n], 0, sizeof(cand[n]));
-				cand[n].remove_seq = e->seq;
-				cand[n].dir_fileid = e->dir_fileid;
-				cand[n].child_fileid = e->child_fileid;
-				cand[n].child_generation =
-					e->child_generation;
-				memcpy(cand[n].name, e->name,
-				       sizeof(cand[n].name));
-				e->state = RM_DRAINING;
-				n++;
-			}
-		}
-		pthread_mutex_unlock(&st->lock);
-
+		n = rm_scrub_collect(st, now, min_age_ns, cand, 32U);
 		for (k = 0; k < n; k++) {
-			enum mds_status cst;
-
-			cst = mds_cat_remove_pending_claim(rm->cat,
-					cand[k].remove_seq, rm->mds_id,
-					rm->boot_epoch, now,
-					rm->claim_ttl_ns);
-			if (cst == MDS_OK) {
-				/* Row exists and is overdue: drain it. */
-				(void)rm_execute_and_clear(rm, &cand[k]);
-				continue;
-			}
-			pthread_mutex_lock(&st->lock);
-			if (cst == MDS_ERR_NOTFOUND) {
-				/* Row gone: a peer drained it. */
-				rm_remove_locked(rm, st,
-						 cand[k].dir_fileid,
-						 cand[k].name);
-				MDS_BRANCH_ADD(
-					remove_async_tombstone_scrubbed,
-					1U);
-				scrubbed++;
-			} else {
-				/* Lease held elsewhere / transient:
-				 * revert for a later pass. */
-				e = rm_find_locked(st,
-						   cand[k].dir_fileid,
-						   cand[k].name);
-				if (e != NULL) {
-					e->state = RM_PENDING;
-					pthread_cond_broadcast(&st->cond);
-				}
-			}
-			pthread_mutex_unlock(&st->lock);
+			scrubbed += rm_scrub_probe(rm, st, &cand[k], now);
 		}
 	}
 	return scrubbed;

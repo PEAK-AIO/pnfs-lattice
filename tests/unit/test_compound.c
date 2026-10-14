@@ -98,6 +98,8 @@ static void cleanup_temp_db(const char *path)
 {
 	char lock_path[512];
 
+	if (path == NULL)
+		return;
 	unlink(path);
 	snprintf(lock_path, sizeof(lock_path), "%s-lock", path);
 	unlink(lock_path);
@@ -399,6 +401,18 @@ static struct nfs4_op mk_readdir(uint64_t cookie)
 	op.opnum = OP_READDIR;
 	op.arg.readdir.cookie = cookie;
 	return op;
+}
+
+/* compound_process() leaves each result's scratch block (READDIR
+ * entry arrays, READ payloads, ...) owned by the caller, exactly as
+ * the RPC server releases it after encoding.  Tests that run ops with
+ * scratch-backed results call this before their result array goes out
+ * of scope. */
+static void release_results(struct nfs4_result *res, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++) {
+		nfs4_result_scratch_release(&res[i]);
+	}
 }
 
 /* -----------------------------------------------------------------------
@@ -799,6 +813,7 @@ static void test_readdir(void)
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[0].name, "alpha"), 0);
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[1].name, "bravo"), 0);
 
+	release_results(res, 6);
 	close_test_db(db, path);
 }
 
@@ -867,6 +882,7 @@ static void test_readdir_skips_pending_hpc_create(void)
 	ASSERT_TRUE(saw_bravo);
 	ASSERT_EQ(saw_pending, false);
 
+	release_results(res, 3);
 	close_test_db(db, path);
 }
 
@@ -920,16 +936,36 @@ static void test_readdir_pagination(void)
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[0].name, "alpha"), 0);
 	ASSERT_EQ(strcmp(res[2].res.readdir.entries[3].name, "delta"), 0);
 
-	/* Page 2: cookie = fileid of 2nd entry ("bravo") -> resume after it.
-	 * Cookies are now fileid-based (stable under mutation). */
+	/* Every entry carries the backend's cookie; op_readdir copies it
+	 * unchanged.  Contract (struct mds_cat_dirent in mds_catalogue.h):
+	 * never a reserved value (0, 1, 2), unique per entry within the
+	 * directory, and the backend's own iteration order is the order in
+	 * which cookies increase.  The cookie is NOT derived from the
+	 * fileid: the two sequences merely happen to coincide here. */
+	for (uint32_t ci = 0; ci < res[2].res.readdir.count; ci++) {
+		ASSERT_TRUE(res[2].res.readdir.entries[ci].cookie >= 3);
+		for (uint32_t cj = 0; cj < ci; cj++) {
+			ASSERT_NE(res[2].res.readdir.entries[ci].cookie,
+				  res[2].res.readdir.entries[cj].cookie);
+		}
+		if (ci > 0) {
+			ASSERT_TRUE(res[2].res.readdir.entries[ci].cookie >
+				    res[2].res.readdir.entries[ci - 1].cookie);
+		}
+	}
+
+	/* Page 2: resume with the 2nd entry's ("bravo") cookie -> exactly
+	 * the entries after it, each name once, cookies strictly greater
+	 * than the cursor and still increasing.  Cookies are stable under
+	 * mutation. */
 	{
-		uint64_t bravo_fid = res[2].res.readdir.entries[1].fileid;
+		uint64_t bravo_cookie = res[2].res.readdir.entries[1].cookie;
 		compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
 		ops[0] = mk_sequence();
 		ops[1] = mk_putrootfh();
-		ops[2] = mk_readdir(bravo_fid);
+		ops[2] = mk_readdir(bravo_cookie);
 
 		n = compound_process(&cd, ops, res, 3);
 		ASSERT_EQ(n, (uint32_t)3);
@@ -938,17 +974,20 @@ static void test_readdir_pagination(void)
 		ASSERT_TRUE(res[2].res.readdir.eof);
 		ASSERT_EQ(strcmp(res[2].res.readdir.entries[0].name, "charlie"), 0);
 		ASSERT_EQ(strcmp(res[2].res.readdir.entries[1].name, "delta"), 0);
+		ASSERT_TRUE(res[2].res.readdir.entries[0].cookie > bravo_cookie);
+		ASSERT_TRUE(res[2].res.readdir.entries[1].cookie >
+			    res[2].res.readdir.entries[0].cookie);
 	}
 
-	/* Page 3: cookie = fileid of last entry ("delta") -> past end. */
+	/* Page 3: cookie of the last entry ("delta") -> past end. */
 	{
-		uint64_t delta_fid = res[2].res.readdir.entries[1].fileid;
+		uint64_t delta_cookie = res[2].res.readdir.entries[1].cookie;
 		compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.prealloc = g_prealloc;
 		ops[0] = mk_sequence();
 		ops[1] = mk_putrootfh();
-		ops[2] = mk_readdir(delta_fid);
+		ops[2] = mk_readdir(delta_cookie);
 
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
@@ -957,6 +996,7 @@ static void test_readdir_pagination(void)
 		ASSERT_TRUE(res[2].res.readdir.eof);
 	}
 
+	release_results(res, 10);
 	close_test_db(db, path);
 }
 
@@ -1037,7 +1077,7 @@ static void test_readdir_cursor_multipage(void)
 		if (!eof) {
 			ASSERT_TRUE(res[2].res.readdir.count > 0);
 			cookie = res[2].res.readdir.entries[
-				res[2].res.readdir.count - 1].fileid;
+				res[2].res.readdir.count - 1].cookie;
 		}
 		pages++;
 		ASSERT_TRUE(pages <= total); /* forward-progress guard */
@@ -1050,6 +1090,7 @@ static void test_readdir_cursor_multipage(void)
 	}
 
 	free(seen);
+	release_results(res, 3);
 	close_test_db(db, path);
 }
 
@@ -1102,15 +1143,20 @@ static void test_readdir_byte_budget(void)
 	ASSERT_TRUE(res[2].res.readdir.count < (uint32_t)NFS4_READDIR_MAX);
 	ASSERT_EQ(res[2].res.readdir.eof, false);
 
+	release_results(res, 3);
 	close_test_db(db, path);
 }
 
 /* -----------------------------------------------------------------------
  * test_readdir_deleted_cookie -- resume is safe across a deleted cookie
  *
- * Removing the entry whose fileid is the immediate successor of the
- * cookie between pages must not break the walk: the deleted entry is
- * simply absent and every other remaining entry is delivered once.
+ * The client resumes with the cookie of the last entry it received.
+ * Removing that very entry between pages must not break the walk: the
+ * resume is a strict cookie > last range, so the deleted entry is
+ * simply absent and every remaining entry is delivered once.  Only the
+ * contract is asserted -- cookies are backend-assigned opaque values
+ * >= 3 (0, 1, 2 are reserved) delivered with each entry; nothing here
+ * relates a cookie to a fileid or to creation order.
  * ----------------------------------------------------------------------- */
 
 static void test_readdir_deleted_cookie(void)
@@ -1125,8 +1171,7 @@ static void test_readdir_deleted_cookie(void)
 	const uint32_t total = 300;
 	uint64_t cookie;
 	uint64_t deleted_fid;
-	char dname[32];
-	struct mds_inode dino;
+	char dname[MDS_MAX_NAME + 1];
 	bool found_deleted = false;
 	uint32_t i;
 
@@ -1152,16 +1197,17 @@ static void test_readdir_deleted_cookie(void)
 	ASSERT_EQ(n, (uint32_t)3);
 	ASSERT_EQ(res[2].res.readdir.count, (uint32_t)NFS4_READDIR_MAX);
 	ASSERT_EQ(res[2].res.readdir.eof, false);
-	cookie = res[2].res.readdir.entries[NFS4_READDIR_MAX - 1].fileid;
 
-	/* Delete the cousin of the cookie: the entry created immediately
-	 * after the last page-1 entry (f<NFS4_READDIR_MAX>), whose fileid
-	 * is strictly greater than the cookie. */
-	snprintf(dname, sizeof(dname), "f%04u", (uint32_t)NFS4_READDIR_MAX);
-	VERIFY(mds_cat_ns_lookup(g_test_cat, MDS_FILEID_ROOT, dname,
-				 &dino) == MDS_OK);
-	deleted_fid = dino.fileid;
-	ASSERT_TRUE(deleted_fid > cookie);
+	/* The cursor is the backend-assigned cookie of the last delivered
+	 * entry; 0, 1 and 2 are reserved. */
+	cookie = res[2].res.readdir.entries[NFS4_READDIR_MAX - 1].cookie;
+	ASSERT_TRUE(cookie >= 3);
+
+	/* Delete the cursor entry itself, by the name it was delivered
+	 * under, so page 2 resumes from a cookie whose dirent is gone. */
+	memcpy(dname, res[2].res.readdir.entries[NFS4_READDIR_MAX - 1].name,
+	       sizeof(dname));
+	deleted_fid = res[2].res.readdir.entries[NFS4_READDIR_MAX - 1].fileid;
 	VERIFY(mds_cat_ns_remove(g_test_cat, NULL, MDS_FILEID_ROOT,
 				 dname) == MDS_OK);
 
@@ -1175,18 +1221,22 @@ static void test_readdir_deleted_cookie(void)
 	n = compound_process(&cd, ops, res, 3);
 	ASSERT_EQ(n, (uint32_t)3);
 	ASSERT_EQ(res[2].status, NFS4_OK);
-	/* total - NFS4_READDIR_MAX page-1 entries - 1 deleted. */
+	/* Everything page 1 did not deliver; the deleted entry was in
+	 * page 1, so nothing is missing from page 2. */
 	ASSERT_EQ(res[2].res.readdir.count,
-		  (uint32_t)(total - NFS4_READDIR_MAX - 1));
+		  (uint32_t)(total - NFS4_READDIR_MAX));
 	ASSERT_TRUE(res[2].res.readdir.eof);
 
 	for (i = 0; i < res[2].res.readdir.count; i++) {
+		/* Strictly past the cursor, never a reserved value. */
+		ASSERT_TRUE(res[2].res.readdir.entries[i].cookie > cookie);
 		if (res[2].res.readdir.entries[i].fileid == deleted_fid) {
 			found_deleted = true;
 		}
 	}
 	ASSERT_EQ(found_deleted, false);
 
+	release_results(res, 3);
 	close_test_db(db, path);
 }
 
@@ -1278,6 +1328,7 @@ static void test_readdir_hides_referral_junctions(void)
 	ASSERT_TRUE(saw_data);
 	ASSERT_TRUE(saw_alpha);
 
+	release_results(res, 8);
 	subtree_map_destroy(smap);
 	close_test_db(db, path);
 }
@@ -2603,6 +2654,7 @@ static void test_openattr_read_write(void)
 			  strlen(test_val)), 0);
 	ASSERT_TRUE(res[4].res.read.eof);
 
+	release_results(res, 8);
 	close_test_db(db, path);
 }
 
@@ -2802,10 +2854,7 @@ static char *make_ds_tmpdir(void)
 
 static void rm_ds_tmpdir(char *p)
 {
-	char cmd[4200];
-
-	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", p);
-	(void)system(cmd);
+	test_rm_rf(p);
 	free(p);
 }
 
@@ -3395,6 +3444,7 @@ static void test_xattr_short_read_eof(void)
 	ASSERT_EQ(res[4].res.read.data_len, (uint32_t)8);
 	ASSERT_EQ(res[4].res.read.eof, true);
 
+	release_results(res, 8);
 	close_test_db(db, path);
 }
 
@@ -3945,8 +3995,17 @@ static void test_lookup_notfound_falls_through(void)
 
 static void test_lookup_ext_dirent_on_root_shard(void)
 {
-	struct mds_catalogue *root_db;
-	struct mds_catalogue *child_db;
+	/*
+	 * Shared authority: an in-process multi-MDS test shares ONE
+	 * catalogue instance between its MDS contexts (the plan's rule for
+	 * memdb, and what two daemons on one store see).  The "root
+	 * shard" writes the ext_dirent + shard route and the "child
+	 * shard" serves the LOOKUP through the same handle; the target
+	 * inode lives in that same store.  Two independent instances
+	 * would share nothing, so a row written into one is invisible to
+	 * a LOOKUP served from the other.
+	 */
+	struct mds_catalogue *db;
 	struct mds_shard_map *shard_map = NULL;
 	const struct mds_shard *child_shard;
 	struct compound_data cd;
@@ -3956,15 +4015,12 @@ static void test_lookup_ext_dirent_on_root_shard(void)
 	struct mds_inode child;
 	struct mds_cat_txn *txn = NULL;
 	uint32_t n;
-	char *root_path;
-	char *child_path;
+	char *path;
 
-	root_db = open_test_db(&root_path);
-	child_db = open_test_db(&child_path);
+	db = open_test_db(&path);
 
-	VERIFY(test_create_file(child_db, MDS_FILEID_ROOT, "target",
-           0644,
-			     &child) == MDS_OK);
+	VERIFY(test_create_file(db, MDS_FILEID_ROOT, "target", 0644,
+				&child) == MDS_OK);
 
 	VERIFY(mds_shard_map_create(&shard_map) == 0);
 	VERIFY(mds_shard_map_add(shard_map, "/", NULL) == 0);
@@ -3972,14 +4028,16 @@ static void test_lookup_ext_dirent_on_root_shard(void)
 	child_shard = mds_shard_map_lookup(shard_map, "/remote/target");
 	VERIFY(child_shard != NULL);
 
-	VERIFY(mds_cat_txn_begin(root_db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
-	VERIFY(mds_cat_ext_dirent_put(root_db, txn, MDS_FILEID_ROOT,
+	/* Root-shard side: publish the cross-shard link and its route. */
+	VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
+	VERIFY(mds_cat_ext_dirent_put(db, txn, MDS_FILEID_ROOT,
 				       "remote_link", 1, child.fileid,
 				       (uint8_t)child.type, 1) == MDS_OK);
-	VERIFY(mds_cat_shard_fileid_put(root_db, txn, child.fileid,
+	VERIFY(mds_cat_shard_fileid_put(db, txn, child.fileid,
 					 child_shard->shard_id) == MDS_OK);
 	VERIFY(mds_cat_txn_commit(txn) == 0);
 
+	/* Child-shard side: the LOOKUP is served from the same store. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;
 	cd.shard_map = shard_map;
@@ -3998,8 +4056,7 @@ static void test_lookup_ext_dirent_on_root_shard(void)
 	ASSERT_EQ(res[3].res.getattr.inode.type, MDS_FTYPE_REG);
 
 	mds_shard_map_destroy(shard_map);
-	close_test_db(child_db, child_path);
-	close_test_db(root_db, root_path);
+	close_test_db(db, path);
 }
 static void test_lookup_catalogue_root_child(void)
 {
@@ -4314,6 +4371,7 @@ static void test_rfc8276_setxattr_getxattr(void)
 	ASSERT_TRUE(res[3].res.setxattr.change_after >=
 		    res[3].res.setxattr.change_before);
 
+	release_results(res, 6);
 	close_test_cat(cat, root_path);
 }
 
@@ -4476,6 +4534,7 @@ static void test_rfc8276_listxattrs(void)
 	ASSERT_EQ(res[3].res.listxattrs.name_count, (uint32_t)2);
 	ASSERT_EQ(res[3].res.listxattrs.eof, true);
 
+	release_results(res, 8);
 	close_test_cat(cat, root_path);
 }
 
@@ -5474,6 +5533,142 @@ static void test_nametoolong_flag_paths(void)
 	close_test_db(db, path);
 }
 
+/* -----------------------------------------------------------------------
+ * test_layoutcommit_stamps_mtime_without_client_time
+ *
+ * RFC 8881 S18.42.3: when loca_time_modify is absent (the Linux client
+ * never sets it) the metadata server uses the time of the LAYOUTCOMMIT
+ * as the modification time.  The plain (non-aggregator) path used to
+ * write mtime only when the client supplied one, so a file written
+ * through a pNFS layout kept its creation mtime forever (lab
+ * nfs_client_test T11.1).  Pin both directions: no client time ->
+ * mtime advances past a deliberately old value (with change/ctime), and
+ * a client-supplied time is stored verbatim.
+ * ----------------------------------------------------------------------- */
+
+static struct nfs4_op mk_layoutcommit(uint64_t last_write_offset)
+{
+	struct nfs4_op op;
+
+	memset(&op, 0, sizeof(op));
+	op.opnum = OP_LAYOUTCOMMIT;
+	op.arg.layoutcommit.offset = 0;
+	op.arg.layoutcommit.length = UINT64_MAX;
+	op.arg.layoutcommit.new_offset = true;
+	op.arg.layoutcommit.last_write_offset = last_write_offset;
+	op.arg.layoutcommit.stateid.seqid = 1;
+	memset(op.arg.layoutcommit.stateid.other, 0x4c,
+	       sizeof(op.arg.layoutcommit.stateid.other));
+	return op;
+}
+
+static void test_layoutcommit_stamps_mtime_without_client_time(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	struct mds_inode before, after, attrs;
+	uint64_t fid;
+	uint32_t n;
+	char *path;
+
+	memset(res, 0, sizeof(res));
+	db = open_test_db(&path);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putrootfh();
+	ops[2] = mk_create("lc_mtime", MDS_FTYPE_REG, 0644);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	fid = res[2].res.create.inode.fileid;
+
+	/* Park mtime far in the past so "advanced" is unambiguous. */
+	memset(&attrs, 0, sizeof(attrs));
+	attrs.mtime.tv_sec = 1000;
+	ASSERT_EQ(mds_cat_ns_setattr(g_test_cat, NULL, fid, &attrs,
+				     MDS_ATTR_MTIME), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_getattr(g_test_cat, fid, &before), MDS_OK);
+	ASSERT_EQ((long long)before.mtime.tv_sec, 1000LL);
+
+	/* LAYOUTCOMMIT reporting new data and NO client mtime. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fid);
+	ops[2] = mk_layoutcommit(4095);
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_TRUE(res[2].res.layoutcommit.new_size);
+
+	ASSERT_EQ(mds_cat_ns_getattr(g_test_cat, fid, &after), MDS_OK);
+	ASSERT_EQ((long long)after.size, 4096LL);
+	ASSERT_TRUE(after.mtime.tv_sec > before.mtime.tv_sec);
+	ASSERT_TRUE(after.change > before.change);
+
+	/* A client-supplied time is honoured verbatim. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(fid);
+	ops[2] = mk_layoutcommit(8191);
+	ops[2].arg.layoutcommit.time_modify_set = true;
+	ops[2].arg.layoutcommit.time_modify.tv_sec = 2000000000;
+	ops[2].arg.layoutcommit.time_modify.tv_nsec = 7;
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+	ASSERT_EQ(mds_cat_ns_getattr(g_test_cat, fid, &after), MDS_OK);
+	ASSERT_EQ((long long)after.size, 8192LL);
+	ASSERT_EQ((long long)after.mtime.tv_sec, 2000000000LL);
+	ASSERT_EQ((long long)after.mtime.tv_nsec, 7LL);
+
+	close_test_db(db, path);
+}
+
+/** The process-wide layout-seqid tracker must release every entry on
+ * layout_seqid_table_destroy() and stay usable afterwards; without the
+ * teardown the entries granted by the LAYOUTGET tests above outlive
+ * main() and the valgrind gate counts them as still-reachable errors. */
+static void test_layout_seqid_table_destroy(void)
+{
+	static const uint8_t other_a[NFS4_OTHER_SIZE] = {
+		0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0xA1 };
+	static const uint8_t other_b[NFS4_OTHER_SIZE] = {
+		0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0xB2 };
+	uint64_t before;
+	uint32_t seq = 0;
+
+	before = layout_seqid_entry_count();
+	layout_seqid_record_at(other_a, 5);
+	layout_seqid_record_at(other_b, 7);
+	ASSERT_EQ(layout_seqid_entry_count(), before + 2);
+	ASSERT_TRUE(layout_seqid_peek(other_a, &seq));
+	ASSERT_EQ(seq, (uint32_t)5);
+
+	layout_seqid_table_destroy();
+	ASSERT_EQ(layout_seqid_entry_count(), (uint64_t)0);
+	ASSERT_TRUE(!layout_seqid_peek(other_a, &seq));
+	ASSERT_TRUE(!layout_seqid_peek(other_b, &seq));
+
+	/* A second call is a no-op and the table is still usable. */
+	layout_seqid_table_destroy();
+	layout_seqid_record_at(other_a, 9);
+	ASSERT_TRUE(layout_seqid_peek(other_a, &seq));
+	ASSERT_EQ(seq, (uint32_t)9);
+	ASSERT_EQ(layout_seqid_entry_count(), (uint64_t)1);
+
+	layout_seqid_table_destroy();
+	ASSERT_EQ(layout_seqid_entry_count(), (uint64_t)0);
+}
+
 int main(void)
 {
 	fprintf(stdout, "Running compound dispatch tests:\n");
@@ -5518,6 +5713,8 @@ int main(void)
 	RUN_TEST(test_layoutget_ds_pending_without_proxy_unavailable);
 	RUN_TEST(test_layoutget_ds_pending_patched_ready_clears_pending);
 	RUN_TEST(test_layoutreturn);
+	RUN_TEST(test_layoutcommit_stamps_mtime_without_client_time);
+	RUN_TEST(test_layout_seqid_table_destroy);
 	RUN_TEST(test_openattr_create_remove);
 	RUN_TEST(test_openattr_read_write);
 	RUN_TEST(test_gc_on_remove);
@@ -5579,5 +5776,8 @@ int main(void)
 	RUN_TEST(test_nametoolong_flag_paths);
 
 	fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
+	/* Release the layout stateids the LAYOUTGET tests granted; the
+	 * tracker is process-global and has no other owner here. */
+	layout_seqid_table_destroy();
 	return (tests_passed == tests_run) ? 0 : 1;
 }

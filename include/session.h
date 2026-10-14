@@ -83,10 +83,10 @@ struct rpc_conn;      /* Forward declaration for backchannel binding */
 /* Return-code constants for session_exchange_id beyond plain success.
  * Negative so callers can use the existing rc==0 check unchanged. */
 #define SESSION_EID_OK         0
-#define SESSION_EID_RESOURCE  -1   /* allocation failure */
-#define SESSION_EID_NOENT     -2   /* NFS4ERR_NOENT (UPDATE w/o confirmed record) */
-#define SESSION_EID_NOT_SAME  -3   /* NFS4ERR_NOT_SAME (UPDATE + verifier mismatch) */
-#define SESSION_EID_PERM      -4   /* NFS4ERR_PERM (UPDATE + principal mismatch) */
+#define SESSION_EID_RESOURCE  (-1) /* allocation failure */
+#define SESSION_EID_NOENT     (-2) /* NFS4ERR_NOENT (UPDATE w/o confirmed record) */
+#define SESSION_EID_NOT_SAME  (-3) /* NFS4ERR_NOT_SAME (UPDATE + verifier mismatch) */
+#define SESSION_EID_PERM      (-4) /* NFS4ERR_PERM (UPDATE + principal mismatch) */
 
 /* -----------------------------------------------------------------------
  * CREATE_SESSION flags (RFC 8881 §18.36)

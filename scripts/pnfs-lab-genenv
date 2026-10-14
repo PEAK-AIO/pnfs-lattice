@@ -28,6 +28,16 @@ Spec format (INI-like; '#' comments allowed):
     stripe_unit_bytes = 65536
     hpc_serve_layouts = false
     rondb_data_dir = /var/lib/rondb
+    # Metadata store the MDS configs select: rondb (default) or fdb.
+    # fdb needs the [fdb] section below; pnfs-lab --catalogue overrides.
+    catalogue = rondb
+    fdb_version = 7.3.62
+    fdb_key_prefix = lab          # shared by every MDS of the deployment
+    fdb_redundancy = double       # configure new <redundancy> <engine>
+    fdb_storage_engine = ssd
+    fdb_port = 4500
+    # fdb_op_deadline_ms = 8000   # daemon defaults when unset
+    # fdb_txn_timeout_ms = 4000
 
     [mds]
     # one node per line:  <ssh-host>  <data-ip>
@@ -44,8 +54,16 @@ Spec format (INI-like; '#' comments allowed):
     c00.example.com  10.118.1.78
     c01.example.com  10.118.1.142
 
+    [fdb]
+    # optional: FoundationDB server hosts (one fdbserver each, all
+    # coordinators); required when catalogue = fdb
+    # fdb0.example.com  10.118.1.201
+    # fdb1.example.com  10.118.1.202
+    # fdb2.example.com  10.118.1.203
+
 Rules enforced:
-  - every section non-empty; hosts and IPs unique across the whole spec entry type
+  - [mds], [ds], [clients] non-empty; [fdb] optional (required for
+    catalogue = fdb); hosts and IPs unique within a section
   - RonDB: MDS count must be a multiple of `replicas` (NDB node-group rule)
   - IPs must parse as IPv4 dotted quads
 Node IDs are assigned automatically (DS 0..N-1, MDS/RonDB 1..N, mgmd 65).
@@ -95,6 +113,14 @@ DEFAULTS = {
     "worker_threads": "48",
     "prealloc_pool_size": "1000000",
     "transient_state_cache": "true",
+    "catalogue": "rondb",
+    "fdb_version": "7.3.62",
+    "fdb_key_prefix": "lab",
+    "fdb_redundancy": "double",
+    "fdb_storage_engine": "ssd",
+    "fdb_port": "4500",
+    "fdb_op_deadline_ms": "",
+    "fdb_txn_timeout_ms": "",
 }
 
 
@@ -105,7 +131,7 @@ def die(msg):
 
 def parse_spec(path):
     cluster = dict(DEFAULTS)
-    nodes = {"mds": [], "ds": [], "clients": []}
+    nodes = {"mds": [], "ds": [], "clients": [], "fdb": []}
     section = None
     for lineno, raw in enumerate(open(path), 1):
         line = raw.split("#", 1)[0].strip()
@@ -113,7 +139,7 @@ def parse_spec(path):
             continue
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1].strip().lower()
-            if section not in ("cluster", "mds", "ds", "clients"):
+            if section not in ("cluster", "mds", "ds", "clients", "fdb"):
                 die("line %d: unknown section [%s]" % (lineno, section))
             continue
         if section is None:
@@ -141,8 +167,20 @@ def parse_spec(path):
 
 
 def validate(cluster, nodes):
-    for sec in ("mds", "ds", "clients"):
+    if cluster["catalogue"] not in ("rondb", "fdb"):
+        die("catalogue must be rondb or fdb (got '%s')" % cluster["catalogue"])
+    if cluster["catalogue"] == "fdb" and not nodes["fdb"]:
+        die("catalogue = fdb needs a non-empty [fdb] section")
+    if nodes["fdb"] and len(nodes["fdb"]) < 3 and cluster["fdb_redundancy"] != "single":
+        die("[fdb] has %d host(s): %s redundancy needs at least 3 machines "
+            "(or set fdb_redundancy = single)"
+            % (len(nodes["fdb"]), cluster["fdb_redundancy"]))
+    if not cluster["fdb_key_prefix"] or len(cluster["fdb_key_prefix"]) > 31:
+        die("fdb_key_prefix must be 1..31 bytes")
+    for sec in ("mds", "ds", "clients", "fdb"):
         if not nodes[sec]:
+            if sec == "fdb":
+                continue
             die("section [%s] has no nodes" % sec)
         ips = [ip for _, ip in nodes[sec]]
         hosts = [h for h, _ in nodes[sec]]
@@ -273,6 +311,23 @@ def generate(cluster, nodes):
     a("LAB_CLIENT_NCONNECTS=()")
     a('LAB_CLIENT_MDS_ASSIGNMENT="%s"' % c["client_mds_assignment"])
     a("")
+    a("# Metadata store the MDS configs select (pnfs-lab --catalogue overrides).")
+    a('LAB_CATALOGUE_BACKEND="%s"' % c["catalogue"])
+    fdb = nodes["fdb"]
+    if fdb:
+        a("# FoundationDB %s: one fdbserver per host, every host a coordinator;"
+          % c["fdb_version"])
+        a("# `pnfs-lab fdb` installs it and the clients on every MDS.")
+        a(bash_array("LAB_FDB_HOSTS", [h for h, _ in fdb]))
+        a(bash_array("LAB_FDB_IPS", [i for _, i in fdb]))
+        a('LAB_FDB_VERSION="%s"' % c["fdb_version"])
+        a('LAB_FDB_PORT="%s"' % c["fdb_port"])
+        a('LAB_FDB_REDUNDANCY="%s"' % c["fdb_redundancy"])
+        a('LAB_FDB_STORAGE_ENGINE="%s"' % c["fdb_storage_engine"])
+        a('LAB_FDB_KEY_PREFIX="%s"' % c["fdb_key_prefix"])
+        a('LAB_FDB_OP_DEADLINE_MS="%s"' % c["fdb_op_deadline_ms"])
+        a('LAB_FDB_TXN_TIMEOUT_MS="%s"' % c["fdb_txn_timeout_ms"])
+    a("")
     a('LAB_PROFILE_DEFAULT="%s"' % ("multi-mds" if n > 1 else "single-mds"))
     a("")
     a("# ---- single-mds profile: first MDS only ----")
@@ -319,11 +374,13 @@ def main():
     validate(cluster, nodes)
     sys.stdout.write(generate(cluster, nodes))
     sys.stderr.write(
-        "OK: %d MDS (%d node groups), %d DS, %d clients; profile default: %s\n"
+        "OK: %d MDS (%d node groups), %d DS, %d clients, %d FDB hosts; "
+        "profile default: %s; catalogue: %s\n"
         % (len(nodes["mds"]),
            len(nodes["mds"]) // int(cluster["replicas"]),
-           len(nodes["ds"]), len(nodes["clients"]),
-           "multi-mds" if len(nodes["mds"]) > 1 else "single-mds"))
+           len(nodes["ds"]), len(nodes["clients"]), len(nodes["fdb"]),
+           "multi-mds" if len(nodes["mds"]) > 1 else "single-mds",
+           cluster["catalogue"]))
 
 
 if __name__ == "__main__":

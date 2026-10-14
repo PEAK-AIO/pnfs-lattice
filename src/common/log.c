@@ -122,7 +122,7 @@ void mds_log(int component, int level, const char *fmt, ...)
     }
     /* Redundant with the MDS_LOG_* macro gate, kept for direct
      * mds_log() callers. */
-    if (level > MDS_LOG_LEVEL_LOAD_(component)) {
+    if (level > MDS_LOG_LEVEL_LOAD(component)) {
         return;
     }
 

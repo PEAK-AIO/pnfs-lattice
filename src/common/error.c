@@ -10,7 +10,16 @@
 
 #include "pnfs_mds.h"
 
-/** Map mds_status to a human-readable string. */
+/**
+ * Map mds_status to a human-readable string.
+ *
+ * Every enumerator has its own name.  No default inside the switch:
+ * -Wswitch (in -Wall, -Werror) then rejects a build that adds an
+ * enum mds_status value without naming it here, which is the
+ * exhaustiveness check the enum's lack of a count sentinel denies us.
+ * Values outside the enum fall through to the trailing return so a
+ * log line can still print them.
+ */
 const char *mds_status_str(enum mds_status s)
 {
     switch (s) {
@@ -21,15 +30,22 @@ const char *mds_status_str(enum mds_status s)
     case MDS_ERR_EXISTS:       return "already exists";
     case MDS_ERR_INVAL:        return "invalid argument";
     case MDS_ERR_PERM:         return "permission denied";
-    case MDS_ERR_NOSPC:        return "no space left";
-    case MDS_ERR_NOTEMPTY:     return "directory not empty";
     case MDS_ERR_STALE:        return "stale file handle";
-    case MDS_ERR_MOVED:        return "entry moved (referral)";
     case MDS_ERR_GRACE:        return "server in grace period";
+    case MDS_ERR_REPL:         return "replication failure";
+    case MDS_ERR_MOVED:        return "entry moved (referral)";
+    case MDS_ERR_DELAY:        return "try again later";
+    case MDS_ERR_NOSTANDBY:    return "no standby available";
+    case MDS_ERR_XDEV:         return "cross-device operation";
+    case MDS_ERR_NOTEMPTY:     return "directory not empty";
+    case MDS_ERR_ISDIR:        return "is a directory";
+    case MDS_ERR_NOTDIR:       return "not a directory";
+    case MDS_ERR_NOSPC:        return "no space left";
     case MDS_ERR_LAYOUTUNAVAIL: return "layout unavailable";
     case MDS_ERR_NOSUPPORT:    return "not supported";
-    default:                   return "unknown error";
+    case MDS_ERR_INDOUBT:      return "commit outcome in doubt";
     }
+    return "unknown error";
 }
 
 /*

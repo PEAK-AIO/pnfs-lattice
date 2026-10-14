@@ -728,7 +728,7 @@ static bool encode_attr_vals(XDR *xdrs, const struct mds_inode *inode,
      * because EXCLUSIVE4_1 semantics promise atomic attr
      * application (pjdfstest chmod/12, symlink/00). */
     if (nfs4_bitmap_test(actual, FATTR4_SUPPATTR_EXCLCREAT)) {
-        uint32_t excl[NFS4_BITMAP_WORDS] = {
+        const uint32_t excl[NFS4_BITMAP_WORDS] = {
             0,
             (1u << (FATTR4_MODE - 32)) |
             (1u << (FATTR4_OWNER - 32)) |
@@ -1139,7 +1139,7 @@ void build_all_requested(uint32_t bm[NFS4_BITMAP_WORDS])
 /* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
 {
-    uint32_t opnum;
+    uint32_t opnum = 0;
 
     if (!xdr_uint32_t(xdrs, &opnum)) {
         return false;
@@ -1174,7 +1174,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
     case OP_WRITE:           return decode_op_write(xdrs, op);
     case OP_COMMIT: {
         /* COMMIT4args: offset(8) + count(4). */
-        uint64_t commit_off;
+        uint64_t commit_off = 0;
         uint32_t commit_cnt;
         op->opnum = OP_COMMIT;
         if (!xdr_uint64_t(xdrs, &commit_off)) { return false; }
@@ -1404,7 +1404,7 @@ static bool decode_one_op(XDR *xdrs, struct nfs4_op *op)
             return false;
         }
         for (uint32_t i = 0; i < count; i++) {
-            uint32_t flavor;
+            uint32_t flavor = 0;
             if (!xdr_uint32_t(xdrs, &flavor)) {
                 return false;
             }
@@ -1720,7 +1720,7 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
     /* RFC 8881 §18.12.4 LOCKU4res: NFS4_OK → stateid4. */
     case OP_LOCKU:
         return xdr_nfs4_stateid_encode(xdrs, &r->res.locku.stateid);
-    case OP_OPENATTR:        return true; /* status-only */
+    case OP_OPENATTR:        /* status-only */
     /*
      * RFC 8881 §18.6.4 DELEGRETURN4res — status-only.  The status
      * word is already emitted by encode_one_result before the
@@ -1761,8 +1761,8 @@ static bool encode_one_result(XDR *xdrs, const struct nfs4_result *r)
         }
         return true;
     }
-    case OP_LOOKUPP:         return true; /* status only */
-    case OP_VERIFY:          return true; /* status only */
+    case OP_LOOKUPP:         /* status only */
+    case OP_VERIFY:          /* status only */
     case OP_NVERIFY:         return true; /* status only */
     case OP_READLINK: {
         /* READLINK4resok: linktext4 (utf8str_cs = opaque<>). */

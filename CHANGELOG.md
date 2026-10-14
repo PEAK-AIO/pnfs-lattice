@@ -6,6 +6,90 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **DAOS catalogue backend** (`ENABLE_DAOS`, libdaos 2.6) — a fourth
+  store behind the catalogue vtable, selected with
+  `catalogue_backend = daos` plus `daos_pool`, `daos_cont`, `daos_sys`,
+  `daos_op_deadline_ms`, `daos_oclass`, `daos_oclass_spread` and
+  `daos_dir_counter_shards`.  One DAOS container is one catalogue.
+  Object ids are derived from the entity id and a table tag, never
+  allocated or mapped; every entity (inode, client, registry, queue) is
+  one object with sorted lexical dkeys, so inode-local operations stay
+  on one shard group and the by-file indexes (layouts, opens,
+  delegations, locks) are one akey enumeration on that object, while
+  point-access state (layout, open, delegation, session, journal and GC
+  rows) lives in hashed objects.  A directory's nlink, change, mtime and
+  ctime are counter shards (default 16) updated independently by
+  concurrent creates and composed by GETATTR in one fetch, replacing the
+  atomic adds DAOS lacks.  Every slot is one serializable transaction
+  (`daos_txn.[ch]`): read waves on a borrowed event queue, blind writes,
+  one commit, the body re-run on a conflict; CREATE's duplicate check is
+  a conditional akey insert, not a read.  A commit whose outcome the
+  client cannot determine surfaces as `MDS_ERR_INDOUBT`; there is no
+  witness protocol in this version, the runner counts the case so a lab
+  run decides whether one is worth adding.  Both object classes and the
+  shard count are stamped on the container at bootstrap and verified at
+  open, since a changed class would address a different namespace.
+  `ns_readdir` walks a directory in the store's hash order while READDIR
+  cookies come from a container-wide sequence and stay ascending.  The
+  full slot matrix including the cluster slots is implemented;
+  `tests/catalogue_conformance/` gains a `daos` backend (a private
+  container per test process on `DAOS_POOL`, destroyed at exit),
+  `test_daos_txn` pins the DAOS behaviours the design depends on before
+  the runner is trusted, `test_daos_ext` / `test_daos_coord` pin the
+  slot semantics, and `daemon_smoke.sh` gains `DAEMON_SMOKE_BACKEND=daos`.
+  The option defaults to OFF; every DAOS test exits 77 without a pool.
+  Status: syntax-checked against the DAOS 2.6 headers, not yet run
+  against a live pool (`docs/architecture.md` §17).
+- **Backend-independent MDS, memdb backend, FoundationDB backend and a
+  catalogue conformance suite** — the MDS reached RonDB-specific entry
+  points directly from the cluster, failover and namespace code, so no
+  second catalogue backend could be built or tested.  Every backend
+  dependency now goes through the catalogue vtable, whose contract is
+  pinned in `include/catalogue_internal.h` (C1–C7: re-entrant slots,
+  callbacks never invoked from retry bodies, single-transaction
+  predicates, backend status codes passed through unchanged, truthful
+  capability bits, the transaction token as a grouping context only,
+  dispatcher-owned catalogue).  Cluster services (node registry,
+  heartbeat, partition map) sit behind `struct mds_cluster_ops`, gated by
+  `MDS_CAT_CAP_MULTI_PROCESS`; a backend registry
+  (`catalogue_factory.c`) selects the store from `catalogue_backend`,
+  and a name that is known but not compiled in is refused at start-up.
+  With RonDB not compiled in the key has no default and is mandatory.
+  Three backends ship: **RonDB** (production; its REMOVE, RENAME and
+  LINK now attach interpreted guards to the mutating transaction
+  instead of resolving in one transaction and mutating in another, and
+  registry fencing uses epoch guards with a start-up deadline and
+  duplicate-`mds_id` self-fencing); **memdb**
+  (`src/catalogue/catalogue_memdb.c`), the in-memory reference backend
+  — bounded, non-durable, single process, with real coordination tables
+  and in-process cluster ops, so the daemon runs without RonDB
+  (`catalogue_backend = memdb`) and the unit tests need no external
+  service; and **FoundationDB** (`ENABLE_FDB`, `libfdb_c`), selected
+  with `catalogue_backend = fdb` plus `fdb_cluster_file`,
+  `fdb_key_prefix`, `fdb_op_deadline_ms` and `fdb_txn_timeout_ms`.  The
+  FDB backend runs one FoundationDB transaction per catalogue call over
+  a single-byte-typed key space, keeps directory counters (nlink,
+  change, mtime, ctime) in atomic-ADD side keys so same-directory
+  CREATE/REMOVE do not conflict, mints per-dirent READDIR cookies from a
+  keyspace-wide allocator, and resolves `commit_unknown_result` with a
+  commit-outcome witness (a per-thread WITNESS slot blind-set by every
+  mutating body, fenced by a never-written anchor key with a read
+  version pinned before every commit); an outcome that cannot be
+  established surfaces as the new `MDS_ERR_INDOUBT`, mapped to
+  `NFS4ERR_IO` at every caller with no retry, compensation or split-path
+  fallback (`test_indoubt_mapping` pins the mapping).  It implements the
+  full slot matrix including cluster ops, so a two-MDS deployment runs
+  on it.  `tests/catalogue_conformance/` runs one contract against any
+  backend (`CATALOGUE_TEST_BACKEND=memdb|rondb|fdb`): slot matrix against
+  an expected capability table, transaction-token semantics, object
+  lifecycle, hard-link cookie pagination, contract checks and, for FDB,
+  a fault-injection suite (unknown commit results, stalls, timeouts and
+  restarts between attempt and probe, with exact double/partial-effect
+  counters).  `tests/integration/daemon_smoke.sh` starts the daemon on
+  memdb or FDB and probes it with pynfs.  Known limit: the RonDB
+  backend still uses cookie = fileid for READDIR, a documented expected
+  failure of the hard-link pagination test until the schema gains an
+  ordering column.  See `docs/architecture.md` §6 and §11.
 - **Find-style metadata search: `mds-find`, `mds-apid`, and
   `lattice-find`** — NFSv4 has no query verb, so answering "every file
   over 1 GiB changed in the last day" meant a `LOOKUP`/`READDIR`/

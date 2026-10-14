@@ -107,6 +107,8 @@ static void cleanup_temp_db(const char *path)
 {
 	char lock_path[512];
 
+	if (path == NULL)
+		return;
 	unlink(path);
 	snprintf(lock_path, sizeof(lock_path), "%s-lock", path);
 	unlink(lock_path);
@@ -277,6 +279,16 @@ static struct nfs4_op mk_readdir(void)
 	op.opnum = OP_READDIR;
 	op.arg.readdir.cookie = 0;
 	return op;
+}
+
+/* compound_process() leaves each result's scratch block (READDIR entry
+ * arrays and the like) owned by the caller, as the RPC server releases
+ * it after encoding; release it before the result array is freed. */
+static void release_results(struct nfs4_result *res, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++) {
+		nfs4_result_scratch_release(&res[i]);
+	}
 }
 
 static struct nfs4_op mk_open_create(const char *name, uint32_t mode,
@@ -733,6 +745,7 @@ static void test_full_client_lifecycle(void)
 	cleanup_temp_db(path);
 	free(path);
 	free(ops);
+	release_results(res, 8);
 	free(res);
 }
 
@@ -920,6 +933,7 @@ static void test_share_conflict_lifecycle(void)
 	cleanup_temp_db(path);
 	free(path);
 	free(ops);
+	release_results(res, 6);
 	free(res);
 }
 
@@ -1119,6 +1133,7 @@ static void test_nested_directory_lifecycle(void)
 	cleanup_temp_db(path);
 	free(path);
 	free(ops);
+	release_results(res, 8);
 	free(res);
 }
 

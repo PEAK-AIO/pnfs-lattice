@@ -117,6 +117,62 @@ static void recompute_minima_locked(void)
 }
 
 /**
+ * Broken DS (decoded limits below 4 KiB).  Keep the last advertised
+ * values for already-granted layouts, drop the DS from new placement,
+ * and recall so clients re-drive LAYOUTGET away from it.  Caller
+ * holds g_dsl.lock.  Returns true when a recall is needed (the DS
+ * was eligible until now).
+ */
+static bool probe_mark_ineligible_locked(struct ds_limit_rec *rec,
+                                         uint32_t ds_id,
+                                         uint32_t raw_rt, uint32_t raw_wt)
+{
+    if (!rec->eligible) {
+        return false;
+    }
+    rec->eligible = false;
+    rec->generation++;
+    recompute_minima_locked();
+    MDS_LOG_WARN(LOG_COMP_MDS,
+        "DS %u FSINFO reports unusable I/O limits "
+        "(rtmax=%u wtmax=%u) -- ineligible for new "
+        "layouts (gen=%u)",
+        (unsigned)ds_id, (unsigned)raw_rt,
+        (unsigned)raw_wt, (unsigned)rec->generation);
+    return true;
+}
+
+/**
+ * Publish verified limits (eff_r, eff_w).  Caller holds g_dsl.lock.
+ * A decrease relative to what clients may already be using must
+ * recall; growth and the first verification only need the generation
+ * bump (new layouts pick up the new ID).  Returns the recall flag.
+ */
+static bool probe_apply_limits_locked(struct ds_limit_rec *rec,
+                                      uint32_t ds_id,
+                                      uint32_t eff_r, uint32_t eff_w,
+                                      uint32_t raw_rt, uint32_t raw_wt)
+{
+    bool shrink = rec->verified &&
+                  (eff_r < rec->rsize || eff_w < rec->wsize);
+
+    rec->verified = true;
+    rec->eligible = true;
+    rec->rsize = eff_r;
+    rec->wsize = eff_w;
+    rec->generation++;
+    recompute_minima_locked();
+    MDS_LOG_INFO(LOG_COMP_MDS,
+        "DS %u I/O limits: rsize=%u wsize=%u (raw %u/%u, "
+        "gen=%u%s)",
+        (unsigned)ds_id, (unsigned)eff_r, (unsigned)eff_w,
+        (unsigned)raw_rt, (unsigned)raw_wt,
+        (unsigned)rec->generation,
+        shrink ? ", DECREASE -> recall" : "");
+    return shrink;
+}
+
+/**
  * Fold one probe outcome into the table.  Returns true when the
  * change is a capability DECREASE (or eligibility loss) that must
  * recall the DS's outstanding layouts.  The new state is published
@@ -126,9 +182,6 @@ static bool apply_probe_result(uint32_t ds_id, bool probe_ok,
                                uint32_t raw_rt, uint32_t raw_wt)
 {
     struct ds_limit_rec *rec;
-    uint32_t old_r;
-    uint32_t old_w;
-    bool old_elig;
     uint32_t eff_r;
     uint32_t eff_w;
     bool new_elig;
@@ -165,10 +218,6 @@ static bool apply_probe_result(uint32_t ds_id, bool probe_ok,
         return false;
     }
 
-    old_r = rec->rsize;
-    old_w = rec->wsize;
-    old_elig = rec->eligible;
-
     eff_r = policy_effective(raw_rt);
     eff_w = policy_effective(raw_wt);
     new_elig = (eff_r >= DS_IOLIMIT_ROUND_BYTES &&
@@ -177,48 +226,16 @@ static bool apply_probe_result(uint32_t ds_id, bool probe_ok,
     rec->fail_count = 0;
 
     if (!new_elig) {
-        /* Broken DS (decoded limits below 4 KiB).  Keep the last
-         * advertised values for already-granted layouts, drop the
-         * DS from new placement, and recall so clients re-drive
-         * LAYOUTGET away from it. */
-        if (old_elig) {
-            rec->eligible = false;
-            rec->generation++;
-            recompute_minima_locked();
-            need_recall = true;
-            MDS_LOG_WARN(LOG_COMP_MDS,
-                "DS %u FSINFO reports unusable I/O limits "
-                "(rtmax=%u wtmax=%u) -- ineligible for new "
-                "layouts (gen=%u)",
-                (unsigned)ds_id, (unsigned)raw_rt,
-                (unsigned)raw_wt, (unsigned)rec->generation);
-        }
+        need_recall = probe_mark_ineligible_locked(rec, ds_id,
+                                                   raw_rt, raw_wt);
         pthread_mutex_unlock(&g_dsl.lock);
         return need_recall;
     }
 
-    if (!rec->verified || eff_r != old_r || eff_w != old_w ||
-        !old_elig) {
-        bool shrink = rec->verified &&
-                      (eff_r < old_r || eff_w < old_w);
-
-        rec->verified = true;
-        rec->eligible = true;
-        rec->rsize = eff_r;
-        rec->wsize = eff_w;
-        rec->generation++;
-        recompute_minima_locked();
-        /* A decrease relative to what clients may already be using
-         * must recall; growth and the first verification only need
-         * the generation bump (new layouts pick up the new ID). */
-        need_recall = shrink;
-        MDS_LOG_INFO(LOG_COMP_MDS,
-            "DS %u I/O limits: rsize=%u wsize=%u (raw %u/%u, "
-            "gen=%u%s)",
-            (unsigned)ds_id, (unsigned)eff_r, (unsigned)eff_w,
-            (unsigned)raw_rt, (unsigned)raw_wt,
-            (unsigned)rec->generation,
-            shrink ? ", DECREASE -> recall" : "");
+    if (!rec->verified || eff_r != rec->rsize || eff_w != rec->wsize ||
+        !rec->eligible) {
+        need_recall = probe_apply_limits_locked(rec, ds_id, eff_r, eff_w,
+                                                raw_rt, raw_wt);
     }
 
     pthread_mutex_unlock(&g_dsl.lock);

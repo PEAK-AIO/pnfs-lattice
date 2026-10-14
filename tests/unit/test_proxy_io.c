@@ -73,11 +73,8 @@ static struct mds_catalogue *open_test_db(char **path_out)
 
 static void close_test_db(struct mds_catalogue *db, char *path)
 {
-    char cmd[4200];
-
     mds_catalogue_close(db);
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    test_rm_rf(path);
     free(path);
 }
 
@@ -93,10 +90,7 @@ static char *make_ds_dir(void)
 
 static void rm_ds_dir(char *path)
 {
-    char cmd[4200];
-
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    test_rm_rf(path);
     free(path);
 }
 

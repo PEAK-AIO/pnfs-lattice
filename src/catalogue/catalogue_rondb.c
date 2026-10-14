@@ -60,6 +60,16 @@ struct mds_rondb_state {
 	uint32_t                poller_self_mds_id;
 };
 
+/* The backend-neutral partition states (mds_cluster.h) ARE the RonDB
+ * column encoding: a map written through either name must read back
+ * identically. */
+_Static_assert(MDS_PARTITION_STATE_ACTIVE == RONDB_PM_STATE_ACTIVE,
+	       "partition state ACTIVE encoding differs from RonDB");
+_Static_assert(MDS_PARTITION_STATE_MIGRATING == RONDB_PM_STATE_MIGRATING,
+	       "partition state MIGRATING encoding differs from RonDB");
+_Static_assert(MDS_PARTITION_STATE_FROZEN == RONDB_PM_STATE_FROZEN,
+	       "partition state FROZEN encoding differs from RonDB");
+
 /** Persist the changefeed seqno counter every N mutations. */
 #define DELTA_PERSIST_INTERVAL 64
 
@@ -95,13 +105,31 @@ static void rondb_transient_note_exhausted(int rc)
 
 static void catalogue_rondb_close_backend(struct mds_catalogue *cat);
 
-/* Override the weak default from catalogue_dispatch.c. */
-void *mds_catalogue_backend_handle(const struct mds_catalogue *cat)
+/*
+ * Typed access to the backend-private state.
+ *
+ * backend_private is a void* owned by whichever backend opened the
+ * handle, so the cast is only valid when the handle really is ours.
+ * Checking cat->backend first turns a foreign handle (in-memory test
+ * backend, or any future backend linked into the same binary) into a
+ * NULL that every wrapper below already maps to MDS_ERR_INVAL /
+ * MDS_ERR_NOSUPPORT, instead of a type-confused read.
+ */
+static struct mds_rondb_state *rondb_state(const struct mds_catalogue *cat)
 {
-    if (cat == NULL || cat->backend_private == NULL) {
+    if (cat == NULL || cat->backend != MDS_BACKEND_RONDB ||
+        cat->backend_private == NULL) {
         return NULL;
     }
-    return ((struct mds_rondb_state *)cat->backend_private)->handle;
+    return (struct mds_rondb_state *)cat->backend_private;
+}
+
+/* Lifecycle slot: the NDB shim handle for RonDB-specific tools. */
+static void *catalogue_rondb_backend_handle(const struct mds_catalogue *cat)
+{
+    struct mds_rondb_state *state = rondb_state(cat);
+
+    return (state != NULL) ? state->handle : NULL;
 }
 
 /* This MDS's id, used to tag/partition per-MDS catalogue rows (e.g. the
@@ -109,10 +137,9 @@ void *mds_catalogue_backend_handle(const struct mds_catalogue *cat)
  * "unpartitioned" (drain everything). */
 static uint32_t rondb_self_mds_id(struct mds_catalogue *cat)
 {
-    if (cat == NULL || cat->backend_private == NULL) {
-        return 0U;
-    }
-    return ((struct mds_rondb_state *)cat->backend_private)->mds_id;
+    struct mds_rondb_state *state = rondb_state(cat);
+
+    return (state != NULL) ? state->mds_id : 0U;
 }
 static enum mds_status catalogue_rondb_probe_backend(struct mds_catalogue *cat);
 
@@ -120,12 +147,79 @@ static enum mds_status catalogue_rondb_probe_backend(struct mds_catalogue *cat);
 static const struct mds_authority_ops rondb_authority_ops;
 static const struct mds_authority_ops rondb_locked_authority_ops;
 static const struct mds_coordination_ops rondb_coordination_ops;
+static const struct mds_cluster_ops rondb_cluster_ops;
+
+/* Lifecycle slot adapter for the changefeed poller (defined next to
+ * catalogue_rondb_poller_start). */
+static enum mds_status rondb_image_feed_start(struct mds_catalogue *cat,
+                                              struct catalog_image *img,
+                                              uint32_t self_mds_id,
+                                              uint32_t poll_interval_ms);
 
 static const struct mds_catalogue_ops catalogue_rondb_ops = {
-    .close = catalogue_rondb_close_backend,
-    .probe = catalogue_rondb_probe_backend,
+    .close            = catalogue_rondb_close_backend,
+    .probe            = catalogue_rondb_probe_backend,
+    .bootstrap        = mds_rondb_bootstrap,
+    .backend_handle   = catalogue_rondb_backend_handle,
+    /* Changefeed poller feeding a catalog_image (image mode). */
+    .image_feed_start = rondb_image_feed_start,
+    .image_feed_stop  = catalogue_rondb_poller_stop,
 };
 
+
+/**
+ * Split one "key = value" config line in place.
+ *
+ * Trims blanks around the key, leading blanks before the value and the
+ * trailing newline.  Comments, blank lines and lines without '=' are
+ * skipped.
+ *
+ * @param line     Mutable line buffer (modified in place).
+ * @param key_out  Receives the NUL-terminated key.
+ * @param val_out  Receives the NUL-terminated value (may be empty).
+ * @return true when *key_out / *val_out are set, false for a skipped line.
+ */
+static bool rondb_config_split_line(char *line, char **key_out,
+                                    char **val_out)
+{
+    char *s = line;
+    char *eq;
+    char *val;
+    size_t vlen;
+
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    if (*s == '#' || *s == '\0' || *s == '\n') {
+        return false;
+    }
+
+    eq = strchr(s, '=');
+    if (eq == NULL) {
+        return false;
+    }
+    *eq = '\0';
+
+    {
+        char *end = eq - 1;
+        while (end > s && (*end == ' ' || *end == '\t')) {
+            *end-- = '\0';
+        }
+    }
+
+    val = eq + 1;
+    while (*val == ' ' || *val == '\t') {
+        val++;
+    }
+    vlen = strlen(val);
+    if (vlen > 0 && val[vlen - 1] == '\n') {
+        val[vlen - 1] = '\0';
+    }
+
+    *key_out = s;
+    *val_out = val;
+    return true;
+}
 
 enum mds_status mds_rondb_config_load(const char *path,
                                       struct mds_rondb_config *out)
@@ -146,51 +240,24 @@ enum mds_status mds_rondb_config_load(const char *path,
     }
 
     while (fgets(line, sizeof(line), fp) != NULL) {
-        char *s = line;
-        char *eq;
+        char *key;
         char *val;
 
-        while (*s == ' ' || *s == '\t') {
-            s++;
-        }
-        if (*s == '#' || *s == '\0' || *s == '\n') {
+        if (!rondb_config_split_line(line, &key, &val)) {
             continue;
         }
-
-        eq = strchr(s, '=');
-        if (eq == NULL) {
-            continue;
-        }
-        *eq = '\0';
-
-        {
-            char *end = eq - 1;
-            while (end > s && (*end == ' ' || *end == '\t')) {
-                *end-- = '\0';
-            }
-        }
-
-        val = eq + 1;
-        while (*val == ' ' || *val == '\t') {
-            val++;
-        }
-        {
-            size_t vlen = strlen(val);
-            if (vlen > 0 && val[vlen - 1] == '\n') {
-                val[vlen - 1] = '\0';
-            }
-        }
-
-        if (strcmp(s, "connect_string") == 0) {
+        if (strcmp(key, "connect_string") == 0) {
             (void)snprintf(out->connect_string,
                            sizeof(out->connect_string), "%s", val);
-        } else if (strcmp(s, "schema_name") == 0) {
+        } else if (strcmp(key, "schema_name") == 0) {
             (void)snprintf(out->schema_name,
                            sizeof(out->schema_name), "%s", val);
         }
     }
 
-    fclose(fp);
+    /* Read-only stream drained to EOF: nothing is buffered for
+     * writing, so a failed close cannot lose data. */
+    (void)fclose(fp);
 
     if (out->connect_string[0] == '\0') {
         MDS_LOG_ERROR(LOG_COMP_CAT,
@@ -206,22 +273,22 @@ enum mds_status mds_rondb_config_load(const char *path,
     return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
-                                     struct mds_catalogue **out)
+/* Backend-specific config validation belongs to the backend. */
+static enum mds_status rondb_open_check_cfg(const struct mds_config *cfg)
 {
-    struct mds_catalogue *cat;
-    struct mds_rondb_state *state;
-    enum mds_status st;
-    int rc;
-
-    if (cfg == NULL || out == NULL) {
-        return MDS_ERR_INVAL;
-    }
     if (cfg->catalog_replay_mode == MDS_REPLAY_JOURNAL) {
         MDS_LOG_ERROR(LOG_COMP_CAT,
             "catalogue_backend=rondb with "
             "catalog_replay_mode=journal is not supported until a "
             "RonDB-native replay journal exists");
+        return MDS_ERR_INVAL;
+    }
+    /* The RonDB inode row has no inline payload column, so inline
+     * data cannot be served from this store. */
+    if (cfg->inline_enabled) {
+        MDS_LOG_ERROR(LOG_COMP_CAT,
+            "catalogue_backend=rondb requires "
+            "inline_enabled=false.");
         return MDS_ERR_INVAL;
     }
     if (cfg->catalogue_backend_conf[0] == '\0') {
@@ -230,36 +297,33 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
             "catalogue_backend_conf");
         return MDS_ERR_INVAL;
     }
+    return MDS_OK;
+}
 
-    state = calloc(1, sizeof(*state));
-    cat = calloc(1, sizeof(*cat));
-    if (state == NULL || cat == NULL) {
-        free(state);
-        free(cat);
-        return MDS_ERR_NOMEM;
-    }
+/* Load the backend config file and connect the NDB connection pool.
+ * On failure the caller frees state; a failed connect leaves no
+ * usable handle behind, so there is nothing to disconnect. */
+static enum mds_status rondb_open_connect(struct mds_rondb_state *state,
+                                          const struct mds_config *cfg)
+{
+    enum mds_status st;
+    int pool = (int)cfg->ndb_conn_pool_size;
+    int rc;
 
     st = mds_rondb_config_load(cfg->catalogue_backend_conf, &state->cfg);
     if (st != MDS_OK) {
-        free(state);
-        free(cat);
         return st;
     }
 
-    {
-        int pool = (int)cfg->ndb_conn_pool_size;
-        if (pool <= 0) { pool = 2; }
-        rc = rondb_shim_connect_pool(state->cfg.connect_string,
-                                     state->cfg.schema_name,
-                                     pool,
-                                     &state->handle);
-    }
+    if (pool <= 0) { pool = 2; }
+    rc = rondb_shim_connect_pool(state->cfg.connect_string,
+                                 state->cfg.schema_name,
+                                 pool,
+                                 &state->handle);
     if (rc != 0 || state->handle == NULL) {
         MDS_LOG_ERROR(LOG_COMP_CAT,
             "rondb_shim_connect() failed for schema %s",
             state->cfg.schema_name);
-        free(state);
-        free(cat);
         return MDS_ERR_IO;
     }
 
@@ -276,17 +340,78 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
         "RonDB ndb_async_writes=%s (async batch pipeline for "
         "single-commit creates)",
         cfg->ndb_async_writes ? "true" : "false");
+    return MDS_OK;
+}
+
+/* Phase 9C: resume the changefeed seqno past the persisted counter. */
+static void rondb_open_load_delta_seqno(struct mds_rondb_state *state)
+{
+	uint64_t loaded = 0;
+
+	if (!state->changefeed_enabled || state->handle == NULL) {
+		return;
+	}
+	if (rondb_shim_delta_seqno_load(state->handle, state->mds_id,
+					&loaded) == 0 && loaded > 0) {
+		/* The counter is only persisted every
+		 * DELTA_PERSIST_INTERVAL mutations (and on clean
+		 * shutdown), so after a crash up to that many
+		 * seqnos beyond the persisted value may already
+		 * exist in mds_delta_broadcast.  Skip the whole
+		 * window so restarted emission does not collide
+		 * with already-used keys. */
+		state->delta_seqno = loaded + DELTA_PERSIST_INTERVAL;
+	}
+}
+
+enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
+                                     struct mds_catalogue **out)
+{
+    struct mds_catalogue *cat;
+    struct mds_rondb_state *state;
+    enum mds_status st;
+
+    if (cfg == NULL || out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    st = rondb_open_check_cfg(cfg);
+    if (st != MDS_OK) {
+        return st;
+    }
+
+    state = calloc(1, sizeof(*state));
+    cat = calloc(1, sizeof(*cat));
+    if (state == NULL || cat == NULL) {
+        free(state);
+        free(cat);
+        return MDS_ERR_NOMEM;
+    }
+
+    st = rondb_open_connect(state, cfg);
+    if (st != MDS_OK) {
+        free(state);
+        free(cat);
+        return st;
+    }
 
 	cat->backend = MDS_BACKEND_RONDB;
+	/* One NDB cluster is the single authority for every MDS node, and
+	 * it is reachable from every MDS process (registry / heartbeat /
+	 * partition rows written by one daemon are seen by the others). */
+	cat->caps = MDS_CAT_CAP_SHARED_AUTHORITY | MDS_CAT_CAP_MULTI_PROCESS;
 	cat->ops = &catalogue_rondb_ops;
 	cat->coord_ops = &rondb_coordination_ops;
+	cat->cluster_ops = &rondb_cluster_ops;
 	cat->backend_private = state;
 
 	/* Phase 9B: multi-MDS config. */
 	state->multi_mds = (cfg->cluster_size > 1);
 	state->lock_ttl_ms = 30000; /* 30s default */
 	state->mds_id = cfg->self.id;
-	state->boot_epoch = 0; /* Set by main.c after register. */
+	/* Stamped by the node_register cluster slot
+	 * (rondb_cluster_node_register) on a successful registration;
+	 * stays 0 on a single-node daemon that never registers. */
+	state->boot_epoch = 0;
 
 	/* Phase 9C: changefeed enabled when multi-MDS + image mode != OFF. */
 	state->changefeed_enabled = (state->multi_mds &&
@@ -299,21 +424,7 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
 		free(cat);
 		return MDS_ERR_IO;
 	}
-	if (state->changefeed_enabled && state->handle != NULL) {
-		uint64_t loaded = 0;
-		if (rondb_shim_delta_seqno_load(state->handle,
-						state->mds_id,
-						&loaded) == 0 && loaded > 0) {
-			/* The counter is only persisted every
-			 * DELTA_PERSIST_INTERVAL mutations (and on clean
-			 * shutdown), so after a crash up to that many
-			 * seqnos beyond the persisted value may already
-			 * exist in mds_delta_broadcast.  Skip the whole
-			 * window so restarted emission does not collide
-			 * with already-used keys. */
-			state->delta_seqno = loaded + DELTA_PERSIST_INTERVAL;
-		}
-	}
+	rondb_open_load_delta_seqno(state);
 
 	cat->auth_ops = state->multi_mds
 	              ? &rondb_locked_authority_ops
@@ -353,27 +464,21 @@ static void catalogue_rondb_close_backend(struct mds_catalogue *cat)
 
 static enum mds_status catalogue_rondb_probe_backend(struct mds_catalogue *cat)
 {
-    struct mds_rondb_state *state;
+    struct mds_rondb_state *state = rondb_state(cat);
 
-    if (cat == NULL || cat->backend != MDS_BACKEND_RONDB ||
-        cat->backend_private == NULL) {
+    if (state == NULL) {
         return MDS_ERR_INVAL;
     }
-
-    state = cat->backend_private;
     return rondb_shim_probe(state->handle) == 0 ? MDS_OK : MDS_ERR_IO;
 }
 
 enum mds_status mds_rondb_bootstrap(struct mds_catalogue *cat)
 {
-	struct mds_rondb_state *state;
+	struct mds_rondb_state *state = rondb_state(cat);
 
-	if (cat == NULL || cat->backend != MDS_BACKEND_RONDB ||
-	    cat->backend_private == NULL) {
+	if (state == NULL) {
 		return MDS_ERR_INVAL;
 	}
-
-	state = cat->backend_private;
 
 	/* Bootstrap metadata tables (all 8) + seed rows. */
 	if (rondb_shim_bootstrap_metadata(state->handle,
@@ -392,14 +497,11 @@ enum mds_status mds_rondb_bootstrap(struct mds_catalogue *cat)
 
 enum mds_status mds_rondb_cleanup(struct mds_catalogue *cat)
 {
-	struct mds_rondb_state *state;
+	struct mds_rondb_state *state = rondb_state(cat);
 
-	if (cat == NULL || cat->backend != MDS_BACKEND_RONDB ||
-	    cat->backend_private == NULL) {
+	if (state == NULL) {
 		return MDS_ERR_INVAL;
 	}
-
-	state = cat->backend_private;
 
 	/* Drop metadata tables first, then legacy probe table. */
 	(void)rondb_shim_cleanup_metadata(state->handle,
@@ -419,13 +521,9 @@ enum mds_status mds_rondb_cleanup(struct mds_catalogue *cat)
 
 static void *rondb_handle(const struct mds_catalogue *cat)
 {
-	struct mds_rondb_state *state;
+	struct mds_rondb_state *state = rondb_state(cat);
 
-	if (cat == NULL || cat->backend_private == NULL) {
-		return NULL;
-	}
-	state = cat->backend_private;
-	return state->handle;
+	return (state != NULL) ? state->handle : NULL;
 }
 
 /*
@@ -437,7 +535,7 @@ static void *rondb_handle(const struct mds_catalogue *cat)
 static _Thread_local uint64_t tl_fileid_base      = 0;
 static _Thread_local uint32_t tl_fileid_remaining  = 0;
 
-enum mds_status catalogue_rondb_alloc_fileid(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_alloc_fileid(struct mds_catalogue *cat,
 					     uint64_t *fileid)
 {
 	struct mds_rondb_state *state;
@@ -470,7 +568,7 @@ enum mds_status catalogue_rondb_alloc_fileid(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_getattr(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_ns_getattr(struct mds_catalogue *cat,
 					   uint64_t fileid,
 					   struct mds_inode *inode)
 {
@@ -499,7 +597,7 @@ enum mds_status catalogue_rondb_ns_getattr(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_lookup(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_ns_lookup(struct mds_catalogue *cat,
 					  uint64_t parent_fileid,
 					  const char *name,
 					  struct mds_inode *child)
@@ -538,7 +636,91 @@ enum mds_status catalogue_rondb_ns_lookup(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_create(
+/*
+ * Placement popped from the DS prealloc ring for a regular-file create:
+ * the 1x1 stripe wire blob ([ds_id u32][fh_len u32][fh bytes]) the shim
+ * consumes, the pre-minted fileid (0 = allocate one) and the v8
+ * synthetic DS owner carried onto the child inode.  popped == false
+ * (all zero) when there was nothing to pop.
+ */
+struct rondb_create_pop {
+	bool     popped;
+	struct mds_ds_map_entry entry;
+	uint32_t stripe_unit;       /* ring's configured unit (may be 0) */
+	uint64_t fileid;
+	uint32_t stripe_count;      /* 1 when popped, else 0 */
+	uint32_t stripe_buf_len;
+	uint8_t  stripe_buf[8 + MDS_NFS_FH_MAX];
+};
+
+/*
+ * Pop ONCE and derive every placement input from that one entry.  A
+ * peek followed by a separate pop could select different entries under
+ * concurrent CREATEs and persist one DS in the stripe map while
+ * granting a layout for another.
+ */
+static void rondb_create_pop_prealloc(struct ds_prealloc_ctx *prealloc,
+				      enum mds_file_type type,
+				      struct rondb_create_pop *pop)
+{
+	memset(pop, 0, sizeof(*pop));
+	if (type != MDS_FTYPE_REG || prealloc == NULL) {
+		return;
+	}
+	if (ds_prealloc_pop(prealloc, &pop->entry, &pop->stripe_unit,
+			    &pop->fileid) != 0) {
+		memset(pop, 0, sizeof(*pop));
+		return;
+	}
+	pop->popped = true;
+	/* The FH lives in a MDS_NFS_FH_MAX array; never trust the length
+	 * field past it. */
+	if (pop->entry.nfs_fh_len > MDS_NFS_FH_MAX) {
+		pop->entry.nfs_fh_len = MDS_NFS_FH_MAX;
+	}
+	fdb_put_u32(pop->stripe_buf, pop->entry.ds_id);
+	fdb_put_u32(pop->stripe_buf + 4, pop->entry.nfs_fh_len);
+	if (pop->entry.nfs_fh_len > 0) {
+		memcpy(pop->stripe_buf + 8, pop->entry.nfs_fh,
+		       pop->entry.nfs_fh_len);
+	}
+	pop->stripe_buf_len = 8 + pop->entry.nfs_fh_len;
+	pop->stripe_count = 1;
+}
+
+/* Build the child inode of a create; DS_PENDING when the popped stripe
+ * carries no FH yet (pre-Phase-12 / proxy-less prealloc). */
+static void rondb_create_build_child(struct mds_inode *child,
+				     uint64_t fileid, uint64_t parent_fileid,
+				     enum mds_file_type type, uint32_t mode,
+				     uint64_t uid, uint64_t gid,
+				     const struct rondb_create_pop *pop)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_REALTIME, &now);
+	memset(child, 0, sizeof(*child));
+	child->fileid = fileid;
+	child->type = type;
+	child->mode = mode;
+	child->uid = uid;
+	child->gid = gid;
+	/* v8 stored synthetic DS owner, carried out of the pop. */
+	child->synth_suid = pop->entry.synth_suid;
+	child->synth_sgid = pop->entry.synth_sgid;
+	child->atime = now;
+	child->mtime = now;
+	child->ctime = now;
+	child->change = 1;
+	child->generation = 1;
+	child->parent_fileid = parent_fileid;
+	child->nlink = (type == MDS_FTYPE_DIR) ? 2 : 1;
+	if (pop->stripe_count > 0 && pop->stripe_buf_len <= 8) {
+		child->flags |= MDS_IFLAG_DS_PENDING;
+	}
+}
+
+static enum mds_status catalogue_rondb_ns_create(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	const char *name,
@@ -548,15 +730,12 @@ enum mds_status catalogue_rondb_ns_create(
 	struct mds_inode *out)
 {
 	void *h = rondb_handle(cat);
-	struct mds_inode parent, child;
-	struct timespec now;
-	uint8_t parent_buf[RONDB_INODE_MAX_SIZE];
+	struct mds_inode child;
+	struct rondb_create_pop pop;
 	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
-	uint32_t outlen = 0;
-	uint64_t child_fid = 0;
+	uint64_t child_fid;
 	int32_t parent_nlink_delta;
-	int rc;
-	enum mds_status st;
+	int rc = -1;
 
 	if (h == NULL || name == NULL || out == NULL) {
 		return MDS_ERR_INVAL;
@@ -573,69 +752,22 @@ enum mds_status catalogue_rondb_ns_create(
 	 * authoritative uniqueness check (ConstraintViolation).
 	 * Parent type is validated by the NFS protocol layer before
 	 * we reach this function. */
-	(void)parent_buf;
-	(void)parent;
 
 	/* Pre-alloc stripe map + fileid for regular files. */
-	uint8_t stripe_buf[256];
-	uint32_t stripe_buf_len = 0;
-	uint32_t stripe_count_for_create = 0;
-	/* v8: synth owner carried out of the pop block onto the child inode. */
-	uint32_t child_synth_suid = 0;
-	uint32_t child_synth_sgid = 0;
-
-	if (type == MDS_FTYPE_REG && prealloc != NULL) {
-		struct mds_ds_map_entry ds_entry;
-		uint32_t stripe_unit = 0;
-		uint64_t prealloc_fid = 0;
-		int pop_rc = ds_prealloc_pop(prealloc, &ds_entry,
-					    &stripe_unit, &prealloc_fid);
-		if (pop_rc == 0) {
-			if (prealloc_fid != 0) {
-				child_fid = prealloc_fid;
-			}
-			fdb_put_u32(stripe_buf, ds_entry.ds_id);
-			fdb_put_u32(stripe_buf + 4, ds_entry.nfs_fh_len);
-			if (ds_entry.nfs_fh_len > 0) {
-				memcpy(stripe_buf + 8, ds_entry.nfs_fh,
-				       ds_entry.nfs_fh_len);
-			}
-			stripe_buf_len = 8 + ds_entry.nfs_fh_len;
-			stripe_count_for_create = 1;
-			child_synth_suid = ds_entry.synth_suid;
-			child_synth_sgid = ds_entry.synth_sgid;
-		}
-	}
+	rondb_create_pop_prealloc(prealloc, type, &pop);
 
 	/* Allocate fileid (skip if pre-allocated from pool). */
+	child_fid = pop.fileid;
 	if (child_fid == 0) {
-		st = catalogue_rondb_alloc_fileid(cat, &child_fid);
+		enum mds_status st = catalogue_rondb_alloc_fileid(cat, &child_fid);
+
 		if (st != MDS_OK) {
 			return st;
 		}
 	}
 
-	/* Build child inode. */
-	clock_gettime(CLOCK_REALTIME, &now);
-	memset(&child, 0, sizeof(child));
-	child.fileid = child_fid;
-	child.type = type;
-	child.mode = mode;
-	child.uid = uid;
-	child.gid = gid;
-	child.synth_suid = child_synth_suid;  /* v8 stored synthetic DS owner */
-	child.synth_sgid = child_synth_sgid;
-	child.atime = now;
-	child.mtime = now;
-	child.ctime = now;
-	child.change = 1;
-	child.generation = 1;
-	child.parent_fileid = parent_fileid;
-	child.nlink = (type == MDS_FTYPE_DIR) ? 2 : 1;
-	if (stripe_count_for_create > 0 && stripe_buf_len <= 8) {
-		child.flags |= MDS_IFLAG_DS_PENDING;
-	}
-
+	rondb_create_build_child(&child, child_fid, parent_fileid, type, mode,
+				 uid, gid, &pop);
 	parent_nlink_delta = (type == MDS_FTYPE_DIR) ? 1 : 0;
 
 	if (rondb_inode_serialize(&child, 0, child_buf,
@@ -653,10 +785,10 @@ enum mds_status catalogue_rondb_ns_create(
 		rc = rondb_shim_ns_create(h, parent_fileid, name,
 					  child_buf, RONDB_INODE_FIXED_SIZE,
 					  parent_nlink_delta,
-					  stripe_count_for_create > 0
-					      ? stripe_buf : NULL,
-					  stripe_buf_len,
-					  stripe_count_for_create);
+					  pop.stripe_count > 0
+					      ? pop.stripe_buf : NULL,
+					  pop.stripe_buf_len,
+					  pop.stripe_count);
 		if (rc != -2) {
 			break; /* Success, EXISTS, or permanent error. */
 		}
@@ -675,6 +807,118 @@ enum mds_status catalogue_rondb_ns_create(
 	return MDS_OK;
 }
 
+/* Tell the caller whether its DS bundle may be reclaimed (NULL-safe). */
+static void rondb_set_safe_to_discard(bool *safe_to_discard, bool value)
+{
+	if (safe_to_discard != NULL) {
+		*safe_to_discard = value;
+	}
+}
+
+/*
+ * Serialise wide-stripe entries into the shim's variable-length wire
+ * form ([ds_id u32][fh_len u32][fh bytes] per stripe).  *buf_out is
+ * heap-allocated (caller frees).  MDS_ERR_INVAL for an oversized entry
+ * or a total that does not fit uint32_t, MDS_ERR_NOMEM on allocation
+ * failure; nothing is allocated on error.
+ */
+static enum mds_status rondb_serialize_wide_stripes(
+	const struct mds_ds_map_entry *entries, uint32_t stripe_count,
+	uint8_t **buf_out, uint32_t *len_out)
+{
+	size_t stripe_buf_len = 0;
+	size_t stripe_offset = 0;
+	uint8_t *stripe_buf;
+
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
+		    entries[stripe_index].nfs_fh_len >
+		    SIZE_MAX - stripe_buf_len - 8U) {
+			return MDS_ERR_INVAL;
+		}
+		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
+	}
+	if (stripe_buf_len > UINT32_MAX) {
+		return MDS_ERR_INVAL;
+	}
+
+	stripe_buf = malloc(stripe_buf_len);
+	if (stripe_buf == NULL) {
+		return MDS_ERR_NOMEM;
+	}
+	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
+	     stripe_index++) {
+		const struct mds_ds_map_entry *entry = &entries[stripe_index];
+
+		fdb_put_u32(stripe_buf + stripe_offset, entry->ds_id);
+		fdb_put_u32(stripe_buf + stripe_offset + 4U, entry->nfs_fh_len);
+		if (entry->nfs_fh_len > 0) {
+			memcpy(stripe_buf + stripe_offset + 8U, entry->nfs_fh,
+			       entry->nfs_fh_len);
+		}
+		stripe_offset += 8U + entry->nfs_fh_len;
+	}
+	*buf_out = stripe_buf;
+	*len_out = (uint32_t)stripe_buf_len;
+	return MDS_OK;
+}
+
+/*
+ * Non-success (ConstraintViolation, permanent error, or transient-
+ * retry exhaustion, rc).  ns_create_wide commits inode + dirent +
+ * parent + stripe map in ONE NDB transaction, but a lost reply after a
+ * successful commit is indistinguishable from a real failure here.
+ * Resolve with a committed lookup of (parent, name):
+ *   dirent -> our child fileid : our txn committed (idempotent success
+ *       on a lost-reply retry) -> MDS_OK, do NOT reclaim (LIVE).
+ *   dirent -> a different fileid : genuine foreign collision ->
+ *       MDS_ERR_EXISTS, reclaim our orphaned DS bundle.
+ *   dirent absent + ConstraintViolation : a non-namespace integrity
+ *       violation aborted the txn atomically -> MDS_ERR_IO, reclaim.
+ *   dirent absent + transient exhaustion, or the lookup itself is
+ *       indeterminate -> MDS_ERR_DELAY, do NOT reclaim (commit may have
+ *       landed / be in flight).
+ */
+static enum mds_status rondb_create_wide_resolve_failure(
+	struct mds_catalogue *cat, uint64_t parent_fileid, const char *name,
+	uint64_t child_fileid, int rc, bool *safe_to_discard)
+{
+	uint64_t found_fid = 0;
+	uint8_t found_type = 0;
+	uint8_t lbuf[RONDB_INODE_MAX_SIZE];
+	uint32_t lout = 0;
+	int lrc;
+
+	lrc = rondb_shim_ns_lookup(rondb_handle(cat), parent_fileid, name,
+				   &found_fid, &found_type,
+				   lbuf, sizeof(lbuf), &lout);
+	if (lrc == 0) {
+		if (found_fid == child_fileid) {
+			catalog_stat_inc(&cat->stats.authority_writes);
+			rondb_set_safe_to_discard(safe_to_discard, false);
+			return MDS_OK;
+		}
+		rondb_set_safe_to_discard(safe_to_discard, true);
+		return MDS_ERR_EXISTS;
+	}
+	if (lrc == 1) {
+		if (rc == -2) {
+			/* Transient exhaustion; write may still be
+			 * resolving.  Do not reclaim. */
+			rondb_set_safe_to_discard(safe_to_discard, false);
+			return MDS_ERR_DELAY;
+		}
+		/* Permanent / ConstraintViolation with no published
+		 * dirent: txn aborted atomically -> orphaned DS bundle. */
+		rondb_set_safe_to_discard(safe_to_discard, true);
+		return MDS_ERR_IO;
+	}
+	/* Lookup itself transient (-2) or errored: indeterminate. */
+	rondb_set_safe_to_discard(safe_to_discard, false);
+	return MDS_ERR_DELAY;
+}
+
 static enum mds_status catalogue_rondb_ns_create_wide(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
@@ -688,16 +932,14 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 {
 	void *handle = rondb_handle(cat);
 	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
-	uint8_t *stripe_buf;
-	size_t stripe_buf_len;
-	size_t stripe_offset;
+	uint8_t *stripe_buf = NULL;
+	uint32_t stripe_buf_len = 0;
+	enum mds_status st;
 	int rc = -1;
 
 	/* Default: never let the caller reclaim the DS bundle unless we PROVE
 	 * the create did not publish a live file at child->fileid. */
-	if (safe_to_discard != NULL) {
-		*safe_to_discard = false;
-	}
+	rondb_set_safe_to_discard(safe_to_discard, false);
 
 	if (handle == NULL || name == NULL || child == NULL || entries == NULL ||
 	    child->fileid == 0 || child->parent_fileid != parent_fileid ||
@@ -706,64 +948,27 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 	    mirror_count != 1 ||
 	    (child->flags & MDS_IFLAG_HPC_CREATE_PENDING) != 0) {
 		/* Nothing attempted; any captured DS files are orphaned. */
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = true;
-		}
+		rondb_set_safe_to_discard(safe_to_discard, true);
 		return MDS_ERR_INVAL;
 	}
 	if (rondb_inode_serialize(child, 0, child_buf, sizeof(child_buf)) < 0) {
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = true;
-		}
+		rondb_set_safe_to_discard(safe_to_discard, true);
 		return MDS_ERR_IO;
 	}
 
-	stripe_buf_len = 0;
-	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
-	     stripe_index++) {
-		if (entries[stripe_index].nfs_fh_len > MDS_NFS_FH_MAX ||
-		    entries[stripe_index].nfs_fh_len >
-		    SIZE_MAX - stripe_buf_len - 8U) {
-			if (safe_to_discard != NULL) {
-				*safe_to_discard = true;
-			}
-			return MDS_ERR_INVAL;
-		}
-		stripe_buf_len += 8U + entries[stripe_index].nfs_fh_len;
-	}
-	if (stripe_buf_len > UINT32_MAX) {
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = true;
-		}
-		return MDS_ERR_INVAL;
-	}
-
-	stripe_buf = malloc(stripe_buf_len);
-	if (stripe_buf == NULL) {
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = true;
-		}
-		return MDS_ERR_NOMEM;
-	}
-	stripe_offset = 0;
-	for (uint32_t stripe_index = 0; stripe_index < stripe_count;
-	     stripe_index++) {
-		const struct mds_ds_map_entry *entry = &entries[stripe_index];
-
-		fdb_put_u32(stripe_buf + stripe_offset, entry->ds_id);
-		fdb_put_u32(stripe_buf + stripe_offset + 4U, entry->nfs_fh_len);
-		if (entry->nfs_fh_len > 0) {
-			memcpy(stripe_buf + stripe_offset + 8U, entry->nfs_fh,
-			       entry->nfs_fh_len);
-		}
-		stripe_offset += 8U + entry->nfs_fh_len;
+	st = rondb_serialize_wide_stripes(entries, stripe_count,
+					  &stripe_buf, &stripe_buf_len);
+	if (st != MDS_OK) {
+		/* Nothing attempted (bad entry or no memory). */
+		rondb_set_safe_to_discard(safe_to_discard, true);
+		return st;
 	}
 
 	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
 		rc = rondb_shim_ns_create_wide(
 			handle, parent_fileid, name, child_buf,
 			RONDB_INODE_FIXED_SIZE, stripe_count, stripe_unit,
-			mirror_count, stripe_buf, (uint32_t)stripe_buf_len);
+			mirror_count, stripe_buf, stripe_buf_len);
 		if (rc != -2) {
 			break;
 		}
@@ -775,80 +980,64 @@ static enum mds_status catalogue_rondb_ns_create_wide(
 	if (rc == 0) {
 		/* Committed and live; the DS bundle is now owned by the file. */
 		catalog_stat_inc(&cat->stats.authority_writes);
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = false;
-		}
+		rondb_set_safe_to_discard(safe_to_discard, false);
 		return MDS_OK;
 	}
-
-	/* Non-success (ConstraintViolation, permanent error, or transient-
-	 * retry exhaustion).  ns_create_wide commits inode + dirent + parent +
-	 * stripe map in ONE NDB transaction, but a lost reply after a
-	 * successful commit is indistinguishable from a real failure here.
-	 * Resolve with a committed lookup of (parent, name):
-	 *   dirent -> our child->fileid : our txn committed (idempotent success
-	 *       on a lost-reply retry) -> MDS_OK, do NOT reclaim (LIVE).
-	 *   dirent -> a different fileid : genuine foreign collision ->
-	 *       MDS_ERR_EXISTS, reclaim our orphaned DS bundle.
-	 *   dirent absent + ConstraintViolation : a non-namespace integrity
-	 *       violation aborted the txn atomically -> MDS_ERR_IO, reclaim.
-	 *   dirent absent + transient exhaustion, or the lookup itself is
-	 *       indeterminate -> MDS_ERR_DELAY, do NOT reclaim (commit may have
-	 *       landed / be in flight). */
-	{
-		uint64_t found_fid = 0;
-		uint8_t found_type = 0;
-		uint8_t lbuf[RONDB_INODE_MAX_SIZE];
-		uint32_t lout = 0;
-		int lrc;
-
-		lrc = rondb_shim_ns_lookup(handle, parent_fileid, name,
-					   &found_fid, &found_type,
-					   lbuf, sizeof(lbuf), &lout);
-		if (lrc == 0) {
-			if (found_fid == child->fileid) {
-				catalog_stat_inc(&cat->stats.authority_writes);
-				if (safe_to_discard != NULL) {
-					*safe_to_discard = false;
-				}
-				return MDS_OK;
-			}
-			if (safe_to_discard != NULL) {
-				*safe_to_discard = true;
-			}
-			return MDS_ERR_EXISTS;
-		}
-		if (lrc == 1) {
-			if (rc == -2) {
-				/* Transient exhaustion; write may still be
-				 * resolving.  Do not reclaim. */
-				if (safe_to_discard != NULL) {
-					*safe_to_discard = false;
-				}
-				return MDS_ERR_DELAY;
-			}
-			/* Permanent / ConstraintViolation with no published
-			 * dirent: txn aborted atomically -> orphaned DS bundle. */
-			if (safe_to_discard != NULL) {
-				*safe_to_discard = true;
-			}
-			return MDS_ERR_IO;
-		}
-		/* Lookup itself transient (-2) or errored: indeterminate. */
-		if (safe_to_discard != NULL) {
-			*safe_to_discard = false;
-		}
-		return MDS_ERR_DELAY;
-	}
+	return rondb_create_wide_resolve_failure(cat, parent_fileid, name,
+						 child->fileid, rc,
+						 safe_to_discard);
 }
 
-enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 						uint64_t parent_fileid,
 						const char *name,
 						const struct mds_inode *child,
 						uint32_t stripe_count);
 
-enum mds_status catalogue_rondb_ns_remove(struct mds_catalogue *cat,
+/*
+ * Shim verdicts of the remove transaction -> mds_status.
+ *
+ * 4 / 5 are the data-node snapshot guards: the name no longer resolves
+ * to the caller's child (4) or its live nlink contradicts the
+ * final/non-final shape the caller derived from its snapshot (5).
+ * Nothing was mutated.  Both surface as MDS_ERR_STALE: the caller's
+ * final-unlink bookkeeping (GC rows, quota, layout recall) was derived
+ * from that same snapshot, so the remove must not silently retarget
+ * itself -- the caller re-resolves and decides again.
+ */
+static enum mds_status rondb_ns_remove_rc_status(int rc)
+{
+	switch (rc) {
+	case 0:
+		return MDS_OK;
+	case 1:
+		/* TOCTOU: concurrent remove beat us; row already gone. */
+		return MDS_ERR_NOTFOUND;
+	case 3:
+		/* Directory target still has entries; decided inside the
+		 * removing transaction (C3), nothing was mutated. */
+		return MDS_ERR_NOTEMPTY;
+	case 4:
+	case 5:
+		return MDS_ERR_STALE;
+	case -2:
+		/* Transient NDB contention (lock-wait timeouts) survived
+		 * every retry.  Surface as DELAY so the client backs off
+		 * and resends the REMOVE instead of failing the unlink
+		 * with EIO. */
+		return MDS_ERR_DELAY;
+	default:
+		return MDS_ERR_IO;
+	}
+}
+
+/* Bound on lookup -> guarded remove rounds in the plain ns_remove: a
+ * STALE verdict means a link/unlink/replace of the same name landed
+ * between our own lookup and our transaction; re-resolving once or
+ * twice covers any realistic race without an unbounded loop. */
+#define RONDB_REMOVE_RESOLVE_ATTEMPTS 3
+
+static enum mds_status catalogue_rondb_ns_remove(struct mds_catalogue *cat,
 					  uint64_t parent_fileid,
 					  const char *name)
 {
@@ -858,34 +1047,44 @@ enum mds_status catalogue_rondb_ns_remove(struct mds_catalogue *cat,
 	uint8_t child_type = 0;
 	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
 	uint32_t outlen = 0;
+	enum mds_status st = MDS_ERR_STALE;
 	int rc;
 
 	if (h == NULL || name == NULL) {
 		return MDS_ERR_INVAL;
 	}
 
-	rc = rondb_shim_ns_lookup(h, parent_fileid, name,
-				  &child_fid, &child_type,
-				  child_buf, sizeof(child_buf),
-				  &outlen);
-	if (rc == 1) {
-		return MDS_ERR_NOTFOUND;
+	/* The snapshot is our own and a moment old, so a STALE verdict is
+	 * safe to answer by re-resolving and deciding again: there is no
+	 * caller-side bookkeeping tied to the previous snapshot. */
+	for (int attempt = 0;
+	     attempt < RONDB_REMOVE_RESOLVE_ATTEMPTS && st == MDS_ERR_STALE;
+	     attempt++) {
+		rc = rondb_shim_ns_lookup(h, parent_fileid, name,
+					  &child_fid, &child_type,
+					  child_buf, sizeof(child_buf),
+					  &outlen);
+		if (rc == 1) {
+			return MDS_ERR_NOTFOUND;
+		}
+		if (rc == -2) {
+			return MDS_ERR_DELAY;
+		}
+		if (rc != 0) {
+			return MDS_ERR_IO;
+		}
+		if (rondb_inode_deserialize(child_buf, outlen,
+					   &child_ino, NULL) != 0) {
+			return MDS_ERR_IO;
+		}
+		st = catalogue_rondb_ns_remove_known(cat, parent_fileid, name,
+						     &child_ino, 0);
 	}
-	if (rc == -2) {
-		return MDS_ERR_DELAY;
-	}
-	if (rc != 0) {
-		return MDS_ERR_IO;
-	}
-	if (rondb_inode_deserialize(child_buf, outlen,
-				   &child_ino, NULL) != 0) {
-		return MDS_ERR_IO;
-	}
-	return catalogue_rondb_ns_remove_known(cat, parent_fileid, name,
-					       &child_ino, 0);
+	/* Still racing after every round: let the client resend. */
+	return (st == MDS_ERR_STALE) ? MDS_ERR_DELAY : st;
 }
 
-enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 						uint64_t parent_fileid,
 						const char *name,
 						const struct mds_inode *child,
@@ -933,19 +1132,8 @@ enum mds_status catalogue_rondb_ns_remove_known(struct mds_catalogue *cat,
 		rondb_transient_backoff(attempt);
 	}
 	rondb_transient_note_exhausted(rc);
-	if (rc == 1) {
-		/* TOCTOU: concurrent remove beat us; row already gone. */
-		return MDS_ERR_NOTFOUND;
-	}
-	if (rc == -2) {
-		/* Transient NDB contention (lock-wait timeouts) survived
-		 * every retry.  Surface as DELAY so the client backs off
-		 * and resends the REMOVE instead of failing the unlink
-		 * with EIO.  Same mapping as catalogue_rondb_ns_remove. */
-		return MDS_ERR_DELAY;
-	}
 	if (rc != 0) {
-		return MDS_ERR_IO;
+		return rondb_ns_remove_rc_status(rc);
 	}
 
 	catalog_stat_inc(&cat->stats.authority_writes);
@@ -1045,14 +1233,12 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
 	}
 	rondb_transient_note_exhausted(rc);
 	free(rows);
-	if (rc == 1) {
-		return MDS_ERR_NOTFOUND;
-	}
-	if (rc == -2) {
-		return MDS_ERR_DELAY;
-	}
 	if (rc != 0) {
-		return MDS_ERR_IO;
+		/* Includes the STALE verdicts the header contract promises
+		 * (dirent no longer resolves to @child, or its live nlink
+		 * says this is not the final link): nothing was committed,
+		 * *gc_folded stays false, the caller re-resolves. */
+		return rondb_ns_remove_rc_status(rc);
 	}
 
 	*gc_folded = true;
@@ -1060,7 +1246,7 @@ enum mds_status catalogue_rondb_ns_remove_known_gc(
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
 					   uint64_t fileid,
 					   const struct mds_inode *attrs,
 					   uint32_t mask)
@@ -1118,7 +1304,7 @@ enum mds_status catalogue_rondb_ns_setattr(struct mds_catalogue *cat,
  * therefore cannot be used here -- wide-stripe CREATE persists a brand
  * new inode through this path before any LOOKUP is possible.
  */
-enum mds_status catalogue_rondb_dirent_put(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_dirent_put(struct mds_catalogue *cat,
 					   struct mds_cat_txn *txn,
 					   uint64_t parent,
 					   const char *name,
@@ -1141,7 +1327,7 @@ enum mds_status catalogue_rondb_dirent_put(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_dirent_insert(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_dirent_insert(struct mds_catalogue *cat,
 					      struct mds_cat_txn *txn,
 					      uint64_t parent,
 					      const char *name,
@@ -1170,7 +1356,7 @@ enum mds_status catalogue_rondb_dirent_insert(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_dirent_del(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_dirent_del(struct mds_catalogue *cat,
 					   struct mds_cat_txn *txn,
 					   uint64_t parent,
 					   const char *name)
@@ -1221,7 +1407,7 @@ static enum mds_status catalogue_rondb_inode_del(
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_inode_put(struct mds_catalogue *cat,
+static enum mds_status catalogue_rondb_inode_put(struct mds_catalogue *cat,
 					  struct mds_cat_txn *txn,
 					  const struct mds_inode *inode)
 {
@@ -1254,12 +1440,346 @@ enum mds_status catalogue_rondb_inode_put(struct mds_catalogue *cat,
 	return MDS_OK;
 }
 
+/*
+ * Operands of one rename as resolved by the read prologue below.  The
+ * destination fields are meaningful only when dst_exists; same_file
+ * marks the POSIX no-op where the destination already names the source
+ * inode.
+ */
+struct rondb_rename_plan {
+	uint64_t src_fid;
+	uint8_t  src_type;
+	struct mds_inode sc;
+	uint32_t sc_shard;
+	int      dst_exists;
+	int      same_file;
+	uint64_t dst_fid;
+	uint8_t  dst_type;
+	struct mds_inode dc;
+	uint32_t dc_shard;
+	int      delete_dst;
+};
+
+/* A rename parent must exist and be a directory (validation only). */
+static enum mds_status rondb_rename_check_parent(void *h, uint64_t fileid)
+{
+	struct mds_inode parent;
+	uint8_t buf[RONDB_INODE_MAX_SIZE];
+	uint32_t outlen = 0;
+	int rc;
+
+	rc = rondb_shim_inode_get(h, fileid, buf, sizeof(buf), &outlen, 0);
+	if (rc != 0) {
+		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+	}
+	if (rondb_inode_deserialize(buf, outlen, &parent, NULL) != 0) {
+		return MDS_ERR_IO;
+	}
+	if (parent.type != MDS_FTYPE_DIR) {
+		return MDS_ERR_NOTDIR;
+	}
+	return MDS_OK;
+}
+
+/* Read the source dirent and the source child inode. */
+static enum mds_status rondb_rename_read_src(void *h, uint64_t src_parent,
+					     const char *src_name,
+					     struct rondb_rename_plan *p)
+{
+	uint8_t sc_buf[RONDB_INODE_MAX_SIZE];
+	uint32_t outlen = 0;
+	int rc;
+
+	/* Read src dirent. */
+	rc = rondb_shim_dirent_get(h, src_parent, src_name,
+				   &p->src_fid, &p->src_type, 0);
+	if (rc == 1) {
+		return MDS_ERR_NOTFOUND;
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	/* Read src child inode. */
+	rc = rondb_shim_inode_get(h, p->src_fid, sc_buf,
+				  sizeof(sc_buf), &outlen, 0);
+	if (rc != 0) {
+		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+	}
+	if (rondb_inode_deserialize(sc_buf, outlen, &p->sc, &p->sc_shard) != 0) {
+		return MDS_ERR_IO;
+	}
+	return MDS_OK;
+}
+
+/*
+ * Check the destination dirent (overwrite case): type compatibility,
+ * the same-inode no-op, and the victim's link accounting.  Requires
+ * rondb_rename_read_src to have filled p->src_fid / p->sc.
+ */
+static enum mds_status rondb_rename_read_dst(void *h, uint64_t dst_parent,
+					     const char *dst_name,
+					     uint32_t rn_flags,
+					     struct rondb_rename_plan *p)
+{
+	uint8_t dc_buf[RONDB_INODE_MAX_SIZE];
+	uint32_t outlen = 0;
+	int rc;
+
+	rc = rondb_shim_dirent_get(h, dst_parent, dst_name,
+				   &p->dst_fid, &p->dst_type, 0);
+	if (rc == 1) {
+		return MDS_OK;   /* no destination entry */
+	}
+	if (rc != 0) {
+		return MDS_ERR_IO;
+	}
+
+	/* Destination exists -- check type compatibility. */
+	p->dst_exists = 1;
+	if (p->dst_fid == p->src_fid) {
+		/* Same file -- no-op. */
+		p->same_file = 1;
+		return MDS_OK;
+	}
+
+	/* Type checks: dir->file = NOTDIR, file->dir = ISDIR. */
+	if (p->sc.type == MDS_FTYPE_DIR && p->dst_type != MDS_FTYPE_DIR) {
+		return MDS_ERR_NOTDIR;
+	}
+	if (p->sc.type != MDS_FTYPE_DIR && p->dst_type == MDS_FTYPE_DIR) {
+		return MDS_ERR_ISDIR;
+	}
+
+	/* Read dst child for nlink update. */
+	rc = rondb_shim_inode_get(h, p->dst_fid, dc_buf,
+				  sizeof(dc_buf), &outlen, 0);
+	if (rc != 0) {
+		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+	}
+	if (rondb_inode_deserialize(dc_buf, outlen, &p->dc, &p->dc_shard) != 0) {
+		return MDS_ERR_IO;
+	}
+
+	/* A directory victim has exactly one name: replacing it deletes
+	 * it.  Its emptiness is decided by the shim inside the rename
+	 * transaction (C3), never by a read here. */
+	if (p->dc.type == MDS_FTYPE_DIR) {
+		p->delete_dst = 1;
+		return MDS_OK;
+	}
+
+	if (p->dc.nlink > 0) {
+		p->dc.nlink--;
+	}
+	p->delete_dst = (p->dc.nlink == 0) ? 1 : 0;
+	/*
+	 * Keep-orphan overwrite (pynfs RNM21 / POSIX unlink-of-
+	 * open): when the caller knows live opens reference the
+	 * overwritten regular file, keep its inode row in the
+	 * SAME rename transaction — nlink 0 + UNLINK_ORPHAN flag
+	 * — instead of deleting it.  The row keeps resolving for
+	 * the holder's PUTFH+CLOSE; the last CLOSE finalizes
+	 * (compound_orphan_finalize).  The ctime/change bump and
+	 * serialisation below run because delete_dst is 0.
+	 */
+	if (p->delete_dst != 0 &&
+	    (rn_flags & MDS_CAT_RNF_KEEP_DST_ORPHAN) != 0U &&
+	    p->dc.type == MDS_FTYPE_REG) {
+		p->dc.flags |= MDS_IFLAG_UNLINK_ORPHAN;
+		p->delete_dst = 0;
+	}
+	return MDS_OK;
+}
+
+/*
+ * Stamp and serialise the child inodes the shim writes: the source
+ * child (parent_fileid rebinds on a cross-directory move) and, when an
+ * existing destination survives as a link or an orphan, the victim.
+ */
+static enum mds_status rondb_rename_serialize_children(
+	struct rondb_rename_plan *p, int cross_dir, uint64_t dst_parent,
+	uint8_t *sc_buf, size_t sc_cap, uint8_t *dc_buf, size_t dc_cap)
+{
+	struct timespec now;
+
+	/* Prepare updated child inodes. */
+	clock_gettime(CLOCK_REALTIME, &now);
+
+	/* Src child: update parent_fileid if cross-dir. */
+	if (cross_dir) {
+		p->sc.parent_fileid = dst_parent;
+	}
+	p->sc.ctime = now;
+	p->sc.change++;
+
+	/* Dst child: timestamps if not being deleted. */
+	if (p->dst_exists && !p->delete_dst) {
+		p->dc.ctime = now;
+		p->dc.change++;
+	}
+
+	/* Serialize child inodes only (parents updated atomically by shim). */
+	if (rondb_inode_serialize(&p->sc, p->sc_shard, sc_buf, sc_cap) < 0) {
+		return MDS_ERR_IO;
+	}
+	if (p->dst_exists && !p->delete_dst &&
+	    rondb_inode_serialize(&p->dc, p->dc_shard, dc_buf, dc_cap) < 0) {
+		return MDS_ERR_IO;
+	}
+	return MDS_OK;
+}
+
+/*
+ * Parent nlink deltas the shim applies atomically.  A directory's
+ * ".." link counts on its parent: a directory moving between parents
+ * takes one link from the source parent to the destination parent,
+ * and a replaced directory's link leaves the destination parent.  On
+ * a same-directory rename the shim updates only the source parent
+ * row, so the victim's link is charged there.
+ */
+static void rondb_rename_parent_deltas(const struct rondb_rename_plan *p,
+				       int cross_dir,
+				       int32_t *sp_nlink_delta,
+				       int32_t *dp_nlink_delta)
+{
+	*sp_nlink_delta = 0;
+	*dp_nlink_delta = 0;
+	if (cross_dir && p->sc.type == MDS_FTYPE_DIR) {
+		*sp_nlink_delta -= 1;
+		*dp_nlink_delta += 1;
+	}
+	if (p->dst_exists && p->dc.type == MDS_FTYPE_DIR) {
+		if (cross_dir) {
+			*dp_nlink_delta -= 1;
+		} else {
+			*sp_nlink_delta -= 1;
+		}
+	}
+}
+
+/*
+ * One rename attempt: resolve the operands (reads outside the
+ * transaction), then hand the plan to the shim's single transaction.
+ * Returns MDS_ERR_DELAY when the shim asks for a re-resolve (transient
+ * NDB error, or a directory victim that vanished under a concurrent
+ * remove); rondb_ns_rename_resolved retries that.
+ */
+static enum mds_status rondb_ns_rename_attempt(
+	struct mds_catalogue *cat,
+	uint64_t src_parent,
+	const char *src_name,
+	uint64_t dst_parent,
+	const char *dst_name,
+	uint64_t *src_fid_out,
+	uint8_t *src_type_out,
+	uint32_t rn_flags)
+{
+	void *h = rondb_handle(cat);
+	struct rondb_rename_plan p;
+	uint8_t sc_buf[RONDB_INODE_MAX_SIZE], dc_buf[RONDB_INODE_MAX_SIZE];
+	int32_t sp_nlink_delta;
+	int32_t dp_nlink_delta;
+	enum mds_status st;
+	int cross_dir;
+	int dst_kept;
+	int rc;
+
+	if (h == NULL || src_name == NULL || dst_name == NULL) {
+		return MDS_ERR_INVAL;
+	}
+
+	cross_dir = (src_parent != dst_parent) ? 1 : 0;
+
+	/* Read src parent (validation only: must exist and be a dir). */
+	st = rondb_rename_check_parent(h, src_parent);
+	if (st != MDS_OK) {
+		return st;
+	}
+	/* Read dst parent (validation only: must exist and be a dir). */
+	if (cross_dir) {
+		st = rondb_rename_check_parent(h, dst_parent);
+		if (st != MDS_OK) {
+			return st;
+		}
+	}
+
+	memset(&p, 0, sizeof(p));
+	st = rondb_rename_read_src(h, src_parent, src_name, &p);
+	if (st != MDS_OK) {
+		return st;
+	}
+	/* Check dst dirent (overwrite case). */
+	st = rondb_rename_read_dst(h, dst_parent, dst_name, rn_flags, &p);
+	if (st != MDS_OK) {
+		return st;
+	}
+	if (p.same_file) {
+		/* Same file -- no-op. */
+		if (src_fid_out != NULL) { *src_fid_out = p.src_fid; }
+		if (src_type_out != NULL) { *src_type_out = p.src_type; }
+		return MDS_OK;
+	}
+
+	rondb_rename_parent_deltas(&p, cross_dir, &sp_nlink_delta,
+				   &dp_nlink_delta);
+
+	st = rondb_rename_serialize_children(&p, cross_dir, dst_parent,
+					     sc_buf, sizeof(sc_buf),
+					     dc_buf, sizeof(dc_buf));
+	if (st != MDS_OK) {
+		return st;
+	}
+
+	/* Atomic rename via shim (T2 transaction).
+	 * Parent nlink/change/mtime updated atomically at NDB data node.
+	 * dc_buf is only serialised (and only read by the shim) when the
+	 * victim survives as a link or an orphan. */
+	dst_kept = (p.dst_exists && !p.delete_dst) ? 1 : 0;
+	rc = rondb_shim_rename(h, src_parent, src_name,
+			       dst_parent, dst_name,
+			       sp_nlink_delta, dp_nlink_delta,
+			       sc_buf, RONDB_INODE_FIXED_SIZE,
+			       p.src_fid, p.src_type,
+			       p.dst_exists,
+			       dst_kept ? dc_buf : NULL,
+			       dst_kept ? RONDB_INODE_FIXED_SIZE : 0,
+			       p.dst_fid, p.dc.type, p.delete_dst);
+	switch (rc) {
+	case 0:
+		break;
+	case 3:
+		return MDS_ERR_NOTEMPTY;
+	case 4:
+		/* The store refused the plan (its data-node guards saw a
+		 * name repointed, a victim replaced or a link count that
+		 * moved since the reads above); nothing was mutated.  The
+		 * next attempt re-resolves from scratch. */
+		return MDS_ERR_STALE;
+	case -2:
+		return MDS_ERR_DELAY;
+	default:
+		return MDS_ERR_IO;
+	}
+
+	if (src_fid_out != NULL) { *src_fid_out = p.src_fid; }
+	if (src_type_out != NULL) { *src_type_out = p.src_type; }
+	return MDS_OK;
+}
+
 /**
  * Rename implementation.  On success, *src_fid_out / *src_type_out
  * (when non-NULL) receive the renamed child's fileid and type as
  * resolved from the source dirent.  The changefeed wrapper needs them
  * to emit a DIRENT_PUT delta that maps the destination name to the
  * real child instead of fileid 0.
+ *
+ * A rename over a non-empty directory is MDS_ERR_NOTEMPTY, decided by
+ * the shim inside the rename transaction.  Attempts the shim reports
+ * as stale (its snapshot guards refused the plan; retried at once with
+ * fresh reads) or transient (retried after a backoff) are re-resolved a
+ * bounded number of times; exhaustion of either surfaces as
+ * MDS_ERR_DELAY so the client backs off and resends the RENAME.
  */
 static enum mds_status rondb_ns_rename_resolved(
 	struct mds_catalogue *cat,
@@ -1271,198 +1791,28 @@ static enum mds_status rondb_ns_rename_resolved(
 	uint8_t *src_type_out,
 	uint32_t rn_flags)
 {
-	void *h = rondb_handle(cat);
-	struct mds_inode sp, dp, sc, dc;
-	uint32_t sp_shard = 0, dp_shard = 0, sc_shard = 0, dc_shard = 0;
-	uint64_t src_fid = 0, dst_fid = 0;
-	uint8_t src_type = 0, dst_type = 0;
-	uint8_t sp_buf[RONDB_INODE_MAX_SIZE], dp_buf[RONDB_INODE_MAX_SIZE];
-	uint8_t sc_buf[RONDB_INODE_MAX_SIZE], dc_buf[RONDB_INODE_MAX_SIZE];
-	uint32_t outlen = 0;
-	struct timespec now;
-	int dst_exists = 0;
-	int delete_dst = 0;
-	int cross_dir;
-	int rc;
+	enum mds_status st = MDS_ERR_DELAY;
 
-	if (h == NULL || src_name == NULL || dst_name == NULL) {
-		return MDS_ERR_INVAL;
-	}
-
-	cross_dir = (src_parent != dst_parent) ? 1 : 0;
-
-	/* Read src parent (validation only: must exist and be a dir). */
-	rc = rondb_shim_inode_get(h, src_parent, sp_buf,
-				  sizeof(sp_buf), &outlen, 0);
-	if (rc != 0) {
-		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
-	}
-	if (rondb_inode_deserialize(sp_buf, outlen, &sp, NULL) != 0) {
-		return MDS_ERR_IO;
-	}
-	if (sp.type != MDS_FTYPE_DIR) {
-		return MDS_ERR_NOTDIR;
-	}
-
-	/* Read dst parent (validation only: must exist and be a dir). */
-	if (cross_dir) {
-		rc = rondb_shim_inode_get(h, dst_parent, dp_buf,
-					  sizeof(dp_buf), &outlen, 0);
-		if (rc != 0) {
-			return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		st = rondb_ns_rename_attempt(cat, src_parent, src_name,
+					     dst_parent, dst_name,
+					     src_fid_out, src_type_out,
+					     rn_flags);
+		if (st != MDS_ERR_DELAY && st != MDS_ERR_STALE) {
+			break;
 		}
-		if (rondb_inode_deserialize(dp_buf, outlen,
-					   &dp, NULL) != 0) {
-			return MDS_ERR_IO;
-		}
-		if (dp.type != MDS_FTYPE_DIR) {
-			return MDS_ERR_NOTDIR;
+		if (st == MDS_ERR_DELAY) {
+			rondb_transient_backoff(attempt);
 		}
 	}
-
-	/* Read src dirent. */
-	rc = rondb_shim_dirent_get(h, src_parent, src_name,
-				   &src_fid, &src_type, 0);
-	if (rc == 1) {
-		return MDS_ERR_NOTFOUND;
+	if (st == MDS_ERR_DELAY || st == MDS_ERR_STALE) {
+		rondb_transient_note_exhausted(-2);
+		return MDS_ERR_DELAY;
 	}
-	if (rc != 0) {
-		return MDS_ERR_IO;
-	}
-
-	/* Read src child inode. */
-	rc = rondb_shim_inode_get(h, src_fid, sc_buf,
-				  sizeof(sc_buf), &outlen, 0);
-	if (rc != 0) {
-		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
-	}
-	if (rondb_inode_deserialize(sc_buf, outlen, &sc, &sc_shard) != 0) {
-		return MDS_ERR_IO;
-	}
-
-	/* Check dst dirent (overwrite case). */
-	rc = rondb_shim_dirent_get(h, dst_parent, dst_name,
-				   &dst_fid, &dst_type, 0);
-	if (rc == 0) {
-		/* Destination exists -- check type compatibility. */
-		dst_exists = 1;
-
-		if (dst_fid == src_fid) {
-			/* Same file -- no-op. */
-			if (src_fid_out != NULL) { *src_fid_out = src_fid; }
-			if (src_type_out != NULL) { *src_type_out = src_type; }
-			return MDS_OK;
-		}
-
-		/* Type checks: dir->file = NOTDIR, file->dir = ISDIR. */
-		if (sc.type == MDS_FTYPE_DIR && dst_type != MDS_FTYPE_DIR) {
-			return MDS_ERR_NOTDIR;
-		}
-		if (sc.type != MDS_FTYPE_DIR && dst_type == MDS_FTYPE_DIR) {
-			return MDS_ERR_ISDIR;
-		}
-
-		/* Read dst child for nlink update. */
-		rc = rondb_shim_inode_get(h, dst_fid, dc_buf,
-					  sizeof(dc_buf), &outlen, 0);
-		if (rc != 0) {
-			return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
-		}
-		if (rondb_inode_deserialize(dc_buf, outlen,
-					   &dc, &dc_shard) != 0) {
-			return MDS_ERR_IO;
-		}
-
-		/* TODO: empty-dir check for dir-replacing-dir. */
-
-		if (dc.nlink > 0) {
-			dc.nlink--;
-		}
-		delete_dst = (dc.nlink == 0) ? 1 : 0;
-		/*
-		 * Keep-orphan overwrite (pynfs RNM21 / POSIX unlink-of-
-		 * open): when the caller knows live opens reference the
-		 * overwritten regular file, keep its inode row in the
-		 * SAME rename transaction — nlink 0 + UNLINK_ORPHAN flag
-		 * — instead of deleting it.  The row keeps resolving for
-		 * the holder's PUTFH+CLOSE; the last CLOSE finalizes
-		 * (compound_orphan_finalize).  The ctime/change bump and
-		 * serialisation below run because delete_dst is 0.
-		 */
-		if (delete_dst != 0 &&
-		    (rn_flags & MDS_CAT_RNF_KEEP_DST_ORPHAN) != 0U &&
-		    dc.type == MDS_FTYPE_REG) {
-			dc.flags |= MDS_IFLAG_UNLINK_ORPHAN;
-			delete_dst = 0;
-		}
-	} else if (rc != 1) {
-		return MDS_ERR_IO;
-	}
-
-	/* Compute nlink deltas for parents (handled atomically by shim).
-	 * Src parent: -1 if dir moves out in cross-dir rename.
-	 * Dst parent: +1 if dir moves in, -1 if overwriting a dir. */
-	int32_t sp_nlink_delta = 0;
-	int32_t dp_nlink_delta = 0;
-
-	if (cross_dir && sc.type == MDS_FTYPE_DIR) {
-		sp_nlink_delta = -1;
-		dp_nlink_delta += 1;
-	}
-	if (cross_dir && dst_exists &&
-	    dc.type == MDS_FTYPE_DIR) {
-		dp_nlink_delta -= 1;
-	}
-
-	/* Prepare updated child inodes. */
-	clock_gettime(CLOCK_REALTIME, &now);
-
-	/* Src child: update parent_fileid if cross-dir. */
-	if (cross_dir) {
-		sc.parent_fileid = dst_parent;
-	}
-	sc.ctime = now;
-	sc.change++;
-
-	/* Dst child: timestamps if not being deleted. */
-	if (dst_exists && !delete_dst) {
-		dc.ctime = now;
-		dc.change++;
-	}
-
-	/* Serialize child inodes only (parents updated atomically by shim). */
-	if (rondb_inode_serialize(&sc, sc_shard,
-				  sc_buf, sizeof(sc_buf)) < 0) {
-		return MDS_ERR_IO;
-	}
-	if (dst_exists && !delete_dst) {
-		if (rondb_inode_serialize(&dc, dc_shard,
-					  dc_buf, sizeof(dc_buf)) < 0) {
-			return MDS_ERR_IO;
-		}
-	}
-
-	/* Atomic rename via shim (T2 transaction).
-	 * Parent nlink/change/mtime updated atomically at NDB data node. */
-	rc = rondb_shim_rename(h, src_parent, src_name,
-			       dst_parent, dst_name,
-			       sp_nlink_delta, dp_nlink_delta,
-			       sc_buf, RONDB_INODE_FIXED_SIZE,
-			       src_fid, src_type,
-			       dst_exists,
-			       dst_exists ? dc_buf : NULL,
-			       dst_exists ? RONDB_INODE_FIXED_SIZE : 0,
-			       dst_fid, delete_dst);
-	if (rc != 0) {
-		return MDS_ERR_IO;
-	}
-
-	if (src_fid_out != NULL) { *src_fid_out = src_fid; }
-	if (src_type_out != NULL) { *src_type_out = src_type; }
-	return MDS_OK;
+	return st;
 }
 
-enum mds_status catalogue_rondb_ns_rename(
+static enum mds_status catalogue_rondb_ns_rename(
 	struct mds_catalogue *cat,
 	uint64_t src_parent,
 	const char *src_name,
@@ -1492,6 +1842,9 @@ static int rondb_readdir_shim_cb(uint64_t child_fid, uint8_t child_type,
 
 	memset(&ent, 0, sizeof(ent));
 	ent.fileid = child_fid;
+	/* RonDB cookie = child fileid (see ns_readdir_plus_from in
+	 * catalogue_internal.h for the hard-link caveat). */
+	ent.cookie = child_fid;
 	ent.type = child_type;
 	if (name_len > MDS_MAX_NAME) {
 		name_len = MDS_MAX_NAME;
@@ -1502,7 +1855,7 @@ static int rondb_readdir_shim_cb(uint64_t child_fid, uint8_t child_type,
 	return a->cat_cb(&ent, a->cat_ctx);
 }
 
-enum mds_status catalogue_rondb_ns_readdir(
+static enum mds_status catalogue_rondb_ns_readdir(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	const char *start_after,
@@ -1530,7 +1883,7 @@ enum mds_status catalogue_rondb_ns_readdir(
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_dirent_name_for_child(
+static enum mds_status catalogue_rondb_dirent_name_for_child(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	uint64_t child_fileid,
@@ -1584,6 +1937,9 @@ static int rondb_readdir_plus_shim_cb(uint64_t child_fid,
 
 	memset(&ent, 0, sizeof(ent));
 	ent.fileid = child_fid;
+	/* RonDB cookie = child fileid; ns_readdir_plus_from resumes over
+	 * ix_dirents_parent_child in this same order. */
+	ent.cookie = child_fid;
 	ent.type = child_type;
 	if (name_len > MDS_MAX_NAME) {
 		name_len = MDS_MAX_NAME;
@@ -1606,7 +1962,7 @@ static int rondb_readdir_plus_shim_cb(uint64_t child_fid,
 	return a->cat_cb(&ent, valid ? &inode : NULL, valid, a->cat_ctx);
 }
 
-enum mds_status catalogue_rondb_ns_readdir_plus(
+static enum mds_status catalogue_rondb_ns_readdir_plus(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	const char *start_after,
@@ -1671,86 +2027,57 @@ static enum mds_status catalogue_rondb_ns_readdir_plus_from(
 }
 
 /* -----------------------------------------------------------------------
- * Link -- create dirent + bump target nlink atomically
+ * Link -- dirent insert + target nlink bump + parent touch in ONE NDB
+ * transaction (rondb_shim_ns_link).  Parent/target validation happens
+ * under the shim's row locks, so there is no read outside the
+ * transaction and no full-row write of the target.
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_ns_link(
+static enum mds_status catalogue_rondb_ns_link(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	const char *name,
 	uint64_t target_fileid)
 {
 	void *h = rondb_handle(cat);
-	struct mds_inode parent, target;
-	uint32_t parent_shard = 0, target_shard = 0;
-	uint8_t parent_buf[RONDB_INODE_MAX_SIZE];
-	uint8_t target_buf[RONDB_INODE_MAX_SIZE];
-	uint32_t outlen = 0;
-	struct timespec now;
-	int rc;
+	int rc = -1;
 
 	if (h == NULL || name == NULL) {
 		return MDS_ERR_INVAL;
 	}
 
-	/* Read parent inode (validation only: must exist and be a dir). */
-	rc = rondb_shim_inode_get(h, parent_fileid, parent_buf,
-				  sizeof(parent_buf), &outlen, 0);
-	if (rc != 0) {
-		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+	for (int attempt = 0; attempt < RONDB_TRANSIENT_RETRIES; attempt++) {
+		rc = rondb_shim_ns_link(h, parent_fileid, name, target_fileid);
+		if (rc != -2) {
+			break;
+		}
+		rondb_transient_backoff(attempt);
 	}
-	if (rondb_inode_deserialize(parent_buf, outlen,
-				   &parent, NULL) != 0) {
-		return MDS_ERR_IO;
-	}
-	if (parent.type != MDS_FTYPE_DIR) {
-		return MDS_ERR_NOTDIR;
-	}
-
-	/* Read target inode. */
-	rc = rondb_shim_inode_get(h, target_fileid, target_buf,
-				  sizeof(target_buf), &outlen, 0);
-	if (rc != 0) {
-		return (rc == 1) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
-	}
-	if (rondb_inode_deserialize(target_buf, outlen,
-				   &target, &target_shard) != 0) {
-		return MDS_ERR_IO;
-	}
-	if (target.type == MDS_FTYPE_DIR) {
-		return MDS_ERR_ISDIR;
-	}
-
-	/* Prepare target inode update (nlink bump). */
-	clock_gettime(CLOCK_REALTIME, &now);
-	target.nlink++;
-	target.ctime = now;
-	target.change++;
-
-	/* Serialize target inode only (parent updated atomically by shim). */
-	if (rondb_inode_serialize(&target, target_shard,
-				  target_buf, sizeof(target_buf)) < 0) {
-		return MDS_ERR_IO;
-	}
-
-	rc = rondb_shim_ns_link(h, parent_fileid, name,
-				target_fileid, (uint8_t)target.type,
-				target_buf, RONDB_INODE_FIXED_SIZE);
-	if (rc == 1) {
+	rondb_transient_note_exhausted(rc);
+	switch (rc) {
+	case 0:
+		catalog_stat_inc(&cat->stats.authority_writes);
+		return MDS_OK;
+	case 1:
 		return MDS_ERR_EXISTS;
-	}
-	if (rc != 0) {
+	case 2:
+		return MDS_ERR_NOTFOUND;
+	case 3:
+		return MDS_ERR_ISDIR;
+	case 4:
+		return MDS_ERR_NOTDIR;
+	case -2:
+		return MDS_ERR_DELAY;
+	default:
 		return MDS_ERR_IO;
 	}
-
-	return MDS_OK;
 }
 
 /* -----------------------------------------------------------------------
  * nlink_adjust -- standalone atomic shim helper
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_ns_nlink_adjust(
+static enum mds_status catalogue_rondb_ns_nlink_adjust(
 	struct mds_catalogue *cat,
 	uint64_t fileid,
 	int32_t delta)
@@ -1861,7 +2188,7 @@ static uint8_t *stripe_scratch_get(size_t need)
 	return stripe_scratch_buf;
 }
 
-enum mds_status catalogue_rondb_stripe_map_get(
+static enum mds_status catalogue_rondb_stripe_map_get(
 	struct mds_catalogue *cat, uint64_t fileid,
 	uint32_t *stripe_count, uint32_t *stripe_unit,
 	uint32_t *mirror_count,
@@ -1920,7 +2247,7 @@ enum mds_status catalogue_rondb_stripe_map_get(
 
 		for (i = 0; i < sc; i++) {
 			if (rondb_stripe_entry_deserialize(
-				buf + (i * RONDB_STRIPE_ENTRY_SIZE),
+				buf + ((size_t)i * RONDB_STRIPE_ENTRY_SIZE),
 				RONDB_STRIPE_ENTRY_SIZE, &ents[i]) != 0) {
 				free(ents);
 				return MDS_ERR_IO;
@@ -1933,7 +2260,7 @@ enum mds_status catalogue_rondb_stripe_map_get(
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_stripe_map_put(
+static enum mds_status catalogue_rondb_stripe_map_put(
 	struct mds_catalogue *cat, uint64_t fileid,
 	uint32_t stripe_count, uint32_t stripe_unit,
 	uint32_t mirror_count,
@@ -1967,7 +2294,7 @@ enum mds_status catalogue_rondb_stripe_map_put(
 		for (i = 0; i < stripe_count; i++) {
 			if (rondb_stripe_entry_serialize(
 				&entries[i],
-				buf + (i * RONDB_STRIPE_ENTRY_SIZE),
+				buf + ((size_t)i * RONDB_STRIPE_ENTRY_SIZE),
 				RONDB_STRIPE_ENTRY_SIZE) < 0) {
 				free(buf);
 				return MDS_ERR_IO;
@@ -1990,7 +2317,7 @@ enum mds_status catalogue_rondb_stripe_map_put(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_stripe_map_del(
+static enum mds_status catalogue_rondb_stripe_map_del(
 	struct mds_catalogue *cat, uint64_t fileid)
 {
 	void *h = rondb_handle(cat);
@@ -2027,7 +2354,7 @@ enum mds_status catalogue_rondb_stripe_map_del(
  * Extended attributes (composite PK: fileid + attr_name)
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_xattr_get(
+static enum mds_status catalogue_rondb_xattr_get(
 	struct mds_catalogue *cat, uint64_t fileid, const char *name,
 	void **val, uint32_t *vallen)
 {
@@ -2068,34 +2395,9 @@ enum mds_status catalogue_rondb_xattr_get(
 	return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_xattr_put(
-	struct mds_catalogue *cat, uint64_t fileid, const char *name,
-	const void *val, uint32_t vallen)
-{
-	void *h = rondb_handle(cat);
-	int rc;
-
-	if (h == NULL || name == NULL) {
-		return MDS_ERR_INVAL;
-	}
-
-	rc = rondb_shim_xattr_put(h, fileid, name, val, vallen);
-	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
-}
-
-enum mds_status catalogue_rondb_xattr_del(
-	struct mds_catalogue *cat, uint64_t fileid, const char *name)
-{
-	void *h = rondb_handle(cat);
-	int rc;
-
-	if (h == NULL || name == NULL) {
-		return MDS_ERR_INVAL;
-	}
-
-	rc = rondb_shim_xattr_del(h, fileid, name);
-	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
-}
+/* xattr_put / xattr_del are served by rondb_auth_xattr_put /
+ * rondb_auth_xattr_del (Stage 7: xattr row + inode ctime/change touch in
+ * one NDB transaction); the plain per-row wrappers were dead code. */
 
 struct rondb_xattr_list_adapter {
 	mds_xattr_list_cb cb;
@@ -2109,7 +2411,7 @@ static int rondb_xattr_list_trampoline(const char *name, uint32_t name_len,
 	return a->cb(name, (size_t)name_len, a->ctx);
 }
 
-enum mds_status catalogue_rondb_xattr_list(
+static enum mds_status catalogue_rondb_xattr_list(
 	struct mds_catalogue *cat, uint64_t fileid,
 	mds_xattr_list_cb cb, void *ctx)
 {
@@ -2128,7 +2430,7 @@ enum mds_status catalogue_rondb_xattr_list(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_xattr_exists(
+static enum mds_status catalogue_rondb_xattr_exists(
 	struct mds_catalogue *cat, uint64_t fileid, const char *name)
 {
 	void *h = rondb_handle(cat);
@@ -2152,7 +2454,7 @@ enum mds_status catalogue_rondb_xattr_exists(
  * DS registry (typed columns, no blob serialisation)
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_ds_get(
+static enum mds_status catalogue_rondb_ds_get(
 	struct mds_catalogue *cat, uint32_t ds_id,
 	struct mds_ds_info *info)
 {
@@ -2170,7 +2472,7 @@ enum mds_status catalogue_rondb_ds_get(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_ds_put(
+static enum mds_status catalogue_rondb_ds_put(
 	struct mds_catalogue *cat,
 	const struct mds_ds_info *info)
 {
@@ -2185,7 +2487,7 @@ enum mds_status catalogue_rondb_ds_put(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_ds_del(
+static enum mds_status catalogue_rondb_ds_del(
 	struct mds_catalogue *cat, uint32_t ds_id)
 {
 	void *h = rondb_handle(cat);
@@ -2202,7 +2504,7 @@ enum mds_status catalogue_rondb_ds_del(
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_ds_list(
+static enum mds_status catalogue_rondb_ds_list(
 	struct mds_catalogue *cat,
 	struct mds_ds_info **list, uint32_t *count)
 {
@@ -2729,8 +3031,11 @@ static enum mds_status catalogue_rondb_layout_grant_union(
 /**
  * Phase 2: Fused stripe_get + layout_grant in one NDB txn.
  * Saves 1 NDB round-trip compared to separate calls.
+ *
+ * Coordination vtable slot (layoutget_fused); reached only through
+ * mds_coord_layoutget_fused().
  */
-enum mds_status catalogue_rondb_layoutget_fused(
+static enum mds_status catalogue_rondb_layoutget_fused(
 	struct mds_catalogue *cat, uint64_t fileid,
 	uint32_t *stripe_count, uint32_t *stripe_unit,
 	uint32_t *mirror_count, struct mds_ds_map_entry **entries,
@@ -2806,7 +3111,7 @@ enum mds_status catalogue_rondb_layoutget_fused(
 
 	for (i = 0; i < total && i * RONDB_STRIPE_ENTRY_SIZE < outlen; i++) {
 		if (rondb_stripe_entry_deserialize(
-			    buf + i * RONDB_STRIPE_ENTRY_SIZE,
+			    buf + ((size_t)i * RONDB_STRIPE_ENTRY_SIZE),
 			    RONDB_STRIPE_ENTRY_SIZE,
 			    &(*entries)[i]) != 0) {
 			free(*entries);
@@ -2818,6 +3123,63 @@ enum mds_status catalogue_rondb_layoutget_fused(
 	return MDS_OK;
 }
 
+/* Every fused-create out-param starts in its documented "nothing
+ * happened" state so callers never read stale data. */
+static void rondb_create_wl_reset_outputs(
+	bool *layout_ok, struct mds_ds_map_entry *layout_entry_out,
+	uint32_t *layout_pop_stripe_unit_out)
+{
+	if (layout_ok != NULL) {
+		*layout_ok = false;
+	}
+	if (layout_entry_out != NULL) {
+		memset(layout_entry_out, 0, sizeof(*layout_entry_out));
+	}
+	if (layout_pop_stripe_unit_out != NULL) {
+		*layout_pop_stripe_unit_out = 0;
+	}
+}
+
+/*
+ * Placement derived from the ONE popped entry: the layout DS, the
+ * stripe unit persisted with the 1x1 map, and the caller-facing
+ * placement outputs.
+ *
+ * Persist the ring's configured unit, not the 65536 fallback: the
+ * durable stripe-map header must match the popped entry's geometry.
+ * (The fallback previously applied unconditionally -- a latent header
+ * mismatch whenever stripe_unit_bytes != 64 KiB.)
+ *
+ * Surface the popped entry to the caller so a follow-up LAYOUTGET in
+ * the same compound can skip stripe_map_get's NDB read.  Only
+ * meaningful when an FH was captured by ds_prealloc_pop --
+ * pre-Phase-12 / proxy-less paths leave nfs_fh_len at zero and the
+ * caller falls back to the legacy DS_PENDING flow.
+ */
+static void rondb_create_wl_apply_pop(
+	const struct rondb_create_pop *pop,
+	uint32_t *layout_ds_id, uint32_t *layout_ds_count,
+	uint32_t *create_stripe_unit,
+	struct mds_ds_map_entry *layout_entry_out,
+	uint32_t *layout_pop_stripe_unit_out)
+{
+	if (!pop->popped) {
+		return;
+	}
+	*layout_ds_id = pop->entry.ds_id;
+	*layout_ds_count = 1;
+	*create_stripe_unit =
+		(pop->stripe_unit != 0U) ? pop->stripe_unit : 65536U;
+	if (layout_entry_out != NULL) {
+		*layout_entry_out = pop->entry;
+	}
+	/* Pop-once indicator + authoritative unit for the caller's
+	 * stripe cache (always nonzero on pop). */
+	if (layout_pop_stripe_unit_out != NULL) {
+		*layout_pop_stripe_unit_out = *create_stripe_unit;
+	}
+}
+
 /**
  * Phase 3: ns_create with layout pre-grant (single NDB transaction).
  *
@@ -2825,8 +3187,11 @@ enum mds_status catalogue_rondb_layoutget_fused(
  * stripe + layout_state + layout indexes all in one NDB transaction
  * (NoCommit flush + Commit = 2 NDB internal RTs, but 1 user-visible
  * wall-clock NDB transaction).  LAYOUTGET becomes 0 NDB RTs.
+ *
+ * Authority vtable slot (ns_create_with_layout); reached only through
+ * mds_cat_ns_create_with_layout().
  */
-enum mds_status catalogue_rondb_ns_create_with_layout(
+static enum mds_status catalogue_rondb_ns_create_with_layout(
 	struct mds_catalogue *cat,
 	uint64_t parent_fileid,
 	const char *name,
@@ -2844,144 +3209,56 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 {
 	void *h = rondb_handle(cat);
 	struct mds_inode child;
-	struct timespec now;
+	struct rondb_create_pop pop;
 	uint8_t child_buf[RONDB_INODE_MAX_SIZE];
 	int32_t parent_nlink_delta;
-	int rc;
-	enum mds_status st;
+	uint32_t layout_ds_id = 0;
+	uint32_t layout_ds_count = 0;
+	/* Stripe unit persisted with the 1x1 map.  Defaults to the
+	 * historical 65536 and is replaced by the popped prealloc
+	 * entry's configured unit, so the durable header matches the
+	 * ring's (config-derived) geometry. */
+	uint32_t create_stripe_unit = 65536;
+	uint64_t child_fid;
+	int rc = -1;
 
-	if (layout_ok != NULL) {
-		*layout_ok = false;
-	}
-	if (layout_entry_out != NULL) {
-		memset(layout_entry_out, 0, sizeof(*layout_entry_out));
-	}
-	if (layout_pop_stripe_unit_out != NULL) {
-		*layout_pop_stripe_unit_out = 0;
-	}
+	rondb_create_wl_reset_outputs(layout_ok, layout_entry_out,
+				      layout_pop_stripe_unit_out);
 	if (h == NULL || name == NULL || out == NULL) {
 		return MDS_ERR_INVAL;
 	}
 
 	/*
-	 * Pop once and derive every placement input from that entry.
-	 *
-	 * A prior peek followed by a separate pop could select different
-	 * entries under concurrent CREATEs.  That persisted one DS in the
-	 * stripe map while granting a layout for another DS.
+	 * Pop FIRST and derive every placement input (layout DS id,
+	 * stripe blob, fileid, synth owner) from the ONE popped entry.
+	 * The previous peek-then-pop pair made two independent placement
+	 * picks: with empty prealloc rings both calls fall back to the
+	 * placement policy and can select DIFFERENT DSes, and the fused
+	 * transaction then commits a split-brain file (layout row pinned
+	 * to one DS, stripe map to another).  Every small-file create
+	 * from a client that fuses OPEN+LAYOUTGET then reads back EIO
+	 * because the fused map never becomes FH-ready on the layout DS.
+	 * One pop, one placement decision, used everywhere below.
 	 */
-	uint32_t layout_ds_id = 0;
-	uint32_t layout_ds_count = 0;
-	uint8_t stripe_buf[256];
-	uint32_t stripe_buf_len = 0;
-	uint32_t stripe_count_for_create = 0;
-	/* Stripe unit persisted with the 1x1 map.  Defaults to the
-	 * historical 65536 and is replaced by the popped prealloc
-	 * entry's configured unit below, so the durable header matches
-	 * the ring's (config-derived) geometry. */
-	uint32_t create_stripe_unit = 65536;
-	/* v8: synth owner carried out of the pop block onto the child inode. */
-	uint32_t child_synth_suid = 0;
-	uint32_t child_synth_sgid = 0;
-
-	uint64_t child_fid = 0;
-	if (type == MDS_FTYPE_REG && prealloc != NULL) {
-		struct mds_ds_map_entry ds_entry;
-		uint32_t stripe_unit = 0;
-		uint64_t prealloc_fid = 0;
-		/*
-		 * Pop FIRST and derive every placement input (layout DS
-		 * id, stripe blob, fileid, synth owner) from the ONE
-		 * popped entry.  The previous peek-then-pop pair made two
-		 * independent placement picks: with empty prealloc rings
-		 * both calls fall back to the placement policy and can
-		 * select DIFFERENT DSes, and the fused transaction then
-		 * commits a split-brain file (layout row pinned to one
-		 * DS, stripe map to another).  Every small-file create
-		 * from a client that fuses OPEN+LAYOUTGET then reads
-		 * back EIO because the fused map never becomes FH-ready
-		 * on the layout DS.  One pop, one placement decision,
-		 * used everywhere below.
-		 */
-		if (ds_prealloc_pop(prealloc, &ds_entry, &stripe_unit,
-				    &prealloc_fid) == 0) {
-			layout_ds_id = ds_entry.ds_id;
-			layout_ds_count = 1;
-			if (prealloc_fid != 0) {
-				child_fid = prealloc_fid;
-			}
-			fdb_put_u32(stripe_buf, ds_entry.ds_id);
-			fdb_put_u32(stripe_buf + 4, ds_entry.nfs_fh_len);
-			if (ds_entry.nfs_fh_len > 0) {
-				memcpy(stripe_buf + 8, ds_entry.nfs_fh,
-				       ds_entry.nfs_fh_len);
-			}
-			stripe_buf_len = 8 + ds_entry.nfs_fh_len;
-			stripe_count_for_create = 1;
-			child_synth_suid = ds_entry.synth_suid;
-			child_synth_sgid = ds_entry.synth_sgid;
-
-			/*
-			 * Persist the ring's configured unit, not the
-			 * 65536 fallback: the durable stripe-map header
-			 * must match the popped entry's geometry.  (The
-			 * fallback previously applied unconditionally --
-			 * a latent header mismatch whenever
-			 * stripe_unit_bytes != 64 KiB.)
-			 */
-			create_stripe_unit =
-				(stripe_unit != 0U) ? stripe_unit : 65536U;
-
-			/*
-			 * Surface the popped entry to the caller so a
-			 * follow-up LAYOUTGET in the same compound can
-			 * skip stripe_map_get's NDB read.  Only meaningful
-			 * when an FH was captured by ds_prealloc_pop --
-			 * pre-Phase-12 / proxy-less paths leave nfs_fh_len
-			 * at zero and the caller falls back to the legacy
-			 * DS_PENDING flow.
-			 */
-			if (layout_entry_out != NULL) {
-				*layout_entry_out = ds_entry;
-			}
-			/* Pop-once indicator + authoritative unit for the
-			 * caller's stripe cache (always nonzero on pop). */
-			if (layout_pop_stripe_unit_out != NULL) {
-				*layout_pop_stripe_unit_out =
-					create_stripe_unit;
-			}
-		}
-	}
+	rondb_create_pop_prealloc(prealloc, type, &pop);
+	rondb_create_wl_apply_pop(&pop, &layout_ds_id, &layout_ds_count,
+				  &create_stripe_unit, layout_entry_out,
+				  layout_pop_stripe_unit_out);
 
 	/* Allocate fileid (skip if pre-allocated from pool). */
+	child_fid = pop.fileid;
 	if (child_fid == 0) {
-		st = catalogue_rondb_alloc_fileid(cat, &child_fid);
+		enum mds_status st = catalogue_rondb_alloc_fileid(cat, &child_fid);
+
 		if (st != MDS_OK) {
 			return st;
 		}
 	}
 
-	/* Build child inode. */
-	clock_gettime(CLOCK_REALTIME, &now);
-	memset(&child, 0, sizeof(child));
-	child.fileid = child_fid;
-	child.type = type;
-	child.mode = mode;
-	child.uid = uid;
-	child.gid = gid;
-	child.synth_suid = child_synth_suid;  /* v8 stored synthetic DS owner */
-	child.synth_sgid = child_synth_sgid;
-	child.atime = now;
-	child.mtime = now;
-	child.ctime = now;
-	child.change = 1;
-	child.generation = 1;
-	child.parent_fileid = parent_fileid;
-	child.nlink = (type == MDS_FTYPE_DIR) ? 2 : 1;
-	/* Only set DS_PENDING if stripe has no pre-captured FH. */
-	if (stripe_count_for_create > 0 && stripe_buf_len <= 8) {
-		child.flags |= MDS_IFLAG_DS_PENDING;
-	}
+	/* Build child inode (DS_PENDING only when the stripe has no
+	 * pre-captured FH). */
+	rondb_create_build_child(&child, child_fid, parent_fileid, type, mode,
+				 uid, gid, &pop);
 	parent_nlink_delta = (type == MDS_FTYPE_DIR) ? 1 : 0;
 
 	if (rondb_inode_serialize(&child, 0, child_buf,
@@ -2995,8 +3272,8 @@ enum mds_status catalogue_rondb_ns_create_with_layout(
 			h, parent_fileid, name,
 			child_buf, RONDB_INODE_FIXED_SIZE,
 			parent_nlink_delta,
-			stripe_count_for_create > 0 ? stripe_buf : NULL,
-			stripe_buf_len, stripe_count_for_create,
+			pop.stripe_count > 0 ? pop.stripe_buf : NULL,
+			pop.stripe_buf_len, pop.stripe_count,
 			create_stripe_unit, 1,
 			layout_clientid, layout_iomode,
 			layout_offset, layout_length,
@@ -3164,6 +3441,16 @@ static enum mds_status catalogue_rondb_layout_iter_file(
 
 /* -----------------------------------------------------------------------
  * Phase 8A C wrappers -- Client recovery (coordination ops)
+ *
+ * A recovery row is owned by the MDS whose handle wrote it: session.c
+ * persists it on CREATE_SESSION through the serving MDS's own catalogue
+ * handle (directly or via its commit queue), so the owner is this
+ * backend's identity.  recovery_list(owner) returns that owner's rows
+ * (plus unassigned owner-0 legacy rows, never another owner's);
+ * failover_promote lists the dead partner's rows and a restarted MDS
+ * lists its own.  state->boot_epoch is stamped as the owner epoch; it
+ * is 0 until the node_register cluster slot records the daemon's epoch
+ * on this handle.
  * ----------------------------------------------------------------------- */
 
 static enum mds_status catalogue_rondb_recovery_put(
@@ -3171,16 +3458,17 @@ static enum mds_status catalogue_rondb_recovery_put(
 	uint64_t clientid, const uint8_t *co_ownerid,
 	uint32_t co_ownerid_len, const uint8_t verifier[8])
 {
-	void *h = rondb_handle(cat);
+	struct mds_rondb_state *state = rondb_state(cat);
 	int rc;
 
 	(void)txn;
-	if (h == NULL || verifier == NULL) {
+	if (state == NULL || state->handle == NULL || verifier == NULL) {
 		return MDS_ERR_INVAL;
 	}
 
-	rc = rondb_shim_recovery_put(h, clientid, co_ownerid,
-				     co_ownerid_len, verifier);
+	rc = rondb_shim_recovery_put(state->handle, clientid, co_ownerid,
+				     co_ownerid_len, verifier,
+				     state->mds_id, state->boot_epoch);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
@@ -3656,14 +3944,6 @@ static enum mds_status rondb_auth_ds_del(
  * On contention (acquire returns 1), return MDS_ERR_DELAY.
  * ----------------------------------------------------------------------- */
 
-static struct mds_rondb_state *rondb_state(const struct mds_catalogue *cat)
-{
-    if (cat == NULL || cat->backend_private == NULL) {
-        return NULL;
-    }
-    return (struct mds_rondb_state *)cat->backend_private;
-}
-
 /** Acquire a single lock.  Returns MDS_OK, MDS_ERR_DELAY, or MDS_ERR_IO. */
 static enum mds_status rondb_lock_one(
     void *h, const struct mds_rondb_state *st,
@@ -3832,6 +4112,7 @@ static enum mds_status rondb_locked_ns_rename_flags(
     uint64_t child_fid = 0;
     uint8_t child_type = 0;
 
+    (void)txn; /* RonDB writes are self-contained. */
     if (st == NULL || h == NULL ||
         src_name == NULL || dst_name == NULL) {
         return MDS_ERR_INVAL;
@@ -3943,16 +4224,19 @@ struct foreign_node {
     uint64_t last_applied;
 };
 
+/* Discovery scan state: the foreign nodes found so far. */
+struct foreign_discover {
+    struct foreign_node *nodes;
+    uint32_t count;
+    uint32_t self_id;
+};
+
 static int collect_foreign_cb(uint32_t mds_id, uint64_t boot_epoch,
                               uint64_t last_heartbeat_ns, void *ctx)
 {
-    (void)last_heartbeat_ns;
-    struct {
-        struct foreign_node *nodes;
-        uint32_t count;
-        uint32_t self_id;
-    } *state = ctx;
+    struct foreign_discover *state = ctx;
 
+    (void)last_heartbeat_ns;
     if (mds_id == state->self_id) { return 0; }
     if (state->count >= POLLER_MAX_FOREIGN) { return 0; }
 
@@ -3961,6 +4245,77 @@ static int collect_foreign_cb(uint32_t mds_id, uint64_t boot_epoch,
     state->nodes[state->count].last_applied = 0;
     state->count++;
     return 0;
+}
+
+/* Discover foreign MDS IDs from the node registry, keeping the
+ * last_applied cursor of every stream that is still present. */
+static void poller_discover_foreign(struct mds_rondb_state *st,
+                                    struct foreign_node *foreign,
+                                    uint32_t *foreign_count)
+{
+    struct foreign_discover dc = { .nodes = foreign, .count = 0,
+                                   .self_id = st->poller_self_mds_id };
+    /* Preserve existing last_applied values. */
+    struct foreign_node old[POLLER_MAX_FOREIGN];
+    uint32_t old_count = *foreign_count;
+
+    memcpy(old, foreign, old_count * sizeof(old[0]));
+
+    (void)rondb_shim_mds_scan_stale(st->handle, UINT64_MAX,
+                                    collect_foreign_cb, &dc);
+    *foreign_count = dc.count;
+
+    /* Restore last_applied for known MDS IDs. */
+    for (uint32_t i = 0; i < *foreign_count; i++) {
+        for (uint32_t j = 0; j < old_count; j++) {
+            if (foreign[i].mds_id == old[j].mds_id) {
+                foreign[i].last_applied = old[j].last_applied;
+                break;
+            }
+        }
+    }
+}
+
+/* Poll each foreign stream and apply its deltas to the image. */
+static void poller_poll_streams(struct mds_rondb_state *st,
+                                struct foreign_node *foreign,
+                                uint32_t foreign_count)
+{
+    for (uint32_t i = 0; i < foreign_count; i++) {
+        struct poller_apply_ctx pa = {
+            .img = st->poller_image,
+            .stream_id = foreign[i].mds_id,
+            .max_applied = foreign[i].last_applied,
+        };
+        (void)rondb_shim_delta_poll(
+            st->handle, foreign[i].mds_id,
+            foreign[i].last_applied, POLLER_BATCH,
+            poller_delta_cb, &pa);
+        if (pa.max_applied > foreign[i].last_applied) {
+            foreign[i].last_applied = pa.max_applied;
+        }
+    }
+}
+
+/* Trim every stream up to the smallest applied seqno. */
+static void poller_trim_streams(struct mds_rondb_state *st,
+                                const struct foreign_node *foreign,
+                                uint32_t foreign_count)
+{
+    uint64_t min_applied = UINT64_MAX;
+
+    for (uint32_t i = 0; i < foreign_count; i++) {
+        if (foreign[i].last_applied < min_applied) {
+            min_applied = foreign[i].last_applied;
+        }
+    }
+    if (min_applied > 0 && min_applied != UINT64_MAX) {
+        for (uint32_t i = 0; i < foreign_count; i++) {
+            (void)rondb_shim_delta_trim(
+                st->handle, foreign[i].mds_id,
+                min_applied);
+        }
+    }
 }
 
 static void *rondb_poller_thread(void *arg)
@@ -3976,65 +4331,15 @@ static void *rondb_poller_thread(void *arg)
 
         /* Discover foreign MDS IDs every 30s. */
         if (now - last_discover >= 30 || foreign_count == 0) {
-            struct {
-                struct foreign_node *nodes;
-                uint32_t count;
-                uint32_t self_id;
-            } dc = { .nodes = foreign, .count = 0,
-                     .self_id = st->poller_self_mds_id };
-
-            /* Preserve existing last_applied values. */
-            struct foreign_node old[POLLER_MAX_FOREIGN];
-            uint32_t old_count = foreign_count;
-            memcpy(old, foreign, old_count * sizeof(old[0]));
-
-            (void)rondb_shim_mds_scan_stale(st->handle, UINT64_MAX,
-                                            collect_foreign_cb, &dc);
-            foreign_count = dc.count;
-
-            /* Restore last_applied for known MDS IDs. */
-            for (uint32_t i = 0; i < foreign_count; i++) {
-                for (uint32_t j = 0; j < old_count; j++) {
-                    if (foreign[i].mds_id == old[j].mds_id) {
-                        foreign[i].last_applied = old[j].last_applied;
-                        break;
-                    }
-                }
-            }
+            poller_discover_foreign(st, foreign, &foreign_count);
             last_discover = now;
         }
 
-        /* Poll each foreign stream. */
-        for (uint32_t i = 0; i < foreign_count; i++) {
-            struct poller_apply_ctx pa = {
-                .img = st->poller_image,
-                .stream_id = foreign[i].mds_id,
-                .max_applied = foreign[i].last_applied,
-            };
-            (void)rondb_shim_delta_poll(
-                st->handle, foreign[i].mds_id,
-                foreign[i].last_applied, POLLER_BATCH,
-                poller_delta_cb, &pa);
-            if (pa.max_applied > foreign[i].last_applied) {
-                foreign[i].last_applied = pa.max_applied;
-            }
-        }
+        poller_poll_streams(st, foreign, foreign_count);
 
         /* Periodic age-based trim (every 60s). */
         if (now - last_trim >= POLLER_TRIM_SEC && foreign_count > 0) {
-            uint64_t min_applied = UINT64_MAX;
-            for (uint32_t i = 0; i < foreign_count; i++) {
-                if (foreign[i].last_applied < min_applied) {
-                    min_applied = foreign[i].last_applied;
-                }
-            }
-            if (min_applied > 0 && min_applied != UINT64_MAX) {
-                for (uint32_t i = 0; i < foreign_count; i++) {
-                    (void)rondb_shim_delta_trim(
-                        st->handle, foreign[i].mds_id,
-                        min_applied);
-                }
-            }
+            poller_trim_streams(st, foreign, foreign_count);
             last_trim = now;
         }
 
@@ -4095,6 +4400,23 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
     st->poller_image = NULL;
 }
 
+/* image_feed_start lifecycle slot: the poller keeps its int contract
+ * (0 / -1); the slot reports a status like every other slot.  The
+ * poller's only failure modes are a missing handle/image (INVAL) and
+ * pthread_create failing, so -1 with valid arguments is an IO error. */
+static enum mds_status rondb_image_feed_start(struct mds_catalogue *cat,
+                                              struct catalog_image *img,
+                                              uint32_t self_mds_id,
+                                              uint32_t poll_interval_ms)
+{
+    if (cat == NULL || img == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    return catalogue_rondb_poller_start(cat, img, self_mds_id,
+                                        poll_interval_ms) == 0
+           ? MDS_OK : MDS_ERR_IO;
+}
+
 /* -----------------------------------------------------------------------
  * Phase 8B -- RonDB authority vtable (single-MDS, no locking)
  * ----------------------------------------------------------------------- */
@@ -4102,6 +4424,7 @@ void catalogue_rondb_poller_stop(struct mds_catalogue *cat)
 static const struct mds_authority_ops rondb_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
 	.ns_create_wide    = rondb_auth_ns_create_wide,
+	.ns_create_with_layout = catalogue_rondb_ns_create_with_layout,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
@@ -4207,6 +4530,7 @@ static const struct mds_authority_ops rondb_authority_ops = {
 static const struct mds_authority_ops rondb_locked_authority_ops = {
 	.ns_create         = rondb_auth_ns_create,
 	.ns_create_wide    = rondb_auth_ns_create_wide,
+	.ns_create_with_layout = catalogue_rondb_ns_create_with_layout,
 	.ns_remove         = rondb_auth_ns_remove,
 	.ns_remove_known   = rondb_auth_ns_remove_known,
 	.ns_remove_known_gc = rondb_auth_ns_remove_known_gc,
@@ -4488,6 +4812,7 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 	.journal_scan            = catalogue_rondb_journal_scan,
 	.layout_grant            = catalogue_rondb_layout_grant,
 	.layout_grant_union      = catalogue_rondb_layout_grant_union,
+	.layoutget_fused         = catalogue_rondb_layoutget_fused,
 	.layout_return           = catalogue_rondb_layout_return,
 	.layout_get_by_stateid   = catalogue_rondb_layout_get_by_stateid,
 	.layout_scan_for_file    = catalogue_rondb_layout_scan_for_file,
@@ -4527,29 +4852,49 @@ static const struct mds_coordination_ops rondb_coordination_ops = {
 };
 
 /* -----------------------------------------------------------------------
- * Phase 9A -- Node registry C wrappers
+ * Phase 9A -- Node registry cluster slots (struct mds_cluster_ops)
+ *
+ * Reached only through the mds_cluster_* dispatchers.  The mds_cluster_*
+ * callback typedefs have exactly the shapes of the shim's rondb_*_cb
+ * typedefs, so the callback pointers are forwarded without a cast: any
+ * future drift between the two is an incompatible-pointer-type error
+ * under -Werror rather than a silent ABI mismatch.
+ *
+ * The slots implement the registry contract of mds_cluster.h: the shim
+ * performs the epoch checks inside the store (see the node-registry
+ * section of catalogue_rondb_shim.cpp) and reports them as distinct
+ * return codes, mapped here 1:1 onto MDS_ERR_EXISTS / MDS_ERR_NOTFOUND
+ * / MDS_ERR_STALE.
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_mds_register(struct mds_catalogue *cat,
-                                             uint32_t mds_id,
-                                             uint64_t boot_epoch,
-                                             const char *hostname,
-                                             uint16_t nfs_port,
-                                             uint16_t grpc_port)
+static enum mds_status rondb_cluster_node_register(struct mds_catalogue *cat,
+                                                   uint32_t mds_id,
+                                                   uint64_t boot_epoch,
+                                                   const char *hostname,
+                                                   uint16_t nfs_port,
+                                                   uint16_t grpc_port)
 {
-    void *h = rondb_handle(cat);
+    struct mds_rondb_state *state = rondb_state(cat);
+    int rc;
 
-    if (h == NULL || hostname == NULL) {
+    if (state == NULL || state->handle == NULL || hostname == NULL) {
         return MDS_ERR_INVAL;
     }
-    return rondb_shim_mds_register(h, mds_id, boot_epoch,
-                                   hostname, nfs_port, grpc_port) == 0
-           ? MDS_OK : MDS_ERR_IO;
+    rc = rondb_shim_mds_register(state->handle, mds_id, boot_epoch,
+                                 hostname, nfs_port, grpc_port);
+    if (rc == 1) { return MDS_ERR_EXISTS; } /* equal/higher epoch live */
+    if (rc != 0) { return MDS_ERR_IO; }
+    /* This incarnation now owns the registry row: every owner-epoch
+     * stamp the backend writes from here on (lock owners, deltas)
+     * carries the same epoch.  Written once, on the main thread,
+     * before any worker thread exists (main.c step 2d). */
+    state->boot_epoch = boot_epoch;
+    return MDS_OK;
 }
 
-enum mds_status catalogue_rondb_mds_heartbeat(struct mds_catalogue *cat,
-                                              uint32_t mds_id,
-                                              uint64_t boot_epoch)
+static enum mds_status rondb_cluster_node_heartbeat(struct mds_catalogue *cat,
+                                                    uint32_t mds_id,
+                                                    uint64_t boot_epoch)
 {
     void *h = rondb_handle(cat);
 
@@ -4558,25 +4903,29 @@ enum mds_status catalogue_rondb_mds_heartbeat(struct mds_catalogue *cat,
     }
     int rc = rondb_shim_mds_heartbeat(h, mds_id, boot_epoch);
     if (rc == 1) { return MDS_ERR_NOTFOUND; }
+    if (rc == 2) { return MDS_ERR_STALE; }
     return rc == 0 ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_mds_deregister(struct mds_catalogue *cat,
-                                               uint32_t mds_id)
+static enum mds_status rondb_cluster_node_deregister(struct mds_catalogue *cat,
+                                                     uint32_t mds_id,
+                                                     uint64_t boot_epoch)
 {
     void *h = rondb_handle(cat);
+    int rc;
 
     if (h == NULL) {
         return MDS_ERR_INVAL;
     }
-    return rondb_shim_mds_deregister(h, mds_id) == 0
-           ? MDS_OK : MDS_ERR_IO;
+    rc = rondb_shim_mds_deregister(h, mds_id, boot_epoch);
+    if (rc == 2) { return MDS_ERR_STALE; }
+    return rc == 0 ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_mds_scan_stale(
+static enum mds_status rondb_cluster_node_scan_stale(
     struct mds_catalogue *cat,
     uint64_t threshold_ns,
-    rondb_stale_node_cb cb, void *ctx)
+    mds_cluster_stale_cb cb, void *ctx)
 {
     void *h = rondb_handle(cat);
 
@@ -4633,11 +4982,11 @@ enum mds_status catalogue_rondb_lock_reap_by_owner(
 }
 
 /* -----------------------------------------------------------------------
- * Partition map C wrappers
+ * Partition map cluster slots (struct mds_cluster_ops)
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_partition_map_list(
-    struct mds_catalogue *cat, rondb_partition_map_cb cb, void *ctx)
+static enum mds_status rondb_cluster_partition_list(
+    struct mds_catalogue *cat, mds_cluster_partition_cb cb, void *ctx)
 {
     void *h = rondb_handle(cat);
 
@@ -4648,22 +4997,32 @@ enum mds_status catalogue_rondb_partition_map_list(
            ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_partition_map_put(
+/* insert_only == true is an insertTuple (the startup root claim): a
+ * duplicate key is MDS_ERR_EXISTS -- another node owns the partition.
+ * insert_only == false is the writeTuple upsert reserved for seeding
+ * the never-owned initial shard layout. */
+static enum mds_status rondb_cluster_partition_put(
     struct mds_catalogue *cat, uint32_t partition_id,
-    uint32_t owner_mds_id, uint8_t state, const char *subtree_path)
+    uint32_t owner_mds_id, uint8_t state, const char *subtree_path,
+    bool insert_only)
 {
     void *h = rondb_handle(cat);
+    int rc;
 
     if (h == NULL || subtree_path == NULL) {
         return MDS_ERR_INVAL;
     }
-    return rondb_shim_partition_map_put(h, partition_id,
-                                       owner_mds_id, state,
-                                       subtree_path) == 0
-           ? MDS_OK : MDS_ERR_IO;
+    rc = rondb_shim_partition_map_put(h, partition_id,
+                                     owner_mds_id, state,
+                                     subtree_path, insert_only ? 1 : 0);
+    if (rc == 1) { return MDS_ERR_EXISTS; }
+    return rc == 0 ? MDS_OK : MDS_ERR_IO;
 }
 
-enum mds_status catalogue_rondb_partition_map_cas(
+/* Owner CAS (the failover takeover's persistence step): the shim reads
+ * the row LM_Exclusive and rewrites owner/state under that lock, so the
+ * compare and the write are one transaction. */
+static enum mds_status rondb_cluster_partition_cas(
     struct mds_catalogue *cat, uint32_t partition_id,
     uint32_t expected_owner, uint32_t new_owner, uint8_t new_state)
 {
@@ -4683,11 +5042,11 @@ enum mds_status catalogue_rondb_partition_map_cas(
 }
 
 /* -----------------------------------------------------------------------
- * Node registry list C wrapper
+ * Node registry list cluster slot
  * ----------------------------------------------------------------------- */
 
-enum mds_status catalogue_rondb_mds_list(
-    struct mds_catalogue *cat, rondb_mds_list_cb cb, void *ctx)
+static enum mds_status rondb_cluster_node_list(
+    struct mds_catalogue *cat, mds_cluster_node_cb cb, void *ctx)
 {
     void *h = rondb_handle(cat);
 
@@ -4697,6 +5056,20 @@ enum mds_status catalogue_rondb_mds_list(
     return rondb_shim_mds_list(h, cb, ctx) == 0
            ? MDS_OK : MDS_ERR_IO;
 }
+
+/* Cluster services vtable.  Every slot is populated: RonDB is one
+ * cluster reachable from every MDS process (MDS_CAT_CAP_MULTI_PROCESS
+ * in catalogue_rondb_open), so mds_cluster_supported() is true. */
+static const struct mds_cluster_ops rondb_cluster_ops = {
+    .node_register   = rondb_cluster_node_register,
+    .node_heartbeat  = rondb_cluster_node_heartbeat,
+    .node_deregister = rondb_cluster_node_deregister,
+    .node_list       = rondb_cluster_node_list,
+    .node_scan_stale = rondb_cluster_node_scan_stale,
+    .partition_list  = rondb_cluster_partition_list,
+    .partition_put   = rondb_cluster_partition_put,
+    .partition_cas   = rondb_cluster_partition_cas,
+};
 
 /* -----------------------------------------------------------------------
  * Metadata search scan C wrappers

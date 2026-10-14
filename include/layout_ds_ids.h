@@ -23,8 +23,8 @@
  * dispatch layer (mds_coord_layout_grant / _return in
  * src/catalogue/catalogue_dispatch.c).  Individual backends MAY apply
  * a narrower cap when their on-disk row format or transaction size
- * cannot accommodate the full ceiling: the in-memory test backend
- * (tests/catalogue_memdb.c) deep-copies the full list, while the
+ * cannot accommodate the full ceiling: the in-memory backend
+ * (src/catalogue/catalogue_memdb.c) deep-copies the full list, while the
  * RonDB shim is bounded by the per-transaction op-count limit
  * (~4096) and is documented as a follow-up at
  * src/catalogue/catalogue_rondb.c::catalogue_rondb_stripe_map_get.

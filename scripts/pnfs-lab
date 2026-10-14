@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 #
-# pnfs-lab — Canonical staged lab orchestrator for the RonDB-backed pNFS lab.
+# pnfs-lab — Canonical staged lab orchestrator for the pNFS lab.
+#
+# The metadata store is a dimension orthogonal to the MDS profile:
+#   LAB_CATALOGUE_BACKEND=rondb (default)  pnfs-mds on the colocated RonDB
+#   LAB_CATALOGUE_BACKEND=fdb              pnfs-mds on a FoundationDB cluster
+#                                          (LAB_FDB_HOSTS; `fdb` phase)
+# `--catalogue NAME` overrides the inventory for one invocation.  A deploy
+# (`multi-mds` / `single-mds`) renders mds.conf for the active catalogue and
+# restarts the daemons, so switching stores is a config change plus a
+# restart, never a rebuild: the RonDB services keep running while the MDS
+# serve from FoundationDB, and `--catalogue rondb multi-mds` switches back.
+# Running the same switch twice is a no-op.
 #
 # Safe defaults:
 #   - defaults to "validate"
@@ -17,6 +28,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INVENTORY="${SCRIPT_DIR}/pnfs-lab.env"
 DRY_RUN=0
 PROFILE=""
+CATALOGUE=""
 CONFIRM_RESET=0
 TEST_SUITE_MODE="smoke"
 COMMANDS=()
@@ -39,6 +51,7 @@ declare -a KNOWN_RUNTIME_HOSTS=()
 declare -a KNOWN_HOSTS=()
 
 ACTIVE_PROFILE_NAME=""
+ACTIVE_CATALOGUE=""
 ACTIVE_RONDB_NUM_REPLICAS=""
 ACTIVE_RONDB_FREE_API_SLOTS=""
 ACTIVE_MDS_WORKER_THREADS=""
@@ -54,6 +67,9 @@ Options:
                            (default: ${INVENTORY})
   --profile NAME           Profile to use with profile-aware commands
                            (single-mds | multi-mds)
+  --catalogue NAME         Metadata store the MDS configs select
+                           (rondb | fdb; default: LAB_CATALOGUE_BACKEND,
+                           then rondb)
   --dry-run                Print actions without executing them
   --confirm-reset          Allow the reset command to clear generated lab state
   --test-suite-mode MODE   Client suite mode for test-suite
@@ -67,10 +83,16 @@ Commands:
   rondb          Install or refresh RonDB and start the RonDB cluster
   rondb-reinit   WIPE RonDB namespace + DS backing files, restart fresh
                  (requires --confirm-reset; unmounts clients first)
-  build          Build pnfs-mds locally with RonDB enabled
-  deploy         Deploy pnfs-mds for the selected profile
+  fdb            Install FoundationDB ${LAB_FDB_VERSION:-7.3.62} on LAB_FDB_HOSTS
+                 (server + clients, one process per host, every host a
+                 coordinator), create the database
+                 (configure new <redundancy> <engine>) and install the
+                 clients + cluster file on every MDS host
+  build          Build pnfs-mds locally (RonDB enabled; FoundationDB
+                 enabled too when its client headers are installed)
+  deploy         Deploy pnfs-mds for the selected profile and catalogue
   single-mds     Deploy the single-MDS profile
-  multi-mds      Deploy the multi-MDS RonDB profile
+  multi-mds      Deploy the multi-MDS profile
   client         Mount the namespace on every configured client
                  (LAB_CLIENT_MDS_ASSIGNMENT=round-robin spreads clients
                   across MDS shards for load testing)
@@ -94,6 +116,9 @@ Examples:
   ./scripts/pnfs-lab validate
   ./scripts/pnfs-lab --profile single-mds rondb single-mds client smoke
   ./scripts/pnfs-lab full-multi
+  ./scripts/pnfs-lab --profile multi-mds fdb build                    # FDB cluster + fdb-enabled build
+  ./scripts/pnfs-lab --profile multi-mds --catalogue fdb multi-mds    # MDS -> FoundationDB
+  ./scripts/pnfs-lab --profile multi-mds --catalogue rondb multi-mds  # ... and back
   ./scripts/pnfs-lab menu
 EOF
 }
@@ -433,6 +458,43 @@ build_known_hosts() {
             append_unique KNOWN_HOSTS "${host}"
         fi
     done
+    # The FoundationDB hosts join the mesh / validate set only when the
+    # active catalogue needs them, so a RonDB-only lab never has to keep
+    # an unused FDB inventory reachable.
+    if [ "${ACTIVE_CATALOGUE}" = "fdb" ]; then
+        for host in "${LAB_FDB_HOSTS[@]}"; do
+            append_unique KNOWN_HOSTS "${host}"
+        done
+    fi
+}
+
+# Resolve the catalogue the MDS configs select: --catalogue wins over
+# the inventory's LAB_CATALOGUE_BACKEND (default rondb).  With fdb the
+# FDB host arrays must be present and consistent.
+apply_catalogue() {
+    ACTIVE_CATALOGUE="${CATALOGUE:-${LAB_CATALOGUE_BACKEND}}"
+    case "${ACTIVE_CATALOGUE}" in
+        rondb) ;;
+        fdb)
+            [ "${#LAB_FDB_HOSTS[@]}" -gt 0 ] || \
+                fail "catalogue fdb needs LAB_FDB_HOSTS in the inventory"
+            ensure_equal_lengths "LAB_FDB_HOSTS" "${#LAB_FDB_HOSTS[@]}" \
+                "LAB_FDB_IPS" "${#LAB_FDB_IPS[@]}"
+            [ -n "${LAB_FDB_KEY_PREFIX}" ] || \
+                fail "LAB_FDB_KEY_PREFIX must not be empty: the daemons of one \
+deployment share it and an empty prefix would address the whole database"
+            [ "${#LAB_FDB_KEY_PREFIX}" -le 31 ] || \
+                fail "LAB_FDB_KEY_PREFIX longer than 31 bytes"
+            case "${LAB_FDB_KEY_PREFIX}" in
+                *[!A-Za-z0-9_.-]*)
+                    fail "LAB_FDB_KEY_PREFIX may only contain [A-Za-z0-9_.-]"
+                    ;;
+            esac
+            ;;
+        *)
+            fail "Unknown catalogue: ${ACTIVE_CATALOGUE} (rondb | fdb)"
+            ;;
+    esac
 }
 
 apply_profile() {
@@ -486,6 +548,7 @@ apply_profile() {
             ;;
     esac
 
+    apply_catalogue
     build_known_hosts
 }
 
@@ -515,6 +578,30 @@ load_inventory() {
     LAB_CLIENT_MDS_ASSIGNMENT="${LAB_CLIENT_MDS_ASSIGNMENT:-first}"
     LAB_DS_TRANSPORT="${LAB_DS_TRANSPORT:-tcp}"
     LAB_DS_RDMA_PORT="${LAB_DS_RDMA_PORT:-20049}"
+
+    # Metadata store selection and the FoundationDB inventory (all
+    # optional; a RonDB-only inventory needs none of them).
+    LAB_CATALOGUE_BACKEND="${LAB_CATALOGUE_BACKEND:-rondb}"
+    if ! declare -p LAB_FDB_HOSTS >/dev/null 2>&1; then
+        LAB_FDB_HOSTS=()
+    fi
+    if ! declare -p LAB_FDB_IPS >/dev/null 2>&1; then
+        LAB_FDB_IPS=()
+    fi
+    LAB_FDB_VERSION="${LAB_FDB_VERSION:-7.3.62}"
+    # Official release assets; the version is pinned so the server matches
+    # the libfdb_c the MDS links (the FDB client refuses a server whose
+    # protocol version differs).
+    LAB_FDB_DEB_URL_BASE="${LAB_FDB_DEB_URL_BASE:-https://github.com/apple/foundationdb/releases/download}"
+    LAB_FDB_PORT="${LAB_FDB_PORT:-4500}"
+    LAB_FDB_REDUNDANCY="${LAB_FDB_REDUNDANCY:-double}"
+    LAB_FDB_STORAGE_ENGINE="${LAB_FDB_STORAGE_ENGINE:-ssd}"
+    LAB_FDB_DESCRIPTION="${LAB_FDB_DESCRIPTION:-lattice}"
+    LAB_FDB_CLUSTER_FILE="${LAB_FDB_CLUSTER_FILE:-/etc/foundationdb/fdb.cluster}"
+    LAB_FDB_KEY_PREFIX="${LAB_FDB_KEY_PREFIX:-lab}"
+    LAB_FDB_OP_DEADLINE_MS="${LAB_FDB_OP_DEADLINE_MS:-}"
+    LAB_FDB_TXN_TIMEOUT_MS="${LAB_FDB_TXN_TIMEOUT_MS:-}"
+    LAB_BUILD_ENABLE_FDB="${LAB_BUILD_ENABLE_FDB:-auto}"
 
     : "${LAB_USER:?LAB_USER is required}"
     : "${LAB_BUILD_HOST_RONDB_BASE:?LAB_BUILD_HOST_RONDB_BASE is required}"
@@ -557,6 +644,10 @@ load_inventory() {
         fail "Profile ${PROFILE} has no MDS hosts"
     [ "${#ACTIVE_RONDB_DATA_HOSTS[@]}" -gt 0 ] || \
         fail "Profile ${PROFILE} has no RonDB data hosts"
+    case "${LAB_BUILD_ENABLE_FDB}" in
+        auto|on|off) ;;
+        *) fail "LAB_BUILD_ENABLE_FDB must be auto|on|off" ;;
+    esac
 }
 
 render_bounded_mount_function() {
@@ -723,6 +814,31 @@ render_ds_mount_script() {
     done
 }
 
+# The catalogue_backend block of mds.conf.  Everything else in the
+# config is store-independent, so the two variants differ in exactly
+# these lines.  fdb_key_prefix is shared by every MDS of the deployment
+# (one keyspace); the two optional timeouts are emitted only when the
+# inventory sets them, so the daemon defaults otherwise apply.
+render_catalogue_config() {
+    case "${ACTIVE_CATALOGUE}" in
+        fdb)
+            printf 'catalogue_backend = fdb\n'
+            printf 'fdb_cluster_file = %s\n' "${LAB_FDB_CLUSTER_FILE}"
+            printf 'fdb_key_prefix = %s\n' "${LAB_FDB_KEY_PREFIX}"
+            if [ -n "${LAB_FDB_OP_DEADLINE_MS}" ]; then
+                printf 'fdb_op_deadline_ms = %s\n' "${LAB_FDB_OP_DEADLINE_MS}"
+            fi
+            if [ -n "${LAB_FDB_TXN_TIMEOUT_MS}" ]; then
+                printf 'fdb_txn_timeout_ms = %s\n' "${LAB_FDB_TXN_TIMEOUT_MS}"
+            fi
+            ;;
+        *)
+            printf 'catalogue_backend = rondb\n'
+            printf 'catalogue_backend_conf = %s/rondb.conf\n' "${LAB_MDS_CONF_DIR}"
+            ;;
+    esac
+}
+
 render_mds_config() {
     local idx="$1"
 
@@ -731,8 +847,7 @@ mds_id = ${ACTIVE_MDS_IDS[$idx]}
 hostname = ${ACTIVE_MDS_IPS[$idx]}
 nfs_port = ${LAB_MDS_NFS_PORT}
 grpc_port = ${LAB_MDS_GRPC_PORT}
-catalogue_backend = rondb
-catalogue_backend_conf = ${LAB_MDS_CONF_DIR}/rondb.conf
+$(render_catalogue_config)
 worker_threads = ${ACTIVE_MDS_WORKER_THREADS}
 inline_enabled = false
 lease_time_sec = 90
@@ -1092,12 +1207,15 @@ phase_deps() {
 
     # pnfs-mds builds from source on THIS host; make sure the toolchain and
     # build-time headers are present (fresh machines lack libntirpc-dev /
-    # libkrb5-dev and the build fails half-way in).
+    # libkrb5-dev and the build fails half-way in).  Same retrying
+    # ensure_packages helper as the remote hosts: a cloud image's apt
+    # lists are stale, and a bare apt-get install then 404s on every
+    # package that was rebuilt since the image was made.
     log "  [build-host] ensure build packages (cmake, libntirpc-dev, libkrb5-dev, ...)"
-    run_local sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        --no-install-recommends \
-        build-essential cmake pkg-config \
-        libntirpc-dev libkrb5-dev libssl-dev
+    run_local sudo -n bash -se <<EOF
+$(render_ensure_packages)
+ensure_packages build-essential cmake pkg-config libntirpc-dev libkrb5-dev libssl-dev
+EOF
 
     for host in "${LAB_DS_HOSTS[@]}"; do
         log "  [${host}] ensure nfs-kernel-server, nfs-common"
@@ -1345,7 +1463,283 @@ EOF
     fi
 }
 
+# -----------------------------------------------------------------------
+# FoundationDB (LAB_CATALOGUE_BACKEND=fdb)
+#
+# One fdbserver process per LAB_FDB_HOSTS entry, every one of them a
+# coordinator, one shared cluster file.  The server package's postinst
+# creates a throw-away single-node database only when no cluster file
+# exists yet, so the shared file is written BEFORE the server package is
+# installed and the database is created explicitly afterwards with
+# `configure new <redundancy> <engine>` once every process is up.  Every
+# step is idempotent: an existing cluster file on the first FDB host is
+# the source of truth (never regenerated), an installed package of the
+# right version is left alone, an available database is not configured
+# again.
+# -----------------------------------------------------------------------
+
+FDB_DEB_CACHE="/var/cache/pnfs-lab"
+
+fdb_deb_name() {
+    # $1: clients | server
+    printf 'foundationdb-%s_%s-1_amd64.deb' "$1" "${LAB_FDB_VERSION}"
+}
+
+fdb_coordinators() {
+    local idx
+    local out=""
+
+    for idx in "${!LAB_FDB_IPS[@]}"; do
+        if [ -n "${out}" ]; then
+            out+=","
+        fi
+        out+="${LAB_FDB_IPS[$idx]}:${LAB_FDB_PORT}"
+    done
+    printf '%s' "${out}"
+}
+
+# Remote snippet (root): download the release deb(s) named in "$@" into
+# the cache when missing and install each one unless the installed
+# version already matches.  The clients package carries libfdb_c, fdbcli
+# and the headers the build needs; the server package is only asked for
+# on the FDB hosts.  Expects render_fdb_prereq_snippet earlier in the
+# same script.
+render_fdb_prereq_snippet() {
+    render_ensure_packages
+    printf 'ensure_packages wget ca-certificates python3\n'
+    printf "install -d -m 0755 '%s'\\n" "${FDB_DEB_CACHE}"
+}
+
+render_fdb_install_snippet() {
+    local pkg
+    local out=""
+
+    for pkg in "$@"; do
+        local deb
+        deb="$(fdb_deb_name "${pkg}")"
+        out+="$(cat <<EOF
+if [ "\$(dpkg-query -W -f='\${Version}' foundationdb-${pkg} 2>/dev/null)" = "${LAB_FDB_VERSION}" ]; then
+    printf 'foundationdb-${pkg} ${LAB_FDB_VERSION} already installed\n'
+else
+    if [ ! -f "${FDB_DEB_CACHE}/${deb}" ]; then
+        printf 'fetching ${deb}\n'
+        wget --tries=3 --timeout=60 -q -O "${FDB_DEB_CACHE}/${deb}.part" \\
+            "${LAB_FDB_DEB_URL_BASE}/${LAB_FDB_VERSION}/${deb}"
+        mv "${FDB_DEB_CACHE}/${deb}.part" "${FDB_DEB_CACHE}/${deb}"
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \\
+        "${FDB_DEB_CACHE}/${deb}"
+fi
+EOF
+)"$'\n'
+    done
+    printf '%s' "${out}"
+}
+
+# Remote snippet (root): make the cluster file at @path carry exactly
+# @content (0664, foundationdb group, like the package writes it).
+# Prints "cluster-file changed" when it wrote a different file.
+render_fdb_cluster_file_snippet() {
+    local path="$1"
+    local content="$2"
+
+    cat <<EOF
+install -d -m 0775 "\$(dirname '${path}')"
+if [ "\$(cat '${path}' 2>/dev/null || true)" != '${content}' ]; then
+    printf '%s\n' '${content}' > '${path}.pnfs-lab.tmp'
+    mv -f '${path}.pnfs-lab.tmp' '${path}'
+    printf 'cluster-file changed\n'
+fi
+chmod 0664 '${path}'
+if getent group foundationdb >/dev/null 2>&1; then
+    chgrp foundationdb '${path}'
+fi
+EOF
+}
+
+# The cluster file content: reused from the first FDB host when it has
+# one (the id must not change under a live database), generated
+# deterministically otherwise.
+fdb_cluster_content() {
+    local existing=""
+    local id
+
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        existing="$(capture_remote_cmd "${LAB_FDB_HOSTS[0]}" \
+            "sudo -n cat '${LAB_FDB_CLUSTER_FILE}' 2>/dev/null || true" 2>/dev/null || true)"
+        existing="$(printf '%s' "${existing}" | head -n 1 | tr -d '\r')"
+    fi
+    if [ -n "${existing}" ]; then
+        log "  [${LAB_FDB_HOSTS[0]}] reusing cluster file: ${existing}" >&2
+        printf '%s' "${existing}"
+        return 0
+    fi
+    id="$(printf '%s %s' "${LAB_FDB_DESCRIPTION}" "$(fdb_coordinators)" | sha256sum | cut -c1-8)"
+    printf '%s:%s@%s' "${LAB_FDB_DESCRIPTION}" "${id}" "$(fdb_coordinators)"
+}
+
+# `fdbcli --exec 'status minimal'` on @host, through the given cluster
+# file; the whole (trimmed) output, so callers match on it with case.
+fdb_status_minimal() {
+    local host="$1"
+    local file="$2"
+
+    capture_remote_cmd "${host}" \
+        "fdbcli -C '${file}' --timeout 10 --exec 'status minimal' 2>&1 || true" \
+        2>/dev/null | tr -d '\r' | tr '\n' ' ' | sed 's/  */ /g; s/ $//'
+}
+
+# Wait (bounded) until @host reports @want processes in `status json`.
+fdb_wait_processes() {
+    local host="$1"
+    local want="$2"
+    local attempt=0
+    local seen=0
+    local probe
+
+    probe="fdbcli -C '${LAB_FDB_CLUSTER_FILE}' --timeout 10 --exec 'status json' 2>/dev/null"
+    probe+=" | python3 -c \"import json,sys; d=json.load(sys.stdin);"
+    probe+=" print(len(d.get('cluster',{}).get('processes',{})))\" 2>/dev/null || echo 0"
+    [ "${DRY_RUN}" -eq 0 ] || return 0
+    while [ "${attempt}" -lt 30 ]; do
+        seen="$(capture_remote_cmd "${host}" "${probe}" 2>/dev/null | tr -d '\r' | tail -n 1)"
+        seen="${seen//[^0-9]/}"
+        [ -n "${seen}" ] || seen=0
+        if [ "${seen}" -ge "${want}" ]; then
+            log "  [fdb] ${seen} fdbserver process(es) visible"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 3
+    done
+    fail "only ${seen}/${want} fdbserver processes joined within 90 s (fdbcli status on ${host})"
+}
+
+fdb_wait_available() {
+    local host="$1"
+    local file="$2"
+    local attempt=0
+    local line=""
+
+    [ "${DRY_RUN}" -eq 0 ] || return 0
+    while [ "${attempt}" -lt 30 ]; do
+        line="$(fdb_status_minimal "${host}" "${file}")"
+        case "${line}" in
+            *"database is available"*)
+                log "  [${host}] ${line}"
+                return 0
+                ;;
+        esac
+        attempt=$((attempt + 1))
+        sleep 3
+    done
+    fail "FoundationDB not available from ${host} within 90 s: ${line}"
+}
+
+phase_fdb() {
+    local host
+    local idx
+    local content
+    local line
+
+    log "Command: fdb (FoundationDB ${LAB_FDB_VERSION}, ${#LAB_FDB_HOSTS[@]} host(s), \
+${LAB_FDB_REDUNDANCY} ${LAB_FDB_STORAGE_ENGINE})"
+    [ "${#LAB_FDB_HOSTS[@]}" -gt 0 ] || fail "LAB_FDB_HOSTS is empty"
+    ensure_equal_lengths "LAB_FDB_HOSTS" "${#LAB_FDB_HOSTS[@]}" \
+        "LAB_FDB_IPS" "${#LAB_FDB_IPS[@]}"
+
+    content="$(fdb_cluster_content)"
+    log "  cluster file: ${content}"
+
+    for idx in "${!LAB_FDB_HOSTS[@]}"; do
+        host="${LAB_FDB_HOSTS[$idx]}"
+        log "  [${host}] FoundationDB clients + server ${LAB_FDB_VERSION}, coordinator ${LAB_FDB_IPS[$idx]}:${LAB_FDB_PORT}"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_fdb_prereq_snippet)
+$(render_fdb_install_snippet clients)
+# The shared cluster file must exist before the server package's
+# postinst runs, or it creates a private single-node database.
+$(render_fdb_cluster_file_snippet "${LAB_FDB_CLUSTER_FILE}" "${content}")
+server_was_installed=0
+if [ "\$(dpkg-query -W -f='\${Version}' foundationdb-server 2>/dev/null)" = "${LAB_FDB_VERSION}" ]; then
+    server_was_installed=1
+fi
+$(render_fdb_install_snippet server)
+systemctl enable foundationdb.service >/dev/null 2>&1 || true
+if [ "\${server_was_installed}" = 1 ]; then
+    # An already-installed server re-reads the cluster file only on restart.
+    systemctl restart foundationdb.service
+fi
+systemctl is-active foundationdb.service
+EOF
+)"
+    done
+
+    # On a cluster whose database does not exist yet `status` (json or
+    # not) times out, so the database is created first and the process
+    # census follows once it answers.  `configure new` on an existing
+    # database is refused by fdbcli ("Database already exists"), hence the
+    # availability check in front of it.
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        line="$(fdb_status_minimal "${LAB_FDB_HOSTS[0]}" "${LAB_FDB_CLUSTER_FILE}")"
+        case "${line}" in
+            *"database is available"*)
+                log "  [fdb] database already configured; leaving it (${line})"
+                ;;
+            *)
+                log "  [fdb] creating the database: configure new ${LAB_FDB_REDUNDANCY} ${LAB_FDB_STORAGE_ENGINE}"
+                capture_remote_cmd "${LAB_FDB_HOSTS[0]}" \
+                    "fdbcli -C '${LAB_FDB_CLUSTER_FILE}' --timeout 60 --exec \
+                     'configure new ${LAB_FDB_REDUNDANCY} ${LAB_FDB_STORAGE_ENGINE}'"
+                ;;
+        esac
+    else
+        printf '[dry-run][%s] fdbcli --exec "configure new %s %s" (unless available)\n' \
+            "${LAB_FDB_HOSTS[0]}" "${LAB_FDB_REDUNDANCY}" "${LAB_FDB_STORAGE_ENGINE}"
+    fi
+    fdb_wait_available "${LAB_FDB_HOSTS[0]}" "${LAB_FDB_CLUSTER_FILE}"
+    fdb_wait_processes "${LAB_FDB_HOSTS[0]}" "${#LAB_FDB_HOSTS[@]}"
+
+    for host in "${ACTIVE_MDS_HOSTS[@]}"; do
+        log "  [${host}] FoundationDB clients ${LAB_FDB_VERSION} + cluster file ${LAB_FDB_CLUSTER_FILE}"
+        run_remote_root_script "${host}" "$(cat <<EOF
+$(render_fdb_prereq_snippet)
+$(render_fdb_install_snippet clients)
+$(render_fdb_cluster_file_snippet "${LAB_FDB_CLUSTER_FILE}" "${content}")
+ldconfig
+EOF
+)"
+        fdb_wait_available "${host}" "${LAB_FDB_CLUSTER_FILE}"
+    done
+
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        capture_remote_cmd "${LAB_FDB_HOSTS[0]}" \
+            "fdbcli -C '${LAB_FDB_CLUSTER_FILE}' --timeout 10 --exec status" || true
+    fi
+}
+
+# ENABLE_FDB for the build: LAB_BUILD_ENABLE_FDB=on|off, or auto = ON
+# exactly when the FoundationDB client headers are installed on the
+# build host (the `fdb` phase installs them on every MDS, the first of
+# which is normally the build host).  One binary then carries both
+# backends and mds.conf alone selects the store.
+build_enable_fdb() {
+    case "${LAB_BUILD_ENABLE_FDB}" in
+        on)  printf 'ON' ;;
+        off) printf 'OFF' ;;
+        *)
+            if [ -f /usr/include/foundationdb/fdb_c.h ]; then
+                printf 'ON'
+            else
+                printf 'OFF'
+            fi
+            ;;
+    esac
+}
+
 phase_build() {
+    local enable_fdb
+
     log "Command: build"
 
     download_and_extract_local \
@@ -1354,29 +1748,95 @@ phase_build() {
         "${LAB_REMOTE_RONDB_VERSION}" \
         "${LAB_BUILD_HOST_RONDB_LINK}"
 
+    enable_fdb="$(build_enable_fdb)"
+    if [ "${ACTIVE_CATALOGUE}" = "fdb" ] && [ "${enable_fdb}" != "ON" ]; then
+        fail "catalogue fdb needs an fdb-enabled build: install the FoundationDB \
+clients on this host (the 'fdb' phase does) or set LAB_BUILD_ENABLE_FDB=on"
+    fi
+    log "  ENABLE_RONDB=ON ENABLE_FDB=${enable_fdb} (LAB_BUILD_ENABLE_FDB=${LAB_BUILD_ENABLE_FDB})"
     run_local "${LAB_SOURCE_DIR}/scripts/cmake-fresh.sh" "${LAB_BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE="${LAB_BUILD_TYPE}" \
         -DENABLE_RONDB=ON \
         -DRonDB_ROOT="${LAB_BUILD_HOST_RONDB_LINK}" \
+        -DENABLE_FDB="${enable_fdb}" \
         -DENABLE_DS_PREALLOC=ON
     heartbeat_start "cmake --build ${LAB_BUILD_DIR}"
     run_local cmake --build "${LAB_BUILD_DIR}" -j"$(nproc)"
     heartbeat_stop
 }
 
+# Remote snippet (root): what store the daemon on this host is
+# configured for and is actually connected to -- the deployed
+# catalogue_backend line plus the daemon's established connections to
+# the FoundationDB coordinators (:LAB_FDB_PORT) and to the RonDB
+# management server (:LAB_RONDB_MGM_PORT).
+render_backend_report_snippet() {
+    cat <<EOF
+be=\$(sed -n 's/^catalogue_backend *= *//p' "${LAB_MDS_CONF_DIR}/mds.conf" | head -n 1)
+pid=\$(systemctl show -p MainPID --value pnfs-mds.service 2>/dev/null || echo 0)
+fdb_conns=0
+rondb_conns=0
+if [ -n "\${pid}" ] && [ "\${pid}" != 0 ]; then
+    fdb_conns=\$(ss -Htnp state established "( dport = :${LAB_FDB_PORT} )" 2>/dev/null | grep -c "pid=\${pid}," || true)
+    rondb_conns=\$(ss -Htnp state established "( dport = :${LAB_RONDB_MGM_PORT} )" 2>/dev/null | grep -c "pid=\${pid}," || true)
+fi
+printf 'backend-report host=%s catalogue_backend=%s pid=%s fdb_connections=%s rondb_mgm_connections=%s\n' \\
+    "\$(hostname)" "\${be:-?}" "\${pid}" "\${fdb_conns}" "\${rondb_conns}"
+EOF
+}
+
+# Remote snippet (root): the store prerequisites the daemon needs on
+# this host.  The RonDB runtime is required whenever the binary links
+# libndbclient (an fdb-enabled build still does); the FoundationDB
+# client library and cluster file whenever the active catalogue is fdb.
+render_deploy_prereq_snippet() {
+    local needs_rondb_runtime="$1"
+
+    if [ "${needs_rondb_runtime}" = 1 ]; then
+        cat <<EOF
+if [ ! -e "${LAB_REMOTE_RONDB_LINK}/lib" ]; then
+    echo "ERROR: RonDB runtime missing at ${LAB_REMOTE_RONDB_LINK} on \$(hostname)." >&2
+    echo "       pnfs-mds needs libndbclient from the RonDB runtime; run the" >&2
+    echo "       'rondb' phase first (it installs the runtime on every MDS," >&2
+    echo "       and must be re-run after changing MDS/RonDB host arrays)." >&2
+    exit 1
+fi
+EOF
+    fi
+    if [ "${ACTIVE_CATALOGUE}" = "fdb" ]; then
+        cat <<EOF
+if ! ldconfig -p | grep -q 'libfdb_c.so' || [ ! -r "${LAB_FDB_CLUSTER_FILE}" ]; then
+    echo "ERROR: FoundationDB client library or cluster file ${LAB_FDB_CLUSTER_FILE}" >&2
+    echo "       missing on \$(hostname); run the 'fdb' phase first (it installs" >&2
+    echo "       foundationdb-clients and the cluster file on every MDS host)." >&2
+    exit 1
+fi
+EOF
+    fi
+}
+
 phase_deploy() {
     local pnfs_mds_bin="${LAB_BUILD_DIR}/src/mds/pnfs-mds"
     local mds_admin_bin="${LAB_BUILD_DIR}/src/tools/mds-admin"
+    local needs_rondb_runtime=0
     local idx
     local host
     local mds_conf
 
-    log "Command: deploy (profile: ${ACTIVE_PROFILE_NAME})"
+    log "Command: deploy (profile: ${ACTIVE_PROFILE_NAME}, catalogue: ${ACTIVE_CATALOGUE})"
 
     [ -x "${pnfs_mds_bin}" ] || \
         fail "Missing pnfs-mds binary: ${pnfs_mds_bin}"
     if [ ! -x "${mds_admin_bin}" ]; then
         warn "mds-admin binary not found at ${mds_admin_bin}; skipping it"
+    fi
+    if ldd "${pnfs_mds_bin}" 2>/dev/null | grep -q 'libndbclient'; then
+        needs_rondb_runtime=1
+    fi
+    if [ "${ACTIVE_CATALOGUE}" = "fdb" ] && \
+        ! ldd "${pnfs_mds_bin}" 2>/dev/null | grep -q 'libfdb_c'; then
+        fail "catalogue fdb but ${pnfs_mds_bin} was built without the FoundationDB \
+backend; run 'build' with the FoundationDB clients installed (LAB_BUILD_ENABLE_FDB)"
     fi
 
     for idx in "${!ACTIVE_MDS_HOSTS[@]}"; do
@@ -1386,13 +1846,7 @@ phase_deploy() {
 
         run_remote_root_script "${host}" "$(cat <<EOF
 $(render_ensure_packages)
-if [ ! -e "${LAB_REMOTE_RONDB_LINK}/lib" ]; then
-    echo "ERROR: RonDB runtime missing at ${LAB_REMOTE_RONDB_LINK} on \$(hostname)." >&2
-    echo "       pnfs-mds needs libndbclient from the RonDB runtime; run the" >&2
-    echo "       'rondb' phase first (it installs the runtime on every MDS," >&2
-    echo "       and must be re-run after changing MDS/RonDB host arrays)." >&2
-    exit 1
-fi
+$(render_deploy_prereq_snippet "${needs_rondb_runtime}")
 ensure_packages libntirpc-dev libgssapi-krb5-2 libssl3 nfs-common
 EOF
 )"
@@ -1408,6 +1862,7 @@ EOF
         # daemon exits 127 ("error while loading shared libraries") on every
         # MDS that is not the build host.
         lib_snippet=""
+        lib_cleanup=""
         # The script sets a newline/tab-only IFS globally; restore
         # space-splitting just for this read.
         while IFS=' ' read -r lib_soname lib_path; do
@@ -1415,6 +1870,8 @@ EOF
             copy_to_host "${lib_path}" "${host}" "/tmp/${lib_soname}"
             lib_snippet="${lib_snippet}install -m 0644 /tmp/${lib_soname} /usr/local/lib/pnfs-mds/${lib_soname}
 rm -f /tmp/${lib_soname}
+"
+            lib_cleanup="${lib_cleanup}rm -f /tmp/${lib_soname}
 "
         done < <(ldd "${pnfs_mds_bin}" 2>/dev/null | awk '$3 ~ "^/usr/local/" {print $1, $3}')
         if [ -n "${lib_snippet}" ]; then
@@ -1424,34 +1881,22 @@ ldconfig
 "
         fi
 
+        # Binary, config and unit are staged next to the live copies and
+        # compared first: when nothing differs and the daemon is running,
+        # it is left alone, so a repeated deploy (a repeated catalogue
+        # switch in particular) is a no-op instead of a restart.
         run_remote_root_script "${host}" "$(cat <<EOF
 install -d -m 0755 /usr/local/bin
 install -d -m 0755 "${LAB_MDS_CONF_DIR}"
 install -d -m 0755 "${LAB_MDS_RUN_DIR}"
-# Stop the running daemon (if any) so we can replace the binary.
-systemctl stop pnfs-mds.service 2>/dev/null || true
-# Give kernel a moment to release the executable mapping.
-for _ in 1 2 3 4 5; do
-    if ! fuser /usr/local/bin/pnfs-mds >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
-install -m 0755 /tmp/pnfs-mds /usr/local/bin/pnfs-mds
-if [ -f /tmp/mds-admin ]; then
-    install -m 0755 /tmp/mds-admin /usr/local/bin/mds-admin
-fi
-rm -f /tmp/pnfs-mds /tmp/mds-admin
-${lib_snippet}
 cat > "${LAB_MDS_CONF_DIR}/rondb.conf" <<'EOC'
 connect_string = ${LAB_RONDB_MGM_IP}:${LAB_RONDB_MGM_PORT}
 schema_name = ${LAB_RONDB_SCHEMA_NAME}
 EOC
-cat > "${LAB_MDS_CONF_DIR}/mds.conf" <<'EOC'
+cat > "${LAB_MDS_CONF_DIR}/mds.conf.pnfs-lab.new" <<'EOC'
 ${mds_conf}
 EOC
-$(render_ds_mount_script)
-cat > /etc/systemd/system/pnfs-mds.service <<'EOC'
+cat > /etc/systemd/system/pnfs-mds.service.pnfs-lab.new <<'EOC'
 [Unit]
 Description=pnfs-mds lab daemon
 After=network-online.target rondb-mgmd.service rondb-ndbmtd.service
@@ -1467,8 +1912,58 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOC
-systemctl daemon-reload
-systemctl enable --now pnfs-mds.service
+unchanged=0
+if cmp -s /tmp/pnfs-mds /usr/local/bin/pnfs-mds && \\
+    cmp -s "${LAB_MDS_CONF_DIR}/mds.conf.pnfs-lab.new" "${LAB_MDS_CONF_DIR}/mds.conf" && \\
+    cmp -s /etc/systemd/system/pnfs-mds.service.pnfs-lab.new /etc/systemd/system/pnfs-mds.service && \\
+    { [ ! -f /tmp/mds-admin ] || cmp -s /tmp/mds-admin /usr/local/bin/mds-admin; } && \\
+    systemctl is-active --quiet pnfs-mds.service; then
+    unchanged=1
+fi
+rm -f "${LAB_MDS_CONF_DIR}/mds.conf.pnfs-lab.new" /etc/systemd/system/pnfs-mds.service.pnfs-lab.new
+if [ "\${unchanged}" = 1 ]; then
+    rm -f /tmp/pnfs-mds /tmp/mds-admin
+    ${lib_cleanup}
+    printf 'pnfs-mds binary, mds.conf and unit unchanged; daemon left running\n'
+else
+    # Stop the running daemon (if any) so we can replace the binary.
+    systemctl stop pnfs-mds.service 2>/dev/null || true
+    # Give kernel a moment to release the executable mapping.
+    for _ in 1 2 3 4 5; do
+        if ! fuser /usr/local/bin/pnfs-mds >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    install -m 0755 /tmp/pnfs-mds /usr/local/bin/pnfs-mds
+    if [ -f /tmp/mds-admin ]; then
+        install -m 0755 /tmp/mds-admin /usr/local/bin/mds-admin
+    fi
+    rm -f /tmp/pnfs-mds /tmp/mds-admin
+    ${lib_snippet}
+    cat > "${LAB_MDS_CONF_DIR}/mds.conf" <<'EOC'
+${mds_conf}
+EOC
+    cat > /etc/systemd/system/pnfs-mds.service <<'EOC'
+[Unit]
+Description=pnfs-mds lab daemon
+After=network-online.target rondb-mgmd.service rondb-ndbmtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=${LAB_REMOTE_RONDB_LINK}/lib:${LAB_REMOTE_RONDB_LINK}/lib/mysql
+ExecStart=/usr/local/bin/pnfs-mds ${LAB_MDS_CONF_DIR}/mds.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOC
+    systemctl daemon-reload
+    systemctl enable --now pnfs-mds.service
+fi
+$(render_ds_mount_script)
 EOF
 )"
     done
@@ -1504,6 +1999,11 @@ ldd /usr/local/bin/pnfs-mds 2>&1 | grep 'not found' || true
                 fail "pnfs-mds did not open port ${LAB_MDS_NFS_PORT} on ${wait_host} within $((max_attempts * 2))s (diagnostics above)"
             fi
             log "  [${wait_host}] pnfs-mds is listening on ${LAB_MDS_NFS_PORT}"
+        done
+        # Which store each daemon runs: the deployed config line and the
+        # daemon's live connections to the coordinators / mgmd.
+        for wait_host in "${ACTIVE_MDS_HOSTS[@]}"; do
+            run_remote_root_script "${wait_host}" "$(render_backend_report_snippet)" || true
         done
     fi
 }
@@ -1907,6 +2407,18 @@ EOF
 
     run_remote_root_script "${LAB_RONDB_MGM_HOST}" \
         "systemctl stop rondb-mgmd.service 2>/dev/null || true"
+
+    # The FoundationDB processes are lab-managed only when the active
+    # catalogue is fdb; their data is never removed here (reset leaves
+    # /var/lib/foundationdb alone -- wipe it by hand if a fresh database
+    # is wanted: stop foundationdb.service on every FDB host, remove
+    # /var/lib/foundationdb/data/*, start, `configure new ...`).
+    if [ "${ACTIVE_CATALOGUE}" = "fdb" ]; then
+        for host in "${LAB_FDB_HOSTS[@]}"; do
+            run_remote_root_script "${host}" \
+                "systemctl stop foundationdb.service 2>/dev/null || true"
+        done
+    fi
 }
 
 phase_reset() {
@@ -1960,7 +2472,8 @@ menu_loop() {
 
     while true; do
         printf '\n'
-        printf 'pNFS lab menu (current profile: %s)\n' "${PROFILE}"
+        printf 'pNFS lab menu (current profile: %s, catalogue: %s)\n' "${PROFILE}" \
+            "${ACTIVE_CATALOGUE}"
         printf ' 1) validate\n'
         printf ' 2) deps\n'
         printf ' 3) ds\n'
@@ -1978,6 +2491,7 @@ menu_loop() {
         printf '15) stop\n'
         printf '16) reset\n'
         printf '17) quit\n'
+        printf '18) fdb (FoundationDB cluster + MDS clients)\n'
         printf '> '
         read -r choice
 
@@ -1999,6 +2513,7 @@ menu_loop() {
             15) run_command stop ;;
             16) run_command reset ;;
             17) return 0 ;;
+            18) run_command fdb ;;
             *) warn "Unknown menu choice: ${choice}" ;;
         esac
     done
@@ -2020,6 +2535,9 @@ run_command() {
             ;;
         rondb-reinit)
             phase_rondb_reinit
+            ;;
+        fdb)
+            phase_fdb
             ;;
         build)
             phase_build
@@ -2088,6 +2606,11 @@ parse_args() {
             --profile)
                 [ "$#" -ge 2 ] || fail "--profile requires a name"
                 PROFILE="$2"
+                shift 2
+                ;;
+            --catalogue)
+                [ "$#" -ge 2 ] || fail "--catalogue requires a name (rondb | fdb)"
+                CATALOGUE="$2"
                 shift 2
                 ;;
             --dry-run)

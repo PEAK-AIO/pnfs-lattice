@@ -126,8 +126,8 @@ enum mds_status mds_coord_layout_grant(struct mds_catalogue *cat,
  * superset of everything granted under the stateid; over-recall is
  * safe.
  *
- * Backends without a native union slot fall back to the plain grant
- * (overwrite) so behaviour is never worse than before.
+ * There is no overwrite fallback: a backend without a union slot gets
+ * MDS_ERR_NOSUPPORT from the dispatcher (C5), never a narrowed row.
  */
 enum mds_status mds_coord_layout_grant_union(struct mds_catalogue *cat,
 					     struct mds_cat_txn *txn,
@@ -139,6 +139,37 @@ enum mds_status mds_coord_layout_grant_union(struct mds_catalogue *cat,
 					     const struct nfs4_stateid *stateid,
 					     const uint32_t *ds_ids,
 					     uint32_t ds_count);
+
+/**
+ * Fused LAYOUTGET: read the file's stripe map and persist the layout
+ * grant in ONE backend transaction.
+ *
+ * Output contract for (stripe_count, stripe_unit, mirror_count,
+ * entries) matches mds_cat_stripe_map_get; the caller frees *entries.
+ * On MDS_ERR_NOTFOUND the file has no stripe map and nothing was
+ * granted.  MDS_ERR_DELAY reports a transient backend failure after
+ * the backend's own bounded retry; MDS_ERR_NOSUPPORT means the backend
+ * has no fused path (see mds_coord_layoutget_fused_supported).  On any
+ * error *entries is NULL.
+ */
+enum mds_status mds_coord_layoutget_fused(
+	struct mds_catalogue *cat, uint64_t fileid,
+	uint32_t *stripe_count, uint32_t *stripe_unit,
+	uint32_t *mirror_count, struct mds_ds_map_entry **entries,
+	const struct nfs4_stateid *stateid,
+	uint64_t clientid, uint32_t iomode, uint64_t offset,
+	uint64_t length, uint32_t mds_id);
+
+/** True when the backend implements the fused LAYOUTGET. */
+bool mds_coord_layoutget_fused_supported(const struct mds_catalogue *cat);
+
+/**
+ * True when the backend persists shared protocol state (open-state,
+ * byte-range lock and delegation rows) so the open/lock/delegation
+ * tables should write through to it.  False when any of those rows
+ * would only ever come back MDS_ERR_NOSUPPORT.
+ */
+bool mds_coord_shared_state_supported(const struct mds_catalogue *cat);
 
 enum mds_status mds_coord_layout_return(struct mds_catalogue *cat,
 					struct mds_cat_txn *txn,

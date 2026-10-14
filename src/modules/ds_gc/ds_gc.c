@@ -76,90 +76,87 @@ static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi)
 	return v;
 }
 
-static bool process_one_entry(struct ds_gc *gc,
-			      const struct mds_gc_entry *entry)
+/*
+ * The three sweep strategies below each return MDS_OK when every
+ * probe they attempted completed, or the status of the first DS
+ * unlink that could not be attempted or failed ("blocked").  The
+ * caller decides whether a blocked entry is retried or dropped.
+ */
+
+/*
+ * Single-slot reclaim (rebalance mover): unlink exactly the encoded
+ * (stripe, mirror) file.  Other slots of the same file on this DS
+ * are still live and MUST NOT be touched.
+ */
+static enum mds_status sweep_single_slot(const struct ds_gc *gc,
+					 const struct mds_gc_entry *entry)
 {
-	bool had_any_existed = false;
-	bool blocked = false;
-	enum mds_status block_st = MDS_OK;
+	/* existed is not needed: one slot, nothing further to probe. */
+	return mds_proxy_unlink_ds_file(
+		gc->proxy, entry->ds_id, entry->fileid,
+		MDS_GC_SWEEP_SC(entry->sweep_hint),
+		MDS_GC_SWEEP_MC(entry->sweep_hint),
+		NULL);
+}
 
-	if (MDS_GC_SWEEP_IS_SLOT(entry->sweep_hint)) {
-		/*
-		 * Single-slot reclaim (rebalance mover): unlink exactly
-		 * the encoded (stripe, mirror) file.  Other slots of the
-		 * same file on this DS are still live and MUST NOT be
-		 * touched.
-		 */
-		bool existed = false;
-		enum mds_status st;
+/*
+ * Whole-file reclaim with known stripe-map geometry: probe every
+ * (stripe < sc, mirror < mc) slot.  Absent slots are EXPECTED --
+ * with round-robin placement a wide file holds only its own stripe
+ * indices on this DS (e.g. stripe k on DS k), so absence is never a
+ * termination signal.  The legacy dense sweep below assumed stripes
+ * dense from 0 per DS and stopped at the first absent one, silently
+ * leaking every non-stripe-0 backing file of a wide layout.  Cost is
+ * bounded by the file's REAL geometry (sc * mc probes), not
+ * MDS_MAX_*.
+ */
+static enum mds_status sweep_known_geometry(const struct ds_gc *gc,
+					    const struct mds_gc_entry *entry)
+{
+	uint32_t sc = MDS_GC_SWEEP_SC(entry->sweep_hint);
+	uint32_t mc = MDS_GC_SWEEP_MC(entry->sweep_hint);
 
-		st = mds_proxy_unlink_ds_file(
-			gc->proxy, entry->ds_id, entry->fileid,
-			MDS_GC_SWEEP_SC(entry->sweep_hint),
-			MDS_GC_SWEEP_MC(entry->sweep_hint),
-			&existed);
-		if (st != MDS_OK) {
-			blocked = true;
-			block_st = st;
-		}
-		had_any_existed = existed;
-	} else if (entry->sweep_hint != 0U) {
-		/*
-		 * Whole-file reclaim with known stripe-map geometry:
-		 * probe every (stripe < sc, mirror < mc) slot.  Absent
-		 * slots are EXPECTED -- with round-robin placement a wide
-		 * file holds only its own stripe indices on this DS (e.g.
-		 * stripe k on DS k), so absence is never a termination
-		 * signal.  The legacy dense sweep below assumed stripes
-		 * dense from 0 per DS and stopped at the first absent
-		 * one, silently leaking every non-stripe-0 backing file
-		 * of a wide layout.  Cost is bounded by the file's REAL
-		 * geometry (sc * mc probes), not MDS_MAX_*.
-		 */
-		uint32_t sc = MDS_GC_SWEEP_SC(entry->sweep_hint);
-		uint32_t mc = MDS_GC_SWEEP_MC(entry->sweep_hint);
+	if (sc == 0U || sc > MDS_MAX_STRIPES) {
+		sc = MDS_MAX_STRIPES;
+	}
+	if (mc == 0U || mc > MDS_MAX_MIRRORS) {
+		mc = MDS_MAX_MIRRORS;
+	}
+	for (uint32_t stripe = 0; stripe < sc; stripe++) {
+		for (uint32_t mirror = 0; mirror < mc; mirror++) {
+			enum mds_status st;
 
-		if (sc == 0U || sc > MDS_MAX_STRIPES) {
-			sc = MDS_MAX_STRIPES;
-		}
-		if (mc == 0U || mc > MDS_MAX_MIRRORS) {
-			mc = MDS_MAX_MIRRORS;
-		}
-		for (uint32_t stripe = 0; stripe < sc && !blocked; stripe++) {
-			for (uint32_t mirror = 0; mirror < mc; mirror++) {
-				bool existed = false;
-				enum mds_status st;
-
-				st = mds_proxy_unlink_ds_file(gc->proxy,
-							      entry->ds_id,
-							      entry->fileid,
-							      stripe, mirror,
-							      &existed);
-				if (st != MDS_OK) {
-					blocked = true;
-					block_st = st;
-					break;
-				}
-				if (existed) {
-					had_any_existed = true;
-				}
+			/* Every slot is probed regardless of existence, so the
+			 * existed flag is not needed here. */
+			st = mds_proxy_unlink_ds_file(gc->proxy,
+						      entry->ds_id,
+						      entry->fileid,
+						      stripe, mirror,
+						      NULL);
+			if (st != MDS_OK) {
+				return st;
 			}
 		}
-	} else {
-	/*
-	 * Legacy dense sweep (hint absent: pre-hint row or an enqueue
-	 * site with no geometry in scope).  A file's stripes
-	 * (0..stripe_count-1) and mirrors (0..mirror_count-1) are
-	 * assumed dense from 0 ON THIS DS, so the first absent slot
-	 * means there are no higher ones.  Stop probing there instead
-	 * of brute-forcing all MDS_MAX_STRIPES * MDS_MAX_MIRRORS
-	 * combinations -- that was ~4096 DS round-trips per
-	 * single-stripe file, which made the drain unable to keep up
-	 * with a heavy-delete backlog.  Correct for 1x1 files only;
-	 * geometry-aware enqueue sites pass MDS_GC_SWEEP_GEOM instead.
-	 */
-	for (uint32_t stripe = 0; stripe < MDS_MAX_STRIPES && !blocked;
-	     stripe++) {
+	}
+	return MDS_OK;
+}
+
+/*
+ * Legacy dense sweep (hint absent: pre-hint row or an enqueue
+ * site with no geometry in scope).  A file's stripes
+ * (0..stripe_count-1) and mirrors (0..mirror_count-1) are
+ * assumed dense from 0 ON THIS DS, so the first absent slot
+ * means there are no higher ones.  Stop probing there instead
+ * of brute-forcing all MDS_MAX_STRIPES * MDS_MAX_MIRRORS
+ * combinations -- that was ~4096 DS round-trips per
+ * single-stripe file, which made the drain unable to keep up
+ * with a heavy-delete backlog.  Correct for 1x1 files only;
+ * geometry-aware enqueue sites pass MDS_GC_SWEEP_GEOM instead.
+ */
+static enum mds_status sweep_legacy_dense(const struct ds_gc *gc,
+					  const struct mds_gc_entry *entry)
+{
+	for (uint32_t stripe = 0; stripe < MDS_MAX_STRIPES; stripe++) {
 		bool stripe_had_existing = false;
 
 		for (uint32_t mirror = 0; mirror < MDS_MAX_MIRRORS; mirror++) {
@@ -171,14 +168,11 @@ static bool process_one_entry(struct ds_gc *gc,
 						      entry->fileid,
 						      stripe, mirror,
 						      &existed);
-			if (st == MDS_ERR_NOTFOUND || st != MDS_OK) {
+			if (st != MDS_OK) {
 				/* DS mount missing / I/O error -- retry later. */
-				blocked = true;
-				block_st = st;
-				break;
+				return st;
 			}
 			if (existed) {
-				had_any_existed = true;
 				stripe_had_existing = true;
 				continue;
 			}
@@ -187,28 +181,52 @@ static bool process_one_entry(struct ds_gc *gc,
 			break;
 		}
 		/* First stripe with no mirror at all: stripes exhausted. */
-		if (!blocked && !stripe_had_existing) {
+		if (!stripe_had_existing) {
 			break;
 		}
 	}
+	return MDS_OK;
+}
+
+/*
+ * One un-drainable entry stalls the whole FIFO drain, so make it
+ * visible (rate-limited): NOTFOUND means entry->ds_id is not mounted
+ * on this MDS; MDS_ERR_IO is a real unlink failure.
+ */
+static void warn_blocked_entry(const struct mds_gc_entry *entry,
+			       enum mds_status block_st)
+{
+	static _Atomic unsigned long blk_n = 0;
+
+	if ((atomic_fetch_add_explicit(&blk_n, 1UL,
+				       memory_order_relaxed) & 0x3FFUL) == 0UL) {
+		/* Diagnostic only: nothing to do if stderr is gone. */
+		(void)fprintf(stderr,
+			      "WARN: ds_gc blocked entry: fileid=%llu ds_id=%u "
+			      "status=%d (%s)\n",
+			      (unsigned long long)entry->fileid,
+			      entry->ds_id, (int)block_st,
+			      block_st == MDS_ERR_NOTFOUND ?
+				      "ds_id not mounted here (dropping)"
+				      : "unlink I/O (retry)");
+	}
+}
+
+static bool process_one_entry(struct ds_gc *gc,
+			      const struct mds_gc_entry *entry)
+{
+	enum mds_status block_st;
+
+	if (MDS_GC_SWEEP_IS_SLOT(entry->sweep_hint)) {
+		block_st = sweep_single_slot(gc, entry);
+	} else if (entry->sweep_hint != 0U) {
+		block_st = sweep_known_geometry(gc, entry);
+	} else {
+		block_st = sweep_legacy_dense(gc, entry);
 	}
 
-	if (blocked) {
-		/* One un-drainable entry stalls the whole FIFO drain, so make
-		 * it visible (rate-limited): NOTFOUND means entry->ds_id is not
-		 * mounted on this MDS; MDS_ERR_IO is a real unlink failure. */
-		static _Atomic unsigned long blk_n = 0;
-		if ((atomic_fetch_add_explicit(&blk_n, 1UL,
-					       memory_order_relaxed) & 0x3FFUL) == 0UL) {
-			fprintf(stderr,
-				"WARN: ds_gc blocked entry: fileid=%llu ds_id=%u "
-				"status=%d (%s)\n",
-				(unsigned long long)entry->fileid,
-				entry->ds_id, (int)block_st,
-				block_st == MDS_ERR_NOTFOUND ?
-					"ds_id not mounted here (dropping)"
-					: "unlink I/O (retry)");
-		}
+	if (block_st != MDS_OK) {
+		warn_blocked_entry(entry, block_st);
 		/* MDS_ERR_NOTFOUND: entry->ds_id is not resolvable to a DS mount
 		 * on this MDS (out-of-range / synthetic ds_id). This MDS can never
 		 * drain it, and returning false keeps it at the head of the
@@ -222,7 +240,6 @@ static bool process_one_entry(struct ds_gc *gc,
 			return false;
 		}
 	}
-	(void)had_any_existed;
 	/* Best-effort: drop catalogue stripe rows after DS bytes are gone.
 	 * Idempotent when ns_remove already deleted them in-txn. */
 	(void)mds_cat_stripe_map_del(gc->cat, NULL, entry->fileid);
@@ -231,7 +248,14 @@ static bool process_one_entry(struct ds_gc *gc,
 
 static void q_signal_stop(struct ds_gc *gc)
 {
-	(void)write(gc->wake_pipe[1], "x", 1);
+	ssize_t n;
+
+	/* Wake the coordinator out of poll().  gc->stop is already set,
+	 * so a failed write only costs one poll_ms tick before it is
+	 * noticed; only EINTR is worth retrying. */
+	do {
+		n = write(gc->wake_pipe[1], "x", 1);
+	} while (n < 0 && errno == EINTR);
 }
 
 static bool q_push(struct ds_gc *gc, const struct mds_gc_entry *entry)

@@ -42,16 +42,6 @@ static int fail_count;
     } pass_count++; \
 } while (0)
 
-#define TEST_MAP_SIZE (64ULL * 1024 * 1024)
-
-static int db_counter;
-static char *make_temp_db(void)
-{
-    static char path[256];
-    snprintf(path, sizeof(path), "/tmp/test_ds_prealloc_%d_%d", getpid(), db_counter++);
-    return path;
-}
-
 static void seed_ds(struct mds_catalogue *db, uint32_t ds_id)
 {
     struct mds_ds_info info;
@@ -80,7 +70,6 @@ static void seed_ds(struct mds_catalogue *db, uint32_t ds_id)
 
 static void test_init_destroy(void)
 {
-    char *path = make_temp_db();
     struct mds_catalogue *db = NULL;
 	struct mds_catalogue *cat = NULL;
     struct ds_prealloc_ctx *ctx = NULL;
@@ -113,7 +102,6 @@ static void test_init_null_db(void)
 
 static void test_pop_valid(void)
 {
-    char *path = make_temp_db();
     struct mds_catalogue *db = NULL;
 	struct mds_catalogue *cat = NULL;
     struct ds_prealloc_ctx *ctx = NULL;
@@ -146,7 +134,6 @@ static void test_pop_valid(void)
 
 static void test_pop_empty_pool(void)
 {
-    char *path = make_temp_db();
     struct mds_catalogue *db = NULL;
 	struct mds_catalogue *cat = NULL;
     struct ds_prealloc_ctx *ctx = NULL;
@@ -200,7 +187,6 @@ static void *pop_thread_fn(void *arg)
 
 static void test_concurrent_pop(void)
 {
-    char *path = make_temp_db();
     struct mds_catalogue *db = NULL;
 	struct mds_catalogue *cat = NULL;
     struct ds_prealloc_ctx *ctx = NULL;
@@ -246,7 +232,6 @@ static void test_concurrent_pop(void)
 
 static void test_pop_no_ds(void)
 {
-    char *path = make_temp_db();
     struct mds_catalogue *db = NULL;
 	struct mds_catalogue *cat = NULL;
     struct ds_prealloc_ctx *ctx = NULL;

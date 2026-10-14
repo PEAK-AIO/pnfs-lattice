@@ -187,6 +187,7 @@ static void test_putfh_junction_succeeds(void)
 
     struct nfs4_op ops[1];
     struct nfs4_result results[1];
+    memset(results, 0, sizeof(results));
     ops[0] = mk_putfh(junction.fileid);
 
     uint32_t n = compound_process(&cd, ops, results, 1);
@@ -242,6 +243,7 @@ static void test_lookup_junction_returns_moved(void)
 
     struct nfs4_op ops[2];
     struct nfs4_result results[2];
+    memset(results, 0, sizeof(results));
     ops[0] = mk_putrootfh();
     ops[1] = mk_lookup("foreign");
 
@@ -295,6 +297,7 @@ static void test_lookup_junction_getattr_fs_locations(void)
 
     struct nfs4_op ops[3];
     struct nfs4_result results[3];
+    memset(results, 0, sizeof(results));
     ops[0] = mk_putrootfh();
     ops[1] = mk_lookup("foreign");
     ops[2] = mk_getattr_fs_locations();
@@ -423,6 +426,7 @@ static void test_rename_cross_subtree_local_to_remote_fastpath(void)
 
     struct nfs4_op ops[6];
     struct nfs4_result results[6];
+    memset(results, 0, sizeof(results));
     ops[0] = mk_putrootfh();
     ops[1] = mk_lookup("local");
     ops[2] = mk_savefh();
@@ -589,6 +593,7 @@ static void test_rename_cross_subtree_membership(void)
 
     struct nfs4_op ops[6];
     struct nfs4_result results[6];
+    memset(results, 0, sizeof(results));
     ops[0] = mk_putrootfh();
     ops[1] = mk_lookup("local");
     ops[2] = mk_savefh();

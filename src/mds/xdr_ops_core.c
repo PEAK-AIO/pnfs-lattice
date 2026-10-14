@@ -35,7 +35,7 @@ static bool xdr_skip_opaque_bytes(XDR *xdrs, uint32_t len);
  */
 static bool xdr_skip_bitmap4(XDR *xdrs)
 {
-    uint32_t words;
+    uint32_t words = 0;
 
     if (!xdr_uint32_t(xdrs, &words)) {
         return false;
@@ -61,7 +61,7 @@ static bool xdr_skip_bitmap4(XDR *xdrs)
 static bool xdr_skip_opaque_array(XDR *xdrs, uint32_t max_items,
                                   uint32_t max_item_len)
 {
-    uint32_t count;
+    uint32_t count = 0;
 
     if (!xdr_uint32_t(xdrs, &count)) {
         return false;
@@ -156,7 +156,10 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
         a->spa_how = sp_how;
         if (sp_how == SP4_MACH_CRED) {
             /* state_protect_ops4: spo_must_enforce + spo_must_allow. */
-            if (!xdr_skip_bitmap4(xdrs) || !xdr_skip_bitmap4(xdrs)) {
+            if (!xdr_skip_bitmap4(xdrs)) {
+                return false;
+            }
+            if (!xdr_skip_bitmap4(xdrs)) {
                 return false;
             }
         } else if (sp_how == SP4_SSV) {
@@ -166,11 +169,16 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
              * up to 128 bytes each is far above any real GSS OID. */
             uint32_t win, ngss;
 
-            if (!xdr_skip_bitmap4(xdrs) || !xdr_skip_bitmap4(xdrs)) {
+            if (!xdr_skip_bitmap4(xdrs)) {
                 return false;
             }
-            if (!xdr_skip_opaque_array(xdrs, 16U, 128U) ||
-                !xdr_skip_opaque_array(xdrs, 16U, 128U)) {
+            if (!xdr_skip_bitmap4(xdrs)) {
+                return false;
+            }
+            if (!xdr_skip_opaque_array(xdrs, 16U, 128U)) {
+                return false;
+            }
+            if (!xdr_skip_opaque_array(xdrs, 16U, 128U)) {
                 return false;
             }
             if (!xdr_uint32_t(xdrs, &win) ||
@@ -231,7 +239,7 @@ bool decode_op_exchange_id(XDR *xdrs, struct nfs4_op *op)
         }
         /* nii_date: int64 + uint32 */
         {
-            int64_t s;
+            int64_t s = 0;
             uint32_t ns;
 
             if (!xdr_int64_t(xdrs, &s)) {
@@ -561,7 +569,7 @@ bool decode_op_setattr(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_create(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_create *a = &op->arg.create;
-    uint32_t nfs_type;
+    uint32_t nfs_type = 0;
 
     a->name_too_long = false;
     a->link_target_too_long = false;
@@ -674,7 +682,7 @@ bool decode_op_readdir(XDR *xdrs, struct nfs4_op *op)
 {
     /* READDIR4args: cookie(uint64), cookieverf(8 bytes),
      * dircount(uint32), maxcount(uint32), attr_request(bitmap4). */
-    uint64_t cookie;
+    uint64_t cookie = 0;
     char verf[8];
     uint32_t dircount, maxcount;
     uint32_t words;
@@ -708,7 +716,7 @@ bool decode_op_readdir(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_open *a = &op->arg.open;
-    uint32_t seqid_unused;
+    uint32_t seqid_unused = 0;
     uint32_t open_claim;
     uint32_t createmode;
     memset(&a->layout_hint, 0, sizeof(a->layout_hint));
@@ -731,7 +739,7 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
 
     /* open_owner4: clientid + owner<> — store for per-owner state. */
     {
-        uint64_t clientid_wire;
+        uint64_t clientid_wire = 0;
         uint32_t owner_len;
 
         if (!xdr_uint64_t(xdrs, &clientid_wire)) {
@@ -857,7 +865,7 @@ bool decode_op_open(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_close(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_close *a = &op->arg.close;
-    uint32_t seqid_unused;
+    uint32_t seqid_unused = 0;
 
     /* seqid (deprecated in v4.1 but on wire) */
     if (!xdr_uint32_t(xdrs, &seqid_unused)) {
@@ -870,7 +878,7 @@ bool decode_op_close(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_openattr(XDR *xdrs, struct nfs4_op *op)
 {
     /* OPENATTR4args: createdir(bool). */
-    uint32_t create;
+    uint32_t create = 0;
 
     if (!xdr_uint32_t(xdrs, &create)) {
         return false;
@@ -942,7 +950,7 @@ bool decode_op_write(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_reclaim_complete(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_reclaim_complete *a = &op->arg.reclaim_complete;
-    uint32_t bval;
+    uint32_t bval = 0;
     if (!xdr_uint32_t(xdrs, &bval)) { return false; }
     a->rca_one_fs = (bval != 0);
     return true;
@@ -1270,6 +1278,51 @@ static bool encode_readdir_minimal_attrs(
     return xdr_nfs4_fattr_encode(xdrs, &inode, minimal);
 }
 
+/* One entry4 of the READDIR reply: value_follows(true) + cookie +
+ * name + attrs (full fattr4 when the producer filled entry_attrs[i],
+ * the minimal synthetic set otherwise). */
+static bool encode_readdir_entry(XDR *xdrs,
+                                 const struct nfs4_res_readdir *rd,
+                                 uint32_t i, bool have_requested)
+{
+    int32_t value_follows = 1; /* true */
+    /* Backend-assigned cookie (struct mds_cat_dirent.cookie),
+     * carried through op_readdir unchanged; never the fileid. */
+    uint64_t cookie = rd->entries[i].cookie;
+    uint32_t name_len = (uint32_t)strlen(rd->entries[i].name);
+
+    if (!xdr_putbool(xdrs, value_follows)) {
+        return false;
+    }
+    /* cookie */
+    if (!xdr_uint64_t(xdrs, &cookie)) {
+        return false;
+    }
+    /* name (component4 = utf8str_cs) */
+    if (!xdr_uint32_t(xdrs, &name_len)) {
+        return false;
+    }
+    if (!xdr_opaque_encode(xdrs, rd->entries[i].name, name_len)) {
+        return false;
+    }
+
+    if (have_requested && rd->entry_attrs_valid[i]) {
+        /* Same fsid as GETATTR would report on this tree; the
+         * plain encoder hardcodes fsid (1,0) which mismatches
+         * any shard with fsid != 1 and makes the client treat
+         * every entry as a filesystem crossing (auto-submount,
+         * rm -rf EBUSY).  No referral context on entries. */
+        return xdr_nfs4_fattr_encode_ex(xdrs, &rd->entry_attrs[i],
+                                        rd->requested, NULL,
+                                        (rd->fsid_major != 0)
+                                            ? rd->fsid_major : 1,
+                                        rd->fsid_minor,
+                                        NULL, NULL, NULL);
+    }
+    return encode_readdir_minimal_attrs(xdrs, &rd->entries[i],
+                                        rd->requested);
+}
+
 bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
 {
     const struct nfs4_res_readdir *rd = &r->res.readdir;
@@ -1297,44 +1350,8 @@ bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
     /* entry4 linked list: each is value_follows(bool) + entry data.
      * Final entry followed by value_follows=false + eof(bool). */
     for (i = 0; i < rd->count; i++) {
-        int32_t value_follows = 1; /* true */
-        uint64_t cookie = rd->entries[i].fileid;
-        uint32_t name_len = (uint32_t)strlen(rd->entries[i].name);
-
-        if (!xdr_putbool(xdrs, value_follows)) {
+        if (!encode_readdir_entry(xdrs, rd, i, have_requested)) {
             return false;
-        }
-        /* cookie */
-        if (!xdr_uint64_t(xdrs, &cookie)) {
-            return false;
-        }
-        /* name (component4 = utf8str_cs) */
-        if (!xdr_uint32_t(xdrs, &name_len)) {
-            return false;
-        }
-        if (!xdr_opaque_encode(xdrs, rd->entries[i].name, name_len)) {
-            return false;
-        }
-
-        if (have_requested && rd->entry_attrs_valid[i]) {
-            /* Same fsid as GETATTR would report on this tree; the
-             * plain encoder hardcodes fsid (1,0) which mismatches
-             * any shard with fsid != 1 and makes the client treat
-             * every entry as a filesystem crossing (auto-submount,
-             * rm -rf EBUSY).  No referral context on entries. */
-            if (!xdr_nfs4_fattr_encode_ex(xdrs, &rd->entry_attrs[i],
-                                          rd->requested, NULL,
-                                          (rd->fsid_major != 0)
-                                              ? rd->fsid_major : 1,
-                                          rd->fsid_minor,
-                                          NULL, NULL, NULL)) {
-                return false;
-            }
-        } else {
-            if (!encode_readdir_minimal_attrs(xdrs, &rd->entries[i],
-                                              rd->requested)) {
-                return false;
-            }
         }
     }
     /* No more entries. */
@@ -1356,6 +1373,8 @@ bool encode_res_readdir(XDR *xdrs, const struct nfs4_result *r)
     return true;
 }
 
+/* open_delegation4 union encoder; defined after encode_res_open. */
+static bool encode_open_delegation(XDR *xdrs, const struct nfs4_res_open *o);
 
 bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
 {
@@ -1435,111 +1454,126 @@ bool encode_res_open(XDR *xdrs, const struct nfs4_result *r)
      * collapses to OPEN_DELEGATE_NONE so a producer bug never
      * yields an unparseable wire form.
      */
+    return encode_open_delegation(xdrs, o);
+}
+
+/* open_none_delegation4: ond_why + per-reason tail. */
+static bool encode_open_none_ext(XDR *xdrs, const struct nfs4_res_open *o)
+{
+    uint32_t ond_why = o->none_reason;
+
+    if (ond_why > WND4_IS_DIR) {
+        ond_why = WND4_NOT_WANTED;
+    }
+    if (!xdr_uint32_t(xdrs, &ond_why)) {
+        return false;
+    }
+    if (ond_why == WND4_CONTENTION) {
+        int32_t will = o->none_will_push ? 1 : 0;
+        if (!xdr_putbool(xdrs, will)) {
+            return false;
+        }
+    } else if (ond_why == WND4_RESOURCE) {
+        int32_t will = o->none_will_signal ? 1 : 0;
+        if (!xdr_putbool(xdrs, will)) {
+            return false;
+        }
+    }
+    /* All other reason codes have a void tail. */
+    return true;
+}
+
+/* open_read_delegation4 / open_write_delegation4 body (the
+ * discriminant has already been emitted). */
+static bool encode_open_deleg_body(XDR *xdrs, const struct nfs4_res_open *o,
+                                   uint32_t deleg_type)
+{
+    /* Common to both READ and WRITE bodies: stateid + recall
+     * (RFC 8881 §18.16.4).  recall=false on grant; the server
+     * sets it true only inside CB_RECALL bodies. */
+    if (!xdr_nfs4_stateid_encode(xdrs, &o->deleg_stateid)) {
+        return false;
+    }
     {
-        uint32_t deleg_type = o->delegation_type;
-
-        if (deleg_type != OPEN_DELEGATE_READ &&
-            deleg_type != OPEN_DELEGATE_WRITE &&
-            deleg_type != OPEN_DELEGATE_NONE_EXT) {
-            deleg_type = OPEN_DELEGATE_NONE;
-        }
-        if (!xdr_uint32_t(xdrs, &deleg_type)) {
+        int32_t recall = 0;
+        if (!xdr_putbool(xdrs, recall)) {
             return false;
         }
-        if (deleg_type == OPEN_DELEGATE_NONE) {
-            return true;
-        }
+    }
 
-        if (deleg_type == OPEN_DELEGATE_NONE_EXT) {
-            /* open_none_delegation4: ond_why + per-reason tail. */
-            uint32_t ond_why = o->none_reason;
-
-            if (ond_why > WND4_IS_DIR) {
-                ond_why = WND4_NOT_WANTED;
-            }
-            if (!xdr_uint32_t(xdrs, &ond_why)) {
-                return false;
-            }
-            if (ond_why == WND4_CONTENTION) {
-                int32_t will = o->none_will_push ? 1 : 0;
-                if (!xdr_putbool(xdrs, will)) {
-                    return false;
-                }
-            } else if (ond_why == WND4_RESOURCE) {
-                int32_t will = o->none_will_signal ? 1 : 0;
-                if (!xdr_putbool(xdrs, will)) {
-                    return false;
-                }
-            }
-            /* All other reason codes have a void tail. */
-            return true;
-        }
-
-        /* Common to both READ and WRITE bodies: stateid + recall
-         * (RFC 8881 §18.16.4).  recall=false on grant; the server
-         * sets it true only inside CB_RECALL bodies. */
-        if (!xdr_nfs4_stateid_encode(xdrs, &o->deleg_stateid)) {
-            return false;
-        }
-        {
-            int32_t recall = 0;
-            if (!xdr_putbool(xdrs, recall)) {
-                return false;
-            }
-        }
-
-        if (deleg_type == OPEN_DELEGATE_WRITE) {
-            /*
-             * nfs_space_limit4: union switch (limitby4 limitby).
-             * NFS_LIMIT_SIZE = 1 (uint64 filesize); we advertise
-             * an effectively unlimited cap.  RFC 8881 §18.16.4. */
-            uint32_t limitby = 1; /* NFS_LIMIT_SIZE */
-            uint64_t filesize = (uint64_t)INT64_MAX;
-
-            if (!xdr_uint32_t(xdrs, &limitby)) {
-                return false;
-            }
-            if (!xdr_uint64_t(xdrs, &filesize)) {
-                return false;
-            }
-        }
-
+    if (deleg_type == OPEN_DELEGATE_WRITE) {
         /*
-         * nfsace4 permissions:
-         *   acetype4   = ACE4_ACCESS_ALLOWED_ACE_TYPE (0)
-         *   aceflag4   = 0
-         *   acemask4   = ACE4_READ_DATA (0x1) for READ deleg,
-         *                ACE4_WRITE_DATA|ACE4_READ_DATA (0x3) for WRITE
-         *   utf8str_mixed who = "EVERYONE@" (RFC 7530 §6.2.1.5)
-         *
-         * The Linux client only consults this for cache-policy
-         * hints; "EVERYONE@" is the broadest valid grant. */
-        {
-            uint32_t acetype = 0;
-            uint32_t aceflag = 0;
-            uint32_t acemask = (deleg_type == OPEN_DELEGATE_WRITE)
-                                 ? 0x3u : 0x1u;
-            const char *who = "EVERYONE@";
-            uint32_t who_len = (uint32_t)strlen(who);
+         * nfs_space_limit4: union switch (limitby4 limitby).
+         * NFS_LIMIT_SIZE = 1 (uint64 filesize); we advertise
+         * an effectively unlimited cap.  RFC 8881 §18.16.4. */
+        uint32_t limitby = 1; /* NFS_LIMIT_SIZE */
+        uint64_t filesize = (uint64_t)INT64_MAX;
 
-            if (!xdr_uint32_t(xdrs, &acetype)) {
-                return false;
-            }
-            if (!xdr_uint32_t(xdrs, &aceflag)) {
-                return false;
-            }
-            if (!xdr_uint32_t(xdrs, &acemask)) {
-                return false;
-            }
-            if (!xdr_uint32_t(xdrs, &who_len)) {
-                return false;
-            }
-            if (!xdr_opaque_encode(xdrs, who, who_len)) {
-                return false;
-            }
+        if (!xdr_uint32_t(xdrs, &limitby)) {
+            return false;
+        }
+        if (!xdr_uint64_t(xdrs, &filesize)) {
+            return false;
+        }
+    }
+
+    /*
+     * nfsace4 permissions:
+     *   acetype4   = ACE4_ACCESS_ALLOWED_ACE_TYPE (0)
+     *   aceflag4   = 0
+     *   acemask4   = ACE4_READ_DATA (0x1) for READ deleg,
+     *                ACE4_WRITE_DATA|ACE4_READ_DATA (0x3) for WRITE
+     *   utf8str_mixed who = "EVERYONE@" (RFC 7530 §6.2.1.5)
+     *
+     * The Linux client only consults this for cache-policy
+     * hints; "EVERYONE@" is the broadest valid grant. */
+    {
+        uint32_t acetype = 0;
+        uint32_t aceflag = 0;
+        uint32_t acemask = (deleg_type == OPEN_DELEGATE_WRITE)
+                             ? 0x3u : 0x1u;
+        const char *who = "EVERYONE@";
+        uint32_t who_len = (uint32_t)strlen(who);
+
+        if (!xdr_uint32_t(xdrs, &acetype)) {
+            return false;
+        }
+        if (!xdr_uint32_t(xdrs, &aceflag)) {
+            return false;
+        }
+        if (!xdr_uint32_t(xdrs, &acemask)) {
+            return false;
+        }
+        if (!xdr_uint32_t(xdrs, &who_len)) {
+            return false;
+        }
+        if (!xdr_opaque_encode(xdrs, who, who_len)) {
+            return false;
         }
     }
     return true;
+}
+
+/* open_delegation4 union: discriminant + arm (see encode_res_open). */
+static bool encode_open_delegation(XDR *xdrs, const struct nfs4_res_open *o)
+{
+    uint32_t deleg_type = o->delegation_type;
+
+    if (deleg_type != OPEN_DELEGATE_READ &&
+        deleg_type != OPEN_DELEGATE_WRITE &&
+        deleg_type != OPEN_DELEGATE_NONE_EXT) {
+        deleg_type = OPEN_DELEGATE_NONE;
+    }
+    if (!xdr_uint32_t(xdrs, &deleg_type)) {
+        return false;
+    }
+    if (deleg_type == OPEN_DELEGATE_NONE) {
+        return true;
+    }
+    if (deleg_type == OPEN_DELEGATE_NONE_EXT) {
+        return encode_open_none_ext(xdrs, o);
+    }
+    return encode_open_deleg_body(xdrs, o, deleg_type);
 }
 
 

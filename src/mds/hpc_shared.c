@@ -261,6 +261,55 @@ void hpc_shared_test_set_pending_reap_grace(uint32_t grace_sec)
     g_pending_reap_grace_sec = grace_sec;
 }
 
+/*
+ * Incomplete legacy PENDING row past the grace window: GC every
+ * captured DS object, then remove the namespace entry (or the orphan
+ * inode row when the dirent is already gone).  Consumes @entries.
+ * Returns MDS_ERR_NOTFOUND once the row is no longer visible, or the
+ * first catalogue error.
+ */
+static enum mds_status hpc_pending_reap(struct compound_data *cd,
+                                        const struct mds_inode *inode,
+                                        struct mds_ds_map_entry *entries,
+                                        uint32_t stripe_count,
+                                        uint32_t mirror_count)
+{
+    uint64_t entry_count = 0;
+    char name[MDS_MAX_NAME + 1];
+    enum mds_status st;
+
+    if (stripe_count > 0 && stripe_count <= MDS_MAX_STRIPES &&
+        mirror_count > 0 && mirror_count <= MDS_MAX_MIRRORS) {
+        entry_count = (uint64_t)stripe_count * mirror_count;
+    }
+    hpc_enqueue_cleanup_entries(cd->cat, inode->fileid, entries, entry_count,
+                                stripe_count, mirror_count);
+    free(entries);
+    st = mds_cat_ns_dirent_name_for_child(
+        cd->cat, inode->parent_fileid, inode->fileid, name, sizeof(name));
+    if (st == MDS_OK) {
+        st = mds_cat_ns_remove_known(
+            cd->cat, NULL, inode->parent_fileid, name, inode, stripe_count);
+        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+            return st;
+        }
+        (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
+        compound_dirent_invalidate(cd, inode->parent_fileid, name);
+    } else if (st == MDS_ERR_NOTFOUND) {
+        if (stripe_count > 0) {
+            (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
+        }
+        st = mds_cat_inode_del(cd->cat, NULL, inode->fileid);
+        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+            return st;
+        }
+    } else {
+        return st;
+    }
+    compound_inode_invalidate(cd, inode->fileid);
+    return MDS_ERR_NOTFOUND;
+}
+
 enum mds_status hpc_shared_recover_pending(
     struct compound_data *cd,
     struct mds_inode *inode)
@@ -270,8 +319,6 @@ enum mds_status hpc_shared_recover_pending(
     uint32_t stripe_count = 0;
     uint32_t stripe_unit = 0;
     uint32_t mirror_count = 0;
-    uint64_t entry_count;
-    char name[MDS_MAX_NAME + 1];
     enum mds_status st;
 
     if (cd == NULL || cd->cat == NULL || inode == NULL) {
@@ -322,37 +369,7 @@ enum mds_status hpc_shared_recover_pending(
         }
     }
 
-    entry_count = 0;
-    if (stripe_count > 0 && stripe_count <= MDS_MAX_STRIPES &&
-        mirror_count > 0 && mirror_count <= MDS_MAX_MIRRORS) {
-        entry_count = (uint64_t)stripe_count * mirror_count;
-    }
-    hpc_enqueue_cleanup_entries(cd->cat, inode->fileid, entries, entry_count,
-                                stripe_count, mirror_count);
-    free(entries);
-    st = mds_cat_ns_dirent_name_for_child(
-        cd->cat, inode->parent_fileid, inode->fileid, name, sizeof(name));
-    if (st == MDS_OK) {
-        st = mds_cat_ns_remove_known(
-            cd->cat, NULL, inode->parent_fileid, name, inode, stripe_count);
-        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
-            return st;
-        }
-        (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
-        compound_dirent_invalidate(cd, inode->parent_fileid, name);
-    } else if (st == MDS_ERR_NOTFOUND) {
-        if (stripe_count > 0) {
-            (void)mds_cat_stripe_map_del(cd->cat, NULL, inode->fileid);
-        }
-        st = mds_cat_inode_del(cd->cat, NULL, inode->fileid);
-        if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
-            return st;
-        }
-    } else {
-        return st;
-    }
-    compound_inode_invalidate(cd, inode->fileid);
-    return MDS_ERR_NOTFOUND;
+    return hpc_pending_reap(cd, inode, entries, stripe_count, mirror_count);
 }
 
 struct hpc_pending_scan_ctx {
@@ -484,6 +501,78 @@ static void hpc_create_gc_enqueue_entries(
         batch->stripe_count, batch->mirror_count);
 }
 
+/* Argument validation for hpc_shared_create_wide_layout. */
+static enum mds_status hpc_wide_create_check_args(
+    const struct mds_catalogue *cat,
+    const struct ds_prealloc_ctx *prealloc,
+    const char *name, const struct mds_inode *out,
+    uint32_t stripe_count, uint32_t mirror_count)
+{
+    if (cat == NULL || prealloc == NULL || name == NULL || out == NULL) {
+        return MDS_ERR_INVAL;
+    }
+    if (stripe_count == 0 || stripe_count > MDS_MAX_STRIPES ||
+        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS) {
+        return MDS_ERR_INVAL;
+    }
+    /* QA Phase 5: HPC-Shared wide pre-warm has only been validated
+     * for mirror_count == 1.  The N-to-1 workloads this path exists
+     * for write checkpoint data once and pay-as-you-go on durability
+     * via async replication / backup; live mirroring on every WRITE
+     * is explicitly out of scope (see docs/hpc-shared-files.md
+     * "Limits").  Reject mirror_count > 1 with NOSUPPORT instead of
+     * silently routing it through an unvalidated code path. */
+    if (mirror_count > 1) {
+        return MDS_ERR_NOSUPPORT;
+    }
+    return MDS_OK;
+}
+
+/*
+ * Step 3 of the wide create: the single fused catalogue transaction.
+ * On failure the captured DS bundle is GC-enqueued only when the
+ * create is PROVEN not to have published a live file at child->fileid
+ * -- on an indeterminate result (MDS_ERR_DELAY, MDS_ERR_INDOUBT) the
+ * commit may have landed, so we must not GC a possibly-live file's
+ * backing store; the pending-recovery scan / reconciliation handles
+ * that case.  The batch is destroyed on failure (heap bookkeeping
+ * only -- the DS objects themselves are untouched); on success the
+ * caller still owns it.
+ */
+static enum mds_status hpc_wide_create_commit(
+    struct mds_catalogue *cat, uint64_t parent_fileid, const char *name,
+    struct mds_inode *child, struct ds_prealloc_batch_result *batch)
+{
+    bool safe_to_discard = false;
+    enum mds_status st;
+
+    st = mds_cat_ns_create_wide(
+        cat, parent_fileid, name, child, batch->stripe_count,
+        batch->stripe_unit, batch->mirror_count, batch->entries,
+        &safe_to_discard);
+    if (st == MDS_ERR_INDOUBT) {
+        /* The dispatcher and every backend leave safe_to_discard
+         * false on an unresolved commit (mds_catalogue.h contract);
+         * pin it here too, at the one place that acts on it, so no
+         * backend can ever turn an in-doubt create into a reclaim. */
+        safe_to_discard = false;
+    }
+    if (st != MDS_OK) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "hpc wide-create '%s' parent=%llu fileid=%llu: catalogue "
+            "commit failed (st=%d sc=%u su=%u discard=%d)",
+            name, (unsigned long long)parent_fileid,
+            (unsigned long long)child->fileid, (int)st,
+            (unsigned)batch->stripe_count, (unsigned)batch->stripe_unit,
+            safe_to_discard ? 1 : 0);
+        if (safe_to_discard) {
+            hpc_create_gc_enqueue_entries(cat, child->fileid, batch);
+        }
+        ds_prealloc_batch_result_destroy(batch);
+    }
+    return st;
+}
+
 enum mds_status hpc_shared_create_wide_layout(
     struct mds_catalogue   *cat,
     struct ds_prealloc_ctx *prealloc,
@@ -506,22 +595,10 @@ enum mds_status hpc_shared_create_wide_layout(
     struct ds_prealloc_batch_result batch;
     enum mds_status st;
 
-    if (cat == NULL || prealloc == NULL || name == NULL || out == NULL) {
-        return MDS_ERR_INVAL;
-    }
-    if (stripe_count == 0 || stripe_count > MDS_MAX_STRIPES ||
-        mirror_count == 0 || mirror_count > MDS_MAX_MIRRORS) {
-        return MDS_ERR_INVAL;
-    }
-    /* QA Phase 5: HPC-Shared wide pre-warm has only been validated
-     * for mirror_count == 1.  The N-to-1 workloads this path exists
-     * for write checkpoint data once and pay-as-you-go on durability
-     * via async replication / backup; live mirroring on every WRITE
-     * is explicitly out of scope (see docs/hpc-shared-files.md
-     * "Limits").  Reject mirror_count > 1 with NOSUPPORT instead of
-     * silently routing it through an unvalidated code path. */
-    if (mirror_count > 1) {
-        return MDS_ERR_NOSUPPORT;
+    st = hpc_wide_create_check_args(cat, prealloc, name, out,
+                                    stripe_count, mirror_count);
+    if (st != MDS_OK) {
+        return st;
     }
     if (stripe_unit == 0) {
         stripe_unit = 65536;
@@ -558,29 +635,9 @@ enum mds_status hpc_shared_create_wide_layout(
         return st;
     }
 
-    bool safe_to_discard = false;
-    st = mds_cat_ns_create_wide(
-        cat, parent_fileid, name, &child, batch.stripe_count,
-        batch.stripe_unit, batch.mirror_count, batch.entries,
-        &safe_to_discard);
+    st = hpc_wide_create_commit(cat, parent_fileid, name, &child, &batch);
     if (st != MDS_OK) {
-        MDS_LOG_WARN(LOG_COMP_MDS,
-            "hpc wide-create '%s' parent=%llu fileid=%llu: catalogue "
-            "commit failed (st=%d sc=%u su=%u discard=%d)",
-            name, (unsigned long long)parent_fileid,
-            (unsigned long long)child.fileid, (int)st,
-            (unsigned)batch.stripe_count, (unsigned)batch.stripe_unit,
-            safe_to_discard ? 1 : 0);
-        /* Reclaim the DS bundle only when the create is PROVEN not to have
-         * published a live file at child.fileid.  On an indeterminate
-         * result (MDS_ERR_DELAY) the commit may have landed, so we must not
-         * GC a possibly-live file's backing store; the pending-recovery
-         * scan / reconciliation handles that case. */
-        if (safe_to_discard) {
-            hpc_create_gc_enqueue_entries(cat, child.fileid, &batch);
-        }
-        ds_prealloc_batch_result_destroy(&batch);
-        return st;
+        return st; /* batch already destroyed */
     }
 
     child.stripe_count = batch.stripe_count;

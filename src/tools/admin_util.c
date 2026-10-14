@@ -181,6 +181,14 @@ int parse_ds_filename(const char *name, uint64_t *fileid,
     return 0;
 }
 
+const char *admin_errno_text(int err, char *buf, size_t cap)
+{
+    /* The build defines _GNU_SOURCE, so this is the GNU strerror_r():
+     * it returns the message text, which may live in @buf or in a
+     * static string. */
+    return strerror_r(err, buf, cap);
+}
+
 enum mds_status resolve_mds_path(void *unused,
                                  const char *path, const uint64_t *fileid)
 {

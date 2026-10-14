@@ -13,6 +13,7 @@
 #include <stdbool.h>
 
 #include "pnfs_mds.h"
+#include "repl_monitor.h"
 
 struct bpf_monitor {
     bool running;

@@ -1086,6 +1086,116 @@ static int proxy_name_to_handle(const char *path, bool knfsd_strict,
                                        fh_out, fh_cap, fh_len);
 }
 
+/*
+ * Primary path of mds_proxy_ensure_ds_file_fh: create the file on the
+ * local NFS mount and extract the server FH with name_to_handle_at().
+ * Returns true on success; false when the caller must fall back to
+ * the NFS3 RPC path (path/open failure silently, handle failure with
+ * a warning).
+ */
+static bool ensure_ds_file_fh_syscall(const struct mds_proxy_ctx *ctx,
+                                      const char *mount, uint64_t fileid,
+                                      uint32_t stripe, uint32_t mirror,
+                                      uint8_t *fh_out, uint32_t *fh_len)
+{
+    char file_path[MDS_MAX_PATH];
+    char dir_path[MDS_MAX_PATH];
+    int fd;
+    struct timespec t0, t1, t2;
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    /* Ensure data/ subdirectory exists. */
+    (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount);
+    (void)mkdir(dir_path, 0755);
+
+    /* Create the file if absent. */
+    if (build_ds_path(file_path, sizeof(file_path), mount,
+                      fileid, stripe, mirror) != 0) {
+        return false;
+    }
+    fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+        return false;
+    }
+    /* 0666: DS backing file must be writable by the client's
+     * real (non-root) AUTH_SYS uid; see the mode rationale in
+     * mds_proxy_ensure_ds_file above. */
+    (void)fchmod(fd, 0666);
+    close(fd);
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    /* Extract server FH via syscall. */
+    errno = 0;
+    if (proxy_name_to_handle(file_path, ctx->fh_knfsd_strict,
+                             fh_out, *fh_len, fh_len) == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        {
+            int64_t open_us = (t1.tv_sec - t0.tv_sec) * 1000000LL
+                + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
+            int64_t nth_us = (t2.tv_sec - t1.tv_sec) * 1000000LL
+                + (t2.tv_nsec - t1.tv_nsec) / 1000LL;
+            MDS_LOG_DEBUG(LOG_COMP_MDS,
+                "FH_TIMING syscall: open=%" PRId64 "us nth=%" PRId64
+                "us total=%" PRId64 "us",
+                open_us, nth_us, open_us + nth_us);
+        }
+        return true;
+    }
+    /* name_to_handle_at failed -- fall through to RPC. */
+    MDS_LOG_WARN(LOG_COMP_MDS,
+        "ensure_ds_file_fh: name_to_handle_at path failed "
+        "(path=%s errno=%d) -- falling back to NFS3 RPC",
+        file_path, errno);
+    return false;
+}
+
+/* Fallback path of mds_proxy_ensure_ds_file_fh: NFS3 MOUNT + LOOKUP
+ * RPC to the DS. */
+static enum mds_status ensure_ds_file_fh_rpc(const struct mds_proxy_ctx *ctx,
+                                             uint32_t ds_id, uint64_t fileid,
+                                             uint32_t stripe, uint32_t mirror,
+                                             uint8_t *fh_out,
+                                             uint32_t *fh_len)
+{
+    char rel_path[256];
+    const char *host = ctx->mounts[ds_id].host;
+    uint16_t nfs_port = ctx->mounts[ds_id].nfs_port;
+    const char *export_path = ctx->mounts[ds_id].export_path;
+    struct timespec tr0, tr1;
+
+    if (host[0] == '\0' || export_path[0] == '\0' || nfs_port == 0) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "ensure_ds_file_fh: NFS3 RPC fallback unavailable "
+            "(ds=%u host='%s' export='%s' port=%u)",
+            (unsigned)ds_id, host, export_path,
+            (unsigned)nfs_port);
+        return MDS_ERR_INVAL;
+    }
+
+    (void)snprintf(rel_path, sizeof(rel_path),
+                   "data/%" PRIu64 "_%u_%u", fileid, stripe, mirror);
+
+    clock_gettime(CLOCK_MONOTONIC, &tr0);
+    if (ds_nfs3_lookup_fh(host, nfs_port, export_path,
+                          rel_path, 1, fh_out, fh_len, 3000) != 0) {
+        MDS_LOG_WARN(LOG_COMP_MDS,
+            "ensure_ds_file_fh: NFS3 RPC FH lookup failed "
+            "(ds=%u host=%s export=%s rel=%s)",
+            (unsigned)ds_id, host, export_path, rel_path);
+        return MDS_ERR_IO;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &tr1);
+    {
+        int64_t rpc_us = (tr1.tv_sec - tr0.tv_sec) * 1000000LL
+            + (tr1.tv_nsec - tr0.tv_nsec) / 1000LL;
+        MDS_LOG_DEBUG(LOG_COMP_MDS,
+            "FH_TIMING rpc_fallback: %" PRId64 "us", rpc_us);
+    }
+    return MDS_OK;
+}
+
 /**
  * Ensure a DS data file exists and return its NFS file handle.
  *
@@ -1112,7 +1222,6 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
     uint8_t *fh_out, uint32_t *fh_len)
 {
     const char *mount;
-    char file_path[MDS_MAX_PATH];
 
     if (ctx == NULL || fh_out == NULL || fh_len == NULL) {
         return MDS_ERR_INVAL;
@@ -1129,97 +1238,15 @@ enum mds_status mds_proxy_ensure_ds_file_fh(
      * Primary path: name_to_handle_at() on the local NFS mount.
      * Requires the DS to be NFS-mounted on the MDS.
      */
-    if (mount != NULL) {
-        char dir_path[MDS_MAX_PATH];
-        int fd;
-        struct timespec t0, t1, t2;
-
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-
-        /* Ensure data/ subdirectory exists. */
-        (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount);
-        (void)mkdir(dir_path, 0755);
-
-        /* Create the file if absent. */
-        if (build_ds_path(file_path, sizeof(file_path), mount,
-                          fileid, stripe, mirror) != 0) {
-            goto fallback_rpc;
-        }
-        fd = open(file_path, O_WRONLY | O_CREAT, 0644);
-        if (fd < 0) {
-            goto fallback_rpc;
-        }
-        /* 0666: DS backing file must be writable by the client's
-         * real (non-root) AUTH_SYS uid; see the mode rationale in
-         * mds_proxy_ensure_ds_file above. */
-        (void)fchmod(fd, 0666);
-        close(fd);
-
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-
-        /* Extract server FH via syscall. */
-        errno = 0;
-        if (proxy_name_to_handle(file_path, ctx->fh_knfsd_strict,
-                                 fh_out, *fh_len, fh_len) == 0) {
-            clock_gettime(CLOCK_MONOTONIC, &t2);
-            {
-                int64_t open_us = (t1.tv_sec - t0.tv_sec) * 1000000LL
-                    + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
-                int64_t nth_us = (t2.tv_sec - t1.tv_sec) * 1000000LL
-                    + (t2.tv_nsec - t1.tv_nsec) / 1000LL;
-                MDS_LOG_DEBUG(LOG_COMP_MDS,
-                    "FH_TIMING syscall: open=%" PRId64 "us nth=%" PRId64
-                    "us total=%" PRId64 "us",
-                    open_us, nth_us, open_us + nth_us);
-            }
-            return MDS_OK;
-        }
-        /* name_to_handle_at failed -- fall through to RPC. */
-        MDS_LOG_WARN(LOG_COMP_MDS,
-            "ensure_ds_file_fh: name_to_handle_at path failed "
-            "(path=%s errno=%d) -- falling back to NFS3 RPC",
-            file_path, errno);
-    }
-
-fallback_rpc:
-    /* Fallback: NFS3 MOUNT + LOOKUP RPC to the DS. */
-    {
-        char rel_path[256];
-        const char *host = ctx->mounts[ds_id].host;
-        uint16_t nfs_port = ctx->mounts[ds_id].nfs_port;
-        const char *export_path = ctx->mounts[ds_id].export_path;
-        struct timespec tr0, tr1;
-
-        if (host[0] == '\0' || export_path[0] == '\0' || nfs_port == 0) {
-            MDS_LOG_WARN(LOG_COMP_MDS,
-                "ensure_ds_file_fh: NFS3 RPC fallback unavailable "
-                "(ds=%u host='%s' export='%s' port=%u)",
-                (unsigned)ds_id, host, export_path,
-                (unsigned)nfs_port);
-            return MDS_ERR_INVAL;
-        }
-
-        (void)snprintf(rel_path, sizeof(rel_path),
-                       "data/%" PRIu64 "_%u_%u", fileid, stripe, mirror);
-
-        clock_gettime(CLOCK_MONOTONIC, &tr0);
-        if (ds_nfs3_lookup_fh(host, nfs_port, export_path,
-                              rel_path, 1, fh_out, fh_len, 3000) != 0) {
-            MDS_LOG_WARN(LOG_COMP_MDS,
-                "ensure_ds_file_fh: NFS3 RPC FH lookup failed "
-                "(ds=%u host=%s export=%s rel=%s)",
-                (unsigned)ds_id, host, export_path, rel_path);
-            return MDS_ERR_IO;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &tr1);
-        {
-            int64_t rpc_us = (tr1.tv_sec - tr0.tv_sec) * 1000000LL
-                + (tr1.tv_nsec - tr0.tv_nsec) / 1000LL;
-            MDS_LOG_DEBUG(LOG_COMP_MDS,
-                "FH_TIMING rpc_fallback: %" PRId64 "us", rpc_us);
-        }
+    if (mount != NULL &&
+        ensure_ds_file_fh_syscall(ctx, mount, fileid, stripe, mirror,
+                                  fh_out, fh_len)) {
         return MDS_OK;
     }
+
+    /* Fallback: NFS3 MOUNT + LOOKUP RPC to the DS. */
+    return ensure_ds_file_fh_rpc(ctx, ds_id, fileid, stripe, mirror,
+                                 fh_out, fh_len);
 }
 
 /* -----------------------------------------------------------------------
@@ -1666,6 +1693,189 @@ static int proxy_find_content_byte(int fd, uint64_t start, uint64_t end,
     return 0;
 }
 
+/* Outcome of probing one mirror of the current stripe unit. */
+enum seek_probe {
+    SEEK_PROBE_SKIP,   /**< Mirror unusable (no mount / file / read). */
+    SEEK_PROBE_ZEROS,  /**< Rest of the unit provably reads as zeros. */
+    SEEK_PROBE_HOLE,   /**< SEEK_HOLE: leading unallocated bytes. */
+    SEEK_PROBE_FOUND,  /**< *found holds the matching logical offset. */
+    SEEK_PROBE_NONE,   /**< Unit scanned to its end without a match. */
+};
+
+/*
+ * lseek(SEEK_DATA) accelerator.  Block-granular allocation can only
+ * prove where zeros are (unallocated ranges), never where logical
+ * data starts, so the byte scan stays authoritative for allocated
+ * ranges.  ENXIO or a result at/beyond the unit end proves the rest
+ * of the unit reads as zeros: skip the read entirely.  An in-unit
+ * result lets the scan start at the first allocated byte.  Any other
+ * error (e.g. EINVAL from a filesystem without SEEK_DATA) falls back
+ * to scanning the whole unit.
+ *
+ * Returns SEEK_PROBE_ZEROS, SEEK_PROBE_HOLE (SEEK_HOLE can answer
+ * "current" from leading unallocated bytes) or SEEK_PROBE_NONE (scan
+ * from *scan_start).  *next_alloc_slot (optional) receives the first
+ * allocated offset for the skip cache.
+ */
+static enum seek_probe proxy_seek_alloc_probe(int fd, uint64_t local_offset,
+                                              uint64_t stripe_end,
+                                              uint32_t what,
+                                              uint64_t *next_alloc_slot,
+                                              uint64_t *scan_start)
+{
+    off_t alloc_at = lseek(fd, (off_t)local_offset, SEEK_DATA);
+    int seek_errno = errno;
+
+    if (alloc_at < 0 && seek_errno == ENXIO) {
+        if (next_alloc_slot != NULL) {
+            *next_alloc_slot = UINT64_MAX;
+        }
+        return SEEK_PROBE_ZEROS;
+    }
+    if (alloc_at < 0) {
+        return SEEK_PROBE_NONE;
+    }
+    if (next_alloc_slot != NULL) {
+        *next_alloc_slot = (uint64_t)alloc_at;
+    }
+    if ((uint64_t)alloc_at >= stripe_end) {
+        return SEEK_PROBE_ZEROS;
+    }
+    if ((uint64_t)alloc_at > local_offset) {
+        if (what != 0) {
+            /* Leading unallocated bytes read as zeros: logical hole
+             * at current. */
+            return SEEK_PROBE_HOLE;
+        }
+        *scan_start = (uint64_t)alloc_at;
+    }
+    return SEEK_PROBE_NONE;
+}
+
+/* Probe one mirror's backing file for the current stripe unit. */
+static enum seek_probe proxy_seek_probe_mirror(
+    const struct mds_proxy_ctx *ctx, uint64_t fileid,
+    const struct mds_ds_map_entry *entry,
+    uint32_t stripe_idx, uint32_t m,
+    uint64_t local_offset, uint64_t stripe_end, uint32_t what,
+    uint64_t *next_alloc_slot, uint64_t *found_offset)
+{
+    const char *mount;
+    char path[MDS_MAX_PATH];
+    int fd;
+    uint64_t scan_start = local_offset;
+    int find_result;
+    enum seek_probe r;
+
+    mount = find_mount(ctx, entry->ds_id);
+    if (mount == NULL ||
+        build_ds_path(path, sizeof(path), mount,
+                      fileid, stripe_idx, m) != 0) {
+        return SEEK_PROBE_SKIP;
+    }
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return SEEK_PROBE_SKIP;
+    }
+
+    r = proxy_seek_alloc_probe(fd, local_offset, stripe_end, what,
+                               next_alloc_slot, &scan_start);
+    if (r != SEEK_PROBE_NONE) {
+        close(fd);
+        return r;
+    }
+
+    find_result = proxy_find_content_byte(fd, scan_start,
+                                           stripe_end, what,
+                                           found_offset);
+    close(fd);
+    if (find_result < 0) {
+        return SEEK_PROBE_SKIP;
+    }
+    return (find_result > 0) ? SEEK_PROBE_FOUND : SEEK_PROBE_NONE;
+}
+
+/*
+ * Resolve one stripe unit [current, stripe_end) across its mirrors.
+ * Returns 1 with *out_offset set when the answer lies in this unit,
+ * 0 to advance to the next unit, -1 when no mirror could be read.
+ */
+static int proxy_seek_unit(const struct mds_proxy_ctx *ctx,
+                           uint64_t fileid,
+                           const struct mds_ds_map_entry *entries,
+                           uint32_t stripe_count, uint32_t mirror_count,
+                           uint32_t stripe_idx, uint64_t local_offset,
+                           uint64_t current, uint64_t stripe_end,
+                           uint32_t what, uint64_t *next_alloc,
+                           uint64_t *out_offset)
+{
+    bool seek_ok = false;
+    uint32_t m;
+
+    for (m = 0; m < mirror_count; m++) {
+        uint32_t entry_idx = stripe_idx * mirror_count + m;
+        uint64_t found_offset;
+        enum seek_probe r;
+
+        if (entry_idx >= stripe_count * mirror_count) {
+            continue;
+        }
+        r = proxy_seek_probe_mirror(ctx, fileid, &entries[entry_idx],
+                                    stripe_idx, m, local_offset,
+                                    stripe_end, what,
+                                    (next_alloc != NULL)
+                                        ? &next_alloc[stripe_idx] : NULL,
+                                    &found_offset);
+        if (r == SEEK_PROBE_SKIP) {
+            continue;
+        }
+        if (r == SEEK_PROBE_HOLE) {
+            *out_offset = current;
+            return 1;
+        }
+        if (r == SEEK_PROBE_ZEROS) {
+            if (what != 0) {
+                /* Whole unit reads as zeros: hole at current. */
+                *out_offset = current;
+                return 1;
+            }
+            seek_ok = true;
+            continue; /* next mirror; the loop ends after the last */
+        }
+
+        seek_ok = true;
+        if (r == SEEK_PROBE_FOUND) {
+            *out_offset = found_offset;
+            return 1;
+        }
+        /*
+         * SEEK_PROBE_NONE: the unit was scanned to its end without a
+         * match on this mirror.  For SEEK_DATA that means no data
+         * here; for SEEK_HOLE it means the unit is fully written --
+         * either way the answer lies in a later unit (a DS file that
+         * ends inside the unit already reported the hole at its local
+         * EOF via proxy_find_content_byte).  Keep probing the
+         * remaining mirrors, then let the caller advance.
+         */
+    }
+
+    return seek_ok ? 0 : -1;
+}
+
+/* Exclusive end of the stripe unit containing @current, clamped to
+ * the logical file size. */
+static uint64_t proxy_seek_unit_end(uint64_t current, uint32_t stripe_unit,
+                                    uint64_t logical_size)
+{
+    uint64_t stripe_bytes = (stripe_unit == 0) ? logical_size - current :
+        stripe_unit - (current % stripe_unit);
+
+    if (stripe_bytes > logical_size - current) {
+        stripe_bytes = logical_size - current;
+    }
+    return current + stripe_bytes;
+}
+
 enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
                                struct mds_catalogue *cat,
                                uint64_t fileid,
@@ -1724,19 +1934,13 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
     while (current < logical_size) {
         uint32_t stripe_idx;
         uint64_t local_offset;
-        uint64_t stripe_bytes;
         uint64_t stripe_end;
-        uint32_t m;
-        bool seek_ok = false;
+        int r;
 
         compute_stripe_addr(current, stripe_unit, stripe_count,
                             &stripe_idx, &local_offset);
-        stripe_bytes = (stripe_unit == 0) ? logical_size - current :
-            stripe_unit - (current % stripe_unit);
-        if (stripe_bytes > logical_size - current) {
-            stripe_bytes = logical_size - current;
-        }
-        stripe_end = current + stripe_bytes;
+        stripe_end = proxy_seek_unit_end(current, stripe_unit,
+                                         logical_size);
 
         /* Known-unallocated through this unit: provably all zeros, so
          * no SEEK_DATA match can exist here.  Skip without syscalls. */
@@ -1746,129 +1950,26 @@ enum mds_status mds_proxy_seek(const struct mds_proxy_ctx *ctx,
             continue;
         }
 
-        for (m = 0; m < mirror_count; m++) {
-            uint32_t entry_idx = stripe_idx * mirror_count + m;
-            const char *mount;
-            char path[MDS_MAX_PATH];
-            int fd;
-            uint64_t scan_start = local_offset;
-            uint64_t found_offset;
-            int find_result;
-            bool unit_is_zeros = false;
-
-            if (entry_idx >= stripe_count * mirror_count) {
-                continue;
-            }
-            mount = find_mount(ctx, entries[entry_idx].ds_id);
-            if (mount == NULL ||
-                build_ds_path(path, sizeof(path), mount,
-                              fileid, stripe_idx, m) != 0) {
-                continue;
-            }
-            fd = open(path, O_RDONLY);
-            if (fd < 0) {
-                continue;
-            }
-
-            /*
-             * lseek(SEEK_DATA) accelerator.  Block-granular allocation
-             * can only prove where zeros are (unallocated ranges),
-             * never where logical data starts, so the byte scan stays
-             * authoritative for allocated ranges.  ENXIO or a result
-             * at/beyond the unit end proves the rest of the unit reads
-             * as zeros: skip the read entirely.  An in-unit result
-             * lets the scan start at the first allocated byte.  Any
-             * other error (e.g. EINVAL from a filesystem without
-             * SEEK_DATA) falls back to scanning the whole unit.
-             */
-            {
-                off_t alloc_at = lseek(fd, (off_t)local_offset,
-                                       SEEK_DATA);
-                int seek_errno = errno;
-
-                if (alloc_at < 0 && seek_errno == ENXIO) {
-                    unit_is_zeros = true;
-                    if (next_alloc != NULL) {
-                        next_alloc[stripe_idx] = UINT64_MAX;
-                    }
-                } else if (alloc_at >= 0) {
-                    if (next_alloc != NULL) {
-                        next_alloc[stripe_idx] = (uint64_t)alloc_at;
-                    }
-                    if ((uint64_t)alloc_at >= stripe_end) {
-                        unit_is_zeros = true;
-                    } else if ((uint64_t)alloc_at > local_offset) {
-                        if (what != 0) {
-                            /* Leading unallocated bytes read as
-                             * zeros: logical hole at current. */
-                            close(fd);
-                            *out_offset = current;
-                            free(next_alloc);
-                            free(entries);
-                            return MDS_OK;
-                        }
-                        scan_start = (uint64_t)alloc_at;
-                    }
-                }
-            }
-
-            if (unit_is_zeros) {
-                close(fd);
-                if (what != 0) {
-                    /* Whole unit reads as zeros: hole at current. */
-                    *out_offset = current;
-                    free(next_alloc);
-                    free(entries);
-                    return MDS_OK;
-                }
-                seek_ok = true;
-                if (m + 1 < mirror_count) {
-                    continue;
-                }
-                break;
-            }
-
-            find_result = proxy_find_content_byte(fd, scan_start,
-                                                   stripe_end, what,
-                                                   &found_offset);
-            close(fd);
-            if (find_result < 0) {
-                continue;
-            }
-
-            seek_ok = true;
-            if (find_result > 0) {
-                *out_offset = found_offset;
-                free(next_alloc);
-                free(entries);
-                return MDS_OK;
-            }
-            if (m + 1 < mirror_count) {
-                continue;
-            }
-            if (what != 0) {
-                /*
-                 * The stripe has no physical content before its local EOF.
-                 * Its first logical byte is consequently a hole.
-                 */
-                *out_offset = current;
-                free(next_alloc);
-                free(entries);
-                return MDS_OK;
-            }
-            break;
-        }
-
-        if (!seek_ok) {
+        r = proxy_seek_unit(ctx, fileid, entries, stripe_count,
+                            mirror_count, stripe_idx, local_offset,
+                            current, stripe_end, what, next_alloc,
+                            out_offset);
+        if (r != 0) {
             free(next_alloc);
             free(entries);
-            return MDS_ERR_IO;
+            return (r > 0) ? MDS_OK : MDS_ERR_IO;
         }
         current = stripe_end;
     }
 
     free(next_alloc);
     free(entries);
+    if (what != 0) {
+        /* Every unit up to logical EOF is data: the next hole is the
+         * implicit one at end-of-file (RFC 7862 S15.11 / lseek(2)
+         * SEEK_HOLE), reported with eof set like knfsd does. */
+        *out_offset = logical_size;
+    }
     *eof = true;
     return MDS_OK;
 }
@@ -1979,6 +2080,60 @@ enum mds_status mds_proxy_copy_data(const struct mds_proxy_ctx *ctx,
  * that advertise durable/visible data (COPY replies FILE_SYNC4)
  * MUST flush before answering.
  */
+/*
+ * fsync one DS backing file of @fileid (cached fd when the fd cache
+ * has one).  A never-written hole stripe (ENOENT) is not an error.
+ * *stop is set when the caller must abandon the remaining mirrors of
+ * this stripe (unresolvable mount / path / open failure); an fsync
+ * failure is reported through the return value only.
+ */
+static enum mds_status proxy_flush_entry(const struct mds_proxy_ctx *ctx,
+                                         uint64_t fileid, uint32_t ds_id,
+                                         uint32_t s, uint32_t m,
+                                         bool *stop)
+{
+    const char *mount;
+    char path[MDS_MAX_PATH];
+    int fd;
+    enum mds_status st = MDS_OK;
+
+    *stop = false;
+    mount = find_mount(ctx, ds_id);
+    if (mount == NULL) {
+        *stop = true;
+        return MDS_ERR_NOTFOUND;
+    }
+    if (build_ds_path(path, sizeof(path), mount, fileid, s, m) != 0) {
+        *stop = true;
+        return MDS_ERR_IO;
+    }
+    fd = fd_cache_get(&((struct mds_proxy_ctx *)ctx)->fdc,
+                      fileid, ds_id, s, m, O_WRONLY | O_CREAT);
+    if (fd < 0) {
+        fd = open(path, O_WRONLY);
+        if (fd < 0) {
+            /* Never written (hole stripe) — nothing to
+             * flush for this entry. */
+            if (errno == ENOENT) {
+                return MDS_OK;
+            }
+            *stop = true;
+            return MDS_ERR_IO;
+        }
+        if (fsync(fd) != 0) {
+            st = MDS_ERR_IO;
+        }
+        close(fd);
+        return st;
+    }
+    if (fsync(fd) != 0) {
+        st = MDS_ERR_IO;
+    }
+    fd_cache_release(&((struct mds_proxy_ctx *)ctx)->fdc,
+                     fileid, ds_id, s, m, O_WRONLY | O_CREAT, fd);
+    return st;
+}
+
 enum mds_status mds_proxy_flush_file(const struct mds_proxy_ctx *ctx,
                                      struct mds_catalogue *cat,
                                      uint64_t fileid)
@@ -2004,50 +2159,17 @@ enum mds_status mds_proxy_flush_file(const struct mds_proxy_ctx *ctx,
     for (uint32_t s = 0; s < stripe_count && st == MDS_OK; s++) {
         for (uint32_t m = 0; m < mirror_count; m++) {
             uint32_t entry_idx = s * mirror_count + m;
-            const char *mount;
-            char path[MDS_MAX_PATH];
-            int fd;
+            bool stop;
 
             if (entry_idx >= stripe_count * mirror_count) {
                 st = MDS_ERR_IO;
                 break;
             }
-            mount = find_mount(ctx, entries[entry_idx].ds_id);
-            if (mount == NULL) {
-                st = MDS_ERR_NOTFOUND;
+            st = proxy_flush_entry(ctx, fileid, entries[entry_idx].ds_id,
+                                   s, m, &stop);
+            if (stop) {
                 break;
             }
-            if (build_ds_path(path, sizeof(path), mount,
-                              fileid, s, m) != 0) {
-                st = MDS_ERR_IO;
-                break;
-            }
-            fd = fd_cache_get(&((struct mds_proxy_ctx *)ctx)->fdc,
-                              fileid, entries[entry_idx].ds_id,
-                              s, m, O_WRONLY | O_CREAT);
-            if (fd < 0) {
-                fd = open(path, O_WRONLY);
-                if (fd < 0) {
-                    /* Never written (hole stripe) — nothing to
-                     * flush for this entry. */
-                    if (errno == ENOENT) {
-                        continue;
-                    }
-                    st = MDS_ERR_IO;
-                    break;
-                }
-                if (fsync(fd) != 0) {
-                    st = MDS_ERR_IO;
-                }
-                close(fd);
-                continue;
-            }
-            if (fsync(fd) != 0) {
-                st = MDS_ERR_IO;
-            }
-            fd_cache_release(&((struct mds_proxy_ctx *)ctx)->fdc,
-                             fileid, entries[entry_idx].ds_id,
-                             s, m, O_WRONLY | O_CREAT, fd);
         }
     }
 

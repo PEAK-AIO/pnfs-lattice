@@ -20,7 +20,7 @@
 bool decode_op_layoutget(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_layoutget *a = &op->arg.layoutget;
-    uint32_t signal;
+    uint32_t signal = 0;
 
     /* signal_layout_avail (bool) */
     if (!xdr_uint32_t(xdrs, &signal)) {
@@ -72,7 +72,7 @@ bool decode_op_getdeviceinfo(XDR *xdrs, struct nfs4_op *op)
 bool decode_op_layoutreturn(XDR *xdrs, struct nfs4_op *op)
 {
     struct nfs4_arg_layoutreturn *a = &op->arg.layoutreturn;
-    uint32_t reclaim;
+    uint32_t reclaim = 0;
 
     if (!xdr_uint32_t(xdrs, &reclaim)) {
         return false;

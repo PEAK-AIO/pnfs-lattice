@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include "pnfs_mds.h"
 #include "rpc_server.h"
@@ -21,6 +22,7 @@
 #include "copy_offload.h"
 #include "cluster_membership.h"
 #include "mds_catalogue.h"
+#include "mds_coordination.h"
 #include "subtree_map.h"
 #include "cluster_transport.h"
 #include "health.h"
@@ -42,7 +44,7 @@
 #include "open_state.h"
 #include "lock_state.h"
 #include "failover.h"
-#include "failover_rondb.h"
+#include "failover_watchdog.h"
 #include "subtree_split.h"
 #include "mds_shard.h"
 #include "ds_cache.h"
@@ -62,13 +64,22 @@
 #include "mds_op_metrics.h"
 #include "mountd_compat.h"
 #include "hpc_shared.h"
-#ifdef HAVE_RONDB
-#include "catalogue_rondb.h"
+#include "mds_cluster.h"
 #include "catalog_image.h"
-#endif
+#include "failover_watchdog.h"
 
 /** Maximum concurrent RPC listener threads. */
 #define MAX_RPC_LISTENERS 32
+
+/** Whole-second pause without the signal side effects sleep() may
+ * carry (nanosleep is async-signal- and thread-safe).  An EINTR
+ * early return is acceptable at every call site, as with sleep(). */
+static void sleep_seconds(unsigned int sec)
+{
+	struct timespec ts = { .tv_sec = (time_t)sec, .tv_nsec = 0 };
+
+	(void)nanosleep(&ts, NULL);
+}
 
 /** RPC listener thread entry point (blocking). */
 static void *rpc_listener_thread(void *arg)
@@ -80,13 +91,34 @@ static void *rpc_listener_thread(void *arg)
 }
 
 /* -----------------------------------------------------------------------
- * RonDB heartbeat thread (Phase 9A)
+ * Cluster heartbeat thread (Phase 9A)
+ *
+ * Runs only when mds_cluster_supported(cat): refreshes this node's
+ * registry row through the backend-neutral mds_cluster_node_heartbeat
+ * dispatcher and, every third cycle, re-reads the partition map and
+ * the node registry so ownership / peer changes made by other MDS
+ * nodes become visible without flooding the store with scans.
+ *
+ * The argument block is written completely (including smap and
+ * membership) BEFORE pthread_create and never written afterwards, so
+ * the thread reads it without synchronisation.
+ *
+ * Supersession: node_register replaces a row whose boot_epoch is lower
+ * (mds_cluster.h), so a second daemon started later under this mds_id
+ * takes the row over and every heartbeat from here answers
+ * MDS_ERR_STALE.  Continuing to serve unregistered would leave two
+ * heads behind one id with no standby watching this one, so the thread
+ * fences this daemon: it logs the superseding epoch, sets
+ * cluster_superseded (main turns that into EXIT_FAILURE and skips the
+ * deregister, which would be STALE too) and raises the process-wide
+ * SIGTERM that main's sigwait() consumes -- the same cleanup path the
+ * startup deadline takes.
  * ----------------------------------------------------------------------- */
 
-#ifdef HAVE_RONDB
-static _Atomic bool rondb_hb_flag = true;
+static _Atomic bool cluster_hb_flag = true;
+static _Atomic bool cluster_superseded = false;
 
-struct rondb_hb_arg {
+struct cluster_hb_arg {
 	struct mds_catalogue *cat;
 	uint32_t mds_id;
 	uint64_t boot_epoch;
@@ -94,36 +126,124 @@ struct rondb_hb_arg {
 	struct subtree_map *smap;  /**< Refreshed every heartbeat cycle. */
 	struct cluster_membership *membership; /**< Peer refresh cycle. */
 };
-static struct rondb_hb_arg rondb_hb_arg_g;
+static struct cluster_hb_arg cluster_hb_arg_g;
 
-static void *rondb_hb_fn(void *a)
+static void *cluster_hb_fn(void *a)
 {
-	struct rondb_hb_arg *arg = a;
+	struct cluster_hb_arg *arg = a;
 	uint32_t cycle = 0;
 
 	while (atomic_load(arg->running)) {
-		(void)catalogue_rondb_mds_heartbeat(
-			arg->cat, arg->mds_id, arg->boot_epoch);
+		uint64_t superseder = 0;
+		enum mds_status hb_st;
+
+		/* NOTFOUND (row gone) and transient errors are retried
+		 * next cycle, as before; STALE is fatal (see above). */
+		hb_st = cluster_heartbeat_tick(arg->cat, arg->mds_id,
+					       arg->boot_epoch, &superseder);
+		if (hb_st == MDS_ERR_STALE) {
+			MDS_LOG_FATAL(LOG_COMP_MDS,
+				"node registry row for mds_id %u now carries "
+				"boot_epoch %llu, not ours (%llu): a newer "
+				"incarnation registered while this one is "
+				"running; fencing this daemon (shutting down, "
+				"deregister skipped)",
+				(unsigned)arg->mds_id,
+				(unsigned long long)superseder,
+				(unsigned long long)arg->boot_epoch);
+			atomic_store(&cluster_superseded, true);
+			(void)kill(getpid(), SIGTERM);
+			break;
+		}
 
 		/* Refresh subtree map + membership every 3rd cycle (~15s)
 		 * to pick up ownership and peer changes from other MDS
-		 * nodes without flooding RonDB with scans. */
+		 * nodes without flooding the store with scans. */
 		if ((cycle % 3) == 0) {
 			if (arg->smap != NULL) {
-				(void)subtree_map_refresh_rondb(
+				(void)subtree_map_refresh_from_catalogue(
 					arg->smap, arg->cat);
 			}
 			if (arg->membership != NULL) {
-				(void)cluster_membership_populate_rondb(
+				(void)cluster_membership_populate(
 					arg->membership, arg->cat);
 			}
 		}
 		cycle++;
-		sleep(5);
+		sleep_seconds(5);
 	}
 	return NULL;
 }
-#endif
+
+/* -----------------------------------------------------------------------
+ * Startup registry conflict report
+ *
+ * node_register refused with MDS_ERR_EXISTS: the registry already holds
+ * a row for this mds_id with an equal or higher boot_epoch
+ * (mds_cluster.h).  Read that row back so the fatal message names it --
+ * the operator must tell a duplicate live daemon from the stale row of
+ * a dead incarnation whose epoch is ahead of this host's wall clock.
+ * ----------------------------------------------------------------------- */
+
+struct registry_conflict {
+	uint32_t mds_id;
+	bool     found;
+	uint64_t boot_epoch;
+	uint64_t last_heartbeat_ns;
+	char     hostname[256];
+};
+
+static int registry_conflict_cb(uint32_t mds_id, uint64_t boot_epoch,
+				const char *hostname,
+				uint16_t nfs_port, uint16_t grpc_port,
+				uint64_t last_heartbeat_ns, void *ctx)
+{
+	struct registry_conflict *conf = ctx;
+
+	(void)nfs_port;
+	(void)grpc_port;
+	if (mds_id != conf->mds_id) {
+		return 0;
+	}
+	conf->found = true;
+	conf->boot_epoch = boot_epoch;
+	conf->last_heartbeat_ns = last_heartbeat_ns;
+	(void)snprintf(conf->hostname, sizeof(conf->hostname), "%s",
+		       hostname != NULL ? hostname : "");
+	return 1;
+}
+
+static void log_registry_conflict(struct mds_catalogue *cat,
+				  uint32_t mds_id, uint64_t our_epoch)
+{
+	struct registry_conflict conf;
+
+	memset(&conf, 0, sizeof(conf));
+	conf.mds_id = mds_id;
+	(void)mds_cluster_node_list(cat, registry_conflict_cb, &conf);
+	if (conf.found) {
+		MDS_LOG_FATAL(LOG_COMP_MDS,
+			"node registry already holds mds_id %u with "
+			"boot_epoch %llu (host %s, last heartbeat %llu ns), "
+			"not below ours (%llu): another live daemon uses this "
+			"mds_id, or this host's clock was stepped back below "
+			"the previous incarnation's epoch.  Refusing to start "
+			"(split-brain).  Stop the duplicate, or -- if that "
+			"incarnation is dead -- let the clock pass its epoch "
+			"or remove the stale row, then restart.",
+			(unsigned)mds_id,
+			(unsigned long long)conf.boot_epoch,
+			conf.hostname,
+			(unsigned long long)conf.last_heartbeat_ns,
+			(unsigned long long)our_epoch);
+	} else {
+		MDS_LOG_FATAL(LOG_COMP_MDS,
+			"node registry refused mds_id %u (boot_epoch %llu) "
+			"as already registered but the row could not be read "
+			"back; refusing to start",
+			(unsigned)mds_id, (unsigned long long)our_epoch);
+	}
+}
 
 /** DS failure callback adapter -- bridges ds_health to layout_recall. */
 static void ds_fail_recall_cb(uint32_t ds_id, void *ctx)
@@ -231,8 +351,6 @@ static void failover_on_partner_loss(
 }
 
 
-
-/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 /* -----------------------------------------------------------------------
  * parent_touch flush callback (deferred parent-dir attr aggregator,
  * ported).  Persists the accumulated change delta + flush-time
@@ -271,22 +389,46 @@ static int pt_flush_cb(uint64_t fileid, uint64_t change_delta,
 	return 0;
 }
 
-
+/* Linear daemon lifecycle: one start-up sequence with a single
+ * cleanup label, whose score is dominated by the ~100 logging macro
+ * sites (do/while + level gate each); splitting it into helpers would
+ * only relocate the sequence.  Same annotation as the other
+ * inherently linear dispatchers in this tree. */
+/* NOLINTNEXTLINE(readability-function-cognitive-complexity) */
 int main(int argc, char *argv[])
 {
 	struct mds_config cfg;
 	enum mds_status rc;
 	const char *config_path = "/etc/pnfs-mds/mds.conf";
-#ifdef HAVE_RONDB
-	uint64_t rondb_boot_epoch = 0;
-	pthread_t rondb_hb_thread;
-	bool rondb_hb_running = false;
-#endif
+	/* Boot epoch: stamps every shared-state row this daemon instance
+	 * writes (open/lock/deleg owner fencing, remove-manifest claims,
+	 * node registry) so a restarted MDS can be told apart from the
+	 * previous incarnation.  Backend-independent; generated once the
+	 * catalogue is open.
+	 *
+	 * It is CLOCK_REALTIME in nanoseconds (step 2c) because the node
+	 * registry contract (mds_cluster.h) needs it monotonic across
+	 * restarts of one mds_id, including a host reboot -- a since-boot
+	 * clock restarts near zero and would rank a fresh incarnation
+	 * below the dead row it replaces.  Every consumer treats the value
+	 * as an identity (equality / ordering), never as a time base.
+	 * Ordering across restarts therefore relies on the wall clock not
+	 * being stepped back below the previous incarnation's value; when
+	 * it is, node_register refuses with MDS_ERR_EXISTS and step 2d
+	 * exits with a message naming the row and both epochs -- never a
+	 * silent unregistered start. */
+	uint64_t mds_boot_epoch = 0;
+	/* CLOCK_MONOTONIC at a successful node_register (step 2d); 0 when
+	 * this node did not register.  Step 4c measures the startup
+	 * deadline from it. */
+	uint64_t cluster_register_mono_ns = 0;
+	/* Cluster heartbeat thread; started iff mds_cluster_supported(cat)
+	 * (see step 4c), joined first at shutdown. */
+	pthread_t cluster_hb_thread;
+	bool cluster_hb_running = false;
 	struct health_monitor *hm = NULL;
 	struct failover_ctx *fo_ctx = NULL;
-#ifdef HAVE_RONDB
 	struct failover_watchdog *fo_wd = NULL;
-#endif
 	int exit_code = EXIT_SUCCESS;
 	struct mds_catalogue *cat = NULL;
 	struct subtree_map *smap = NULL;
@@ -314,9 +456,9 @@ int main(int argc, char *argv[])
 	struct ds_gc *ds_gc = NULL;
 	struct mds_shard_map *shard_map = NULL;
 	struct layout_commit_aggregator *lcommit_agg = NULL;
-#ifdef HAVE_RONDB
-	struct catalog_image *rondb_image = NULL;
-#endif
+	/* Catalog image fed by the backend's changefeed (image mode);
+	 * NULL when image mode is off or the backend has no feed. */
+	struct catalog_image *image = NULL;
 	struct rpc_server *rpc_srv[MAX_RPC_LISTENERS];
 	pthread_t rpc_threads[MAX_RPC_LISTENERS];
 	uint32_t rpc_listener_count = 0;
@@ -384,17 +526,9 @@ int main(int argc, char *argv[])
 	sigaddset(&shutdown_set, SIGTERM);
 	(void)pthread_sigmask(SIG_BLOCK, &shutdown_set, NULL);
 
-	/* 2. Backend-specific validation. */
-#ifdef HAVE_RONDB
-	if (cfg.catalogue_backend == MDS_BACKEND_RONDB &&
-	    cfg.inline_enabled) {
-		MDS_LOG_FATAL(LOG_COMP_MDS,
-			"catalogue_backend=rondb requires "
-			"inline_enabled=false.");
-		return EXIT_FAILURE;
-	}
-#endif
-
+	/* 2. Open the catalogue.  Backend-specific config validation
+	 * (e.g. RonDB refusing inline_enabled) lives inside the backend's
+	 * constructor, so a refused configuration surfaces here. */
 	rc = mds_catalogue_open(&cfg, &cat);
 	if (rc != MDS_OK) {
 		MDS_LOG_ERROR(LOG_COMP_MDS,
@@ -403,154 +537,187 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-#ifdef HAVE_RONDB
-	/* RonDB: auto-bootstrap on first start (probe fails = no tables).
-	 * Phase 10A: retry loop guards against concurrent bootstrap race
-	 * when multiple MDS instances start simultaneously.  If another
-	 * MDS is bootstrapping, the probe will eventually succeed. */
-	if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-		{
-			const int bootstrap_max_retries = 10;
-			int attempt;
+	/* 2a. Multi-MDS operation needs the store's cluster services
+	 * (node registry, heartbeat, partition map) AND a store that
+	 * every MDS process can reach (MDS_CAT_CAP_MULTI_PROCESS); that
+	 * is exactly mds_cluster_supported().  Refuse to start a
+	 * multi-node configuration otherwise rather than run a node that
+	 * no peer can see.  An in-process store that populates the slots
+	 * for tests never carries the capability, so it is refused here
+	 * by construction. */
+	if (cfg.cluster_size > 1 && !mds_cluster_supported(cat)) {
+		MDS_LOG_FATAL(LOG_COMP_MDS,
+			"cluster_size=%u but catalogue backend %d has no "
+			"multi-process cluster services",
+			(unsigned)cfg.cluster_size,
+			(int)mds_catalogue_backend_type(cat));
+		mds_catalogue_close(cat);
+		return EXIT_FAILURE;
+	}
 
-			/*
-			 * Always invoke bootstrap once on startup.  The DDL is
-			 * idempotent (create_table_if_not_exists), and this lets
-			 * schema-version upgrade blocks inside
-			 * rondb_shim_bootstrap_metadata run on an existing
-			 * cluster.  Probe-then-bootstrap-on-failure alone
-			 * skipped upgrades because the legacy probe table
-			 * always exists on a previously-bootstrapped cluster.
-			 */
-			rc = mds_rondb_bootstrap(cat);
-			if (rc != MDS_OK) {
+	/* 2b. Schema bootstrap for backends that have one (probe fails =
+	 * no tables).  Phase 10A: retry loop guards against concurrent
+	 * bootstrap race when multiple MDS instances start
+	 * simultaneously.  If another MDS is bootstrapping, the probe
+	 * will eventually succeed. */
+	if (mds_catalogue_bootstrap_supported(cat)) {
+		const int bootstrap_max_retries = 10;
+		int attempt;
+
+		/*
+		 * Always invoke bootstrap once on startup.  The DDL is
+		 * idempotent (create_table_if_not_exists), and this lets
+		 * schema-version upgrade blocks inside the backend's
+		 * bootstrap run on an existing cluster.
+		 * Probe-then-bootstrap-on-failure alone skipped upgrades
+		 * because the legacy probe table always exists on a
+		 * previously-bootstrapped cluster.
+		 */
+		rc = mds_catalogue_bootstrap(cat);
+		if (rc != MDS_OK) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"initial bootstrap returned %d, "
+				"entering probe-retry loop...",
+				(int)rc);
+		}
+		for (attempt = 0; attempt < bootstrap_max_retries;
+		     attempt++) {
+			if (mds_catalogue_probe(cat) == MDS_OK) {
+				break; /* Schema ready. */
+			}
+			if (attempt == 0) {
 				MDS_LOG_INFO(LOG_COMP_MDS,
-					"initial bootstrap returned %d, "
-					"entering probe-retry loop...",
-					(int)rc);
-			}
-			for (attempt = 0; attempt < bootstrap_max_retries;
-			     attempt++) {
-				if (mds_catalogue_probe(cat) == MDS_OK) {
-					break; /* Schema ready. */
+					"catalogue probe failed after "
+					"initial bootstrap, retrying "
+					"bootstrap...");
+				rc = mds_catalogue_bootstrap(cat);
+				if (rc == MDS_OK) {
+					break;
 				}
-				if (attempt == 0) {
-					MDS_LOG_INFO(LOG_COMP_MDS,
-						"RonDB probe failed after "
-						"initial bootstrap, retrying "
-						"bootstrap...");
-					rc = mds_rondb_bootstrap(cat);
-					if (rc == MDS_OK) {
-						break;
-					}
-					MDS_LOG_WARN(LOG_COMP_MDS,
-						"bootstrap returned %d, "
-						"another MDS may be "
-						"bootstrapping -- retrying "
-						"probe...", (int)rc);
-				} else {
-					MDS_LOG_INFO(LOG_COMP_MDS,
-						"probe retry %d/%d...",
-						attempt,
-						bootstrap_max_retries);
-				}
-				sleep(2);
-			}
-			if (attempt >= bootstrap_max_retries) {
-				MDS_LOG_FATAL(LOG_COMP_MDS,
-					"RonDB schema not ready "
-					"after %d attempts",
+				MDS_LOG_WARN(LOG_COMP_MDS,
+					"bootstrap returned %d, "
+					"another MDS may be "
+					"bootstrapping -- retrying "
+					"probe...", (int)rc);
+			} else {
+				MDS_LOG_INFO(LOG_COMP_MDS,
+					"probe retry %d/%d...",
+					attempt,
 					bootstrap_max_retries);
-				if (s_rmf != NULL) {
-					remove_manifest_destroy(s_rmf);
-					s_rmf = NULL;
-				}
-if (s_pt != NULL) {
-					(void)parent_touch_flush_all_dirty(s_pt);
-					parent_touch_destroy(s_pt);
-					s_pt = NULL;
-				}
-				mds_catalogue_close(cat);
-				return EXIT_FAILURE;
 			}
+			sleep_seconds(2);
 		}
+		if (attempt >= bootstrap_max_retries) {
+			MDS_LOG_FATAL(LOG_COMP_MDS,
+				"catalogue schema not ready "
+				"after %d attempts",
+				bootstrap_max_retries);
+			if (s_rmf != NULL) {
+				remove_manifest_destroy(s_rmf);
+				s_rmf = NULL;
+			}
+			if (s_pt != NULL) {
+				(void)parent_touch_flush_all_dirty(s_pt);
+				parent_touch_destroy(s_pt);
+				s_pt = NULL;
+			}
+			mds_catalogue_close(cat);
+			return EXIT_FAILURE;
+		}
+	}
 
-		/* Phase 9A: generate boot_epoch, register in node registry,
-		 * start heartbeat thread. */
-		{
-			struct timespec boot_ts;
-			clock_gettime(CLOCK_MONOTONIC, &boot_ts);
-			rondb_boot_epoch =
-				(uint64_t)boot_ts.tv_sec * 1000000000ULL +
-				(uint64_t)boot_ts.tv_nsec;
+	/* 2c. Boot epoch for this daemon instance (see declaration):
+	 * wall-clock nanoseconds, monotonic across restarts as long as the
+	 * clock is not stepped back below the previous incarnation. */
+	{
+		struct timespec boot_ts;
+		clock_gettime(CLOCK_REALTIME, &boot_ts);
+		mds_boot_epoch =
+			(uint64_t)boot_ts.tv_sec * 1000000000ULL +
+			(uint64_t)boot_ts.tv_nsec;
+	}
+
+	/* 2d. Cluster services (Phase 9A): register this incarnation in
+	 * the node registry.  The heartbeat thread that keeps the row
+	 * fresh is started in step 4c, AFTER the subtree map and
+	 * membership it refreshes exist; node_register has already
+	 * stamped the row's heartbeat timestamp, so peers see this node
+	 * as live from here on -- and step 4c must follow within
+	 * CLUSTER_STARTUP_DEADLINE_MS or the row goes stale while we are
+	 * still initialising.
+	 *
+	 * MDS_ERR_EXISTS is fatal: a row with an equal or higher
+	 * boot_epoch means another live daemon carries this mds_id (or
+	 * this host's clock stepped back past the dead incarnation's
+	 * epoch).  Continuing unregistered would let the standby promote
+	 * against a node that is about to serve -- split-brain -- so the
+	 * daemon exits with the conflicting row in the log. */
+	if (mds_cluster_supported(cat)) {
+		rc = mds_cluster_node_register(cat, cfg.self.id,
+					       mds_boot_epoch,
+					       cfg.self.hostname,
+					       cfg.self.nfs_port,
+					       cfg.self.grpc_port);
+		if (rc == MDS_ERR_EXISTS) {
+			log_registry_conflict(cat, cfg.self.id, mds_boot_epoch);
+			mds_catalogue_close(cat);
+			return EXIT_FAILURE;
 		}
-		rc = catalogue_rondb_mds_register(cat, cfg.self.id,
-						  rondb_boot_epoch,
-						  cfg.self.hostname,
-						  cfg.self.nfs_port,
-						  cfg.self.grpc_port);
 		if (rc != MDS_OK) {
 			MDS_LOG_WARN(LOG_COMP_MDS,
-				"RonDB node registry register failed: %d",
+				"node registry register failed: %d",
 				(int)rc);
 		} else {
+			struct timespec reg_ts;
+
+			clock_gettime(CLOCK_MONOTONIC, &reg_ts);
+			cluster_register_mono_ns =
+				(uint64_t)reg_ts.tv_sec * 1000000000ULL +
+				(uint64_t)reg_ts.tv_nsec;
 			MDS_LOG_INFO(LOG_COMP_MDS,
-				"RonDB node %u registered "
+				"node %u registered "
 				"(boot_epoch=%llu)",
 				(unsigned)cfg.self.id,
-				(unsigned long long)rondb_boot_epoch);
+				(unsigned long long)mds_boot_epoch);
 		}
+	}
 
-		/* Phase 9A: heartbeat thread (5s interval).
-		 * Each thread gets its own Ndb via the shim's TLS pool. */
-		{
-			rondb_hb_arg_g.cat = cat;
-			rondb_hb_arg_g.mds_id = cfg.self.id;
-			rondb_hb_arg_g.boot_epoch = rondb_boot_epoch;
-			rondb_hb_arg_g.running = &rondb_hb_flag;
-			rondb_hb_arg_g.smap = NULL; /* set after subtree_map_init */
-
-			if (pthread_create(&rondb_hb_thread, NULL,
-					   rondb_hb_fn, &rondb_hb_arg_g) == 0) {
-				rondb_hb_running = true;
+	/* 2e. Catalog image (Phase 9C): the image is fed by the backend's
+	 * changefeed.  It is a read-side optimisation, so a backend without
+	 * a feed is not an error -- the daemon logs once and serves every
+	 * read from the authority. */
+	if (cfg.catalog_image_mode != MDS_IMAGE_OFF) {
+		if (!mds_catalogue_image_feed_supported(cat)) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"catalog_image_mode=%d needs a catalogue "
+				"backend with a changefeed; backend %d has "
+				"none -- running authority-only",
+				(int)cfg.catalog_image_mode,
+				(int)mds_catalogue_backend_type(cat));
+		} else if (catalog_image_create(&image) != 0) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"catalog_image_create failed");
+			image = NULL;
+		} else {
+			rc = mds_catalogue_image_feed_start(cat, image,
+							    cfg.self.id, 50);
+			if (rc != MDS_OK) {
+				MDS_LOG_WARN(LOG_COMP_MDS,
+					"changefeed poller start failed: %d",
+					(int)rc);
+				catalog_image_destroy(image);
+				image = NULL;
+			} else {
 				MDS_LOG_INFO(LOG_COMP_MDS,
-					"RonDB heartbeat thread "
-					"started (5s interval)");
-			} else {
-				MDS_LOG_WARN(LOG_COMP_MDS,
-					"RonDB heartbeat thread "
-					"start failed");
-			}
-		}
-
-		/* Phase 9C: start changefeed poller if image mode enabled. */
-		if (cfg.catalog_image_mode != MDS_IMAGE_OFF) {
-			if (catalog_image_create(&rondb_image) != 0) {
-				MDS_LOG_WARN(LOG_COMP_MDS,
-					"catalog_image_create failed");
-				rondb_image = NULL;
-			} else {
-				if (catalogue_rondb_poller_start(
-					    cat, rondb_image,
-					    cfg.self.id, 50) != 0) {
-					MDS_LOG_WARN(LOG_COMP_MDS,
-						"changefeed poller "
-						"start failed");
-					catalog_image_destroy(rondb_image);
-					rondb_image = NULL;
-				} else {
-					MDS_LOG_INFO(LOG_COMP_MDS,
-						"changefeed poller "
-						"started (image_mode=%d)",
-						(int)cfg.catalog_image_mode);
-				}
+					"changefeed poller "
+					"started (image_mode=%d)",
+					(int)cfg.catalog_image_mode);
 			}
 		}
 	}
-#endif
 
-	/* Pre-atomic releases could leave a PENDING wide-create inode after
-	 * persisting its namespace rows separately from its stripe map.
+	/* 2f. Pre-atomic releases could leave a PENDING wide-create inode
+	 * after persisting its namespace rows separately from its stripe map.
 	 * The scan repairs those legacy rows before requests are accepted,
 	 * but walks the entire namespace from the root, so it is opt-in
 	 * (run it once after upgrading from an affected release).  Lazy
@@ -617,22 +784,23 @@ if (s_pt != NULL) {
 		hm = NULL;
 	}
 
-	/* 4. Initialise cluster subsystem (subtree map + membership). */
-#ifdef HAVE_RONDB
-	if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
-		/* RonDB mode: load subtree map from partition_map table.
-		 * No etcd dependency. */
-		rc = subtree_map_init_rondb(cat, cfg.self.id,
-					   cfg.self.hostname, &smap);
+	/* 4. Initialise cluster subsystem (subtree map + membership).
+	 * With cluster services the map is loaded from the store's
+	 * partition map and the membership from its node registry, all
+	 * through the backend-neutral mds_cluster_* dispatchers. */
+	if (mds_cluster_supported(cat)) {
+		rc = subtree_map_init_from_catalogue(cat, cfg.self.id,
+						     cfg.self.hostname, &smap);
 		if (rc != MDS_OK) {
 			MDS_LOG_ERROR(LOG_COMP_MDS,
-				"subtree_map_init_rondb failed: %d",
+				"subtree_map_init_from_catalogue failed: %d",
 				(int)rc);
 			exit_code = EXIT_FAILURE;
 			goto cleanup;
 		}
-		/* Membership: local mode, then populate from node_registry
-		 * so all live peers are visible to transport/failover. */
+		/* Membership: local mode, then populate from the node
+		 * registry so all live peers are visible to
+		 * transport/failover. */
 		rc = cluster_membership_init(&cfg, smap, NULL,
 					     &membership);
 		if (rc != MDS_OK) {
@@ -642,8 +810,8 @@ if (s_pt != NULL) {
 			exit_code = EXIT_FAILURE;
 			goto cleanup;
 		}
-		/* Load peers from RonDB node_registry. */
-		(void)cluster_membership_populate_rondb(membership, cat);
+		/* Load peers from the node registry. */
+		(void)cluster_membership_populate(membership, cat);
 		/* 4a-shard. Auto-seed + persist /shardN partition_map rows
 		 * when cluster_size > 1 and only the root entry exists.
 		 * Must run BEFORE set_membership -- the membership check
@@ -658,14 +826,14 @@ if (s_pt != NULL) {
 			for (uint32_t pi = 0; pi < pc; pi++) {
 				peers[pi] = cfg.cluster_allowed_peers[pi];
 			}
-			(void)subtree_map_seed_shards_rondb(
+			(void)subtree_map_seed_shards(
 				smap, cat, cfg.cluster_size,
 				peers, pc);
 		}
 
 		/* 4a-hosts. Always register MDS hostnames from config
 		 * into the subtree map's node table.  Hostnames are
-		 * NOT stored in partition_map (RonDB), so they must be
+		 * NOT stored in the partition map, so they must be
 		 * populated on every startup for referral_build() to
 		 * resolve fs_locations server addresses. */
 		for (uint32_t hi = 0; hi < cfg.cluster_allowed_peer_count;
@@ -676,11 +844,6 @@ if (s_pt != NULL) {
 		}
 
 		subtree_map_set_membership(smap, membership);
-
-		/* Wire smap + membership into heartbeat thread for
-		 * periodic refresh of subtree ownership and peers. */
-		rondb_hb_arg_g.smap = smap;
-		rondb_hb_arg_g.membership = membership;
 
 		/* 4a-junction-roots.  Resolve each partition subtree path
 		 * to its root-directory fileid so FH-based ancestry walks
@@ -695,7 +858,8 @@ if (s_pt != NULL) {
 			for (uint32_t si = 0; si < sm_count; si++) {
 				struct subtree_entry se;
 				char pbuf[MDS_MAX_PATH];
-				char *comp, *save = NULL;
+				const char *comp;
+				char *save = NULL;
 				uint64_t fid = MDS_FILEID_ROOT;
 				bool resolved = true;
 
@@ -737,8 +901,102 @@ if (s_pt != NULL) {
 				}
 			}
 		}
+
+		/* 4c. Heartbeat thread (5s interval; each thread gets its
+		 * own backend connection from the backend's per-thread
+		 * pool).  Created only now, after smap and membership are
+		 * stored in its argument block: the previous arrangement
+		 * created the thread right after node_register and wrote
+		 * arg->smap later from the main thread through a plain
+		 * pointer -- a data race.  Liveness: node_register (step
+		 * 2d) already wrote the row with a fresh heartbeat
+		 * timestamp, and the watchdog's stale threshold (15 s) is
+		 * three heartbeat intervals; the work between the two steps
+		 * (partition-map load, registry scan, junction-root
+		 * lookups) is a handful of bounded catalogue reads.  The
+		 * opt-in legacy recovery scan (step 2f) is the one step in
+		 * between whose duration depends on namespace size.
+		 *
+		 * Startup deadline: that gap is bounded by
+		 * CLUSTER_STARTUP_DEADLINE_MS (failover_watchdog.h, below the
+		 * stale threshold).  A node that overran it may already have
+		 * been declared dead by its standby, which then owns its
+		 * subtrees; starting to heartbeat and serve now would be
+		 * split-brain, so the daemon exits instead (cleanup
+		 * deregisters the row). */
+		if (cluster_register_mono_ns != 0) {
+			struct timespec now_ts;
+			uint64_t now_ns;
+			uint64_t elapsed_ms;
+
+			clock_gettime(CLOCK_MONOTONIC, &now_ts);
+			now_ns = (uint64_t)now_ts.tv_sec * 1000000000ULL +
+				 (uint64_t)now_ts.tv_nsec;
+			elapsed_ms = (now_ns - cluster_register_mono_ns) /
+				     1000000ULL;
+			if (elapsed_ms > CLUSTER_STARTUP_DEADLINE_MS) {
+				MDS_LOG_FATAL(LOG_COMP_MDS,
+					"startup took %llu ms between "
+					"node_register and the heartbeat "
+					"start, over the %u ms deadline: the "
+					"registry row may already be stale "
+					"and the standby promoted; exiting "
+					"rather than serving into a "
+					"split-brain",
+					(unsigned long long)elapsed_ms,
+					(unsigned)CLUSTER_STARTUP_DEADLINE_MS);
+				exit_code = EXIT_FAILURE;
+				goto cleanup;
+			}
+		}
+		cluster_hb_arg_g.cat = cat;
+		cluster_hb_arg_g.mds_id = cfg.self.id;
+		cluster_hb_arg_g.boot_epoch = mds_boot_epoch;
+		cluster_hb_arg_g.running = &cluster_hb_flag;
+		cluster_hb_arg_g.smap = smap;
+		cluster_hb_arg_g.membership = membership;
+		if (pthread_create(&cluster_hb_thread, NULL,
+				   cluster_hb_fn, &cluster_hb_arg_g) == 0) {
+			cluster_hb_running = true;
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"cluster heartbeat thread started "
+				"(5s interval)");
+		} else {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"cluster heartbeat thread start failed");
+		}
 	}
-#endif
+
+	/* 4-local. Backends without multi-process cluster services (step
+	 * 2a already enforced cluster_size == 1 for them): a local
+	 * single-node subtree map ("/" owned by self) and a membership
+	 * table holding only this node -- the same setup the unit tests
+	 * use.  Every consumer (referrals, transport admin handlers,
+	 * split evaluator) then sees a one-node cluster instead of a
+	 * NULL map. */
+	if (smap == NULL) {
+		rc = subtree_map_init(NULL, NULL, cfg.self.id,
+				      cfg.self.hostname, NULL, &smap);
+		if (rc != MDS_OK) {
+			MDS_LOG_ERROR(LOG_COMP_MDS,
+				"subtree_map_init failed: %d", (int)rc);
+			exit_code = EXIT_FAILURE;
+			goto cleanup;
+		}
+		rc = cluster_membership_init(&cfg, smap, NULL, &membership);
+		if (rc != MDS_OK) {
+			MDS_LOG_ERROR(LOG_COMP_MDS,
+				"cluster_membership_init failed: %d",
+				(int)rc);
+			exit_code = EXIT_FAILURE;
+			goto cleanup;
+		}
+		subtree_map_set_membership(smap, membership);
+		MDS_LOG_INFO(LOG_COMP_MDS,
+			"single-node subtree map (backend %d has no "
+			"multi-process cluster services)",
+			(int)mds_catalogue_backend_type(cat));
+	}
 
 	/* 4b. Seed DS registry from config if catalogue is empty. */
 	{
@@ -1208,34 +1466,47 @@ if (s_pt != NULL) {
 					"Standby failover armed: "
 					"partner=%u\n",
 					(unsigned)self_m.failover_partner_id);
-#ifdef HAVE_RONDB
-				/* RonDB-native partner-liveness watchdog:
-				 * polls mds_node_registry.last_heartbeat_ns
-				 * and fires failover_promote when the partner
-				 * misses its heartbeats.  Replaces the old
-				 * LMDB-delta-shipping signal that was removed
-				 * with the writer thread. */
-				if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+				/* Partner-liveness watchdog: polls the node
+				 * registry's heartbeat timestamps through
+				 * mds_cluster_node_scan_stale and fires
+				 * failover_promote when the partner misses its
+				 * heartbeats.  Replaces the old LMDB-delta-
+				 * shipping signal that was removed with the
+				 * writer thread.  A backend without the stale
+				 * scan refuses with NOSUPPORT; that is not an
+				 * error, just an unarmed watchdog. */
+				{
 					struct failover_watchdog_cfg wd_cfg;
+					enum mds_status wd_st;
+
 					memset(&wd_cfg, 0, sizeof(wd_cfg));
 					wd_cfg.fo         = fo_ctx;
 					wd_cfg.cat        = cat;
 					wd_cfg.partner_id = self_m.failover_partner_id;
-					if (failover_watchdog_start(&wd_cfg,
-								    &fo_wd) == MDS_OK) {
+					wd_st = failover_watchdog_start(&wd_cfg,
+									&fo_wd);
+					if (wd_st == MDS_OK) {
 						MDS_LOG_INFO(LOG_COMP_MDS,
-							"RonDB failover watchdog "
+							"failover watchdog "
 							"active (partner=%u)",
 							(unsigned)self_m.failover_partner_id);
+					} else if (wd_st == MDS_ERR_NOSUPPORT) {
+						MDS_LOG_INFO(LOG_COMP_MDS,
+							"failover watchdog not armed: "
+							"backend %d has no stale-node "
+							"scan (partner=%u)",
+							(int)mds_catalogue_backend_type(cat),
+							(unsigned)self_m.failover_partner_id);
+						fo_wd = NULL;
 					} else {
 						MDS_LOG_WARN(LOG_COMP_MDS,
 							"failover_watchdog_start "
-							"failed (partner=%u)",
+							"failed: %d (partner=%u)",
+							(int)wd_st,
 							(unsigned)self_m.failover_partner_id);
 						fo_wd = NULL;
 					}
 				}
-#endif
 			}
 		}
 	}
@@ -1337,10 +1608,16 @@ if (s_pt != NULL) {
 		}
 	}
 
-	/* 6d. Open state table (shared with resilver for writer fencing). */
+	/* 6d. Open state table (shared with resilver for writer fencing).
+	 * Failure takes the common cleanup path like every other fatal
+	 * step: the subsystems created above (DS cache and capacity
+	 * probe, cluster transport, session table, DS health monitor)
+	 * are torn down there, and lock_tbl is still NULL so its own
+	 * destroy is a no-op. */
 	if (lock_table_init(cfg.self.id, &lock_tbl) != 0) {
 		MDS_LOG_ERROR(LOG_COMP_MDS, "lock_table_init failed");
-		return EXIT_FAILURE;
+		exit_code = EXIT_FAILURE;
+		goto cleanup;
 	}
 
 	if (open_state_table_init_ex(cfg.self.id,
@@ -1368,27 +1645,28 @@ if (s_pt != NULL) {
 				: (unsigned)OPEN_STATE_DEFAULT_LOCK_STRIPES);
 	}
 
-	/* shared-attr: wire RonDB catalogue into stateful subsystems
-	 * so open/lock/deleg mutations are persisted to shared tables. */
-#ifdef HAVE_RONDB
-	if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+	/* shared-attr: wire the catalogue into the stateful subsystems
+	 * so open/lock/deleg mutations are persisted to the shared
+	 * protocol-state tables -- when the backend has them.  The
+	 * tables treat MDS_ERR_NOSUPPORT from a slot as "nothing to
+	 * persist", so this gate only avoids the pointless call. */
+	if (mds_coord_shared_state_supported(cat)) {
 		if (ot != NULL) {
-			open_state_table_set_cat(ot, cat, rondb_boot_epoch);
+			open_state_table_set_cat(ot, cat, mds_boot_epoch);
 			if (cfg.transient_state_cache) {
 				open_state_table_set_skip_ndb(ot, true);
 				MDS_LOG_INFO(LOG_COMP_MDS,
 					"transient_state_cache=on "
-					"(open/layout NDB writes skipped)");
+					"(open/layout backend writes skipped)");
 			}
 		}
 		if (lock_tbl != NULL) {
-			lock_table_set_cat(lock_tbl, cat, rondb_boot_epoch);
+			lock_table_set_cat(lock_tbl, cat, mds_boot_epoch);
 		}
 		MDS_LOG_INFO(LOG_COMP_MDS,
 			"shared protocol state active "
-			"(open+lock write-through to RonDB)");
+			"(open+lock write-through to the catalogue)");
 	}
-#endif
 
 	/* 6e. Resilver worker (admin-triggered, not auto-started). */
 	if (resilver_init(cat, cq, proxy, ot, &rw) != 0) {
@@ -1551,6 +1829,7 @@ if (s_pt != NULL) {
 					"GSS init failed for "
 					"nfs_auth_mode=%d",
 					(int)cfg.nfs_auth_mode);
+				exit_code = EXIT_FAILURE;
 				goto cleanup;
 			}
 			MDS_LOG_INFO(LOG_COMP_MDS,
@@ -1711,7 +1990,11 @@ if (s_pt != NULL) {
 					(unsigned)neg_ttl,
 					(unsigned)cache_pos_ttl_ms);
 			} else {
-				MDS_LOG_INFO(LOG_COMP_MDS, cfg.dirent_cache_size ? "dirent_cache_init failed" : "dirent cache disabled (dirent_cache_size=0)");
+				MDS_LOG_INFO(LOG_COMP_MDS,
+					cfg.dirent_cache_size
+					? "dirent_cache_init failed"
+					: "dirent cache disabled "
+					  "(dirent_cache_size=0)");
 			}
 		rpc_cfg.dcache = dcache;
 		}
@@ -1737,7 +2020,12 @@ if (s_pt != NULL) {
 					"(max=%u entries)",
 					(unsigned)lcache_size);
 			} else {
-				MDS_LOG_INFO(LOG_COMP_MDS, cfg.layout_cache_size ? "layout_cache_init failed; falling back to catalogue reads" : "HPC layout cache disabled (layout_cache_size=0)");
+				MDS_LOG_INFO(LOG_COMP_MDS,
+					cfg.layout_cache_size
+					? "layout_cache_init failed; falling back "
+					  "to catalogue reads"
+					: "HPC layout cache disabled "
+					  "(layout_cache_size=0)");
 			}
 			rpc_cfg.lcache = lcache;
 			if (ct_srv != NULL) {
@@ -1797,7 +2085,7 @@ if (s_pt != NULL) {
 
 		/* Delegation state table (RFC 8881 S10.4).
 		 *
-		 * Gated by cfg.file_delegations_enabled (default true).  When
+		 * Gated by cfg.file_delegations_enabled (default false).  When
 		 * false, we skip the table init entirely and leave
 		 * rpc_cfg.dt == NULL so cd->dt == NULL in compound_data;
 		 * op_open's deleg-grant arm short-circuits at the
@@ -1814,12 +2102,10 @@ if (s_pt != NULL) {
 			if (deleg_table_init(cfg.self.id, &dt) == 0) {
 				MDS_LOG_INFO(LOG_COMP_MDS,
 					"delegation table active");
-#ifdef HAVE_RONDB
-				if (cfg.catalogue_backend == MDS_BACKEND_RONDB) {
+				if (mds_coord_shared_state_supported(cat)) {
 					deleg_table_set_cat(dt, cat,
-							    rondb_boot_epoch);
+							    mds_boot_epoch);
 				}
-#endif
 				/* Wire the session table so deleg_recall_file()
 				 * can snapshot the holder's backchannel and
 				 * issue CB_RECALL on a dup'd fd.  Without this,
@@ -1896,7 +2182,7 @@ if (s_pt != NULL) {
 			} else if (remove_manifest_init(cat, rpc_cfg.proxy,
 					rpc_cfg.lcache, rpc_cfg.lcommit_agg,
 					rpc_cfg.quota, cfg.self.id,
-					rondb_boot_epoch, 65536U,
+					mds_boot_epoch, 65536U,
 					cfg.remove_async_workers,
 					cfg.remove_async_batch,
 					cfg.remove_async_poll_ms,
@@ -2087,6 +2373,11 @@ if (s_pt != NULL) {
 		(unsigned)cluster_transport_server_port(ct_srv),
 		"",
 		"");
+	/* stdout is a pipe under systemd and therefore fully buffered:
+	 * without this flush the banner (and the grace / failover lines
+	 * above it) reach the journal only at exit, i.e. never while the
+	 * daemon is being watched for its listener to come up. */
+	(void)fflush(stdout);
 
 	/* 10. Wait for shutdown signal via sigwait().
 	 *     SIGINT/SIGTERM were blocked before thread creation;
@@ -2094,6 +2385,11 @@ if (s_pt != NULL) {
 	{
 		int caught_sig = 0;
 		(void)sigwait(&shutdown_set, &caught_sig);
+	}
+	/* A SIGTERM raised by the heartbeat thread on supersession is a
+	 * failure exit, not an operator stop. */
+	if (atomic_load(&cluster_superseded)) {
+		exit_code = EXIT_FAILURE;
 	}
 
 	/* Orderly shutdown -- ordering matters:
@@ -2104,6 +2400,10 @@ if (s_pt != NULL) {
 cleanup:
 	if (exit_code == EXIT_SUCCESS) {
 		(void)fprintf(stdout, "pnfs-mds shutting down.\n");
+	} else if (atomic_load(&cluster_superseded)) {
+		MDS_LOG_ERROR(LOG_COMP_MDS,
+			"pnfs-mds superseded by a newer incarnation, "
+			"cleaning up.");
 	} else {
 		MDS_LOG_ERROR(LOG_COMP_MDS, "pnfs-mds startup failed, cleaning up.");
 	}
@@ -2159,32 +2459,45 @@ cleanup:
 		cluster_transport_server_stop(ct_srv);
 	}
 
-	/* Phase 3b: RonDB heartbeat + changefeed poller stop + deregister. */
-#ifdef HAVE_RONDB
-	if (cfg.catalogue_backend == MDS_BACKEND_RONDB && cat != NULL) {
-		/* Stop heartbeat thread first. */
-		if (rondb_hb_running) {
-			atomic_store(&rondb_hb_flag, false);
-			(void)pthread_join(rondb_hb_thread, NULL);
-			rondb_hb_running = false;
-		}
-		if (rondb_image != NULL) {
-			catalogue_rondb_poller_stop(cat);
-			catalog_image_destroy(rondb_image);
-			rondb_image = NULL;
-		}
-		(void)catalogue_rondb_mds_deregister(cat, cfg.self.id);
-		MDS_LOG_INFO(LOG_COMP_MDS,
-			"RonDB node %u deregistered",
-			(unsigned)cfg.self.id);
+	/* Phase 3b: cluster services teardown.  Order is load-bearing and
+	 * unchanged from the backend-specific version:
+	 *   1. join the heartbeat thread (it dereferences cat, smap and
+	 *      membership on every cycle);
+	 *   2. stop the changefeed feed, then destroy the image it fed;
+	 *   3. deregister this incarnation from the node registry;
+	 *   4. (Phase 5 below) close the catalogue last.
+	 * The heartbeat thread exists only when mds_cluster_supported(cat)
+	 * (step 4c), so cluster_hb_running is the sole guard for 1. */
+	if (cluster_hb_running) {
+		atomic_store(&cluster_hb_flag, false);
+		(void)pthread_join(cluster_hb_thread, NULL);
 	}
-#endif
+	if (image != NULL) {
+		(void)mds_catalogue_image_feed_stop(cat);
+		catalog_image_destroy(image);
+		image = NULL;
+	}
+	if (cat != NULL && mds_cluster_supported(cat)) {
+		if (atomic_load(&cluster_superseded)) {
+			/* The row belongs to the newer incarnation; the
+			 * epoch-guarded delete would be STALE and must not
+			 * even be attempted against its registration. */
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"node %u superseded; registry row left to "
+				"the newer incarnation",
+				(unsigned)cfg.self.id);
+		} else {
+			(void)mds_cluster_node_deregister(cat, cfg.self.id,
+							  mds_boot_epoch);
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"node %u deregistered",
+				(unsigned)cfg.self.id);
+		}
+	}
 
 	/* Phase 4: remaining subsystems. */
 	split_evaluator_stop(split_eval);
-#ifdef HAVE_RONDB
 	failover_watchdog_stop(fo_wd);
-#endif
 	failover_destroy(fo_ctx);
 	tiering_destroy(tw);
 	mds_quota_ctx_destroy(quota);
@@ -2206,12 +2519,29 @@ cleanup:
 	 * prober thread; no-op when probing was never started. */
 	ds_io_limits_stop();
 	layout_recall_destroy(lr);
+	/* The process-wide layout-seqid tracker is written by the COMPOUND
+	 * path (Phase 1), the transport admin handlers (Phase 3), the DS
+	 * health monitor and the recall coordinator (both just above); with
+	 * all of them down its entries can be released. */
+	layout_seqid_table_destroy();
 	/* Stop the capacity probe before destroying the DS cache it
 	 * writes into.  ds_capacity_stop joins the worker thread. */
 	ds_capacity_stop(ds_cap);
 	ds_cap = NULL;
+	/* Every DS cache reader is down at this point: the RPC workers
+	 * (pool joined and servers destroyed in Phase 1), the transport
+	 * admin handlers (Phase 3), the prealloc pool and the capacity
+	 * probe (both just above).  cq never carried a cache reference in
+	 * this daemon (it is NULL, step 6a). */
+	ds_cache_destroy(ds_cache);
+	ds_cache = NULL;
 	session_table_destroy(session_tbl);
 	open_state_table_destroy(ot);
+	/* The lock table's only readers are the COMPOUND path (Phase 1)
+	 * and the session table's client-expiry path, which is gone with
+	 * the table destroyed just above. */
+	lock_table_destroy(lock_tbl);
+	lock_tbl = NULL;
 	commit_queue_destroy(cq);
 	mds_proxy_ctx_destroy(proxy);
 	/* Drain + tear down the LAYOUTCOMMIT aggregator BEFORE the
@@ -2242,10 +2572,25 @@ cleanup:
 		parent_touch_destroy(s_pt);
 		s_pt = NULL;
 	}
+	/* Cluster map and membership go last among the subsystems: their
+	 * readers were the heartbeat thread (joined in Phase 3b), the
+	 * transport listener (Phase 3), the failover context / watchdog
+	 * and the split evaluator (Phase 4) and the COMPOUND path
+	 * (Phase 1).  The membership holds a pointer to the map, so it is
+	 * destroyed first; both are NULL-safe for the early-exit paths
+	 * that never created them. */
+	cluster_membership_destroy(membership);
+	membership = NULL;
+	subtree_map_destroy(smap);
+	smap = NULL;
 	if (cat != NULL) {
 		mds_catalogue_close(cat);
 		cat = NULL;
 	}
+	/* Process-wide backend state (e.g. the FoundationDB client network
+	 * thread) goes after the LAST handle is closed and before the log
+	 * is shut down; no catalogue may be opened after this point. */
+	mds_catalogue_process_shutdown();
 	mds_tls_ctx_destroy(cluster_tls);
 	mds_tls_ctx_destroy(cluster_tls_client);
 

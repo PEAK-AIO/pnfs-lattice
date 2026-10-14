@@ -428,9 +428,13 @@ static void test_clear(void)
 
     layout_cache_clear(lc);
 
+    /* fileids 1..32 land two per shard (fid & 15), so every shard's
+     * walk is exercised; each entry counts exactly once and none is
+     * booked as a capacity eviction. */
     layout_cache_stats_get(lc, &st);
     ASSERT_EQ(st.entry_count, 0u);
-    ASSERT_TRUE(st.invalidations >= 32u);
+    ASSERT_EQ(st.invalidations, 32u);
+    ASSERT_EQ(st.evictions, 0u);
 
     /* All previously cached fileids must miss. */
     uint32_t sc, su, mc;
@@ -440,6 +444,21 @@ static void test_clear(void)
         ASSERT_EQ(layout_cache_get(lc, fid, &sc, &su, &mc, &out),
                   -1);
     }
+
+    /* Clearing an empty cache is a no-op, and the cache stays usable:
+     * a fresh put after clear must hit again. */
+    layout_cache_clear(lc);
+    layout_cache_stats_get(lc, &st);
+    ASSERT_EQ(st.entry_count, 0u);
+    ASSERT_EQ(st.invalidations, 32u);
+
+    ASSERT_EQ(layout_cache_put(lc, 5, 1, 65536, 1, &e), 0);
+    out = NULL;
+    ASSERT_EQ(layout_cache_get(lc, 5, &sc, &su, &mc, &out), 0);
+    ASSERT_TRUE(out != NULL);
+    free(out);
+    layout_cache_stats_get(lc, &st);
+    ASSERT_EQ(st.entry_count, 1u);
 
     layout_cache_destroy(lc);
 

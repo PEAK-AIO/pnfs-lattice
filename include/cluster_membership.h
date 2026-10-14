@@ -390,27 +390,40 @@ enum mds_status cluster_membership_promote_standby(
     struct cluster_membership *ctx, uint32_t mds_id);
 
 /* -----------------------------------------------------------------------
- * RonDB-native membership population (Phase 9)
+ * Membership population from the catalogue's node registry (Phase 9)
  *
- * Scans mds_node_registry and upserts all registered nodes into the
- * local membership array.  Called once at startup and periodically
- * from the heartbeat thread to discover newly-joined peers.
+ * Scans the node registry through mds_cluster_node_list() and merges
+ * all registered nodes into the local membership array.  Called once
+ * at startup and periodically from the heartbeat thread to discover
+ * newly-joined peers.
  * ----------------------------------------------------------------------- */
 
 struct mds_catalogue;
 
 /**
- * @brief Populate membership from RonDB node_registry.
+ * @brief Populate membership from the catalogue's node registry.
  *
- * Scans all rows in mds_node_registry and upserts each as a
- * cluster_member.  Existing entries are updated; new entries
- * are inserted.  Self is skipped (already registered by init).
+ * Scans every registry row via mds_cluster_node_list() and merges it
+ * into the local table.  The registry is authoritative for a node's
+ * address only, so for a member that already exists (this node itself,
+ * registered by cluster_membership_init from the configuration, or a
+ * peer that joined through the transport) only hostname, nfs_port and
+ * grpc_port are refreshed; role, lifecycle, failover partner, cluster
+ * address, wire-compat version and join time are local state and are
+ * preserved -- a configured standby therefore stays NODE_STANDBY.  A
+ * node seen only through the registry is inserted as ACTIVE /
+ * ACTIVE_SERVING with no partner and the legacy wire-compat version 1
+ * (the registry carries no version).  Nothing is ever removed here.
  *
  * @param ctx  Membership handle.
- * @param cat  Catalogue handle (RonDB backend).
- * @return MDS_OK on success, MDS_ERR_INVAL, MDS_ERR_IO.
+ * @param cat  Catalogue handle whose backend populates the node_list
+ *             cluster slot.
+ * @return MDS_OK on success; MDS_ERR_INVAL for NULL arguments;
+ *         otherwise the dispatcher's status unchanged
+ *         (MDS_ERR_NOSUPPORT when the backend has no node registry,
+ *         MDS_ERR_IO on a failed scan).
  */
-enum mds_status cluster_membership_populate_rondb(
-    struct cluster_membership *ctx, struct mds_catalogue *cat);
+enum mds_status cluster_membership_populate(struct cluster_membership *ctx,
+                                            struct mds_catalogue *cat);
 
 #endif /* CLUSTER_MEMBERSHIP_H */

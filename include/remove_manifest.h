@@ -124,14 +124,31 @@ int remove_manifest_start(struct remove_manifest *rm);
 void remove_manifest_destroy(struct remove_manifest *rm);
 
 /**
+ * Third remove_manifest_submit() result: the manifest commit outcome
+ * is unknown (the catalogue answered MDS_ERR_INDOUBT).  The tombstone
+ * has been rolled back exactly as for -1, but the caller MUST NOT fall
+ * through to the synchronous remove: in unlink-at-ack mode the same
+ * transaction deletes the dirent, so a second remove would answer
+ * NFS4ERR_NOENT for a remove that landed and queue its GC rows twice.
+ * The caller answers NFS4ERR_IO (never NFS4ERR_DELAY: a client retry
+ * under a new seqid is not covered by the DRC).  A row that did land
+ * is found and completed by the drainer from its durable copy.
+ */
+#define REMOVE_MANIFEST_SUBMIT_INDOUBT (-2)
+
+/**
  * @brief Ack-path submission (op_remove fast path).
  *
  * Inserts the tombstone, then commits the manifest row
- * (durable-before-ack).  On any failure the tombstone is rolled back
- * and -1 is returned — the caller MUST fall through to the
- * synchronous remove path so the REMOVE never silently drops.
+ * (durable-before-ack).  On a definitive failure the tombstone is
+ * rolled back and -1 is returned — the caller MUST fall through to the
+ * synchronous remove path so the REMOVE never silently drops.  On an
+ * in-doubt commit the tombstone is rolled back too and
+ * REMOVE_MANIFEST_SUBMIT_INDOUBT is returned — the caller MUST NOT run
+ * the synchronous path (see the macro).
  *
- * @return 0 accepted (caller replies NFS4_OK), -1 fall back.
+ * @return 0 accepted (caller replies NFS4_OK), -1 fall back,
+ *         REMOVE_MANIFEST_SUBMIT_INDOUBT hard error without fallback.
  */
 int remove_manifest_submit(struct remove_manifest *rm,
 			   uint64_t dir_fileid, const char *name,

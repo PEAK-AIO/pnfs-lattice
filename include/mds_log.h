@@ -120,26 +120,26 @@ extern int mds_log_component_levels[LOG_COMP_COUNT];
  * compiles in both C and C++ translation units.
  */
 #if defined(__GNUC__) || defined(__clang__)
-# define MDS_LOG_LEVEL_LOAD_(comp) \
+# define MDS_LOG_LEVEL_LOAD(comp) \
     __atomic_load_n(&mds_log_component_levels[(comp)], __ATOMIC_RELAXED)
 #else
-# define MDS_LOG_LEVEL_LOAD_(comp) (mds_log_component_levels[(comp)])
+# define MDS_LOG_LEVEL_LOAD(comp) (mds_log_component_levels[(comp)])
 #endif
 
-#define MDS_LOG_AT_(comp, lvl, ...) \
+#define MDS_LOG_AT(comp, lvl, ...) \
     do { \
         int mds_log_comp_ = (comp); \
         if ((unsigned)mds_log_comp_ < (unsigned)LOG_COMP_COUNT && \
-            (int)(lvl) <= MDS_LOG_LEVEL_LOAD_(mds_log_comp_)) { \
+            (int)(lvl) <= MDS_LOG_LEVEL_LOAD(mds_log_comp_)) { \
             mds_log(mds_log_comp_, (lvl), __VA_ARGS__); \
         } \
     } while (0)
 
-#define MDS_LOG_FATAL(comp, ...) MDS_LOG_AT_((comp), LOG_FATAL, __VA_ARGS__)
-#define MDS_LOG_ERROR(comp, ...) MDS_LOG_AT_((comp), LOG_ERROR, __VA_ARGS__)
-#define MDS_LOG_WARN(comp, ...)  MDS_LOG_AT_((comp), LOG_WARN,  __VA_ARGS__)
-#define MDS_LOG_INFO(comp, ...)  MDS_LOG_AT_((comp), LOG_INFO,  __VA_ARGS__)
-#define MDS_LOG_DEBUG(comp, ...) MDS_LOG_AT_((comp), LOG_DEBUG, __VA_ARGS__)
-#define MDS_LOG_TRACE(comp, ...) MDS_LOG_AT_((comp), LOG_TRACE, __VA_ARGS__)
+#define MDS_LOG_FATAL(comp, ...) MDS_LOG_AT((comp), LOG_FATAL, __VA_ARGS__)
+#define MDS_LOG_ERROR(comp, ...) MDS_LOG_AT((comp), LOG_ERROR, __VA_ARGS__)
+#define MDS_LOG_WARN(comp, ...)  MDS_LOG_AT((comp), LOG_WARN,  __VA_ARGS__)
+#define MDS_LOG_INFO(comp, ...)  MDS_LOG_AT((comp), LOG_INFO,  __VA_ARGS__)
+#define MDS_LOG_DEBUG(comp, ...) MDS_LOG_AT((comp), LOG_DEBUG, __VA_ARGS__)
+#define MDS_LOG_TRACE(comp, ...) MDS_LOG_AT((comp), LOG_TRACE, __VA_ARGS__)
 
 #endif /* MDS_LOG_H */

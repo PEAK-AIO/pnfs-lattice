@@ -38,8 +38,11 @@ static bool hpc_xattr_name_match(const char *name)
 	if (strcmp(name, HPC_SHARED_XATTR_NAME) == 0) {
 		return true;
 	}
-	return strcmp(name, HPC_SHARED_XATTR_NAME +
-			    strlen("user.")) == 0;
+	/* Compare against the canonical name with its "user." prefix
+	 * skipped.  The index must stay inside the literal. */
+	_Static_assert(sizeof(HPC_SHARED_XATTR_NAME) > sizeof("user."),
+		       "HPC_SHARED_XATTR_NAME must carry the user. prefix");
+	return strcmp(name, &HPC_SHARED_XATTR_NAME[strlen("user.")]) == 0;
 }
 
 

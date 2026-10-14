@@ -17,8 +17,10 @@
 
 #include "pnfs_mds.h"
 #include "test_helpers.h"
+#include "harness.h"        /* conformance_open_checked */
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
+#include "mds_cluster.h"
 #include "commit_queue.h"
 #include "compound.h"      /* struct compound_data */
 #include "compound_internal.h" /* cat_getattr, cat_on_root_db */
@@ -93,6 +95,8 @@ static void cleanup_temp_db(const char *path)
 {
 	char lock_path[512];
 
+	if (path == NULL)
+		return;
 	unlink(path);
 	snprintf(lock_path, sizeof(lock_path), "%s-lock", path);
 	unlink(lock_path);
@@ -112,25 +116,51 @@ static void cleanup_temp_db(const char *path)
 	}
 }
 
-/** Open a catalogue backed by the in-memory test backend.
- * This avoids a dependency on HAVE_RONDB; path_out is still
- * populated so the existing close_test_cat() cleanup stays stable. */
+/* Scratch directory of the current test.  Every namespace operation in
+ * this file runs under it rather than under the root: a persistent
+ * store (RonDB) keeps the namespace across runs and is shared with
+ * running daemons, so fixed names directly under "/" collide with
+ * earlier runs and root-level entry counts are never the fixture's.
+ * open_test_cat() creates it, close_test_cat() removes it again. */
+static uint64_t g_dir;
+
+/** Open a catalogue on the backend selected by CATALOGUE_TEST_BACKEND
+ * (memdb by default) through the conformance harness; an unavailable
+ * backend exits 77 before any test runs.  path_out is still populated
+ * so the existing close_test_cat() cleanup stays stable. */
 static struct mds_catalogue *open_test_cat(char **path_out)
 {
 	struct mds_catalogue *cat;
 
 	*path_out = make_temp_db_path();
 
-	cat = open_test_catalogue();
+	cat = conformance_open_checked();
 	assert(cat != NULL);
+	g_dir = 0;
+	assert(conformance_scratch_dir(cat, &g_dir) == MDS_OK);
 	return cat;
 }
 
 static void close_test_cat(struct mds_catalogue *cat, char *path)
 {
+	conformance_scratch_cleanup(cat, g_dir);
+	g_dir = 0;
 	mds_catalogue_close(cat);
 	cleanup_temp_db(path);
 	free(path);
+}
+
+/* A fileid no row of this store carries a layout for: fileids are
+ * allocated monotonically and never reused, so a fresh allocation has
+ * an empty layout table even on a persistent store that other suites
+ * (and earlier runs) left rows in. */
+static uint64_t fresh_fileid(struct mds_catalogue *cat)
+{
+	uint64_t fid = 0;
+
+	assert(mds_cat_alloc_fileid(cat, NULL, &fid) == MDS_OK);
+	assert(fid != 0);
+	return fid;
 }
 
 /* -----------------------------------------------------------------------
@@ -146,6 +176,8 @@ static void test_catalogue_open_close(void)
 	ASSERT_NE(cat, NULL);
 
 	/* Double-close is safe (NULL after first close). */
+	conformance_scratch_cleanup(cat, g_dir);
+	g_dir = 0;
 	mds_catalogue_close(cat);
 	mds_catalogue_close(NULL);  /* must not crash */
 
@@ -165,7 +197,7 @@ static void test_catalogue_ns_create_lookup(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "testdir", MDS_FTYPE_DIR,
 				    0755, 1000, 1000, NULL, &child),
 		  MDS_OK);
@@ -176,13 +208,13 @@ static void test_catalogue_ns_create_lookup(void)
 	ASSERT_EQ(child.nlink, (uint32_t)2);
 
 	/* Lookup returns the same inode. */
-	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_lookup(cat, g_dir,
 				    "testdir", &looked_up),
 		  MDS_OK);
 	ASSERT_EQ(looked_up.fileid, child.fileid);
 
 	/* Duplicate create returns EXISTS. */
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "testdir", MDS_FTYPE_DIR,
 				    0755, 0, 0, NULL, &child),
 		  MDS_ERR_EXISTS);
@@ -223,11 +255,13 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 	uint64_t got_fid = 0;
 	uint32_t ds_ids[32];
 	bool has_layout = false;
+	uint64_t fid;
 	char *path;
 	uint32_t i;
 
 	ASSERT_TRUE(COMMIT_OP_LAYOUT_MAX_DS > 16);
 	cat = open_test_cat(&path);
+	fid = fresh_fileid(cat);
 	ASSERT_EQ(commit_queue_create(cat,
 				      NULL, 0, 0, 0, 0, 0, 0, &cq), 0);
 	ASSERT_NE(cq, NULL);
@@ -243,7 +277,7 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 	memset(&cop, 0, sizeof(cop));
 	cop.type = COMMIT_OP_LAYOUT_STATE_PUT;
 	cop.args.layout_put.clientid = 100;
-	cop.args.layout_put.fileid = 300;
+	cop.args.layout_put.fileid = fid;
 	cop.args.layout_put.iomode = 2;
 	cop.args.layout_put.offset = 0;
 	cop.args.layout_put.length = UINT64_MAX;
@@ -258,14 +292,14 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 						  NULL, NULL),
 		  MDS_OK);
 	ASSERT_EQ(got_cid, (uint64_t)100);
-	ASSERT_EQ(got_fid, (uint64_t)300);
-	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, 300, &has_layout),
+	ASSERT_EQ(got_fid, fid);
+	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, fid, &has_layout),
 		  MDS_OK);
 	ASSERT_TRUE(has_layout);
 
 	memset(&scan, 0, sizeof(scan));
 	scan.expected_clientid = 100;
-	scan.expected_fileid = 300;
+	scan.expected_fileid = fid;
 	ASSERT_EQ(mds_coord_ds_layout_idx_scan(cat, ds_ids[20],
 					       layout_idx_scan_cb, &scan),
 		  MDS_OK);
@@ -275,7 +309,7 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 	memset(&cop, 0, sizeof(cop));
 	cop.type = COMMIT_OP_LAYOUT_STATE_DEL;
 	cop.args.layout_del.clientid = 100;
-	cop.args.layout_del.fileid = 300;
+	cop.args.layout_del.fileid = fid;
 	memcpy(cop.args.layout_del.stateid_other, sid.other,
 	       sizeof(cop.args.layout_del.stateid_other));
 	cop.args.layout_del.ds_ids = ds_ids;
@@ -287,13 +321,13 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
 						  NULL, NULL),
 		  MDS_ERR_NOTFOUND);
 	has_layout = true;
-	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, 300, &has_layout),
+	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, fid, &has_layout),
 		  MDS_OK);
 	ASSERT_EQ(has_layout, false);
 
 	memset(&scan, 0, sizeof(scan));
 	scan.expected_clientid = 100;
-	scan.expected_fileid = 300;
+	scan.expected_fileid = fid;
 	ASSERT_EQ(mds_coord_ds_layout_idx_scan(cat, ds_ids[20],
 					       layout_idx_scan_cb, &scan),
 		  MDS_OK);
@@ -309,40 +343,81 @@ static void test_catalogue_coordination_cq_accepts_wide_ds_count(void)
  * merge (fc6bc2b) dropped the RonDB vtable entries and every HPC
  * hpc_shared create failed with EINVAL; this test fails the same way
  * if memdb (or any backend under test) loses the op again.
+ *
+ * Split in two so the fixture is always restored: the ASSERT_* macros
+ * return from the function they run in, and the checks below leave a
+ * raw alias dirent "b" -> inode("a") behind that the harness cannot
+ * remove (see dirent_insert_only_restore).
  */
+static void dirent_insert_only_checks(struct mds_catalogue *cat,
+				      uint64_t child_fid)
+{
+	uint64_t fid = 0;
+	uint8_t typ = 0;
+
+	/* Insert-only succeeds for a new name. */
+	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, g_dir, "b",
+					child_fid, (uint8_t)MDS_FTYPE_REG),
+		  MDS_OK);
+	ASSERT_EQ(mds_cat_dirent_get(cat, g_dir, "b", &fid, &typ),
+		  MDS_OK);
+	ASSERT_EQ(fid, child_fid);
+
+	/* Second insert of the same name must NOT upsert. */
+	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, g_dir, "b",
+					child_fid + 1,
+					(uint8_t)MDS_FTYPE_REG),
+		  MDS_ERR_EXISTS);
+	fid = 0;
+	ASSERT_EQ(mds_cat_dirent_get(cat, g_dir, "b", &fid, &typ),
+		  MDS_OK);
+	ASSERT_EQ(fid, child_fid);
+}
+
+/*
+ * "b" is a raw dirent aliasing "a"'s inode with no nlink behind it.
+ * The harness cleanup removes entries in readdir order: removing "a"
+ * first deletes the inode, after which ns_remove("b") fails on the
+ * missing inode and the alias -- and with it the scratch directory --
+ * stays behind forever on a shared persistent store.  Drop the alias
+ * with dirent_del (no inode bookkeeping) BEFORE the ordinary remove of
+ * "a", then prove the directory is empty so the harness's removal of
+ * it cannot fail.
+ */
+static void dirent_insert_only_restore(struct mds_catalogue *cat)
+{
+	uint64_t fid = 0;
+	uint8_t typ = 0;
+	bool empty = false;
+
+	if (mds_cat_dirent_get(cat, g_dir, "b", &fid, &typ) == MDS_OK) {
+		ASSERT_EQ(mds_cat_dirent_del(cat, NULL, g_dir, "b"), MDS_OK);
+	}
+	ASSERT_EQ(mds_cat_dirent_get(cat, g_dir, "b", &fid, &typ),
+		  MDS_ERR_NOTFOUND);
+	ASSERT_EQ(mds_cat_ns_remove(cat, NULL, g_dir, "a"), MDS_OK);
+	ASSERT_EQ(mds_cat_dir_is_empty(cat, g_dir, &empty), MDS_OK);
+	ASSERT_TRUE(empty);
+}
+
 static void test_catalogue_dirent_insert_only(void)
 {
 	struct mds_catalogue *cat;
 	struct mds_inode child;
 	char *path;
-	uint64_t fid = 0;
-	uint8_t typ = 0;
 
 	cat = open_test_cat(&path);
 
 	memset(&child, 0, sizeof(child));
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT, "a",
-				    MDS_FTYPE_REG, 0644, 0, 0, NULL,
-				    &child),
-		  MDS_OK);
-
-	/* Insert-only succeeds for a new name. */
-	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, MDS_FILEID_ROOT, "b",
-					child.fileid, (uint8_t)MDS_FTYPE_REG),
-		  MDS_OK);
-	ASSERT_EQ(mds_cat_dirent_get(cat, MDS_FILEID_ROOT, "b", &fid, &typ),
-		  MDS_OK);
-	ASSERT_EQ(fid, child.fileid);
-
-	/* Second insert of the same name must NOT upsert. */
-	ASSERT_EQ(mds_cat_dirent_insert(cat, NULL, MDS_FILEID_ROOT, "b",
-					child.fileid + 1,
-					(uint8_t)MDS_FTYPE_REG),
-		  MDS_ERR_EXISTS);
-	fid = 0;
-	ASSERT_EQ(mds_cat_dirent_get(cat, MDS_FILEID_ROOT, "b", &fid, &typ),
-		  MDS_OK);
-	ASSERT_EQ(fid, child.fileid);
+	if (mds_cat_ns_create(cat, NULL, g_dir, "a", MDS_FTYPE_REG, 0644,
+			      0, 0, NULL, &child) != MDS_OK) {
+		fprintf(stderr, "  FAIL %s:%d: create \"a\"\n",
+			__FILE__, __LINE__);
+		current_test_failed = 1;
+	} else {
+		dirent_insert_only_checks(cat, child.fileid);
+		dirent_insert_only_restore(cat);
+	}
 
 	close_test_cat(cat, path);
 }
@@ -399,7 +474,7 @@ static void test_catalogue_ns_setattr_getattr(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "attrs.dir", MDS_FTYPE_DIR,
 				    0755, 1000, 1000, NULL, &child),
 		  MDS_OK);
@@ -429,16 +504,16 @@ static void test_catalogue_ns_remove(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "todelete", MDS_FTYPE_DIR,
 				    0755, 0, 0, NULL, &child),
 		  MDS_OK);
 
-	ASSERT_EQ(mds_cat_ns_remove(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_remove(cat, NULL, g_dir,
 				    "todelete"),
 		  MDS_OK);
 
-	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_lookup(cat, g_dir,
 				    "todelete", &looked_up),
 		  MDS_ERR_NOTFOUND);
 
@@ -476,26 +551,26 @@ static void test_catalogue_ns_readdir(void)
 	cat = open_test_cat(&path);
 
 	/* Create three directories: aaa, bbb, ccc. */
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "aaa", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "bbb", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ccc", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
 
 	/* Full readdir. */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, NULL, 0,
+	ASSERT_EQ(mds_cat_ns_readdir(cat, g_dir, NULL, 0,
 				     NULL, readdir_counter, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)3);
 
 	/* Readdir with start_after="aaa" -- should skip "aaa". */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, "aaa", 0,
+	ASSERT_EQ(mds_cat_ns_readdir(cat, g_dir, "aaa", 0,
 				     NULL, readdir_counter, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)2);
@@ -553,7 +628,7 @@ static void test_catalogue_ns_readdir_plus_empty(void)
 	cat = open_test_cat(&path);
 
 	/* Create an empty subdir and list it. */
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "empty", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
 
@@ -578,19 +653,19 @@ static void test_catalogue_ns_readdir_plus_three_entries(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "aaa", MDS_FTYPE_DIR, 0700,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "bbb", MDS_FTYPE_REG, 0644,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ccc", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
 
 	/* Full fused readdir_plus: three entries, each with valid inode. */
 	memset(&got, 0, sizeof(got));
-	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, NULL, 0,
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, g_dir, NULL, 0,
 					  NULL,
 					  readdir_plus_collect_cb, &got),
 		  MDS_OK);
@@ -625,19 +700,19 @@ static void test_catalogue_ns_readdir_plus_start_after(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "aaa", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "bbb", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ccc", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
 
 	/* start_after="aaa" should drop "aaa" from the result. */
 	memset(&got, 0, sizeof(got));
-	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, MDS_FILEID_ROOT, "aaa", 0,
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, g_dir, "aaa", 0,
 					  NULL,
 					  readdir_plus_collect_cb, &got),
 		  MDS_OK);
@@ -655,18 +730,18 @@ static void test_catalogue_ns_readdir_max_entries(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "aaa", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "bbb", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ccc", MDS_FTYPE_DIR, 0755,
 				    0, 0, NULL, &child), MDS_OK);
 
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_cat_ns_readdir(cat, MDS_FILEID_ROOT, NULL, 2,
+	ASSERT_EQ(mds_cat_ns_readdir(cat, g_dir, NULL, 2,
 				     NULL, readdir_counter, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.count, (uint32_t)2);
@@ -684,16 +759,247 @@ static void test_catalogue_dirent_name_for_child(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "bravo", MDS_FTYPE_REG, 0644,
 				    0, 0, NULL, &child), MDS_OK);
 
 	memset(name, 0, sizeof(name));
 	ASSERT_EQ(mds_cat_ns_dirent_name_for_child(
-			  cat, MDS_FILEID_ROOT, child.fileid,
+			  cat, g_dir, child.fileid,
 			  name, sizeof(name)),
 		  MDS_OK);
 	ASSERT_EQ(strcmp(name, "bravo"), 0);
+
+	close_test_cat(cat, path);
+}
+
+/* -----------------------------------------------------------------------
+ * 5d. test_catalogue_readdir_cookie -- backend-assigned READDIR cookies
+ *
+ * Every dirent a backend delivers carries a cookie (struct
+ * mds_cat_dirent.cookie) that is never 0, 1 or 2 and is unique within
+ * the directory; readdir_plus_from_cookie resumes with the entries
+ * whose cookie is strictly greater.  The cookie a given entry carries
+ * must be the same on the plain readdir, the readdir_plus fallback and
+ * the cookie-resume path.  How a backend derives the cookie (child
+ * fileid on RonDB, a per-dirent sequence on a backend that is hard-link
+ * safe) is not part of this contract -- the conformance suite covers
+ * the hard-link case per backend.
+ * ----------------------------------------------------------------------- */
+
+/* Smallest cookie a producer may hand out (MDS_READDIR_COOKIE_MIN in
+ * catalogue_dispatch.c): 0, 1 and 2 are reserved by RFC 8881. */
+#define TEST_COOKIE_MIN 3U
+
+struct cookie_collect {
+	uint32_t count;
+	uint64_t fileid[READDIR_PLUS_MAX];
+	uint64_t cookie[READDIR_PLUS_MAX];
+	char name[READDIR_PLUS_MAX][MDS_MAX_NAME + 1];
+};
+
+static int cookie_collect_cb(const struct mds_cat_dirent *entry, void *arg)
+{
+	struct cookie_collect *c = arg;
+
+	if (c->count >= READDIR_PLUS_MAX) {
+		return -1;
+	}
+	c->fileid[c->count] = entry->fileid;
+	c->cookie[c->count] = entry->cookie;
+	snprintf(c->name[c->count], sizeof(c->name[c->count]), "%s",
+		 entry->name);
+	c->count++;
+	return 0;
+}
+
+static int cookie_collect_plus_cb(const struct mds_cat_dirent *entry,
+				  const struct mds_inode *inode,
+				  bool inode_valid,
+				  void *arg)
+{
+	(void)inode;
+	(void)inode_valid;
+	return cookie_collect_cb(entry, arg);
+}
+
+/* Cookie contract for one collected listing: never reserved and unique
+ * within the listing. */
+static bool cookies_valid(const struct cookie_collect *c)
+{
+	uint32_t i, j;
+
+	for (i = 0; i < c->count; i++) {
+		if (c->cookie[i] < TEST_COOKIE_MIN) {
+			return false;
+		}
+		for (j = 0; j < i; j++) {
+			if (c->cookie[j] == c->cookie[i]) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/* Every name of the three-entry fixture delivered exactly once. */
+static bool names_once(const struct cookie_collect *c)
+{
+	unsigned aaa = 0, bbb = 0, ccc = 0;
+	uint32_t i;
+
+	for (i = 0; i < c->count; i++) {
+		if (strcmp(c->name[i], "aaa") == 0) {
+			aaa++;
+		} else if (strcmp(c->name[i], "bbb") == 0) {
+			bbb++;
+		} else if (strcmp(c->name[i], "ccc") == 0) {
+			ccc++;
+		} else {
+			return false;
+		}
+	}
+	return aaa == 1 && bbb == 1 && ccc == 1;
+}
+
+/* The cookie of a given entry (matched by fileid) is the same on every
+ * path that delivers it. */
+static bool cookies_agree(const struct cookie_collect *a,
+			  const struct cookie_collect *b)
+{
+	uint32_t i, j;
+
+	if (a->count != b->count) {
+		return false;
+	}
+	for (i = 0; i < a->count; i++) {
+		bool matched = false;
+
+		for (j = 0; j < b->count; j++) {
+			if (b->fileid[j] == a->fileid[i]) {
+				matched = (b->cookie[j] == a->cookie[i]);
+				break;
+			}
+		}
+		if (!matched) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void test_catalogue_readdir_cookie_contract(void)
+{
+	struct mds_catalogue *cat;
+	struct mds_inode child;
+	struct cookie_collect got;
+	struct cookie_collect plain;
+	uint64_t mid_cookie;
+	uint64_t last_cookie;
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
+				    "aaa", MDS_FTYPE_DIR, 0755,
+				    0, 0, NULL, &child), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
+				    "bbb", MDS_FTYPE_REG, 0644,
+				    0, 0, NULL, &child), MDS_OK);
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
+				    "ccc", MDS_FTYPE_DIR, 0755,
+				    0, 0, NULL, &child), MDS_OK);
+
+	/* Plain readdir. */
+	memset(&plain, 0, sizeof(plain));
+	ASSERT_EQ(mds_cat_ns_readdir(cat, g_dir, NULL, 0, NULL,
+				     cookie_collect_cb, &plain), MDS_OK);
+	ASSERT_EQ(plain.count, (uint32_t)3);
+	ASSERT_TRUE(cookies_valid(&plain));
+	ASSERT_TRUE(names_once(&plain));
+
+	/* readdir_plus (fused or the dispatcher fallback): the producer's
+	 * cookie reaches the caller unchanged. */
+	memset(&got, 0, sizeof(got));
+	ASSERT_EQ(mds_cat_ns_readdir_plus(cat, g_dir, NULL, 0,
+					  NULL, cookie_collect_plus_cb, &got),
+		  MDS_OK);
+	ASSERT_EQ(got.count, (uint32_t)3);
+	ASSERT_TRUE(cookies_valid(&got));
+	ASSERT_TRUE(names_once(&got));
+	ASSERT_TRUE(cookies_agree(&plain, &got));
+
+	/* Cookie-resume path, first page: ascending cookies. */
+	memset(&got, 0, sizeof(got));
+	ASSERT_EQ(mds_cat_ns_readdir_plus_from_cookie(cat, g_dir,
+						      0, 0, NULL,
+						      cookie_collect_plus_cb,
+						      &got),
+		  MDS_OK);
+	ASSERT_EQ(got.count, (uint32_t)3);
+	ASSERT_TRUE(cookies_valid(&got));
+	ASSERT_TRUE(names_once(&got));
+	ASSERT_TRUE(cookies_agree(&plain, &got));
+	ASSERT_TRUE(got.cookie[0] < got.cookie[1]);
+	ASSERT_TRUE(got.cookie[1] < got.cookie[2]);
+	mid_cookie = got.cookie[1];
+	last_cookie = got.cookie[2];
+
+	/* Page size 1, resuming with the last delivered cookie: every name
+	 * exactly once and cookies strictly increasing across resumes. */
+	{
+		struct cookie_collect paged;
+		uint64_t cursor = 0;
+		unsigned pages = 0;
+
+		memset(&paged, 0, sizeof(paged));
+		for (;;) {
+			struct cookie_collect one;
+
+			memset(&one, 0, sizeof(one));
+			ASSERT_EQ(mds_cat_ns_readdir_plus_from_cookie(
+					  cat, g_dir, cursor, 1, NULL,
+					  cookie_collect_plus_cb, &one),
+				  MDS_OK);
+			if (one.count == 0) {
+				break;
+			}
+			ASSERT_EQ(one.count, (uint32_t)1);
+			ASSERT_TRUE(one.cookie[0] > cursor);
+			ASSERT_TRUE(paged.count < READDIR_PLUS_MAX);
+			paged.fileid[paged.count] = one.fileid[0];
+			paged.cookie[paged.count] = one.cookie[0];
+			snprintf(paged.name[paged.count],
+				 sizeof(paged.name[0]), "%s", one.name[0]);
+			paged.count++;
+			cursor = one.cookie[0];
+			pages++;
+			ASSERT_TRUE(pages <= 4);
+		}
+		ASSERT_EQ(pages, 3U);
+		ASSERT_TRUE(cookies_valid(&paged));
+		ASSERT_TRUE(names_once(&paged));
+		ASSERT_TRUE(cookies_agree(&plain, &paged));
+	}
+
+	/* Resume after the middle entry: exactly the strictly-greater one. */
+	memset(&got, 0, sizeof(got));
+	ASSERT_EQ(mds_cat_ns_readdir_plus_from_cookie(cat, g_dir,
+						      mid_cookie, 0, NULL,
+						      cookie_collect_plus_cb,
+						      &got),
+		  MDS_OK);
+	ASSERT_EQ(got.count, (uint32_t)1);
+	ASSERT_EQ(got.cookie[0], last_cookie);
+
+	/* Resume after the last entry: drained. */
+	memset(&got, 0, sizeof(got));
+	ASSERT_EQ(mds_cat_ns_readdir_plus_from_cookie(cat, g_dir,
+						      last_cookie, 0, NULL,
+						      cookie_collect_plus_cb,
+						      &got),
+		  MDS_OK);
+	ASSERT_EQ(got.count, (uint32_t)0);
 
 	close_test_cat(cat, path);
 }
@@ -725,7 +1031,7 @@ static void test_catalogue_stripe_map_wide_round_trip(void)
 
 	cat = open_test_cat(&path);
 
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "wide.bin", MDS_FTYPE_REG, 0644,
 				    0, 0, NULL, &child), MDS_OK);
 
@@ -796,16 +1102,18 @@ static void test_catalogue_layout_grant_return(void)
 	uint64_t got_off, got_len;
 	uint32_t ds_ids[1] = {1};
 	bool has_layout = false;
+	uint64_t fid;
 	char *path;
 
 	cat = open_test_cat(&path);
+	fid = fresh_fileid(cat);
 
 	memset(&sid, 0, sizeof(sid));
 	sid.seqid = 1;
 	memset(sid.other, 0xAB, sizeof(sid.other));
 
 	/* Grant. */
-	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 100, 200,
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 100, fid,
 					 2 /* RW */, 0, UINT64_MAX,
 					 &sid, ds_ids, 1),
 		  MDS_OK);
@@ -817,21 +1125,21 @@ static void test_catalogue_layout_grant_return(void)
 						  &got_len, &got_seqid),
 		  MDS_OK);
 	ASSERT_EQ(got_cid, (uint64_t)100);
-	ASSERT_EQ(got_fid, (uint64_t)200);
+	ASSERT_EQ(got_fid, fid);
 
 	/* Scan for file. */
-	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, 200, &has_layout),
+	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, fid, &has_layout),
 		  MDS_OK);
 	ASSERT_TRUE(has_layout);
 
 	/* Return. */
 	ASSERT_EQ(mds_coord_layout_return(cat, NULL, sid.other,
-					  100, 200, ds_ids, 1),
+					  100, fid, ds_ids, 1),
 		  MDS_OK);
 
 	/* Should be gone. */
 	has_layout = true;
-	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, 200, &has_layout),
+	ASSERT_EQ(mds_coord_layout_scan_for_file(cat, fid, &has_layout),
 		  MDS_OK);
 	ASSERT_EQ(has_layout, false);
 
@@ -880,34 +1188,38 @@ static void test_catalogue_layout_iter_file(void)
 	struct nfs4_stateid sid;
 	uint32_t ds_ids[1] = {1};
 	struct layout_iter_test_ctx ctx;
+	uint64_t fid, other, none;
 	char *path;
 
 	cat = open_test_cat(&path);
+	fid = fresh_fileid(cat);
+	other = fresh_fileid(cat);
+	none = fresh_fileid(cat);
 
-	/* Three holders on fileid 300 (distinct clientid / iomode / seqid). */
+	/* Three holders on one file (distinct clientid / iomode / seqid). */
 	memset(&sid, 0, sizeof(sid));
 	sid.seqid = 1; memset(sid.other, 0x10, sizeof(sid.other));
-	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 10, 300, 1,
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 10, fid, 1,
 					 0, UINT64_MAX, &sid, ds_ids, 1),
 		  MDS_OK);
 	sid.seqid = 2; memset(sid.other, 0x11, sizeof(sid.other));
-	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 11, 300, 2,
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 11, fid, 2,
 					 0, UINT64_MAX, &sid, ds_ids, 1),
 		  MDS_OK);
 	sid.seqid = 3; memset(sid.other, 0x12, sizeof(sid.other));
-	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 12, 300, 1,
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 12, fid, 1,
 					 0, UINT64_MAX, &sid, ds_ids, 1),
 		  MDS_OK);
 
-	/* A holder on a different file must never appear for fileid 300. */
+	/* A holder on a different file must never appear for fid. */
 	sid.seqid = 9; memset(sid.other, 0x99, sizeof(sid.other));
-	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 99, 301, 2,
+	ASSERT_EQ(mds_coord_layout_grant(cat, NULL, 99, other, 2,
 					 0, UINT64_MAX, &sid, ds_ids, 1),
 		  MDS_OK);
 
-	/* Enumerate holders of fileid 300. */
+	/* Enumerate holders of fid. */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_coord_layout_iter_file(cat, 300,
+	ASSERT_EQ(mds_coord_layout_iter_file(cat, fid,
 					     layout_iter_test_cb, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.hits, (uint32_t)3);
@@ -924,7 +1236,7 @@ static void test_catalogue_layout_iter_file(void)
 
 	/* A file with no layouts yields zero holders, no error. */
 	memset(&ctx, 0, sizeof(ctx));
-	ASSERT_EQ(mds_coord_layout_iter_file(cat, 999,
+	ASSERT_EQ(mds_coord_layout_iter_file(cat, none,
 					     layout_iter_test_cb, &ctx),
 		  MDS_OK);
 	ASSERT_EQ(ctx.hits, (uint32_t)0);
@@ -974,17 +1286,14 @@ static void test_catalogue_recovery_put_get_del(void)
  * 8. test_catalogue_txn_commit -- txn begin / commit visibility
  *
  * The original test also exercised the abort path ("create in txn,
- * abort, verify the entry is NOT visible").  That assertion only
- * holds against a backend that implements true transactional
- * rollback -- the production RonDB backend does, but the in-memory
- * test backend (tests/catalogue_memdb.c) writes immediately on
- * mds_cat_ns_create and discards the txn handle.  The abort
- * assertion was therefore testing the BACKEND's transactional
- * semantics, not the catalogue dispatch contract.  Rather than
- * teach memdb how to roll back (significant work for no production
- * coverage), this test now only validates the commit path; the
- * RonDB-backed integration suites cover the abort path against the
- * real transactional backend.
+ * abort, verify the entry is NOT visible").  That assertion described
+ * a rollback no backend provides: struct mds_cat_txn is a grouping
+ * context (contract C6, catalogue_internal.h / mds_catalogue.h) --
+ * every operation is committed by the backend on its own and abort
+ * only frees the token, on RonDB and memdb alike.  This test keeps the
+ * commit path; the conformance suite (tests/catalogue_conformance/
+ * test_token_semantics.c) pins the abort semantics positively (the
+ * create survives the abort) on every backend.
  * ----------------------------------------------------------------------- */
 
 static void test_catalogue_txn_commit_abort(void)
@@ -1000,13 +1309,13 @@ static void test_catalogue_txn_commit_abort(void)
 	ASSERT_EQ(mds_cat_txn_begin(cat, MDS_CAT_TXN_WRITE, &txn),
 		  MDS_OK);
 	ASSERT_NE(txn, NULL);
-	ASSERT_EQ(mds_cat_ns_create(cat, txn, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, txn, g_dir,
 				    "committed.dir", MDS_FTYPE_DIR,
 				    0755, 0, 0, NULL, &child),
 		  MDS_OK);
 	ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
 
-	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_lookup(cat, g_dir,
 				    "committed.dir", &looked_up),
 		  MDS_OK);
 
@@ -1016,7 +1325,7 @@ static void test_catalogue_txn_commit_abort(void)
 	 * pre-abort write is intentionally NOT asserted (see header). */
 	ASSERT_EQ(mds_cat_txn_begin(cat, MDS_CAT_TXN_WRITE, &txn),
 		  MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, txn, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, txn, g_dir,
 				    "aborted.dir", MDS_FTYPE_DIR,
 				    0755, 0, 0, NULL, &child),
 		  MDS_OK);
@@ -1260,21 +1569,21 @@ static void test_catalogue_ns_rename_keep_orphan(void)
 	cat = open_test_cat(&path);
 
 	/* Case 1: KEEP_DST_ORPHAN — the overwritten inode survives. */
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ren-src", MDS_FTYPE_REG,
 				    0644, 1000, 1000, NULL, &src),
 		  MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ren-dst", MDS_FTYPE_REG,
 				    0644, 1000, 1000, NULL, &dst),
 		  MDS_OK);
 	ASSERT_EQ(mds_cat_ns_rename_flags(cat, NULL,
-					  MDS_FILEID_ROOT, "ren-src",
-					  MDS_FILEID_ROOT, "ren-dst",
+					  g_dir, "ren-src",
+					  g_dir, "ren-dst",
 					  MDS_CAT_RNF_KEEP_DST_ORPHAN),
 		  MDS_OK);
 	/* Name now resolves to the source file... */
-	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_lookup(cat, g_dir,
 				    "ren-dst", &looked), MDS_OK);
 	ASSERT_EQ(looked.fileid, src.fileid);
 	/* ...and the overwritten inode row survived as an orphan. */
@@ -1283,21 +1592,93 @@ static void test_catalogue_ns_rename_keep_orphan(void)
 	ASSERT_TRUE((looked.flags & MDS_IFLAG_UNLINK_ORPHAN) != 0U);
 
 	/* Case 2: flags == 0 — the overwritten inode row is deleted. */
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ren-src2", MDS_FTYPE_REG,
 				    0644, 1000, 1000, NULL, &src),
 		  MDS_OK);
-	ASSERT_EQ(mds_cat_ns_create(cat, NULL, MDS_FILEID_ROOT,
+	ASSERT_EQ(mds_cat_ns_create(cat, NULL, g_dir,
 				    "ren-dst2", MDS_FTYPE_REG,
 				    0644, 1000, 1000, NULL, &dst),
 		  MDS_OK);
 	ASSERT_EQ(mds_cat_ns_rename_flags(cat, NULL,
-					  MDS_FILEID_ROOT, "ren-src2",
-					  MDS_FILEID_ROOT, "ren-dst2",
+					  g_dir, "ren-src2",
+					  g_dir, "ren-dst2",
 					  0U),
 		  MDS_OK);
 	ASSERT_EQ(mds_cat_ns_getattr(cat, dst.fileid, &looked),
 		  MDS_ERR_NOTFOUND);
+
+	close_test_cat(cat, path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_catalogue_memdb_identity_and_capabilities
+ *
+ * The in-memory backend must report its own identity (no longer
+ * impersonating RonDB), expose no native handle, advertise the shared-
+ * authority capability the cross-subtree rename path relies on, and
+ * degrade every optional slot it does not implement to NOSUPPORT with
+ * the documented out-param state -- exactly what a third backend that
+ * skips the fused fast paths would see.
+ * ----------------------------------------------------------------------- */
+
+static void test_catalogue_memdb_identity_and_capabilities(void)
+{
+	struct mds_catalogue *cat;
+	struct nfs4_stateid sid;
+	struct mds_inode out;
+	struct mds_ds_map_entry entry;
+	struct mds_ds_map_entry *entries;
+	uint32_t sc = 1, su = 1, mc = 1;
+	bool layout_ok = true;
+	uint32_t pop_unit = 1;
+	char *path;
+
+	cat = open_test_cat(&path);
+
+	ASSERT_EQ(mds_catalogue_backend_type(cat), MDS_BACKEND_MEMDB);
+	ASSERT_EQ(mds_catalogue_backend_handle(cat) == NULL, 1);
+	ASSERT_TRUE(mds_catalogue_shared_authority(cat));
+
+	/* No schema to bootstrap. */
+	ASSERT_EQ(mds_catalogue_bootstrap_supported(cat), false);
+	ASSERT_EQ(mds_catalogue_bootstrap(cat), MDS_ERR_NOSUPPORT);
+
+	/* Fused fast paths absent: callers fall back to the split ops. */
+	memset(&sid, 0, sizeof(sid));
+	ASSERT_EQ(mds_coord_layoutget_fused_supported(cat), false);
+	entries = &entry;
+	ASSERT_EQ(mds_coord_layoutget_fused(cat, MDS_FILEID_ROOT, &sc, &su,
+					    &mc, &entries, &sid, 1, 2, 0,
+					    UINT64_MAX, 1),
+		  MDS_ERR_NOSUPPORT);
+	ASSERT_EQ(entries == NULL, 1);
+
+	ASSERT_EQ(mds_cat_ns_create_with_layout_supported(cat), false);
+	memset(&entry, 0xFF, sizeof(entry));
+	ASSERT_EQ(mds_cat_ns_create_with_layout(cat, MDS_FILEID_ROOT,
+						"fused", MDS_FTYPE_REG,
+						0644, 0, 0, NULL, &out,
+						1, 2, 0, UINT64_MAX, &sid, 1,
+						&layout_ok, &entry, &pop_unit),
+		  MDS_ERR_NOSUPPORT);
+	ASSERT_EQ(layout_ok, false);
+	ASSERT_EQ(pop_unit, (uint32_t)0);
+	ASSERT_EQ(entry.nfs_fh_len, (uint32_t)0);
+	/* And nothing was created behind the NOSUPPORT. */
+	ASSERT_EQ(mds_cat_ns_lookup(cat, MDS_FILEID_ROOT, "fused", &out),
+		  MDS_ERR_NOTFOUND);
+
+	/* memdb populates the open/lock/deleg slots (as stubs), so the
+	 * daemon wires write-through and the tables see NOSUPPORT /
+	 * OK from the individual rows -- the documented "nothing to
+	 * persist" outcome. */
+	ASSERT_TRUE(mds_coord_shared_state_supported(cat));
+
+	/* An in-process store is never a multi-process cluster store,
+	 * whatever cluster slots it may grow for in-process tests: the
+	 * daemon must refuse cluster_size > 1 on it by construction. */
+	ASSERT_EQ(mds_cluster_supported(cat), false);
 
 	close_test_cat(cat, path);
 }
@@ -1308,7 +1689,8 @@ static void test_catalogue_ns_rename_keep_orphan(void)
 
 int main(void)
 {
-	fprintf(stdout, "test_catalogue:\n");
+	fprintf(stdout, "test_catalogue (backend=%s):\n",
+		conformance_backend_name());
 
 	RUN_TEST(test_catalogue_open_close);
 	RUN_TEST(test_catalogue_ns_create_lookup);
@@ -1320,6 +1702,7 @@ int main(void)
 	RUN_TEST(test_catalogue_ns_readdir_plus_start_after);
 	RUN_TEST(test_catalogue_ns_readdir_max_entries);
 	RUN_TEST(test_catalogue_dirent_name_for_child);
+	RUN_TEST(test_catalogue_readdir_cookie_contract);
 	RUN_TEST(test_catalogue_dirent_insert_only);
 	RUN_TEST(test_catalogue_ns_rename_keep_orphan);
 	RUN_TEST(test_catalogue_stripe_map_wide_round_trip);
@@ -1330,11 +1713,17 @@ int main(void)
 	RUN_TEST(test_catalogue_recovery_put_get_del);
 	RUN_TEST(test_catalogue_txn_commit_abort);
 	RUN_TEST(test_catalogue_escape_hatch);
+	/* Identity assertions are about the in-memory backend itself; on
+	 * any other backend the harness selects they would test nothing. */
+	if (conformance_backend_is("memdb")) {
+		RUN_TEST(test_catalogue_memdb_identity_and_capabilities);
+	}
 	/* test_catalogue_shard_routing_guard and
 	 * test_catalogue_root_global_helper_routing retired -- see
 	 * comment at the function definitions. */
 
-	fprintf(stdout, "\ntest_catalogue: %d/%d passed\n",
-		tests_passed, tests_run);
-	return (tests_passed == tests_run) ? 0 : 1;
+		fprintf(stdout, "\ntest_catalogue: %d/%d passed\n",
+			tests_passed, tests_run);
+		conformance_shutdown();
+		return (tests_passed == tests_run) ? 0 : 1;
 }

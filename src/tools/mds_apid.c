@@ -55,7 +55,7 @@
 /** Largest request (request line + headers) we will read. */
 #define APID_REQUEST_MAX    8192U
 /** Hard ceiling on a response body, so a broad query cannot exhaust RAM. */
-#define APID_BODY_MAX       (32U * 1024U * 1024U)
+#define APID_BODY_MAX       ((size_t)32U * 1024U * 1024U)
 /** Headroom reserved so the closing JSON suffix always fits. */
 #define APID_TAIL_RESERVE   256U
 
@@ -431,7 +431,8 @@ static void usage(const char *prog, int rc)
         "enumerate the whole namespace regardless of POSIX permissions.\n",
         prog, APID_DEFAULT_BIND, (unsigned)APID_DEFAULT_PORT,
         APID_DEFAULT_CONF);
-    exit(rc);
+    /* Option parsing runs before the accept loop, on the only thread. */
+    exit(rc); /* NOLINT(concurrency-mt-unsafe) */
 }
 
 /**
@@ -448,10 +449,11 @@ static int load_token(const char *path, char *out, size_t cap)
     struct stat sb;
     FILE *fp;
     size_t n;
+    char errbuf[128];
 
     if (stat(path, &sb) != 0) {
         (void)fprintf(stderr, "mds-apid: cannot stat %s: %s\n",
-                      path, strerror(errno));
+                      path, admin_errno_text(errno, errbuf, sizeof(errbuf)));
         return -1;
     }
     if ((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
@@ -465,7 +467,7 @@ static int load_token(const char *path, char *out, size_t cap)
     fp = fopen(path, "re");
     if (fp == NULL) {
         (void)fprintf(stderr, "mds-apid: cannot open %s: %s\n",
-                      path, strerror(errno));
+                      path, admin_errno_text(errno, errbuf, sizeof(errbuf)));
         return -1;
     }
     if (fgets(out, (int)cap, fp) == NULL) {
@@ -529,7 +531,7 @@ static void parse_opts(int argc, char **argv, struct options *o)
 
             if (!find_parse_u64(argv[++i], &v) || v == 0U || v > 65535U) {
                 (void)fprintf(stderr, "mds-apid: --port must be 1..65535\n");
-                exit(1);
+                exit(1); /* NOLINT(concurrency-mt-unsafe) */
             }
             o->port = (uint16_t)v;
         } else if (strcmp(a, "--config") == 0) {
@@ -586,6 +588,7 @@ static int listen_on(const char *addr, uint16_t port)
     struct sockaddr_in sa;
     int fd;
     int one = 1;
+    char errbuf[128];
 
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -598,19 +601,22 @@ static int listen_on(const char *addr, uint16_t port)
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        (void)fprintf(stderr, "mds-apid: socket: %s\n", strerror(errno));
+        (void)fprintf(stderr, "mds-apid: socket: %s\n",
+                      admin_errno_text(errno, errbuf, sizeof(errbuf)));
         return -1;
     }
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         (void)fprintf(stderr, "mds-apid: bind %s:%u: %s\n",
-                      addr, (unsigned)port, strerror(errno));
+                      addr, (unsigned)port,
+                      admin_errno_text(errno, errbuf, sizeof(errbuf)));
         close(fd);
         return -1;
     }
     if (listen(fd, 16) < 0) {
-        (void)fprintf(stderr, "mds-apid: listen: %s\n", strerror(errno));
+        (void)fprintf(stderr, "mds-apid: listen: %s\n",
+                      admin_errno_text(errno, errbuf, sizeof(errbuf)));
         close(fd);
         return -1;
     }
@@ -628,6 +634,7 @@ int main(int argc, char **argv)
     bool tls_enabled;
     int listen_fd;
     int rc = 0;
+    char errbuf[128];
 
     memset(&o, 0, sizeof(o));
     memset(&srv, 0, sizeof(srv));
@@ -702,7 +709,8 @@ int main(int argc, char **argv)
             if (errno == EINTR) {
                 continue;
             }
-            (void)fprintf(stderr, "mds-apid: accept: %s\n", strerror(errno));
+            (void)fprintf(stderr, "mds-apid: accept: %s\n",
+                          admin_errno_text(errno, errbuf, sizeof(errbuf)));
             rc = 1;
             break;
         }

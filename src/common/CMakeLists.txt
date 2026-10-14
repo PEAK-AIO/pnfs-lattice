@@ -6,6 +6,7 @@ add_library(pnfs_common STATIC
     threadpool.c
     heartbeat.c
     config.c
+    catalogue_backend_names.c
     error.c
     mds_histogram.c
     mds_metrics.c
@@ -13,12 +14,12 @@ add_library(pnfs_common STATIC
     mds_tls.c
 )
 
-# rondb_stubs.c provides fallback symbols (catalogue_rondb_layoutget_fused,
-# catalogue_rondb_ns_create_with_layout, rondb_shim_fileid_batch_alloc,
-# rondb_shim_bench_create) for builds that did NOT find RonDB headers.
-# When ENABLE_RONDB is on, catalogue_rondb.c and catalogue_rondb_shim.cpp
-# provide the real implementations; linking both produces multiple-definition
-# linker errors.  Compile the stubs only when the real backend is absent.
+# rondb_stubs.c provides fallback symbols (rondb_shim_fileid_batch_alloc,
+# rondb_shim_bench_create) for the RonDB-specific tools in builds that
+# did NOT find RonDB headers.  When ENABLE_RONDB is on,
+# catalogue_rondb_shim.cpp provides the real implementations; linking
+# both produces multiple-definition linker errors.  Compile the stubs
+# only when the real backend is absent.
 if(NOT ENABLE_RONDB)
     target_sources(pnfs_common PRIVATE rondb_stubs.c)
 endif()

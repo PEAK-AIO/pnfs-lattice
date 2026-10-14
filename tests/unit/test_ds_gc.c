@@ -77,9 +77,7 @@ static char *make_ds_dir(void)
 
 static void rm_ds_dir(char *path)
 {
-    char cmd[4200];
-    (void)snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    test_rm_rf(path);
     free(path);
 }
 

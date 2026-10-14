@@ -729,35 +729,50 @@ int deleg_check_conflict(struct deleg_table *dt,
     return 0;
 }
 
-int deleg_recall_file(struct deleg_table *dt,
-                      uint64_t fileid, uint64_t clientid,
-                      uint32_t timeout_ms)
+/*
+ * RFC 8881 §10.2.1: move the stateid to the revoked set so the client
+ * sees DELEG_REVOKED (not BAD_STATEID) on any subsequent use.  Pynfs
+ * DELEG8.  Allocation failure just loses the REVOKED hint.
+ */
+static void deleg_revoked_add(struct deleg_table *dt,
+                              const struct deleg_entry *e)
 {
-    struct deleg_recall_target targets[DELEG_RECALL_MAX_PER_FILE];
+    struct deleg_revoked_entry *re = calloc(1, sizeof(*re));
+
+    if (re != NULL) {
+        memcpy(re->other, e->stateid.other, NFS4_OTHER_SIZE);
+        re->clientid = e->clientid;
+        pthread_mutex_lock(&dt->revoked_lock);
+        re->next = dt->revoked_head;
+        dt->revoked_head = re;
+        pthread_mutex_unlock(&dt->revoked_lock);
+    }
+}
+
+/*
+ * Phase 1 of deleg_recall_file -- under the stripe lock: snapshot
+ * every conflicting grant out of the bucket and unlink it.  We MUST
+ * NOT call into the session table or send any CB while holding the
+ * stripe lock (the session table has its own lock; nesting them
+ * creates a lock-order trap with concurrent EXCHANGE_ID /
+ * DESTROY_SESSION paths that already grab the session lock first).
+ * By copying the in-memory record into a stack array we can drop the
+ * stripe lock immediately and do all CB I/O against detached
+ * snapshots with no chance of dereferencing a stale session pointer.
+ *
+ * Takes and releases the stripe lock.  Returns the number of targets
+ * written to @targets (at most @cap).
+ */
+static uint32_t deleg_recall_detach(struct deleg_table *dt,
+                                    uint64_t fileid, uint64_t clientid,
+                                    struct deleg_recall_target *targets,
+                                    uint32_t cap)
+{
     uint32_t target_count = 0;
     uint32_t bucket;
     struct deleg_entry *e;
     struct deleg_entry **pp;
-    int recalled;
 
-    if (dt == NULL) {
-        return -1;
-    }
-    if (timeout_ms == 0) {
-        timeout_ms = DELEG_RECALL_DEFAULT_MS;
-    }
-
-    /*
-     * Phase 1 -- under the stripe lock: snapshot every conflicting
-     * grant out of the bucket and unlink it.  We MUST NOT call into
-     * the session table or send any CB while holding the stripe lock
-     * (the session table has its own lock; nesting them creates a
-     * lock-order trap with concurrent EXCHANGE_ID / DESTROY_SESSION
-     * paths that already grab the session lock first).  By copying
-     * the in-memory record into a stack array we can drop the stripe
-     * lock immediately and do all CB I/O against detached snapshots
-     * with no chance of dereferencing a stale session pointer.
-     */
     lock_stripe(dt, fileid);
 
     bucket = deleg_hash(fileid);
@@ -770,7 +785,7 @@ int deleg_recall_file(struct deleg_table *dt,
             continue;
         }
 
-        if (target_count < DELEG_RECALL_MAX_PER_FILE) {
+        if (target_count < cap) {
             targets[target_count].stateid  = e->stateid;
             targets[target_count].clientid = e->clientid;
             targets[target_count].fileid   = e->fileid;
@@ -788,7 +803,7 @@ int deleg_recall_file(struct deleg_table *dt,
             MDS_LOG_INFO(LOG_COMP_MDS,
                 "deleg: recall cap %u reached on fileid=%llu; "
                 "deferring surplus entries",
-                (unsigned)DELEG_RECALL_MAX_PER_FILE,
+                (unsigned)cap,
                 (unsigned long long)fileid);
             break;
         }
@@ -800,28 +815,91 @@ int deleg_recall_file(struct deleg_table *dt,
         }
         *pp = e->hash_next;
 
-        /*
-         * RFC 8881 §10.2.1: move the stateid to the revoked set
-         * so the client sees DELEG_REVOKED (not BAD_STATEID)
-         * on any subsequent use.  Pynfs DELEG8.
-         */
-        {
-            struct deleg_revoked_entry *re =
-                calloc(1, sizeof(*re));
-            if (re != NULL) {
-                memcpy(re->other, e->stateid.other,
-                       NFS4_OTHER_SIZE);
-                re->clientid = e->clientid;
-                pthread_mutex_lock(&dt->revoked_lock);
-                re->next = dt->revoked_head;
-                dt->revoked_head = re;
-                pthread_mutex_unlock(&dt->revoked_lock);
-            }
-        }
+        deleg_revoked_add(dt, e);
         free(e);
     }
 
     unlock_stripe(dt, fileid);
+    return target_count;
+}
+
+/*
+ * Phase 2 of deleg_recall_file for one detached snapshot: find the
+ * holder's backchannel via the session table, dup() the cb_conn fd
+ * under the session-table lock, then send CB_RECALL on the dup'd fd.
+ * Per RFC 8881 S10.4, the recall is best-effort: the authoritative
+ * contract with the caller is "this delegation is gone", which is
+ * already true after Phase 1.  Any send error (ENOTCONN / ETIMEDOUT /
+ * EIO / NFS4 status) is logged and swallowed.  No retry: the caller
+ * proceeds with the conflicting mutation.
+ */
+static void deleg_recall_send_one(struct deleg_table *dt,
+                                  const struct deleg_recall_target *t,
+                                  uint32_t timeout_ms)
+{
+    struct deleg_cb_lookup_ctx lc;
+    struct nfs4_cb_recall_args ra;
+    int cbrc;
+
+    memset(&lc, 0, sizeof(lc));
+    lc.want_clientid = t->clientid;
+    lc.fd = -1;
+
+    (void)session_for_each_with_cb(dt->st, deleg_cb_lookup_cb, &lc);
+    if (!lc.found) {
+        /* Holder has no bound backchannel -- silent revoke is
+         * the only correct outcome.  The client will discover
+         * its delegation is gone on its next OPEN/READ/WRITE
+         * via NFS4ERR_BAD_STATEID. */
+        return;
+    }
+
+    memset(&ra, 0, sizeof(ra));
+    ra.stateid  = t->stateid;
+    ra.truncate = false;
+    ra.fileid   = t->fileid;
+    /* Filehandle must match the client's (RFC 8881 S20.2). */
+    deleg_fh_identity(dt, t->fileid,
+                      &ra.owner_mds_id, &ra.generation);
+
+    cbrc = nfs4_cb_recall_fd(lc.fd, lc.session_id, lc.cb_prog,
+                             lc.slot_seq_id, lc.num_cb_slots,
+                             lc.minorversion, &lc.cb_sec,
+                             &ra, timeout_ms);
+    if (cbrc != 0) {
+        MDS_LOG_INFO(LOG_COMP_MDS,
+            "deleg: CB_RECALL fileid=%llu client=%llu "
+            "rc=%d \u2014 already revoked",
+            (unsigned long long)t->fileid,
+            (unsigned long long)t->clientid, cbrc);
+    }
+    /* NOTE: cbrc == 0 only means the record was SENT — the
+     * backchannel is fire-and-forget (replies are consumed by
+     * the connection's epoll reader).  The ledger entry
+     * therefore stays until the client acknowledges via
+     * DELEGRETURN / FREE_STATEID, or the TTL / resend cap
+     * reaps it. */
+    (void)close(lc.fd);
+}
+
+int deleg_recall_file(struct deleg_table *dt,
+                      uint64_t fileid, uint64_t clientid,
+                      uint32_t timeout_ms)
+{
+    struct deleg_recall_target targets[DELEG_RECALL_MAX_PER_FILE];
+    uint32_t target_count;
+    int recalled;
+
+    if (dt == NULL) {
+        return -1;
+    }
+    if (timeout_ms == 0) {
+        timeout_ms = DELEG_RECALL_DEFAULT_MS;
+    }
+
+    /* Phase 1 (stripe lock held inside): snapshot + unlink. */
+    target_count = deleg_recall_detach(dt, fileid, clientid, targets,
+                                       DELEG_RECALL_MAX_PER_FILE);
 
     /*
      * Ledger every recall target BEFORE any CB I/O (pynfs DSESS9003):
@@ -837,17 +915,7 @@ int deleg_recall_file(struct deleg_table *dt,
                              targets[pi].fileid);
     }
 
-    /*
-     * Phase 2 -- outside the stripe lock: for each detached snapshot,
-     * find the holder's backchannel via the session table, dup() the
-     * cb_conn fd under the session-table lock, then send CB_RECALL on
-     * the dup'd fd.  Per RFC 8881 S10.4, the recall is best-effort:
-     * the authoritative contract with the caller is "this delegation
-     * is gone", which is already true after Phase 1.  Any send error
-     * (ENOTCONN / ETIMEDOUT / EIO / NFS4 status) is logged and
-     * swallowed.  No retry: the caller proceeds with the conflicting
-     * mutation.
-     */
+    /* Phase 2 -- outside the stripe lock (see deleg_recall_send_one). */
     recalled = (int)target_count;
     if (dt->st == NULL) {
         /*
@@ -860,49 +928,7 @@ int deleg_recall_file(struct deleg_table *dt,
     }
 
     for (uint32_t i = 0; i < target_count; i++) {
-        struct deleg_cb_lookup_ctx lc;
-        struct nfs4_cb_recall_args ra;
-        int cbrc;
-
-        memset(&lc, 0, sizeof(lc));
-        lc.want_clientid = targets[i].clientid;
-        lc.fd = -1;
-
-        (void)session_for_each_with_cb(dt->st, deleg_cb_lookup_cb, &lc);
-        if (!lc.found) {
-            /* Holder has no bound backchannel -- silent revoke is
-             * the only correct outcome.  The client will discover
-             * its delegation is gone on its next OPEN/READ/WRITE
-             * via NFS4ERR_BAD_STATEID. */
-            continue;
-        }
-
-        memset(&ra, 0, sizeof(ra));
-        ra.stateid  = targets[i].stateid;
-        ra.truncate = false;
-        ra.fileid   = targets[i].fileid;
-        /* Filehandle must match the client's (RFC 8881 S20.2). */
-        deleg_fh_identity(dt, targets[i].fileid,
-                          &ra.owner_mds_id, &ra.generation);
-
-        cbrc = nfs4_cb_recall_fd(lc.fd, lc.session_id, lc.cb_prog,
-                                 lc.slot_seq_id, lc.num_cb_slots,
-                                 lc.minorversion, &lc.cb_sec,
-                                 &ra, timeout_ms);
-        if (cbrc != 0) {
-            MDS_LOG_INFO(LOG_COMP_MDS,
-                "deleg: CB_RECALL fileid=%llu client=%llu "
-                "rc=%d \u2014 already revoked",
-                (unsigned long long)targets[i].fileid,
-                (unsigned long long)targets[i].clientid, cbrc);
-        }
-        /* NOTE: cbrc == 0 only means the record was SENT — the
-         * backchannel is fire-and-forget (replies are consumed by
-         * the connection's epoll reader).  The ledger entry
-         * therefore stays until the client acknowledges via
-         * DELEGRETURN / FREE_STATEID, or the TTL / resend cap
-         * reaps it. */
-        (void)close(lc.fd);
+        deleg_recall_send_one(dt, &targets[i], timeout_ms);
     }
 
     return recalled;

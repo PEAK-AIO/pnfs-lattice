@@ -74,6 +74,12 @@ int layout_commit_aggregator_submit(struct layout_commit_aggregator *agg,
     return 0;
 }
 
+/*
+ * The output pointers stay non-const to match the public prototype:
+ * the contract says a miss leaves them untouched, so this stub never
+ * writes them, while the real implementation fills them on a hit.
+ */
+/* NOLINTBEGIN(readability-non-const-parameter) */
 int layout_commit_aggregator_peek(struct layout_commit_aggregator *agg,
                                   uint64_t fileid,
                                   uint64_t *out_size,
@@ -87,6 +93,7 @@ int layout_commit_aggregator_peek(struct layout_commit_aggregator *agg,
     (void)out_dirty;
     return -1;   /* miss */
 }
+/* NOLINTEND(readability-non-const-parameter) */
 
 int layout_commit_aggregator_flush_fileid(
     struct layout_commit_aggregator *agg, uint64_t fileid)

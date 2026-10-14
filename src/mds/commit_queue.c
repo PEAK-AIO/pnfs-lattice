@@ -131,7 +131,7 @@ int commit_queue_create(struct mds_catalogue *cat,
  * include/commit_queue.h) need only outlive the call to
  * commit_queue_submit().  Because dispatch is synchronous and the
  * vtable backends that store the array deep-copy before returning
- * (see tests/catalogue_memdb.c::mem_layout_grant; the RonDB shim
+ * (see src/catalogue/catalogue_memdb.c::mem_layout_grant; the RonDB shim
  * re-encodes via the row writer), callers may borrow stack-locals
  * or transient buffers -- see e.g. layout_recall.c::revoke_layout
  * and compound_data_io.c::op_open's pre_create_ds_id path.  If

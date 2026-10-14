@@ -588,9 +588,10 @@ int nfs4_cb_layoutrecall(struct nfs4_session *session,
         return -ENOTCONN;
 }
 
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-}
+    /* No reply is awaited on this path (see the send comment below),
+     * so the timeout is unused; the parameter stays for API symmetry
+     * with nfs4_cb_getattr_fd. */
+    (void)timeout_ms;
 
     fd = rpc_conn_get_fd(session->cb_conn);
     if (fd < 0) {
@@ -693,9 +694,8 @@ int nfs4_cb_notify(struct nfs4_session *session,
     if (session->cb_conn == NULL) {
         return -ENOTCONN;
     }
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-    }
+    /* Fire-and-forget (no reply awaited): timeout unused. */
+    (void)timeout_ms;
 
     fd = rpc_conn_get_fd(session->cb_conn);
     if (fd < 0) {
@@ -778,9 +778,8 @@ int nfs4_cb_notify_fd(int fd,
         args->notify_type != NOTIFY4_RENAME_ENTRY) {
         return -EINVAL;
     }
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-    }
+    /* Fire-and-forget (no reply awaited): timeout unused. */
+    (void)timeout_ms;
 
     xid = atomic_fetch_add(&cb_xid_counter, 1);
 
@@ -837,9 +836,8 @@ int nfs4_cb_recall(struct nfs4_session *session,
     if (session->cb_conn == NULL) {
         return -ENOTCONN;
     }
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-    }
+    /* Fire-and-forget (no reply awaited): timeout unused. */
+    (void)timeout_ms;
 
     fd = rpc_conn_get_fd(session->cb_conn);
     if (fd < 0) {
@@ -934,9 +932,8 @@ int nfs4_cb_recall_fd(int fd,
         return -EINVAL;
     }
 
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-    }
+    /* Fire-and-forget (no reply awaited): timeout unused. */
+    (void)timeout_ms;
 
     xid = atomic_fetch_add(&cb_xid_counter, 1);
 
@@ -996,9 +993,8 @@ int nfs4_cb_layoutrecall_fd(int fd,
         return -EINVAL;
     }
 
-    if (timeout_ms == 0) {
-        timeout_ms = cb_default_timeout();
-    }
+    /* Fire-and-forget (no reply awaited): timeout unused. */
+    (void)timeout_ms;
 
     xid = atomic_fetch_add(&cb_xid_counter, 1);
 
@@ -1171,6 +1167,127 @@ static bool encode_cb_getattr(XDR *xdrs, uint64_t fileid, uint32_t mds_id,
     return true;
 }
 
+/* RPC reply header: xid(4) msg_type(4)=1 reply_stat(4)=0
+ *                   verf_flavor(4) verf_len(4) verf_body(var)
+ *                   accept_stat(4)=0 */
+static bool decode_rpc_reply_header(XDR *xdrs)
+{
+    uint32_t v;
+
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* xid */
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* msg_type */
+    if (v != 1) { return false; } /* must be REPLY */
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* reply_stat */
+    if (v != 0) { return false; } /* MSG_ACCEPTED */
+    /* verifier: flavor + len + body */
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* verf flavor */
+    { uint32_t vlen;
+      if (!xdr_uint32_t(xdrs, &vlen)) { return false; }
+      if (vlen > 0) {
+          char skip[400];
+          if (vlen > sizeof(skip)) { return false; }
+          if (!xdr_opaque_decode(xdrs, skip, vlen)) { return false; }
+      }
+    }
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* accept_stat */
+    return v == 0; /* SUCCESS */
+}
+
+/* CB_COMPOUND4res: status(4) + tag(var) + resarray_count(4).
+ * Requires NFS4_OK and at least CB_SEQUENCE + CB_GETATTR results. */
+static bool decode_cb_compound_res_header(XDR *xdrs)
+{
+    uint32_t v;
+    uint32_t res_count;
+
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* compound status */
+    if (v != 0) { return false; } /* NFS4_OK */
+    { uint32_t tlen;
+      if (!xdr_uint32_t(xdrs, &tlen)) { return false; }
+      if (tlen > 0) {
+          char skip[64];
+          if (tlen > sizeof(skip)) { return false; }
+          if (!xdr_opaque_decode(xdrs, skip, tlen)) { return false; }
+      }
+    }
+    if (!xdr_uint32_t(xdrs, &res_count)) { return false; }
+    return res_count >= 2;
+}
+
+/* Skip CB_SEQUENCE result: opnum(4) + status(4) + body. */
+static bool decode_cb_sequence_res_skip(XDR *xdrs)
+{
+    uint32_t v;
+
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* opnum */
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* status */
+    if (v != 0) { return false; }
+    /* CB_SEQUENCE4resok per RFC 8881 §20.9.3:
+     *   session_id(16) + sequenceid(4) + slotid(4)
+     *   + highest_slotid(4) + target_highest_slotid(4)
+     *
+     * NOTE: unlike the fore-channel SEQUENCE4resok (§18.46),
+     * CB_SEQUENCE4resok does NOT include csr_status_flags.
+     * The peek below is defensive: if an implementation adds
+     * an extra field, we consume it instead of misaligning. */
+    { char sid[16];
+      if (!xdr_opaque_decode(xdrs, sid, 16)) { return false; }
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    }
+    /* Peek: if the next word is NOT the CB_GETATTR opnum (3),
+     * assume it is status_flags and consume it. */
+    {
+        uint32_t peek_pos = xdr_getpos(xdrs);
+        uint32_t peek_val;
+        if (!xdr_uint32_t(xdrs, &peek_val)) { return false; }
+        if (peek_val != OP_CB_GETATTR) {
+            /* Was status_flags — consumed; next read is opnum. */
+        } else {
+            /* Was the opnum itself — rewind so the outer
+             * CB_GETATTR parse reads it. */
+            xdr_setpos(xdrs, peek_pos);
+        }
+    }
+    return true;
+}
+
+/* CB_GETATTR result: opnum(4) + status(4) + fattr4 on OK. */
+static bool decode_cb_getattr_res(XDR *xdrs,
+                                  struct nfs4_cb_getattr_result *out)
+{
+    uint32_t v;
+
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* opnum */
+    if (!xdr_uint32_t(xdrs, &v)) { return false; } /* status */
+    if (v != 0) { return false; }
+
+    /* fattr4 = bitmap4 + opaque attr_vals<> */
+    uint32_t bm[3] = {0};
+    uint32_t bm_count;
+    if (!xdr_uint32_t(xdrs, &bm_count)) { return false; }
+    for (uint32_t i = 0; i < bm_count && i < 3; i++) {
+        if (!xdr_uint32_t(xdrs, &bm[i])) { return false; }
+    }
+    /* Skip any bitmap words beyond what we handle. */
+    for (uint32_t i = 3; i < bm_count; i++) {
+        if (!xdr_uint32_t(xdrs, &v)) { return false; }
+    }
+    uint32_t attr_len;
+    if (!xdr_uint32_t(xdrs, &attr_len)) { return false; }
+    /* Parse attr_vals in bitmap order. */
+    bool has_change = (bm[0] & (1u << 3)) != 0;
+    bool has_size   = (bm[0] & (1u << 4)) != 0;
+    if (has_change) {
+        if (!xdr_uint64_t(xdrs, &out->change)) { return false; }
+    }
+    if (has_size) {
+        if (!xdr_uint64_t(xdrs, &out->size)) { return false; }
+    }
+    return true;
+}
+
 /**
  * Parse a CB_GETATTR reply to extract size + change.
  * The reply wire form is:
@@ -1183,114 +1300,77 @@ static int decode_cb_getattr_reply(const uint8_t *buf, uint32_t len,
                                    struct nfs4_cb_getattr_result *out)
 {
     XDR xdrs;
-    uint32_t v;
+    bool ok;
     out->valid = false;
 
-    xdrmem_create(&xdrs, (char *)(uintptr_t)buf, len, XDR_DECODE);
+    /* xdrmem_create() has no const-qualified form; the stream is
+     * XDR_DECODE and never writes the buffer. */
+    xdrmem_create(&xdrs, (char *)buf, len, XDR_DECODE);
 
-    /* RPC reply header: xid(4) msg_type(4)=1 reply_stat(4)=0
-     *                   verf_flavor(4) verf_len(4) verf_body(var)
-     *                   accept_stat(4)=0 */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* xid */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* msg_type */
-    if (v != 1) { goto fail; } /* must be REPLY */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* reply_stat */
-    if (v != 0) { goto fail; } /* MSG_ACCEPTED */
-    /* verifier: flavor + len + body */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* verf flavor */
-    { uint32_t vlen;
-      if (!xdr_uint32_t(&xdrs, &vlen)) { goto fail; }
-      if (vlen > 0) {
-          char skip[400];
-          if (vlen > sizeof(skip)) { goto fail; }
-          if (!xdr_opaque_decode(&xdrs, skip, vlen)) { goto fail; }
-      }
+    ok = decode_rpc_reply_header(&xdrs) &&
+         decode_cb_compound_res_header(&xdrs) &&
+         decode_cb_sequence_res_skip(&xdrs) &&
+         decode_cb_getattr_res(&xdrs, out);
+    if (ok) {
+        out->valid = true;
     }
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* accept_stat */
-    if (v != 0) { goto fail; } /* SUCCESS */
+    xdr_destroy(&xdrs);
+    return ok ? 0 : -1;
+}
 
-    /* CB_COMPOUND4res: status(4) + tag(var) + resarray_count(4) */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* compound status */
-    if (v != 0) { goto fail; } /* NFS4_OK */
-    { uint32_t tlen;
-      if (!xdr_uint32_t(&xdrs, &tlen)) { goto fail; }
-      if (tlen > 0) {
-          char skip[64];
-          if (tlen > sizeof(skip)) { goto fail; }
-          if (!xdr_opaque_decode(&xdrs, skip, tlen)) { goto fail; }
-      }
-    }
-    uint32_t res_count;
-    if (!xdr_uint32_t(&xdrs, &res_count)) { goto fail; }
-    if (res_count < 2) { goto fail; }
-
-    /* Skip CB_SEQUENCE result: opnum(4) + status(4) + body. */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* opnum */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* status */
-    if (v != 0) { goto fail; }
-    /* CB_SEQUENCE4resok per RFC 8881 §20.9.3:
-     *   session_id(16) + sequenceid(4) + slotid(4)
-     *   + highest_slotid(4) + target_highest_slotid(4)
-     *
-     * NOTE: unlike the fore-channel SEQUENCE4resok (§18.46),
-     * CB_SEQUENCE4resok does NOT include csr_status_flags.
-     * The peek below is defensive: if an implementation adds
-     * an extra field, we consume it instead of misaligning. */
-    { char sid[16];
-      if (!xdr_opaque_decode(&xdrs, sid, 16)) { goto fail; }
-    }
-    for (int i = 0; i < 4; i++) {
-        if (!xdr_uint32_t(&xdrs, &v)) { goto fail; }
-    }
-    /* Peek: if the next word is NOT the CB_GETATTR opnum (3),
-     * assume it is status_flags and consume it. */
+/*
+ * Slow path for nfs4_cb_getattr_fd: the epoll thread can't read
+ * (EPOLLIN disabled on our connection, or the reply just hasn't
+ * arrived).  Do a blocking recv with SO_RCVTIMEO on the dup'd fd.
+ *
+ * The dup'd fd shares the O_NONBLOCK flag with the original
+ * connection fd (set by handle_epoll_accept).  SO_RCVTIMEO has
+ * no effect on non-blocking sockets — recv returns EAGAIN
+ * immediately.  Clear O_NONBLOCK so the recv actually blocks.
+ *
+ * On success the record body is in reply_buf and *payload_len is its
+ * length.  Returns 0, -ETIMEDOUT when recv fails or times out, or
+ * -EIO when the record does not fit in reply_cap bytes.
+ */
+static int cb_recv_record_blocking(int fd, uint32_t timeout_ms,
+                                   uint8_t *reply_buf, size_t reply_cap,
+                                   uint32_t *payload_len)
+{
     {
-        uint32_t peek_pos = xdr_getpos(&xdrs);
-        uint32_t peek_val;
-        if (!xdr_uint32_t(&xdrs, &peek_val)) { goto fail; }
-        if (peek_val != OP_CB_GETATTR) {
-            /* Was status_flags — consumed; next read is opnum. */
-        } else {
-            /* Was the opnum itself — rewind so the outer
-             * CB_GETATTR parse reads it. */
-            xdr_setpos(&xdrs, peek_pos);
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0 && (flags & O_NONBLOCK)) {
+            fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+        struct timeval tv;
+        tv.tv_sec  = timeout_ms / 1000;
+        tv.tv_usec = (suseconds_t)(timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    /* Read the 4-byte record-mark header. */
+    uint32_t frag_hdr_be;
+    {
+        size_t got = 0;
+        while (got < 4) {
+            ssize_t n = recv(fd, (uint8_t *)&frag_hdr_be + got,
+                            4 - got, 0);
+            if (n <= 0) { return -ETIMEDOUT; }
+            got += (size_t)n;
         }
     }
-
-    /* CB_GETATTR result: opnum(4) + status(4) + fattr4 on OK. */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* opnum */
-    if (!xdr_uint32_t(&xdrs, &v)) { goto fail; } /* status */
-    if (v != 0) { goto fail; }
-
-    /* fattr4 = bitmap4 + opaque attr_vals<> */
-    uint32_t bm[3] = {0};
-    uint32_t bm_count;
-    if (!xdr_uint32_t(&xdrs, &bm_count)) { goto fail; }
-    for (uint32_t i = 0; i < bm_count && i < 3; i++) {
-        if (!xdr_uint32_t(&xdrs, &bm[i])) { goto fail; }
+    uint32_t len = ntohl(frag_hdr_be) & 0x7FFFFFFFu;
+    if (len > reply_cap) {
+        return -EIO;
     }
-    /* Skip any bitmap words beyond what we handle. */
-    for (uint32_t i = 3; i < bm_count; i++) {
-        if (!xdr_uint32_t(&xdrs, &v)) { goto fail; }
+    {
+        size_t got = 0;
+        while (got < len) {
+            ssize_t n = recv(fd, reply_buf + got, len - got, 0);
+            if (n <= 0) { return -ETIMEDOUT; }
+            got += (size_t)n;
+        }
     }
-    uint32_t attr_len;
-    if (!xdr_uint32_t(&xdrs, &attr_len)) { goto fail; }
-    /* Parse attr_vals in bitmap order. */
-    bool has_change = (bm[0] & (1u << 3)) != 0;
-    bool has_size   = (bm[0] & (1u << 4)) != 0;
-    if (has_change) {
-        if (!xdr_uint64_t(&xdrs, &out->change)) { goto fail; }
-    }
-    if (has_size) {
-        if (!xdr_uint64_t(&xdrs, &out->size)) { goto fail; }
-    }
-    out->valid = true;
-    xdr_destroy(&xdrs);
+    *payload_len = len;
     return 0;
-
-fail:
-    xdr_destroy(&xdrs);
-    return -1;
 }
 
 int nfs4_cb_getattr_fd(int fd,
@@ -1382,47 +1462,13 @@ int nfs4_cb_getattr_fd(int fd,
     }
     cb_pending_unregister();
 
-    /* Slow path: epoll thread can't read (EPOLLIN disabled on our
-     * connection, or the reply just hasn't arrived).  Do a blocking
-     * recv with SO_RCVTIMEO on the dup'd fd.
-     *
-     * The dup'd fd shares the O_NONBLOCK flag with the original
-     * connection fd (set by handle_epoll_accept).  SO_RCVTIMEO has
-     * no effect on non-blocking sockets — recv returns EAGAIN
-     * immediately.  Clear O_NONBLOCK so the recv actually blocks. */
-    {
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0 && (flags & O_NONBLOCK)) {
-            fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-        }
-        struct timeval tv;
-        tv.tv_sec  = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
-    /* Read the 4-byte record-mark header. */
-    uint32_t frag_hdr_be;
-    {
-        size_t got = 0;
-        while (got < 4) {
-            ssize_t n = recv(fd, (uint8_t *)&frag_hdr_be + got,
-                            4 - got, 0);
-            if (n <= 0) { return -ETIMEDOUT; }
-            got += (size_t)n;
-        }
-    }
-    uint32_t payload_len = ntohl(frag_hdr_be) & 0x7FFFFFFFu;
-    if (payload_len > sizeof(reply_buf)) {
-        return -EIO;
-    }
-    {
-        size_t got = 0;
-        while (got < payload_len) {
-            ssize_t n = recv(fd, reply_buf + got,
-                            payload_len - got, 0);
-            if (n <= 0) { return -ETIMEDOUT; }
-            got += (size_t)n;
-        }
+    /* Slow path: blocking recv on the dup'd fd (see
+     * cb_recv_record_blocking for why this is safe here). */
+    uint32_t payload_len = 0;
+    rc = cb_recv_record_blocking(fd, timeout_ms, reply_buf,
+                                 sizeof(reply_buf), &payload_len);
+    if (rc != 0) {
+        return rc;
     }
     rc = decode_cb_getattr_reply(reply_buf, payload_len, out);
     return (rc == 0 && out->valid) ? 0 : -EIO;
