@@ -447,6 +447,26 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
                                      uint64_t length);
 
 /**
+ * Discard DS file data beyond a new logical size.
+ *
+ * Walks the file's stripe map and truncates every per-stripe DS file
+ * to @p new_size.  DS-file offsets mirror logical offsets (sparse
+ * layout), so one truncate per stripe file removes exactly the bytes
+ * the catalogue size no longer covers.  Needed after a shrinking
+ * SETATTR(size): the catalogue size alone does not erase DS extents,
+ * and a later grow would otherwise expose the stale tail instead of
+ * zeroes.  Missing DS files (stripe never materialised) are skipped.
+ * Truncating a short file extends it sparsely, which is harmless
+ * because reads are bounded by the logical size.
+ *
+ * @return MDS_OK, MDS_ERR_INVAL, MDS_ERR_NOTFOUND, MDS_ERR_IO.
+ */
+enum mds_status mds_proxy_discard_tail(const struct mds_proxy_ctx *ctx,
+                                       struct mds_catalogue *cat,
+                                       uint64_t fileid,
+                                       uint64_t new_size);
+
+/**
  * Proxy SEEK: find next DATA or HOLE boundary on the DS file.
  *
  * @param logical_size Authoritative logical inode size.

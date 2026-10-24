@@ -1179,6 +1179,20 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 		compound_recall_dir_delegations(cd, cd->current_fh.fileid);
 	}
 
+	/*
+	 * The DS tail discard below needs the pre-mutation size to tell
+	 * a shrink from a grow.  Both shortcuts above may have skipped
+	 * on the fast request path, so force the read here -- before
+	 * cat_setattr rewrites the catalogue row.
+	 */
+	if (!sa_pre_valid &&
+	    (sa_mask & MDS_ATTR_SIZE) != 0) {
+		if (compound_inode_get(cd, cd->current_fh.fileid,
+				       &sa_pre_inode) == MDS_OK) {
+			sa_pre_valid = true;
+		}
+	}
+
 	st = cat_setattr(cd, cd->current_fh.fileid,
 			 &sa_attrs, sa_mask);
 	/* Invalidate snapshot BEFORE post-mutation re-read. */
@@ -1207,6 +1221,42 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 					cd->current_fh.fileid);
 		layout_commit_aggregator_drop(cd->lcommit_agg,
 					      cd->current_fh.fileid);
+	}
+	/*
+	 * Discard the DS tail on a shrinking SETATTR(size).
+	 *
+	 * The catalogue size is authoritative for reads and EOF, but the
+	 * per-stripe DS files keep their extents; a later grow would then
+	 * expose those stale bytes instead of zeroes.  Truncate every DS
+	 * file down to the new size now that the catalogue row is
+	 * committed.  Best-effort: the metadata write already succeeded,
+	 * so failing the SETATTR here would only desynchronise client
+	 * and catalogue.
+	 *
+	 * Inline files have no DS backing store; files without proxy
+	 * context cannot reach the DS mounts.  A regular file that never
+	 * reached a DS has no stripe map: the discard reports NOTFOUND
+	 * and there is nothing to clear.
+	 */
+	if (st == MDS_OK &&
+	    (sa_mask & MDS_ATTR_SIZE) != 0 &&
+	    sa_pre_valid &&
+	    sa_pre_inode.type == MDS_FTYPE_REG &&
+	    (sa_pre_inode.flags & MDS_IFLAG_INLINE) == 0 &&
+	    sa_attrs.size < sa_pre_inode.size &&
+	    cd->proxy != NULL) {
+		enum mds_status dsc_st = mds_proxy_discard_tail(
+			cd->proxy, cd->cat, cd->current_fh.fileid,
+			sa_attrs.size);
+
+		if (dsc_st != MDS_OK && dsc_st != MDS_ERR_NOTFOUND) {
+			MDS_LOG_WARN(LOG_COMP_NFS,
+				     "SETATTR(fileid=%llu) shrink to %llu: "
+				     "DS tail discard failed: %s",
+				     (unsigned long long)cd->current_fh.fileid,
+				     (unsigned long long)sa_attrs.size,
+				     mds_status_str(dsc_st));
+		}
 	}
 	/*
 	 * Mark Q5 P03 — layout-recall on truncate.
