@@ -2420,10 +2420,13 @@ proxy_write:
 				}
 				{
 					/* setattr always bumps ctime+change;
-					 * we add MTIME_NOW + SIZE if extending. */
+					 * MTIME_NOW + SIZE_EXTEND if extending.  Grow-only:
+					 * concurrent proxy writes take max(size) so a stale
+					 * update can never shrink the file (same as the
+					 * LAYOUTCOMMIT path in compound_layout.c). */
 					uint32_t mask = MDS_ATTR_MTIME_NOW;
 					if (new_end > pre_write_size) {
-						mask |= MDS_ATTR_SIZE;
+						mask |= MDS_ATTR_SIZE_EXTEND;
 					}
 					if (wr_clear) {
 						mask |= MDS_ATTR_MODE;
