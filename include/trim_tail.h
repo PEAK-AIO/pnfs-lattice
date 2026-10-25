@@ -19,7 +19,17 @@
 #define TRIM_TAIL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include "pnfs_mds.h"
+
+/* Forward declarations (bound before the drainer starts; see the
+ * setter docs below). */
+struct mds_catalogue;
+struct mds_proxy_ctx;
+struct subtree_map;
+struct layout_recall;
 
 /**
  * @brief Initialise the trim module state.
@@ -113,5 +123,90 @@ bool trim_quiescing(uint64_t fileid);
  * @return Resolved wait in seconds.
  */
 uint32_t trim_max_wait_sec(void);
+
+/**
+ * @brief Resolved NFS lease duration in seconds.
+ *
+ * Stable once trim_module_init() has run; 0 in the config resolves
+ * to the library default (90).  Binds the layout-quiescence wait in
+ * trim_process_entry() (lease_time_sec * 1000 ms).
+ *
+ * @return Resolved lease in seconds.
+ */
+uint32_t trim_lease_sec(void);
+
+/**
+ * @brief Bind the partition map used by the trim ownership guard.
+ *
+ * When bound (non-NULL), trim_process_entry() resolves the file's
+ * path (parent_fileid ancestry walk against authoritative reads) and
+ * compares the owning MDS in @a map against the catalogue handle's
+ * self_mds_id: a non-owner leaves the row queued for the successor
+ * owner and never touches the DS files.  NULL (the default, and
+ * every single-MDS deployment) fails open: this MDS is its own
+ * owner.
+ *
+ * Call this before any trim_process_entry() may run (the daemon
+ * binds it at startup, next to trim_module_init; the unit tests bind
+ * it on the main thread).
+ *
+ * @param map  Partition map, or NULL to fail open.
+ */
+void trim_set_subtree_map(const struct subtree_map *map);
+
+/**
+ * @brief Bind the layout recall coordinator for the quiescence step.
+ *
+ * When bound (non-NULL), trim_process_entry() recalls/revokes every
+ * outstanding client layout for the file (bounded by one lease)
+ * before its locked truncate.  NULL (the default in unit tests,
+ * where the fixtures hold no layouts) makes the step a no-op.
+ *
+ * Call this before any trim_process_entry() may run.
+ *
+ * @param lr  Recall coordinator handle, or NULL.
+ */
+void trim_set_layout_recall(struct layout_recall *lr);
+
+/**
+ * @brief Drain one TRIM GC row: quiesce the file's client layouts,
+ *        then under L(F) truncate every stripe/mirror DS file to the
+ *        current committed size.
+ *
+ * Execution order (spec S3.2/S3.4/S3.5): authoritative vanish check
+ * (inode gone OR no stripe map = dequeue as success), ownership
+ * guard (V5; indeterminate walk = keep queued, never guess),
+ * first-seen bookkeeping with the trim_max_wait backoff bound,
+ * quiescing flag set (closes the LAYOUTGET gate), lease-bounded
+ * layout quiescence, then the critical section: re-read the
+ * authoritative size and re-fetch the stripe map under L(F) and
+ * truncate every slot to that size (Rule R).
+ *
+ * Status contract: MDS_OK ONLY when the row was drained (dequeued --
+ * the caller must not dequeue again); MDS_ERR_DELAY = leave the row
+ * queued (non-owner, indeterminate ownership, transient failure,
+ * backoff bound), which the ds_gc drainer's generic non-OK handling
+ * turns into retry + successor hand-off for free.
+ *
+ * The quiescing flag is cleared on every exit path EXCEPT a
+ * truncate/mount failure, where it is deliberately kept set: the DS
+ * tail is still stale, so the LAYOUTGET gate stays closed until a
+ * later cycle succeeds (the backoff bound releases it periodically
+ * so the gate cannot wedge a file permanently).
+ *
+ * Thread-safe: multiple drainer workers may call this concurrently
+ * for the same fileid (one file can hold several TRIM rows); L(F)
+ * serializes the critical section and the row is dequeued by its
+ * own gc_seq.
+ *
+ * @param cat    Catalogue handle (authoritative reads + GC queue).
+ * @param proxy  DS-mount proxy context (truncate targets).
+ * @param e      The TRIM row to drain.
+ * @return MDS_OK drained, MDS_ERR_DELAY keep queued,
+ *         MDS_ERR_INVAL on NULL arguments.
+ */
+enum mds_status trim_process_entry(struct mds_catalogue *cat,
+                                   const struct mds_proxy_ctx *proxy,
+                                   const struct mds_gc_entry *e);
 
 #endif /* TRIM_TAIL_H */

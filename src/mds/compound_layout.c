@@ -32,6 +32,7 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
+#include "trim_tail.h"      /* DS-tail trim LAYOUTGET gate (S3.4) */
 #include "ds_io_limits.h"   /* per-DS I/O limits (Wave 5 T5.1) */
 #include "lease_table.h"
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
@@ -1260,6 +1261,19 @@ enum nfs4_status op_layoutget(struct compound_data *cd,
 	if (inode.type != MDS_FTYPE_REG) {
 		return NFS4ERR_INVAL;
 }
+
+	/* Background trim gate (trim-tail-rework S3.4): while a trim
+	 * is quiescing this file, defer the grant -- a new layout
+	 * would hand a client a handle to a DS tail that is about to
+	 * be truncated.  The flag clears when the drain completes
+	 * (or releases it at the backoff bound), so the client's
+	 * retry succeeds then. */
+	if (trim_quiescing(cd->current_fh.fileid)) {
+		atomic_fetch_add_explicit(
+			&g_branch_metrics.layoutget_delay_count, 1,
+			memory_order_relaxed);
+		return NFS4ERR_DELAY;
+	}
 
 	/* Inline files are served via MDS proxy I/O, not pNFS layouts.
 	 * DS_PENDING files have stripe_maps and can serve layouts. */

@@ -213,6 +213,38 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
                                 uint32_t *bytes_written);
 
 /**
+ * Stripe-map lookup with the v9 inline single-stripe fallback.
+ *
+ * Files created through the inline fast path
+ * (MDS_IFLAG_INLINE_STRIPE) store their one DS entry on the inode and
+ * have NO stripe-map row, so a bare mds_cat_stripe_map_get returns
+ * NOTFOUND.  This helper synthesizes the single-entry map from the
+ * inode instead, mirroring the proxy I/O paths.
+ *
+ * Exposed for the background DS-tail trim worker, which must address
+ * every stripe/mirror slot of a file (including inline ones) to
+ * truncate the DS tails to the committed size.
+ *
+ * @param cat         Catalogue handle.
+ * @param fileid      File to look up.
+ * @param stripe_count Receives stripes per mirror row.
+ * @param stripe_unit  Receives the stripe unit in bytes.
+ * @param mirror_count Receives mirrors per stripe.
+ * @param entries     Receives the slot array [stripe_count *
+ *                    mirror_count]; slot geometry is stripe = i %
+ *                    stripe_count, mirror = i / stripe_count.  Caller
+ *                    frees with free() in all cases.
+ * @return MDS_OK, MDS_ERR_NOTFOUND (no stripe map and no inline
+ *         entry), MDS_ERR_NOMEM, or the catalogue error.
+ */
+enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
+                                     uint64_t fileid,
+                                     uint32_t *stripe_count,
+                                     uint32_t *stripe_unit,
+                                     uint32_t *mirror_count,
+                                     struct mds_ds_map_entry **entries);
+
+/**
  * Ensure a DS data file exists (create if absent).
  *
  * Used by the MDS when creating stripe_map entries so that proxy I/O
@@ -413,6 +445,35 @@ enum mds_status mds_proxy_truncate_ds_file(const struct mds_proxy_ctx *ctx,
                                             uint64_t fileid,
                                             uint32_t stripe,
                                             uint32_t mirror);
+
+/**
+ * Truncate a single (stripe, mirror) DS data file to an exact size.
+ *
+ * Used by the background DS-tail trim worker (trim-tail-rework S3.2):
+ * the worker re-reads the authoritative committed size under the
+ * per-inode lock and truncates every backing file to it, so a later
+ * grow reads zeroes instead of stale pre-shrink bytes.  Growing
+ * (size > current length) is a plain lseek-extend: the gap becomes a
+ * sparse hole that reads as zeros.
+ *
+ * A missing backing file (ENOENT) is treated as success: the slot
+ * either never existed or was already reclaimed.
+ *
+ * @param ctx     Proxy context with DS mounts registered.
+ * @param ds_id   Data server holding the slot.
+ * @param fileid  Logical file ID.
+ * @param stripe  Stripe index.
+ * @param mirror  Mirror index.
+ * @param size    Target length in bytes (the committed size).
+ * @return MDS_OK (including the ENOENT skip),
+ *         MDS_ERR_NOTFOUND (ds_id not mounted), MDS_ERR_IO.
+ */
+enum mds_status mds_proxy_truncate_ds_file_to(const struct mds_proxy_ctx *ctx,
+                                              uint32_t ds_id,
+                                              uint64_t fileid,
+                                              uint32_t stripe,
+                                              uint32_t mirror,
+                                              uint64_t size);
 
 /* -----------------------------------------------------------------------
  * NFSv4.2 proxy operations

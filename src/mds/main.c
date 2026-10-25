@@ -1542,6 +1542,12 @@ int main(int argc, char *argv[])
 	 *     trim.  It comes up next to the session table because the
 	 *     same lease_time_sec scales both: trim_max_wait_sec = 0
 	 *     means "3 x lease", resolved inside the module. */
+	/* Bind the partition map to the trim ownership guard (V5):
+	 * the drainer must not truncate files whose subtree belongs
+	 * to another MDS.  smap is final by here (both init paths
+	 * above are done); NULL (single-MDS) fails open inside the
+	 * module. */
+	trim_set_subtree_map(smap);
 	if (trim_module_init(cfg.lease_time_sec,
 			     cfg.trim_max_wait_sec) != 0) {
 		MDS_LOG_WARN(LOG_COMP_MDS, "trim_module_init failed");
@@ -1577,6 +1583,13 @@ int main(int argc, char *argv[])
 		 * on layout revocation.  Without this, revocation
 		 * is callback-only. */
 		layout_recall_set_proxy(lr, proxy);
+		/* DS-tail trim quiescence (trim-tail-rework): the
+		 * drainer recalls/revokes a file's layouts under the
+		 * lease bound before its locked truncate.  The RPC
+		 * server starts later, so no client layouts can
+		 * exist while this is bound; the module is NULL-safe
+		 * regardless. */
+		trim_set_layout_recall(lr);
 		if (cfg.ds_heartbeat_ms == 0) {
 			MDS_LOG_INFO(LOG_COMP_MDS,
 				"DS health monitoring disabled "
@@ -2092,6 +2105,13 @@ int main(int argc, char *argv[])
 					"LAYOUTCOMMIT");
 			}
 			rpc_cfg.lcommit_agg = lcommit_agg;
+			/* The trim drainer's recall-quiescence step
+			 * must also drain this file's in-flight
+			 * LAYOUTCOMMIT aggregates, or their later
+			 * flush would commit a size the truncate has
+			 * already superseded (trim-tail-rework).  The
+			 * setter is NULL-tolerant for lr and agg. */
+			layout_recall_set_lcommit_agg(lr, lcommit_agg);
 		}
 
 		/* Delegation state table (RFC 8881 S10.4).
