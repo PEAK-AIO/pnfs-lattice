@@ -5801,6 +5801,34 @@ static void test_layoutcommit_stamps_mtime_without_client_time(void)
 	ASSERT_EQ(mds_cat_ns_getattr(g_test_cat, fid, &before), MDS_OK);
 	ASSERT_EQ((long long)before.mtime.tv_sec, 1000LL);
 
+	/*
+	 * Persistent-mode stateid validation: the LAYOUTCOMMIT stateid
+	 * must refer to a persisted grant row (LAYOUTGET does this on
+	 * the real path).  An unresolvable stateid now fails
+	 * NFS4ERR_BAD_STATEID instead of being accepted best-effort,
+	 * so seed the row the compound commits with (clientid 0 --
+	 * compound_init zeroes cd->clientid).
+	 */
+	{
+		struct mds_cat_txn *txn = NULL;
+		struct nfs4_stateid sid;
+		uint32_t ds_ids[1] = { 1 };
+		uint32_t i;
+
+		memset(&sid, 0, sizeof(sid));
+		sid.seqid = 1;
+		for (i = 0; i < NFS4_OTHER_SIZE; i++) {
+			sid.other[i] = 0x4c;
+		}
+		VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE,
+					 &txn) == MDS_OK);
+		VERIFY(mds_coord_layout_grant(db, txn, 0, fid,
+						LAYOUTIOMODE4_RW, 0,
+						UINT64_MAX,
+						&sid, ds_ids, 1) == MDS_OK);
+		VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
+	}
+
 	/* LAYOUTCOMMIT reporting new data and NO client mtime. */
 	compound_init(&cd);
 	cd.cat = g_test_cat;

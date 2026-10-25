@@ -3174,8 +3174,10 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 	 *   transient_state_cache=off: consult NDB via
 	 *     coord_layout_get_by_stateid (which today is an
 	 *     unindexed `layout_state` scan by stateid_other --
-	 *     ~9 ms p50 in the lab) and accept NOTFOUND as a
-	 *     best-effort success.
+	 *     ~9 ms p50 in the lab).  A NOTFOUND result -- the
+	 *     grant's row was revoked (trim quiescence, recall,
+	 *     LAYOUTRETURN) or was never persisted -- fails with
+	 *     NFS4ERR_BAD_STATEID.
 	 *
 	 *   transient_state_cache=on:  every `mds_coord_layout_grant`
 	 *     call site is gated off in this mode, so the layout_state
@@ -3183,7 +3185,23 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 	 *     scan is guaranteed to return NOTFOUND and the daemon
 	 *     would proceed regardless.  Skipping the scan removes
 	 *     ~9 ms from every LAYOUTCOMMIT (~75% of its total
-	 *     latency in the lab cluster).
+	 *     latency in the lab cluster).  Transient behaviour is
+	 *     therefore byte-identical to the historical
+	 *     proceed-on-NOTFOUND path.
+	 *
+	 * Why the historical NOTFOUND leniency was removed (persistent
+	 * mode only): the DS tail trim drains a shrinking file in the
+	 * background and truncates the DS files to the current committed
+	 * size.  A LAYOUTCOMMIT landing after that truncation -- i.e.
+	 * whose grant row was already removed by the trim's quiescence --
+	 * would claim size over bytes the trim just erased.  BAD_STATEID
+	 * is RFC-correct for a revoked stateid.
+	 *
+	 * Accepted trade: a client whose grant-row insert failed at
+	 * LAYOUTGET (the best-effort `(void)` insert sites in
+	 * layout_persist_grant) can no longer commit; the error is
+	 * client-visible and the client recovers via the proxy
+	 * fallback.  No silent corruption.
 	 *
 	 * Same caveat as the LAYOUTGET recall gate above: this
 	 * trade-off assumes a homogeneous fleet (all MDSes share
@@ -3203,10 +3221,11 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			    lc_fileid != cd->current_fh.fileid) {
 				return NFS4ERR_BAD_STATEID;
 			}
-		} else if (lc_st != MDS_ERR_NOTFOUND) {
+		} else if (lc_st == MDS_ERR_NOTFOUND) {
+			return NFS4ERR_BAD_STATEID;
+		} else {
 			return NFS4ERR_IO;
 		}
-		/* NOTFOUND: layout_grant was best-effort -- proceed. */
 	}
 
 	/* Single inode read for all LAYOUTCOMMIT checks. */
@@ -3434,6 +3453,41 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 				 * by this LAYOUTCOMMIT.
 				 */
 				trim_inode_lock(cd->current_fh.fileid);
+				/*
+				 * Commit-point re-check (persistent mode only):
+				 * look the stateid's layout row up fresh
+				 * under L(F).  The entry check above closes
+				 * the "no state at all" case; this one closes
+				 * the in-flight TOCTOU -- a commit that
+				 * verified at entry before quiescence revoked
+				 * the row must not land its size after the
+				 * trim truncated.  The trim's truncate is
+				 * serialized against this same lock, so a
+				 * fresh NOTFOUND here is authoritative.
+				 * Cost: one extra catalogue lookup (~9 ms p50 in
+				 * the lab, the same unindexed scan as the
+				 * entry check) on every persistent-mode commit
+				 * that writes metadata; it cannot be skipped
+				 * because freshness under L(F) is the whole
+				 * point.
+				 */
+				if (!cd->skip_transient_ndb) {
+					uint64_t lc_cid2 = 0, lc_fid2 = 0;
+					enum mds_status lc_st2;
+
+					lc_st2 = coord_layout_get_by_stateid(
+						cd, sid_resolved.other,
+						&lc_cid2, &lc_fid2,
+						NULL, NULL, NULL, NULL);
+					if (lc_st2 == MDS_ERR_NOTFOUND) {
+						nst = NFS4ERR_BAD_STATEID;
+						goto lc_trim_unlock;
+					}
+					if (lc_st2 != MDS_OK) {
+						nst = NFS4ERR_IO;
+						goto lc_trim_unlock;
+					}
+				}
 				st = cat_setattr(cd,
 					cd->current_fh.fileid,
 					&lc_inode, merged_mask);

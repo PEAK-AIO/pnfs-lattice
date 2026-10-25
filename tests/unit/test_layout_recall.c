@@ -12,8 +12,10 @@
  *   4. layout_recall_for_file returns -1 (stub).
  *   5. LAYOUTERROR XDR decode with stateid + device_error array.
  *   6-17. (CB round-trips, byte-range conflict recall, unlink recall)
- *   18-20. layout_recall_quiesce_for_file: cooperative commit+return,
- *          stuck-holder authoritative expiry, out-of-order commit.
+ *   18-21. layout_recall_quiesce_for_file: cooperative commit+return,
+ *          stuck-holder authoritative expiry, out-of-order commit
+ *          (late LAYOUTCOMMIT now fails BAD_STATEID), in-flight
+ *          straddle (commit parked at L(F) while quiescence expires).
  */
 
 #include <stdio.h>
@@ -44,6 +46,7 @@
 #include "nfs4_cb.h"
 #include "rpc_server.h"
 #include "layout_commit_aggregator.h"
+#include "trim_tail.h"
 #include <sys/socket.h>
 #include <pthread.h>
 #include <poll.h>
@@ -1499,6 +1502,65 @@ static void *quiesce_thread(void *arg)
     return NULL;
 }
 
+/* Compound op builders for driving LAYOUTCOMMIT through the real
+ * op path (persistent-mode stateid validation + commit point). */
+static void mk_q_seq(struct nfs4_op *op)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_SEQUENCE;
+}
+
+static void mk_q_putfh(struct nfs4_op *op, uint64_t fid)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_PUTFH;
+    op->arg.putfh.fh.fileid = fid;
+}
+
+static void mk_q_commit(struct nfs4_op *op, const struct nfs4_stateid *sid,
+                        uint64_t last_write_offset)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_LAYOUTCOMMIT;
+    op->arg.layoutcommit.new_offset = true;
+    op->arg.layoutcommit.last_write_offset = last_write_offset;
+    op->arg.layoutcommit.stateid = *sid;
+    op->arg.layoutcommit.layout_type = LAYOUT4_NFSV4_1_FILES;
+}
+
+/*
+ * Thread that drives one LAYOUTCOMMIT through the compound path and
+ * records the per-op status (the straddle test parks the caller on
+ * L(F) so the commit is in flight while quiescence expires the row).
+ */
+struct late_commit_thread_args {
+    struct mds_catalogue *cat;
+    uint64_t fileid;
+    uint64_t clientid;
+    struct nfs4_stateid sid;
+    uint64_t last_write_offset;
+    enum nfs4_status status;
+};
+
+static void *late_commit_thread(void *arg)
+{
+    struct late_commit_thread_args *a = arg;
+    struct compound_data cd;
+    struct nfs4_op ops[3];
+    struct nfs4_result res[3];
+
+    compound_init(&cd);
+    cd.cat = a->cat;
+    cd.clientid = a->clientid;
+    memset(res, 0, sizeof(res));
+    mk_q_seq(&ops[0]);
+    mk_q_putfh(&ops[1], a->fileid);
+    mk_q_commit(&ops[2], &a->sid, a->last_write_offset);
+    compound_process(&cd, ops, res, 3);
+    a->status = res[2].status;
+    return NULL;
+}
+
 /*
  * Backchannel client that receives whatever the MDS sends on the
  * callback connection and NEVER replies -- a stuck/unresponsive
@@ -1749,17 +1811,17 @@ static void test_quiesce_stuck_holder_expires(void)
  *      must not land after the trim) and the catalogue size must not
  *      claim the range.
  *
- * NOTE (community tree): in this build the aggregator is the no-op
- * stub (ENABLE_LAYOUT_COMMIT_AGGREGATOR=OFF) and op_layoutcommit()
- * proceeds on a NOTFOUND stateid lookup -- a compound-driven scratch
- * run proved a late LAYOUTCOMMIT returns NFS4_OK and claims the size
- * (status=0, size 12288), NOT the NFS4ERR_BAD_STATEID the spec's
- * property statement expects.  The BAD_STATEID half of the property
- * is therefore NOT pinned here; fixing it belongs in op_layoutcommit
- * (a spec-level decision affecting both community and enterprise
- * trees).  This test pins the MDS-side invariants quiescence itself
- * establishes: no layout rows, the stateid unresolvable, no pending
- * commit work (peek miss), and the catalogue size unchanged.
+ * The gap this property used to have is now closed: op_layoutcommit's
+ * persistent-mode stateid validation fails an unresolvable stateid
+ * with NFS4ERR_BAD_STATEID (a late commit after the grant's row was
+ * removed must not claim size over trim-erased bytes), so this test
+ * drives the late LAYOUTCOMMIT through the real compound path and
+ * pins the FULL spec property: BAD_STATEID + size unchanged.
+ *
+ * NOTE (community tree): the aggregator here is the no-op stub
+ * (ENABLE_LAYOUT_COMMIT_AGGREGATOR=OFF), so the submit/peek
+ * assertions gain their real teeth only in the enterprise build;
+ * the BAD_STATEID + size assertions are backend-independent.
  */
 static void test_quiesce_out_of_order_commit(void)
 {
@@ -1842,6 +1904,27 @@ static void test_quiesce_out_of_order_commit(void)
                                                 &dirty), -1);
     }
 
+    /*
+     * Late LAYOUTCOMMIT(12288) through the real compound path: the
+     * grant's row is gone, so persistent-mode stateid validation
+     * must reject it and the size must not claim the range.
+     */
+    {
+        struct compound_data cd;
+        struct nfs4_op ops[3];
+        struct nfs4_result res[3];
+
+        compound_init(&cd);
+        cd.cat = db;
+        cd.clientid = 777;
+        memset(res, 0, sizeof(res));
+        mk_q_seq(&ops[0]);
+        mk_q_putfh(&ops[1], fid);
+        mk_q_commit(&ops[2], &sid, 12287);
+        compound_process(&cd, ops, res, 3);
+        ASSERT_EQ(res[2].status, NFS4ERR_BAD_STATEID);
+    }
+
     /* The catalogue size must not claim the late commit's range. */
     {
         struct mds_inode got;
@@ -1854,6 +1937,113 @@ static void test_quiesce_out_of_order_commit(void)
     mds_catalogue_close(db);
     cleanup_db(path);
     printf("  PASS: test_quiesce_out_of_order_commit\n");
+}
+
+/*
+ * Test 21: in-flight straddle -- a LAYOUTCOMMIT is in flight while
+ * the quiesce timeout path expires the holder (closes the TOCTOU
+ * the commit-point re-check was added for).
+ *
+ * Main holds L(F) (the per-inode trim lock) before the commit starts,
+ * so the commit -- after passing its entry stateid validation (the
+ * row still exists) -- parks at the L(F) fence, immediately before
+ * its size commit.  While it is parked, quiescence times out and
+ * authoritatively expires the holder's row.  Releasing L(F) lets the
+ * commit reach its commit-point re-check, which must see the removed
+ * row and fail BAD_STATEID before any size lands.
+ *
+ * Determinism: holding L(F) pins the commit inside the
+ * entry-check..commit-point window (or earlier).  If its entry check
+ * happens to run after the expiry instead, it fails at the entry
+ * check; both sub-cases end in exactly the pinned outcome, so the
+ * assertions hold for every interleaving.
+ */
+static void test_quiesce_straddled_commit(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct mds_inode in;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct late_commit_thread_args lc;
+    pthread_t tid;
+    char *path = make_temp_db_path();
+    uint64_t fid;
+    uint32_t ds_ids[] = {36};
+    bool expired = false;
+
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    cat = db;
+
+    /* Real inode so the unclaimed size is observable afterwards. */
+    VERIFY(test_create_file(db, 2, "q-straddle-file", 0644, &in)
+           == MDS_OK);
+    fid = in.fileid;
+    memset(&in, 0, sizeof(in));
+    in.size = 4096;
+    VERIFY(mds_cat_ns_setattr(db, NULL, fid, &in, MDS_ATTR_SIZE) == MDS_OK);
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    fill_test_layout_stateid(&sid, 1, 0x37);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 777, fid, LAYOUTIOMODE4_RW,
+                                     0, UINT64_MAX, &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    /*
+     * Hold L(F) so the in-flight commit parks at the commit-point
+     * fence instead of racing past it.
+     */
+    trim_inode_lock(fid);
+
+    memset(&lc, 0, sizeof(lc));
+    lc.cat = db;
+    lc.fileid = fid;
+    lc.clientid = 777;
+    lc.sid = sid;
+    lc.last_write_offset = 12287; /* would claim size 12288 */
+    ASSERT_EQ(pthread_create(&tid, NULL, late_commit_thread, &lc), 0);
+
+    /*
+     * Let the commit pass its entry check (row still present) and
+     * park on L(F).  Even if this window were missed the entry
+     * check would catch the expired row and the outcome below is
+     * the same.
+     */
+    usleep(50 * 1000);
+
+    /* Quiesce times out and authoritatively expires the holder. */
+    ASSERT_EQ(layout_recall_quiesce_for_file(lr, fid, 400, &expired), 0);
+    ASSERT_EQ(expired, 1);
+
+    /* Release L(F): the commit now runs its commit-point re-check. */
+    trim_inode_unlock(fid);
+
+    pthread_join(tid, NULL);
+
+    /* The straddled commit must not have landed. */
+    ASSERT_EQ(lc.status, NFS4ERR_BAD_STATEID);
+
+    {
+        struct mds_inode got;
+        ASSERT_EQ(mds_cat_ns_getattr(db, fid, &got), MDS_OK);
+        ASSERT_EQ(got.size, 4096);
+    }
+
+    {
+        bool has_layout = true;
+        ASSERT_EQ(mds_coord_layout_scan_for_file(db, fid, &has_layout),
+                  MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    layout_recall_destroy(lr);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_quiesce_straddled_commit\n");
 }
 
 /* -----------------------------------------------------------------------
@@ -1891,6 +2081,7 @@ int main(void)
     test_quiesce_commit_then_return();
     test_quiesce_stuck_holder_expires();
     test_quiesce_out_of_order_commit();
+    test_quiesce_straddled_commit();
 
     printf("\n%d passed, %d failed\n", pass_count, fail_count);
     conformance_shutdown();
