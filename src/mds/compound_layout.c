@@ -37,6 +37,7 @@
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "synth_uid.h"           /* RFC 8435 §2.2.1 synthetic UID derivation */
 #include "mds_op_metrics.h" /* MDS_TIME_CAT_OP probes on the LAYOUTGET path */
+#include "trim_tail.h"  /* L(F) per-inode trim lock fence (spec S3.3) */
 
 
 /* -----------------------------------------------------------------------
@@ -3424,12 +3425,22 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 			}
 
 			if (merged_mask != 0) {
+				/*
+				 * L(F) fence (spec S3.3): the commit point
+				 * (MDS_ATTR_SIZE_EXTEND) and its size_grew
+				 * bookkeeping run under the per-inode trim
+				 * lock so a background trim can never
+				 * truncate the DS tail to a size committed
+				 * by this LAYOUTCOMMIT.
+				 */
+				trim_inode_lock(cd->current_fh.fileid);
 				st = cat_setattr(cd,
 					cd->current_fh.fileid,
 					&lc_inode, merged_mask);
 				if (st != MDS_OK) {
 					if (size_grew) {
-						return NFS4ERR_IO;
+						nst = NFS4ERR_IO;
+						goto lc_trim_unlock;
 					}
 					/* DS_PENDING / mtime: best-effort. */
 				} else {
@@ -3446,6 +3457,8 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 						r->new_size_value = new_size;
 					}
 				}
+			lc_trim_unlock:
+				trim_inode_unlock(cd->current_fh.fileid);
 			}
 		}
 	}
@@ -3455,7 +3468,7 @@ enum nfs4_status op_layoutcommit(struct compound_data *cd,
 		r->new_size_value = 0;
 	}
 
-	return NFS4_OK;
+	return nst;
 }
 
 /* -----------------------------------------------------------------------
