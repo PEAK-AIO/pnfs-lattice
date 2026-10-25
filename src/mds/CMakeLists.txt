@@ -43,6 +43,7 @@ add_library(pnfs_mds_core STATIC
     ds_io_limits.c
     # ds_gc.c moved to src/modules/ds_gc/ (gated by ENABLE_DS_GC)
     layout_recall.c
+    trim_tail.c
     # resilver.c moved to src/modules/resilver/ (gated by ENABLE_RESILVER)
     # rebalance.c moved to src/modules/rebalance/ (gated by ENABLE_REBALANCE)
     mover_util.c

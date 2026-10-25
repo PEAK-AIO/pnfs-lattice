@@ -34,6 +34,7 @@
 #include "ds_prealloc.h"
 #include "ds_prepare.h"
 #include "ds_gc.h"
+#include "trim_tail.h"
 #include "proxy_io.h"
 #include "referral.h"
 #include "resilver.h"
@@ -1536,6 +1537,16 @@ int main(int argc, char *argv[])
 		MDS_LOG_WARN(LOG_COMP_MDS, "session_table_init failed");
 	}
 
+	/* 6b2. Trim module state: the striped per-inode lock L(F) and
+	 *     the quiescing-flag table backing the background DS-tail
+	 *     trim.  It comes up next to the session table because the
+	 *     same lease_time_sec scales both: trim_max_wait_sec = 0
+	 *     means "3 x lease", resolved inside the module. */
+	if (trim_module_init(cfg.lease_time_sec,
+			     cfg.trim_max_wait_sec) != 0) {
+		MDS_LOG_WARN(LOG_COMP_MDS, "trim_module_init failed");
+	}
+
 	/* 6c. Layout recall coordinator + DS health monitor.
 	 *     Both lr and ds_hm are bound to the default shard here,
 	 *     before ds_health_start() launches a thread, to avoid
@@ -2508,6 +2519,10 @@ cleanup:
 	 * stops before we tear down the catalogue and proxy. */
 	ds_gc_stop(ds_gc);
 	ds_gc = NULL;
+	/* The drainer that executes TRIM rows is stopped above, so
+	 * the trim module's in-memory state (per-inode locks,
+	 * quiescing flags) can be torn down. */
+	trim_module_fini();
 	ds_prepare_destroy(ds_prep);
 	ds_prealloc_destroy(ds_pa);
 	if (ds_hm != NULL) {

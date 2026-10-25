@@ -552,6 +552,7 @@ enum mds_workload_profile {
 #define MDS_CFG_SET_HPC_MAX_STRIPE_COUNT   (1ULL << 14)
 #define MDS_CFG_SET_HPC_XDR_FORM           (1ULL << 15)
 #define MDS_CFG_SET_STRIPE_LEASE_DURATION   (1ULL << 16)
+#define MDS_CFG_SET_TRIM_MAX_WAIT_SEC       (1ULL << 17)
 
 /* -----------------------------------------------------------------------
  * Catalogue backend selection
@@ -904,6 +905,10 @@ struct mds_config {
     uint32_t            default_stripe_count;
     uint32_t            default_mirror_count;
     uint32_t            lease_time_sec;
+    /* DS-tail trim: maximum quiescence wait in seconds.  0 = 3 x
+     * lease_time_sec, resolved in the trim module at init
+     * (trim_module_init, see trim_tail.h). */
+    uint32_t            trim_max_wait_sec;
     uint32_t            grace_period_sec;
     uint32_t            prealloc_pool_size;
     uint32_t            prealloc_ring_count;  /* prealloc refill rings/workers
