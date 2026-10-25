@@ -370,6 +370,10 @@ struct mds_ds_info {
  *                            by rebalance-style movers where other
  *                            slots of the same file on the same DS are
  *                            still live.
+ *   MDS_GC_SWEEP_TRIM        Tail-trim reclaim: the file is still
+ *                            live.  The drainer trims its DS tail (the
+ *                            extent beyond the new size) instead of
+ *                            unlinking (stripe, mirror) files.
  */
 #define MDS_GC_SWEEP_SLOT_FLAG  (1U << 31)
 #define MDS_GC_SWEEP_GEOM(sc, mc) \
@@ -380,6 +384,17 @@ struct mds_ds_info {
 #define MDS_GC_SWEEP_IS_SLOT(h)  (((h) & MDS_GC_SWEEP_SLOT_FLAG) != 0U)
 #define MDS_GC_SWEEP_SC(h)       ((((uint32_t)(h)) >> 4) & 0x07FFFFFFU)
 #define MDS_GC_SWEEP_MC(h)       (((uint32_t)(h)) & 0xFU)
+/* MDS_GC_SWEEP_TRIM is a mode bit, not a geometry: the value sits
+ * above the GEOM/SLOT fields in use (bits 0-13 with
+ * MDS_MAX_STRIPES = 1024) and below the SLOT flag, so it collides with
+ * no encodable hint (asserted below). */
+#define MDS_GC_SWEEP_TRIM        0x10000000U
+#define MDS_GC_SWEEP_IS_TRIM(h)  (((h) & MDS_GC_SWEEP_TRIM) != 0U)
+
+/* Owner sentinel for mds_cat_gc_enqueue_hint_owner(): 0 is the legacy
+ * "unowned" value the backends already expose to every MDS drainer, so
+ * a row written with it is visible to all of them. */
+#define MDS_GC_OWNER_GLOBAL      0U
 
 /* This header is shared with C++ translation units (the RonDB shim),
  * where the C11 _Static_assert keyword is unavailable. */
@@ -388,11 +403,17 @@ static_assert(MDS_MAX_STRIPES <= 0x07FFFFFF,
 	      "MDS_GC_SWEEP_SC field must hold MDS_MAX_STRIPES");
 static_assert(MDS_MAX_MIRRORS <= 0xF,
 	      "MDS_GC_SWEEP_MC field must hold MDS_MAX_MIRRORS");
+static_assert((((uint32_t)MDS_MAX_STRIPES << 4) | 0xFU) < MDS_GC_SWEEP_TRIM &&
+	      MDS_GC_SWEEP_TRIM < MDS_GC_SWEEP_SLOT_FLAG,
+	      "MDS_GC_SWEEP_TRIM must not collide with GEOM/SLOT hints");
 #else
 _Static_assert(MDS_MAX_STRIPES <= 0x07FFFFFF,
 	       "MDS_GC_SWEEP_SC field must hold MDS_MAX_STRIPES");
 _Static_assert(MDS_MAX_MIRRORS <= 0xF,
 	       "MDS_GC_SWEEP_MC field must hold MDS_MAX_MIRRORS");
+_Static_assert((((uint32_t)MDS_MAX_STRIPES << 4) | 0xFU) < MDS_GC_SWEEP_TRIM &&
+	       MDS_GC_SWEEP_TRIM < MDS_GC_SWEEP_SLOT_FLAG,
+	       "MDS_GC_SWEEP_TRIM must not collide with GEOM/SLOT hints");
 #endif
 
 struct mds_gc_entry {

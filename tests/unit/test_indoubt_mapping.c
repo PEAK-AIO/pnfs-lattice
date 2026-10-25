@@ -423,8 +423,8 @@ AUTH_FWD(quota_usage_put,
 	(R, txn, usage_type, scope_id, usage))
 AUTH_FWD(gc_enqueue,
 	(C, T, uint64_t fileid, uint32_t ds_id, const uint8_t *fh, uint32_t fh_len,
-	 uint32_t hint),
-	(R, txn, fileid, ds_id, fh, fh_len, hint))
+	 uint32_t hint, uint32_t owner),
+	(R, txn, fileid, ds_id, fh, fh_len, hint, owner))
 AUTH_FWD(gc_peek, (C, struct mds_gc_entry *entry), (R, entry))
 AUTH_FWD(gc_dequeue, (C, T, uint64_t gc_seq), (R, txn, gc_seq))
 AUTH_FWD(gc_count, (C, uint32_t *count), (R, count))
