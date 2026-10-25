@@ -1380,35 +1380,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* 5c. Init DS GC drainer.
-	 *
-	 *      Reclaims DS-side data files for inodes that the
-	 *      catalogue layer has already dropped (compound
-	 *      op_remove enqueues here on the final unlink).
-	 *      Disabled when proxy I/O is not available because the
-	 *      worker needs DS mount points to issue unlinks.  The
-	 *      poll interval is intentionally fixed at 5s for the
-	 *      first deployment -- small enough that a removed file
-	 *      reclaims its DS bytes within the lab's smoke timing,
-	 *      large enough that NDB peek traffic stays below the
-	 *      noise floor on the catalogue. */
-	if (cfg.ds_count > 0 && proxy != NULL && cat != NULL) {
-		if (ds_gc_start_ex(cat, proxy, 5000U,
-				   cfg.ds_gc_workers,
-				   cfg.ds_gc_batch_size,
-				   &ds_gc) == 0 &&
-		    ds_gc != NULL) {
-			MDS_LOG_INFO(LOG_COMP_MDS,
-				"DS GC drainer active "
-				"(poll=5000 ms, workers=%u, batch=%u)",
-				(unsigned)cfg.ds_gc_workers,
-				(unsigned)cfg.ds_gc_batch_size);
-		} else if (ds_gc == NULL) {
-			MDS_LOG_WARN(LOG_COMP_MDS,
-				"ds_gc_start failed; "
-				"DS-side cleanup will not run");
-		}
-	}
+	/* 5c. (Moved below the 6c block: the drainer drains TRIM
+	 *     rows through trim_process_entry, so it starts only
+	 *     after the trim module is fully bound.) */
 
 	/* 6. Start inter-MDS cluster transport listener.
 	 *    Serves rename-2PC, migration, DS admin, and metrics requests. */
@@ -1616,6 +1590,50 @@ int main(int argc, char *argv[])
 		}
 	} else {
 		MDS_LOG_WARN(LOG_COMP_MDS, "layout_recall_init failed");
+	}
+
+	/* 5c. Start the DS GC drainer -- deliberately AFTER all the
+	 *     trim bindings (trim_set_subtree_map,
+	 *     trim_set_quiescence_required, trim_module_init, and
+	 *     the layout_recall_init success path's
+	 *     trim_set_layout_recall): the drainer drains TRIM rows
+	 *     through trim_process_entry, and the coordinator's
+	 *     first gc peek fires immediately, so starting it first
+	 *     would let a non-owner MDS with a persisted TRIM
+	 *     backlog drain (truncate) with the ownership guard
+	 *     fail-open, the no-recall gate unarmed, and the L(F)
+	 *     and flag tables not yet initialized.  trim_process_
+	 *     entry's ready gate (MDS_ERR_DELAY while the module is
+	 *     uninitialized) makes any future reordering degrade to
+	 *     "keep queued", never "truncate unguarded".
+	 *
+	 *     Reclaims DS-side data files for inodes that the
+	 *     catalogue layer has already dropped (compound
+	 *     op_remove enqueues here on the final unlink).
+	 *     Disabled when proxy I/O is not available because the
+	 *     worker needs DS mount points to issue unlinks.  The
+	 *     poll interval is intentionally fixed at 5s for the
+	 *     first deployment -- small enough that a removed file
+	 *     reclaims its DS bytes within the lab's smoke timing,
+	 *     large enough that NDB peek traffic stays below the
+	 *     noise floor on the catalogue.  Needs only cat and
+	 *     proxy, both final by here. */
+	if (cfg.ds_count > 0 && proxy != NULL && cat != NULL) {
+		if (ds_gc_start_ex(cat, proxy, 5000U,
+				   cfg.ds_gc_workers,
+				   cfg.ds_gc_batch_size,
+				   &ds_gc) == 0 &&
+		    ds_gc != NULL) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"DS GC drainer active "
+				"(poll=5000 ms, workers=%u, batch=%u)",
+				(unsigned)cfg.ds_gc_workers,
+				(unsigned)cfg.ds_gc_batch_size);
+		} else if (ds_gc == NULL) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"ds_gc_start failed; "
+				"DS-side cleanup will not run");
+		}
 	}
 
 	/* 6c2. Per-DS I/O limit prober (Wave 5 T5.1).  Probes each

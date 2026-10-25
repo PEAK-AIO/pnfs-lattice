@@ -32,13 +32,12 @@
 #include "layout_cache.h"  /* Phase D of docs/hpc-nto1-plan.md */
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
 #include "layout_recall.h"  /* byte-range conflict-recall on op_layoutget */
-#include "trim_tail.h"      /* DS-tail trim LAYOUTGET gate (S3.4) */
+#include "trim_tail.h"  /* L(F) trim lock fence (S3.3) + trim LAYOUTGET gate (S3.4) */
 #include "ds_io_limits.h"   /* per-DS I/O limits (Wave 5 T5.1) */
 #include "lease_table.h"
 #include "lease_stripe_map.h"    /* stripe lease table (Phase 2) */
 #include "synth_uid.h"           /* RFC 8435 §2.2.1 synthetic UID derivation */
 #include "mds_op_metrics.h" /* MDS_TIME_CAT_OP probes on the LAYOUTGET path */
-#include "trim_tail.h"  /* L(F) per-inode trim lock fence (spec S3.3) */
 
 
 /* -----------------------------------------------------------------------
