@@ -1986,6 +1986,9 @@ static void test_quiesce_straddled_commit(void)
 
     ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
 
+    /* The test takes L(F) below; the lock table must be initialized. */
+    ASSERT_EQ(trim_module_init(90, 0), 0);
+
     fill_test_layout_stateid(&sid, 1, 0x37);
     ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
     ASSERT_EQ(mds_coord_layout_grant(db, txn, 777, fid, LAYOUTIOMODE4_RW,
@@ -2041,6 +2044,7 @@ static void test_quiesce_straddled_commit(void)
     }
 
     layout_recall_destroy(lr);
+    trim_module_fini();
     mds_catalogue_close(db);
     cleanup_db(path);
     printf("  PASS: test_quiesce_straddled_commit\n");
