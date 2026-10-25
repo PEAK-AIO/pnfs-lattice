@@ -597,87 +597,6 @@ static void test_extract_server_fh_formats(void)
 }
 
 /* -----------------------------------------------------------------------
- * test_proxy_discard_tail -- shrink discards per-stripe DS tails
- * ----------------------------------------------------------------------- */
-
-static void test_proxy_discard_tail(void)
-{
-    struct mds_catalogue *db;
-    struct mds_proxy_ctx *proxy;
-    char *db_path, *ds0, *ds1;
-    char path[4096];
-    uint64_t fileid = 300;
-    uint32_t stripe_unit = 4096;
-    uint32_t total = stripe_unit * 4;
-    uint8_t *data;
-    uint8_t buf[8192];
-    uint32_t bytes;
-    uint32_t i;
-    bool eof;
-    struct stat sb;
-
-    db = open_test_db(&db_path);
-    ds0 = make_ds_dir();
-    ds1 = make_ds_dir();
-
-    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
-    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds0), MDS_OK);
-    ASSERT_EQ(mds_proxy_mount_set(proxy, 2, ds1), MDS_OK);
-
-    setup_wide_stripe(db, 1, 2, fileid, stripe_unit);
-    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, fileid, 0, 0), MDS_OK);
-    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 2, fileid, 1, 0), MDS_OK);
-
-    data = malloc(total);
-    ASSERT_TRUE(data != NULL);
-    for (i = 0; i < total; i++) {
-        data[i] = (uint8_t)(i * 7 + 1);
-    }
-
-    ASSERT_EQ(mds_proxy_write(proxy, db, fileid, 0, data, total, &bytes),
-              MDS_OK);
-    ASSERT_EQ(bytes, total);
-
-    /* Both stripe files carry a tail before the discard: stripe 0 owns
-     * the 0 and 8192 blocks, stripe 1 the 4096 and 12288 blocks. */
-    snprintf(path, sizeof(path), "%s/data/%llu_0_0", ds0,
-             (unsigned long long)fileid);
-    ASSERT_EQ(stat(path, &sb), 0);
-    ASSERT_EQ((uint64_t)sb.st_size, (uint64_t)12288);
-    snprintf(path, sizeof(path), "%s/data/%llu_1_0", ds1,
-             (unsigned long long)fileid);
-    ASSERT_EQ(stat(path, &sb), 0);
-    ASSERT_EQ((uint64_t)sb.st_size, (uint64_t)total);
-
-    ASSERT_EQ(mds_proxy_discard_tail(proxy, db, fileid, 8192), MDS_OK);
-
-    snprintf(path, sizeof(path), "%s/data/%llu_0_0", ds0,
-             (unsigned long long)fileid);
-    ASSERT_EQ(stat(path, &sb), 0);
-    ASSERT_EQ((uint64_t)sb.st_size, (uint64_t)8192);
-    snprintf(path, sizeof(path), "%s/data/%llu_1_0", ds1,
-             (unsigned long long)fileid);
-    ASSERT_EQ(stat(path, &sb), 0);
-    ASSERT_EQ((uint64_t)sb.st_size, (uint64_t)8192);
-
-    /* Bytes below the new size survived the truncate. */
-    memset(buf, 0, sizeof(buf));
-    ASSERT_EQ(mds_proxy_read(proxy, db, fileid, 8192, 0, 8192, buf,
-                             &bytes, &eof), MDS_OK);
-    ASSERT_EQ(bytes, 8192);
-    ASSERT_EQ(memcmp(buf, data, 8192), 0);
-
-    /* A file without a stripe map is reported, not silently cleared. */
-    ASSERT_EQ(mds_proxy_discard_tail(proxy, db, 9999, 0), MDS_ERR_NOTFOUND);
-
-    free(data);
-    mds_proxy_ctx_destroy(proxy);
-    close_test_db(db, db_path);
-    rm_ds_dir(ds0);
-    rm_ds_dir(ds1);
-}
-
-/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -692,7 +611,6 @@ int main(void)
     RUN_TEST(test_proxy_sparse_stripe_addr);
     RUN_TEST(test_proxy_read_sparse_holes);
     RUN_TEST(test_proxy_read_mirror_failover);
-    RUN_TEST(test_proxy_discard_tail);
 
     fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

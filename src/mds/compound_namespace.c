@@ -1180,7 +1180,7 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 	}
 
 	/*
-	 * The DS tail discard below needs the pre-mutation size to tell
+	 * The trim enqueue below needs the pre-mutation size to tell
 	 * a shrink from a grow.  Both shortcuts above may have skipped
 	 * on the fast request path, so force the read here -- before
 	 * cat_setattr rewrites the catalogue row.
@@ -1190,6 +1190,71 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 		if (compound_inode_get(cd, cd->current_fh.fileid,
 				       &sa_pre_inode) == MDS_OK) {
 			sa_pre_valid = true;
+		}
+	}
+
+	/*
+	 * Durably enqueue the DS tail trim on a shrinking
+	 * SETATTR(size) (design 2026-10-25-trim-tail-rework S3.1).
+	 *
+	 * The catalogue size is authoritative for reads and EOF, but
+	 * the per-stripe DS files keep their old length until the
+	 * trim worker truncates them; a grow before then would expose
+	 * the pre-truncate bytes instead of zeroes.  The queued TRIM
+	 * row is the durable pending work that makes the cleanup
+	 * recoverable: any failure leaves the row queued for retry.
+	 *
+	 * Mode gate (D5): under transient_state_cache the layout
+	 * quiescence fence the trim relies on is vacuous, so phase 1
+	 * enqueues nothing and preserves the pre-fix behaviour; the
+	 * stale-tail limitation is documented for that mode.
+	 *
+	 * No backend offers a fused setattr+GC operation (the txn
+	 * token is a grouping context only; see mds_catalogue.h), so
+	 * the row cannot join the size commit's transaction.  It is
+	 * therefore committed in its own transaction BEFORE the
+	 * setattr below (spec S3.1 fallback ordering): a crash in the
+	 * gap leaves a TRIM row for a not-yet-shrunk file, which the
+	 * worker harmlessly no-ops by truncating to the current
+	 * committed size -- the row is never destructive.
+	 *
+	 * Enqueue failure must not fail the SETATTR: the metadata
+	 * update is authoritative and the client-visible behaviour
+	 * does not change.  Warn and proceed; the next shrink of the
+	 * file re-enqueues (documented limitation).  A file without
+	 * DS backing drains as a no-op (NOTFOUND stripe map = dequeue
+	 * as success).
+	 */
+	if ((sa_mask & MDS_ATTR_SIZE) != 0 &&
+	    sa_pre_valid &&
+	    sa_pre_inode.type == MDS_FTYPE_REG &&
+	    (sa_pre_inode.flags & MDS_IFLAG_INLINE) == 0 &&
+	    sa_attrs.size < sa_pre_inode.size) {
+		enum mds_status trim_st;
+
+		if (cd->skip_transient_ndb) {
+			MDS_LOG_DEBUG(LOG_COMP_NFS,
+				      "SETATTR(fileid=%llu) shrink to %llu: "
+				      "transient state cache, no TRIM row",
+				      (unsigned long long)
+				      cd->current_fh.fileid,
+				      (unsigned long long)sa_attrs.size);
+		} else {
+			trim_st = mds_cat_gc_enqueue_hint_owner(cd->cat,
+								NULL,
+								cd->current_fh.fileid,
+								0, NULL, 0,
+								MDS_GC_SWEEP_TRIM,
+								MDS_GC_OWNER_GLOBAL);
+			if (trim_st != MDS_OK) {
+				MDS_LOG_WARN(LOG_COMP_NFS,
+					     "SETATTR(fileid=%llu) shrink to %llu: "
+					     "TRIM enqueue failed: %s",
+					     (unsigned long long)
+					     cd->current_fh.fileid,
+					     (unsigned long long)sa_attrs.size,
+					     mds_status_str(trim_st));
+			}
 		}
 	}
 
@@ -1221,42 +1286,6 @@ enum nfs4_status op_setattr(struct compound_data *cd,
 					cd->current_fh.fileid);
 		layout_commit_aggregator_drop(cd->lcommit_agg,
 					      cd->current_fh.fileid);
-	}
-	/*
-	 * Discard the DS tail on a shrinking SETATTR(size).
-	 *
-	 * The catalogue size is authoritative for reads and EOF, but the
-	 * per-stripe DS files keep their extents; a later grow would then
-	 * expose those stale bytes instead of zeroes.  Truncate every DS
-	 * file down to the new size now that the catalogue row is
-	 * committed.  Best-effort: the metadata write already succeeded,
-	 * so failing the SETATTR here would only desynchronise client
-	 * and catalogue.
-	 *
-	 * Inline files have no DS backing store; files without proxy
-	 * context cannot reach the DS mounts.  A regular file that never
-	 * reached a DS has no stripe map: the discard reports NOTFOUND
-	 * and there is nothing to clear.
-	 */
-	if (st == MDS_OK &&
-	    (sa_mask & MDS_ATTR_SIZE) != 0 &&
-	    sa_pre_valid &&
-	    sa_pre_inode.type == MDS_FTYPE_REG &&
-	    (sa_pre_inode.flags & MDS_IFLAG_INLINE) == 0 &&
-	    sa_attrs.size < sa_pre_inode.size &&
-	    cd->proxy != NULL) {
-		enum mds_status dsc_st = mds_proxy_discard_tail(
-			cd->proxy, cd->cat, cd->current_fh.fileid,
-			sa_attrs.size);
-
-		if (dsc_st != MDS_OK && dsc_st != MDS_ERR_NOTFOUND) {
-			MDS_LOG_WARN(LOG_COMP_NFS,
-				     "SETATTR(fileid=%llu) shrink to %llu: "
-				     "DS tail discard failed: %s",
-				     (unsigned long long)cd->current_fh.fileid,
-				     (unsigned long long)sa_attrs.size,
-				     mds_status_str(dsc_st));
-		}
 	}
 	/*
 	 * Mark Q5 P03 — layout-recall on truncate.

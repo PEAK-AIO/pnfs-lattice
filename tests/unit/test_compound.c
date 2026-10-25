@@ -13,6 +13,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "pnfs_mds.h"
 #include "mds_catalogue.h"
@@ -215,6 +216,9 @@ static void seed_ds_provision(struct mds_catalogue *db, uint32_t ds_id);
 static void mark_file_ds_pending(struct mds_catalogue *db, uint64_t fileid,
 				 uint32_t ds_id);
 static struct nfs4_op mk_layoutget(uint32_t iomode);
+static struct nfs4_op mk_setattr_attrs(uint32_t mask, uint32_t mode,
+				       uint64_t uid, uint64_t gid,
+				       uint64_t size);
 
 
 /**
@@ -2926,6 +2930,208 @@ static void test_proxy_read_write_compound(void)
 					      &inode), MDS_OK);
 		ASSERT_TRUE((inode.flags & MDS_IFLAG_DS_PENDING) != 0);
 	}
+
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+	rm_ds_tmpdir(ds_path);
+}
+
+/* -----------------------------------------------------------------------
+ * Shrink + durable TRIM enqueue (trim-tail rework, spec §3.1 / T9).
+ *
+ * Fixture: a 1x1 non-inline regular file whose stripe map lives on
+ * ds_id 1 (a simulated DS mount), with @size bytes written through
+ * the proxy and @size committed as the catalogue size.
+ * ----------------------------------------------------------------------- */
+
+static void setup_trim_file(struct mds_catalogue *db,
+			    struct mds_proxy_ctx *proxy,
+			    uint32_t size, uint64_t *fileid_out)
+{
+	struct mds_inode inode;
+	struct mds_ds_map_entry entry;
+	struct mds_cat_txn *txn = NULL;
+	uint8_t *data;
+	uint32_t bytes;
+	uint32_t i;
+
+	ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "trimfile", 0644,
+				   &inode), MDS_OK);
+
+	memset(&entry, 0, sizeof(entry));
+	entry.ds_id = 1;
+	VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
+	VERIFY(mds_cat_stripe_map_put(db, txn, inode.fileid, 1, 65536, 1,
+				      &entry) == MDS_OK);
+	VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
+
+	/* Creates the data/ subdir + (empty) stripe file. */
+	ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, inode.fileid, 0, 0),
+		  MDS_OK);
+
+	data = malloc(size);
+	VERIFY(data != NULL);
+	for (i = 0; i < size; i++) {
+		data[i] = (uint8_t)i;
+	}
+	ASSERT_EQ(mds_proxy_write(proxy, db, inode.fileid, 0, data, size,
+				  &bytes), MDS_OK);
+	ASSERT_EQ(bytes, size);
+	free(data);
+
+	VERIFY(mds_cat_ns_getattr(db, inode.fileid, &inode) == MDS_OK);
+	inode.size = size;
+	VERIFY(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn) == MDS_OK);
+	VERIFY(mds_cat_inode_put(db, txn, &inode) == MDS_OK);
+	VERIFY(mds_cat_txn_commit(txn) == MDS_OK);
+
+	*fileid_out = inode.fileid;
+}
+
+/** stat() the 1x1 stripe file on the simulated DS; -1 if absent. */
+static int trim_ds_file_size(const char *ds_path, uint64_t fileid,
+			     uint64_t *size_out)
+{
+	char path[4096];
+	struct stat sb;
+
+	snprintf(path, sizeof(path), "%s/data/%llu_0_0", ds_path,
+		 (unsigned long long)fileid);
+	if (stat(path, &sb) != 0) {
+		return -1;
+	}
+	*size_out = (uint64_t)sb.st_size;
+	return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * test_shrink_enqueues_trim -- persistent-mode shrinking SETATTR(size)
+ * commits the new size, enqueues exactly one globally-visible TRIM row
+ * and does NOT truncate the DS file itself (the tail trim is durable
+ * background work; the inline SETATTR truncate is gone).
+ * ----------------------------------------------------------------------- */
+
+static void test_shrink_enqueues_trim(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
+	struct mds_proxy_ctx *proxy;
+	struct mds_inode inode;
+	struct mds_gc_entry gcentry;
+	char *path, *ds_path;
+	uint32_t n;
+	uint32_t count;
+	uint64_t file_fid;
+	uint64_t ds_size;
+
+	db = open_test_db(&path);
+	ds_path = make_ds_tmpdir();
+
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+	seed_ds(db, 1, "10.0.0.1:/ds1");
+
+	setup_trim_file(db, proxy, 12288, &file_fid);
+	ASSERT_EQ(trim_ds_file_size(ds_path, file_fid, &ds_size), 0);
+	ASSERT_EQ(ds_size, (uint64_t)12288);
+
+	/* Shrinking SETATTR to 4 KiB through the dispatcher. */
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.proxy = proxy;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(file_fid);
+	ops[2] = mk_setattr_attrs(MDS_ATTR_SIZE, 0, 0, 0, 4096);
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+
+	/* The size commit landed ... */
+	VERIFY(mds_cat_ns_getattr(db, file_fid, &inode) == MDS_OK);
+	ASSERT_EQ(inode.size, (uint64_t)4096);
+
+	/* ... but the SETATTR itself must not have touched the DS:
+	 * the stripe file is still at its pre-shrink length. */
+	ASSERT_EQ(trim_ds_file_size(ds_path, file_fid, &ds_size), 0);
+	ASSERT_EQ(ds_size, (uint64_t)12288);
+
+	/* Exactly one queued row: the durable TRIM entry, globally
+	 * visible (owner 0) and whole-file (no stripe slot, no NFS FH). */
+	ASSERT_EQ(mds_cat_gc_count(db, &count), MDS_OK);
+	ASSERT_EQ(count, (uint32_t)1);
+	ASSERT_EQ(mds_cat_gc_peek(db, &gcentry), MDS_OK);
+	ASSERT_EQ(gcentry.fileid, file_fid);
+	ASSERT_EQ(gcentry.ds_id, (uint32_t)0);
+	ASSERT_EQ(gcentry.nfs_fh_len, (uint32_t)0);
+	ASSERT_EQ(gcentry.sweep_hint, MDS_GC_SWEEP_TRIM);
+	ASSERT_EQ(gcentry.owner_mds_id, (uint32_t)0);
+
+	mds_proxy_ctx_destroy(proxy);
+	close_test_db(db, path);
+	rm_ds_tmpdir(ds_path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_shrink_transient_no_enqueue -- T9: with transient_state_cache
+ * (skip_transient_ndb) a shrinking SETATTR(size) still commits the new
+ * size and returns NFS4_OK, but enqueues no TRIM row (the quiescence
+ * fence the trim relies on is vacuous in this mode; phase 1 preserves
+ * the pre-fix behaviour there) and leaves the DS file untouched.
+ * ----------------------------------------------------------------------- */
+
+static void test_shrink_transient_no_enqueue(void)
+{
+	struct mds_catalogue *db;
+	struct compound_data cd;
+	struct nfs4_op ops[3];
+	struct nfs4_result res[3];
+	memset(res, 0, sizeof(res));
+	struct mds_proxy_ctx *proxy;
+	struct mds_inode inode;
+	char *path, *ds_path;
+	uint32_t n;
+	uint32_t count;
+	uint64_t file_fid;
+	uint64_t ds_size;
+
+	db = open_test_db(&path);
+	ds_path = make_ds_tmpdir();
+
+	ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+	ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+	seed_ds(db, 1, "10.0.0.1:/ds1");
+
+	setup_trim_file(db, proxy, 12288, &file_fid);
+	ASSERT_EQ(trim_ds_file_size(ds_path, file_fid, &ds_size), 0);
+	ASSERT_EQ(ds_size, (uint64_t)12288);
+
+	compound_init(&cd);
+	cd.cat = g_test_cat;
+	cd.prealloc = g_prealloc;
+	cd.proxy = proxy;
+	cd.skip_transient_ndb = true;
+	ops[0] = mk_sequence();
+	ops[1] = mk_putfh(file_fid);
+	ops[2] = mk_setattr_attrs(MDS_ATTR_SIZE, 0, 0, 0, 4096);
+
+	n = compound_process(&cd, ops, res, 3);
+	ASSERT_EQ(n, (uint32_t)3);
+	ASSERT_EQ(res[2].status, NFS4_OK);
+
+	VERIFY(mds_cat_ns_getattr(db, file_fid, &inode) == MDS_OK);
+	ASSERT_EQ(inode.size, (uint64_t)4096);
+
+	/* No inline work, no background work: DS file untouched and
+	 * the GC queue is empty. */
+	ASSERT_EQ(trim_ds_file_size(ds_path, file_fid, &ds_size), 0);
+	ASSERT_EQ(ds_size, (uint64_t)12288);
+	ASSERT_EQ(mds_cat_gc_count(db, &count), MDS_OK);
+	ASSERT_EQ(count, (uint32_t)0);
 
 	mds_proxy_ctx_destroy(proxy);
 	close_test_db(db, path);
@@ -5720,6 +5926,8 @@ int main(void)
 	RUN_TEST(test_gc_on_remove);
 	RUN_TEST(test_gc_on_remove_fused);
 	RUN_TEST(test_proxy_read_write_compound);
+	RUN_TEST(test_shrink_enqueues_trim);
+	RUN_TEST(test_shrink_transient_no_enqueue);
 	RUN_TEST(test_read_bad_seqid);
 	RUN_TEST(test_inline_read_bad_stateid_does_not_promote);
 	RUN_TEST(test_inline_write_bad_stateid_does_not_promote);
