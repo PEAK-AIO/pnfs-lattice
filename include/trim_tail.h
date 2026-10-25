@@ -205,9 +205,13 @@ void trim_set_quiescence_required(bool required);
  *
  * Status contract: MDS_OK ONLY when the row was drained (dequeued --
  * the caller must not dequeue again); MDS_ERR_DELAY = leave the row
- * queued (non-owner, indeterminate ownership, transient failure,
- * backoff bound), which the ds_gc drainer's generic non-OK handling
- * turns into retry + successor hand-off for free.
+ * queued (module not initialized, non-owner, indeterminate
+ * ownership, transient failure, backoff bound, no-recall refusal),
+ * which the ds_gc drainer's generic non-OK handling turns into
+ * retry + successor hand-off for free.  While the module is not
+ * ready (between trim_module_init and trim_module_fini), this
+ * returns MDS_ERR_DELAY immediately and touches no lock, flag, or
+ * DS state at all.
  *
  * The quiescing flag is cleared on every exit path EXCEPT a
  * truncate/mount failure, where it is deliberately kept set: the DS

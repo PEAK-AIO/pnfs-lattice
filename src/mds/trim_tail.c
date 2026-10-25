@@ -69,6 +69,14 @@ static bool g_flags_inited;
 static uint32_t g_trim_max_wait_sec;  /* resolved (0 config = 3 x lease) */
 static uint32_t g_lease_sec;          /* resolved (0 config = library def) */
 
+/* Ready state: true between trim_module_init() and trim_module_
+ * fini().  While false the L(F) and flag tables are down (zeroed or
+ * destroyed statics), so trim_process_entry() must keep every row
+ * queued instead of running the locks/flags -- in particular in the
+ * daemon startup window where the ds_gc drainer runs before
+ * trim_module_init has executed. */
+static bool g_trim_ready;
+
 /* Execution-core bindings (bound at daemon startup before the ds_gc
  * drainer starts; NULL-safe for the unit tests). */
 static const struct subtree_map *g_smap;   /* NULL = fail-open ownership */
@@ -214,6 +222,7 @@ int trim_module_init(uint32_t lease_time_sec, uint32_t trim_max_wait_sec)
 	}
 	g_trim_max_wait_sec = (uint32_t)wait;
 	g_lease_sec = lease;
+	g_trim_ready = true;
 	return 0;
 }
 
@@ -221,6 +230,10 @@ void trim_module_fini(void)
 {
 	uint32_t i;
 
+	/* Drop ready first: a (contract-violating) concurrent drain
+	 * must see not-ready and keep the row queued, not run the
+	 * tables about to be destroyed. */
+	g_trim_ready = false;
 	if (g_flags_inited) {
 		flags_clear_all();
 		for (i = 0; i < TRIM_STRIPES; i++) {
@@ -708,6 +721,17 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 
 	if (cat == NULL || proxy == NULL || e == NULL) {
 		return MDS_ERR_INVAL;
+	}
+	if (!g_trim_ready) {
+		/* Module not initialized (daemon startup window
+		 * before trim_module_init, or a fini'd incarnation):
+		 * the L(F) and flag tables are not up and the
+		 * ownership/recall bindings are not final.  Keep the
+		 * row queued and touch NOTHING -- no flag, no seen
+		 * entry, no L(F), no DS files; there is nothing to
+		 * unwind.  Any future startup reordering degrades to
+		 * "keep queued", never "truncate unguarded". */
+		return MDS_ERR_DELAY;
 	}
 	fid = e->fileid;
 

@@ -1225,6 +1225,53 @@ static void test_trim_restart(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_trim_ready_gate (fix round 2, C1)
+ * ----------------------------------------------------------------------- */
+
+/**
+ * A not-ready module (fini'd: the L(F) and flag tables are down, as
+ * in the daemon startup window between the drainer thread starting
+ * and trim_module_init running) must never execute a drain: the row
+ * stays queued, the DS file is untouched, and no quiescing flag is
+ * set.  Once the module is initialized again, the same row drains
+ * normally.
+ */
+static void test_trim_ready_gate(void)
+{
+	struct trim_env     env;
+	uint64_t            fid;
+	struct mds_gc_entry row;
+
+	ASSERT_EQ(trim_module_init(90, 0), 0);
+	env = env_open();
+	fid = new_file_1x1(env.cat, "ready", KIB(8), 1);
+	ds_data_dir(env.ds_dir);
+	ds_write_pattern(env.ds_dir, fid, 0, 0, KIB(8));
+	cat_set_size(env.cat, fid, KIB(4));
+	enqueue_trim_row(env.cat, fid, 1);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+
+	/* Not ready: fini'd, lock/flag tables destroyed. */
+	trim_module_fini();
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+		MDS_ERR_DELAY);
+	ASSERT_EQ(gc_count_of(env.cat), 1);
+	/* No truncate, no quiescing flag, no L(F) work. */
+	ASSERT_EQ(ds_len(env.ds_dir, fid, 0, 0), KIB(8));
+	ASSERT_TRUE(ds_is_pattern(env.ds_dir, fid, 0, 0, 0, KIB(8)));
+	ASSERT_TRUE(!trim_quiescing(fid));
+
+	/* Ready again: the same row drains from scratch. */
+	ASSERT_EQ(trim_module_init(90, 0), 0);
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row), MDS_OK);
+	ASSERT_EQ(gc_count_of(env.cat), 0);
+	ASSERT_EQ(ds_len(env.ds_dir, fid, 0, 0), KIB(4));
+	ASSERT_TRUE(ds_is_pattern(env.ds_dir, fid, 0, 0, 0, KIB(4)));
+	ASSERT_TRUE(!trim_quiescing(fid));
+	env_close(&env);
+}
+
+/* -----------------------------------------------------------------------
  * test_trim_authoritative_read (T8)
  * ----------------------------------------------------------------------- */
 
@@ -1310,6 +1357,7 @@ int main(void)
 	RUN_TEST(test_trim_owner_guard);
 	RUN_TEST(test_trim_vanish);
 	RUN_TEST(test_trim_restart);
+	RUN_TEST(test_trim_ready_gate);
 	RUN_TEST(test_trim_authoritative_read);
 	trim_module_fini();
 
