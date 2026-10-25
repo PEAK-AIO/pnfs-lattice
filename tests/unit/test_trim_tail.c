@@ -772,6 +772,112 @@ static void test_trim_recoverable_failure(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_trim_backoff_release_inflight (fix round 1, finding 1)
+ * ----------------------------------------------------------------------- */
+
+/**
+ * The backoff-bound release must NOT clear the flag of an in-flight
+ * drain: while worker A is mid-attempt (flag set by its own step 5,
+ * parked under L(F)), a second drain of the same fileid whose backoff
+ * bound is due must skip the release (a drain is in flight); once A
+ * finishes, the next cycle's backoff bound clears the flag a failed
+ * attempt kept set (no permanent DELAY wedge).
+ *
+ * Driven deterministically: the test thread holds L(F) so the worker
+ * parks mid-attempt, and the test thread itself issues the probe
+ * drain.  The 1-second max_wait plus ~1.1-second sleeps make the
+ * probe's backoff bound due in both phases.
+ */
+static void test_trim_backoff_release_inflight(void)
+{
+	struct trim_env          env;
+	struct fence_worker_args wa;
+	pthread_t                th;
+	uint64_t                 fid;
+	struct mds_gc_entry      row;
+	char                     bad[4200];
+	int                      i;
+
+	/* 1s max_wait so the backoff bound can fire across a sleep. */
+	ASSERT_EQ(trim_module_init(90, 1), 0);
+
+	env = env_open();
+	fid = new_file_1x1(env.cat, "backoff", KIB(8), 1);
+	ds_data_dir(env.ds_dir);
+	ds_write_pattern(env.ds_dir, fid, 0, 0, KIB(8));
+	cat_set_size(env.cat, fid, KIB(4));
+	enqueue_trim_row(env.cat, fid, 1);
+
+	/* Plant the kept-set flag the way a truncate failure does
+	 * (EISDIR fault), then retire it the way a prior cycle's
+	 * backoff release would: the seen entry's age keeps running,
+	 * the in-flight count is zero, the flag is clear. */
+	ds_path(bad, sizeof(bad), env.ds_dir, fid, 0, 0);
+	ASSERT_EQ(unlink(bad), 0);
+	ASSERT_EQ(mkdir(bad, 0755), 0);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+		MDS_ERR_DELAY);
+	ASSERT_TRUE(trim_quiescing(fid));
+	ASSERT_EQ(rmdir(bad), 0);
+	ds_write_pattern(env.ds_dir, fid, 0, 0, KIB(8));
+	trim_quiesce_end(fid);
+	ASSERT_TRUE(!trim_quiescing(fid));
+
+	/* Phase 1: worker A mid-attempt owns the flag; the probe's
+	 * due backoff bound must NOT release it. */
+	wa.cat = env.cat;
+	wa.proxy = env.proxy;
+	wa.row = &row;
+	wa.rc = (enum mds_status)MDS_ERR_INVAL;
+	trim_inode_lock(fid);
+	ASSERT_EQ(pthread_create(&th, NULL, fence_worker, &wa), 0);
+	for (i = 0; i < 200 && !trim_quiescing(fid); i++) {
+		usleep(10 * 1000);
+	}
+	ASSERT_TRUE(trim_quiescing(fid));
+	/* The seen entry is now older than the 1s max_wait. */
+	usleep(1100 * 1000);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+		MDS_ERR_DELAY);
+	/* A is still in flight (parked on L(F)): the flag survives
+	 * the probe's due backoff bound. */
+	ASSERT_TRUE(trim_quiescing(fid));
+	ASSERT_EQ(gc_count_of(env.cat), 1);
+
+	/* Release A: it drains the row and clears the flag itself. */
+	trim_inode_unlock(fid);
+	ASSERT_EQ(pthread_join(th, NULL), 0);
+	ASSERT_EQ(wa.rc, MDS_OK);
+	ASSERT_EQ(gc_count_of(env.cat), 0);
+	ASSERT_TRUE(!trim_quiescing(fid));
+	ASSERT_EQ(ds_len(env.ds_dir, fid, 0, 0), KIB(4));
+	ASSERT_TRUE(ds_is_pattern(env.ds_dir, fid, 0, 0, 0, KIB(4)));
+
+	/* Phase 2: with no drain in flight, the next cycle's backoff
+	 * bound clears the flag a failed attempt kept set. */
+	ds_path(bad, sizeof(bad), env.ds_dir, fid, 0, 0);
+	ASSERT_EQ(unlink(bad), 0);
+	ASSERT_EQ(mkdir(bad, 0755), 0);
+	enqueue_trim_row(env.cat, fid, 1);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+		MDS_ERR_DELAY);
+	ASSERT_TRUE(trim_quiescing(fid));
+	usleep(1100 * 1000);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+	ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+		MDS_ERR_DELAY);
+	ASSERT_TRUE(!trim_quiescing(fid));
+	ASSERT_EQ(gc_count_of(env.cat), 1);
+
+	/* Restore the resolved max_wait for the remaining tests. */
+	ASSERT_EQ(trim_module_init(90, 0), 0);
+	env_close(&env);
+}
+
+/* -----------------------------------------------------------------------
  * test_trim_superseding_grow (T3 + multi-mirror variant)
  * ----------------------------------------------------------------------- */
 
@@ -1149,6 +1255,7 @@ int main(void)
 
 	RUN_TEST(test_trim_p1_proxy_fence);
 	RUN_TEST(test_trim_recoverable_failure);
+	RUN_TEST(test_trim_backoff_release_inflight);
 	RUN_TEST(test_trim_superseding_grow);
 	RUN_TEST(test_trim_double_shrink);
 	RUN_TEST(test_trim_missing_mount);

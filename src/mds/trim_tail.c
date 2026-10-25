@@ -27,6 +27,7 @@
  * LAYOUTGET checks the flag without taking L(F)).
  */
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -74,13 +75,21 @@ static const struct subtree_map *g_smap;   /* NULL = fail-open ownership */
 static struct layout_recall     *g_lr;     /* NULL = no layouts to quiesce */
 
 /* First-seen bookkeeping (spec S3.5): one entry per fileid with a
- * monotonic first-seen timestamp and a one-shot lease-age WARN flag.
- * Cold path: only drainer workers touch it, guarded by a single
- * mutex.  The entry count IS the trim_pending gauge. */
+ * monotonic first-seen timestamp, a one-shot lease-age WARN flag,
+ * and a count of drain attempts currently in flight (between
+ * seen_enter and the matching seen_leave).  Cold path: only drainer
+ * workers touch it, guarded by a single mutex.  The entry count IS
+ * the trim_pending gauge. */
 struct trim_first_seen {
 	uint64_t                fileid;
 	uint64_t                first_ns;
 	bool                    warned;
+	/* Drains in flight.  Guarded by g_seen_mutex like every other
+	 * field.  The quiescing flag is cleared only when this count
+	 * reaches zero, so a backoff release (or a concurrent drain's
+	 * exit) can never open the LAYOUTGET gate under a truncate
+	 * that is still running. */
+	uint32_t                in_flight;
 	struct trim_first_seen *next;
 };
 
@@ -401,24 +410,48 @@ static void seen_clear_all(void)
 }
 
 /**
- * Upsert the fileid and return its age in ns since first sight.
- * One-shot WARN when the age crosses one lease period.
+ * Begin the first-seen bookkeeping for one drain attempt of @a
+ * fileid.  ONE g_seen_mutex critical section: upsert the entry, bump
+ * its in-flight count, one-shot lease-age WARN, gauge.
+ *
+ * Bumping the counter here -- before the quiescing flag is set in
+ * step 5 -- is what lets the backoff bound (and every other flag
+ * clear below) tell a flag owned by an IN-FLIGHT drain apart from
+ * one a failed attempt kept set: the release side (seen_leave)
+ * clears the flag only when this count reaches zero, and it runs
+ * under the same mutex, so there is no window where the flag is set
+ * while an in-flight attempt's count reads zero.
+ *
+ * A fresh-entry allocation failure reports age UINT64_MAX and
+ * *tracked false (no counter bumped): the backoff bound then fires
+ * (conservatively releasing the gate for a cycle) instead of letting
+ * a kept-set flag wedge the LAYOUTGET gate forever.
+ *
+ * @param fileid       Inode id being drained.
+ * @param age_out      Age in ns since first sight (UINT64_MAX on a
+ *                     fresh-entry allocation failure).
+ * @param tracked      false only on that allocation failure.
+ * @param in_flight_out In-flight count INCLUDING this attempt
+ *                     (0 when *tracked is false).
  */
-static uint64_t seen_touch(uint64_t fileid)
+static void seen_enter(uint64_t fileid, uint64_t *age_out, bool *tracked,
+		       uint32_t *in_flight_out)
 {
 	uint64_t                now = trim_now_ns();
 	struct trim_first_seen *e;
+	struct trim_first_seen *m = NULL;
 	uint64_t                age = 0;
 	uint32_t                count = 0;
-	bool                    found = false;
+	bool                    is_tracked = false;
 
 	pthread_mutex_lock(&g_seen_mutex);
 	for (e = g_seen_head; e != NULL; e = e->next) {
 		count++;
 		if (e->fileid == fileid) {
-			found = true;
+			m = e;
 			age = (now >= e->first_ns)
 			     ? now - e->first_ns : 0;
+			e->in_flight++;
 			if (!e->warned && g_lease_sec > 0 &&
 			    age >= (uint64_t)g_lease_sec * 1000000000ULL) {
 				e->warned = true;
@@ -431,36 +464,70 @@ static uint64_t seen_touch(uint64_t fileid)
 			}
 		}
 	}
-	if (!found) {
+	if (m == NULL) {
 		e = calloc(1, sizeof(*e));
 		if (e != NULL) {
 			e->fileid = fileid;
 			e->first_ns = now;
-			e->warned = false;
+			e->in_flight = 1;
 			e->next = g_seen_head;
 			g_seen_head = e;
+			m = e;
 			count++;
+		} else {
+			age = UINT64_MAX;
 		}
 	}
+	is_tracked = (m != NULL);
 	atomic_store_explicit(&g_branch_metrics.trim_pending,
 			      (uint64_t)count, memory_order_relaxed);
+	*age_out = age;
+	*tracked = is_tracked;
+	*in_flight_out = is_tracked ? m->in_flight : 0;
 	pthread_mutex_unlock(&g_seen_mutex);
-	return age;
 }
 
-/** Drop the entry (row drained); refresh the gauge. */
-static void seen_drop(uint64_t fileid)
+/**
+ * Finish one drain attempt of @a fileid (pairs with seen_enter).
+ *
+ * @param fileid    Inode id.
+ * @param releasing The quiescing flag should be cleared (every exit
+ *                  EXCEPT the deliberate truncate/mount-failure
+ *                  keep).  It is cleared only when this attempt is
+ *                  the LAST in flight (in_flight reaches zero), and
+ *                  under g_seen_mutex -- the same lock that
+ *                  serializes seen_enter's in-flight reads -- so a
+ *                  backoff release can never open the LAYOUTGET gate
+ *                  while another drain's truncate is running.
+ * @param drop      Remove the entry itself (row drained or the file
+ *                  vanished); a kept entry (row still queued) keeps
+ *                  its age so the backoff bound does not restart its
+ *                  clock.
+ */
+static void seen_leave(uint64_t fileid, bool releasing, bool drop)
 {
 	struct trim_first_seen **link;
 	uint32_t                count = 0;
+	bool                    last = false;
 
 	pthread_mutex_lock(&g_seen_mutex);
 	for (link = &g_seen_head; *link != NULL; link = &(*link)->next) {
 		if ((*link)->fileid == fileid) {
 			struct trim_first_seen *victim = *link;
+			bool                    removed = false;
 
-			*link = victim->next;
-			free(victim);
+			if (victim->in_flight > 0) {
+				victim->in_flight--;
+				last = (victim->in_flight == 0);
+			}
+			if (last && drop) {
+				*link = victim->next;
+				free(victim);
+				removed = true;
+			}
+			if (!removed) {
+				count++;
+			}
 			break;
 		}
 		count++;
@@ -470,6 +537,12 @@ static void seen_drop(uint64_t fileid)
 	}
 	atomic_store_explicit(&g_branch_metrics.trim_pending,
 			      (uint64_t)count, memory_order_relaxed);
+	if (last && releasing) {
+		/* Lock nesting is seen -> flag-stripe only: no
+		 * flag-stripe path ever takes g_seen_mutex, so no
+		 * deadlock. */
+		trim_quiesce_end(fileid);
+	}
 	pthread_mutex_unlock(&g_seen_mutex);
 }
 
@@ -662,13 +735,49 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 	/* 4. First-seen bookkeeping + backoff bound (S3.5): a row
 	 *    pending past trim_max_wait while quiescing releases the
 	 *    LAYOUTGET gate for a cycle, so a failing DS cannot wedge
-	 *    a file in permanent DELAY. */
+	 *    a file in permanent DELAY.  seen_enter() bumps the
+	 *    in-flight count in the same critical section it reads
+	 *    the age, BEFORE the flag is set in step 5, and the only
+	 *    flag clears from here run under the same mutex inside
+	 *    seen_leave() -- so the release below fires only when no
+	 *    drain is in flight and can never open the gate under a
+	 *    running truncate (fix round 1, finding 1). */
 	{
-		uint64_t age = seen_touch(fid);
+		uint64_t age;
+		bool     tracked;
+		uint32_t in_flight;
 
+		seen_enter(fid, &age, &tracked, &in_flight);
+		if (!tracked) {
+			/* Entry allocation failed (OOM): age is
+			 * UINT64_MAX, so a kept-set flag is released
+			 * by the backoff bound instead of wedging
+			 * the gate forever.  No counter was bumped,
+			 * so there is nothing to leave. */
+			if (trim_quiescing(fid)) {
+				trim_quiesce_end(fid);
+			}
+			free(entries);
+			return MDS_ERR_DELAY;
+		}
+		if (in_flight > 1) {
+			/* A drain of this fileid is already in
+			 * flight (the count includes us): it owns
+			 * the flag and its own exit clears it.  Back
+			 * off this cycle rather than stacking a
+			 * second locked truncate. */
+			seen_leave(fid, true, false);
+			free(entries);
+			return MDS_ERR_DELAY;
+		}
 		if (age > (uint64_t)trim_max_wait_sec() * 1000000000ULL &&
 		    trim_quiescing(fid)) {
-			trim_quiesce_end(fid);
+			/* in_flight is 1 (just us, not begun yet):
+			 * the flag is one an earlier failed attempt
+			 * kept set; releasing it here (under
+			 * g_seen_mutex, inside seen_leave) opens the
+			 * gate for exactly this cycle. */
+			seen_leave(fid, true, false);
 			free(entries);
 			return MDS_ERR_DELAY;
 		}
@@ -697,7 +806,7 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 		if (lrc != 0) {
 			/* Enumeration failure: no revoke performed --
 			 * leave the row for the next cycle. */
-			trim_quiesce_end(fid);
+			seen_leave(fid, true, false);
 			free(entries);
 			return MDS_ERR_DELAY;
 		}
@@ -712,15 +821,14 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 	if (st == MDS_ERR_NOTFOUND) {
 		/* Vanished under us: nothing to clear. */
 		trim_inode_unlock(fid);
-		trim_quiesce_end(fid);
+		seen_leave(fid, true, true);
 		free(entries);
-		seen_drop(fid);
 		return (mds_cat_gc_dequeue(cat, NULL, e->gc_seq) == MDS_OK)
 		       ? MDS_OK : MDS_ERR_DELAY;
 	}
 	if (st != MDS_OK) {
 		trim_inode_unlock(fid);
-		trim_quiesce_end(fid);
+		seen_leave(fid, true, false);
 		free(entries);
 		return MDS_ERR_DELAY;
 	}
@@ -735,15 +843,14 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 		if (st == MDS_ERR_NOTFOUND) {
 			/* Map removed under us: nothing to clear. */
 			trim_inode_unlock(fid);
-			trim_quiesce_end(fid);
+			seen_leave(fid, true, true);
 			free(entries);
-			seen_drop(fid);
 			return (mds_cat_gc_dequeue(cat, NULL, e->gc_seq)
 				== MDS_OK) ? MDS_OK : MDS_ERR_DELAY;
 		}
 		if (st != MDS_OK) {
 			trim_inode_unlock(fid);
-			trim_quiesce_end(fid);
+			seen_leave(fid, true, false);
 			free(entries);
 			return MDS_ERR_DELAY;
 		}
@@ -764,9 +871,8 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 		/* Full success: unblock, drop the bookkeeping,
 		 * dequeue. */
 		trim_inode_unlock(fid);
-		trim_quiesce_end(fid);
+		seen_leave(fid, true, true);
 		free(entries);
-		seen_drop(fid);
 		atomic_fetch_add_explicit(&g_branch_metrics.trim_completed,
 					  1, memory_order_relaxed);
 		return mds_cat_gc_dequeue(cat, NULL, e->gc_seq);
@@ -776,6 +882,7 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 	 * gate stays closed); the row stays queued for retry and the
 	 * backoff bound above releases the gate periodically. */
 	trim_inode_unlock(fid);
+	seen_leave(fid, false, false);
 	atomic_fetch_add_explicit(&g_branch_metrics.trim_failed, 1,
 				  memory_order_relaxed);
 	MDS_LOG_WARN(LOG_COMP_MDS,

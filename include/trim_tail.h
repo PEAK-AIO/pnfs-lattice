@@ -192,7 +192,12 @@ void trim_set_layout_recall(struct layout_recall *lr);
  * truncate/mount failure, where it is deliberately kept set: the DS
  * tail is still stale, so the LAYOUTGET gate stays closed until a
  * later cycle succeeds (the backoff bound releases it periodically
- * so the gate cannot wedge a file permanently).
+ * so the gate cannot wedge a file permanently).  A drain that
+ * exits clears the flag only when it is the LAST in-flight drain
+ * of the fileid (an in-flight counter in the first-seen table,
+ * bumped before the flag is set and cleared under the same mutex),
+ * so one drain can never open the LAYOUTGET gate while a
+ * concurrent drain's truncate is still running.
  *
  * Thread-safe: multiple drainer workers may call this concurrently
  * for the same fileid (one file can hold several TRIM rows); L(F)
