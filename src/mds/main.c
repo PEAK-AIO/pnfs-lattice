@@ -1548,6 +1548,12 @@ int main(int argc, char *argv[])
 	 * above are done); NULL (single-MDS) fails open inside the
 	 * module. */
 	trim_set_subtree_map(smap);
+	/* A layout-serving MDS must never let the trim truncate a
+	 * file while a client could hold a live layout the MDS
+	 * cannot recall: if layout_recall_init below fails, the
+	 * drain refuses (row stays queued) instead of skipping the
+	 * quiescence step. */
+	trim_set_quiescence_required(cfg.serve_layouts);
 	if (trim_module_init(cfg.lease_time_sec,
 			     cfg.trim_max_wait_sec) != 0) {
 		MDS_LOG_WARN(LOG_COMP_MDS, "trim_module_init failed");

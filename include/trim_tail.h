@@ -169,6 +169,27 @@ void trim_set_subtree_map(const struct subtree_map *map);
 void trim_set_layout_recall(struct layout_recall *lr);
 
 /**
+ * @brief Declare layout quiescence mandatory for the trim drain.
+ *
+ * In a deployment that serves pNFS layouts, the trim must never
+ * truncate a file while a client could hold a live layout the MDS
+ * cannot recall.  When this is set and no recall coordinator is
+ * bound (trim_set_layout_recall() never received a non-NULL handle,
+ * e.g. layout_recall_init failed at startup), trim_process_entry()
+ * REFUSES to drain: the row stays queued (MDS_ERR_DELAY) with a
+ * rate-limited WARN, instead of skipping the quiescence step and
+ * truncating under live client I/O.
+ *
+ * Default false (the unit-test deployments, which hold no layouts
+ * and bind no coordinator).  Call this before any
+ * trim_process_entry() may run (the daemon calls it at startup,
+ * next to trim_module_init).
+ *
+ * @param required  true: no bound coordinator = refuse to drain.
+ */
+void trim_set_quiescence_required(bool required);
+
+/**
  * @brief Drain one TRIM GC row: quiesce the file's client layouts,
  *        then under L(F) truncate every stripe/mirror DS file to the
  *        current committed size.

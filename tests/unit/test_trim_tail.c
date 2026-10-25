@@ -1012,6 +1012,53 @@ static void test_trim_missing_mount(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_trim_refuse_without_recall (fix round 1, finding 2)
+ * ----------------------------------------------------------------------- */
+
+/**
+ * A layout-serving deployment whose layout_recall_init() failed has
+ * no recall coordinator bound: the drain must REFUSE (row stays
+ * queued, MDS_ERR_DELAY, rate-limited WARN) instead of skipping the
+ * quiescence step and truncating under live client layouts.  The DS
+ * file is untouched, and no quiescing flag is left set.
+ */
+static void test_trim_refuse_without_recall(void)
+{
+	struct trim_env     env;
+	uint64_t            fid;
+	struct mds_gc_entry row;
+	int                 i;
+
+	ASSERT_EQ(trim_module_init(90, 0), 0);
+	/* Layout-serving deployment, no recall coordinator bound
+	 * (g_lr NULL, as in every unit test). */
+	trim_set_quiescence_required(true);
+
+	env = env_open();
+	fid = new_file_1x1(env.cat, "norecall", KIB(8), 1);
+	ds_data_dir(env.ds_dir);
+	ds_write_pattern(env.ds_dir, fid, 0, 0, KIB(8));
+	cat_set_size(env.cat, fid, KIB(4));
+	enqueue_trim_row(env.cat, fid, 1);
+	ASSERT_TRUE(peek_row(env.cat, fid, &row));
+
+	for (i = 0; i < 3; i++) {
+		ASSERT_EQ(trim_process_entry(env.cat, env.proxy, &row),
+			MDS_ERR_DELAY);
+		ASSERT_EQ(gc_count_of(env.cat), 1);
+	}
+
+	/* No truncate (DS length unchanged, tail bytes intact), and
+	 * the gate was never closed. */
+	ASSERT_EQ(ds_len(env.ds_dir, fid, 0, 0), KIB(8));
+	ASSERT_TRUE(ds_is_pattern(env.ds_dir, fid, 0, 0, 0, KIB(8)));
+	ASSERT_TRUE(!trim_quiescing(fid));
+
+	trim_set_quiescence_required(false);
+	env_close(&env);
+}
+
+/* -----------------------------------------------------------------------
  * test_trim_owner_guard (T7)
  * ----------------------------------------------------------------------- */
 
@@ -1259,6 +1306,7 @@ int main(void)
 	RUN_TEST(test_trim_superseding_grow);
 	RUN_TEST(test_trim_double_shrink);
 	RUN_TEST(test_trim_missing_mount);
+	RUN_TEST(test_trim_refuse_without_recall);
 	RUN_TEST(test_trim_owner_guard);
 	RUN_TEST(test_trim_vanish);
 	RUN_TEST(test_trim_restart);

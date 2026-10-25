@@ -73,6 +73,11 @@ static uint32_t g_lease_sec;          /* resolved (0 config = library def) */
  * drainer starts; NULL-safe for the unit tests). */
 static const struct subtree_map *g_smap;   /* NULL = fail-open ownership */
 static struct layout_recall     *g_lr;     /* NULL = no layouts to quiesce */
+/* Layout-serving deployments: a missing recall coordinator means
+ * REFUSE to drain (the quiescence step could not protect the
+ * truncate), not "no layouts to quiesce".  Set by the daemon from
+ * cfg.serve_layouts; false in the unit tests. */
+static bool g_quiesce_required;
 
 /* First-seen bookkeeping (spec S3.5): one entry per fileid with a
  * monotonic first-seen timestamp, a one-shot lease-age WARN flag,
@@ -376,6 +381,11 @@ void trim_set_subtree_map(const struct subtree_map *map)
 void trim_set_layout_recall(struct layout_recall *lr)
 {
 	g_lr = lr;
+}
+
+void trim_set_quiescence_required(bool required)
+{
+	g_quiesce_required = required;
 }
 
 /* -----------------------------------------------------------------------
@@ -728,6 +738,31 @@ enum mds_status trim_process_entry(struct mds_catalogue *cat,
 		       ? MDS_OK : MDS_ERR_DELAY;
 	}
 	if (st != MDS_OK) {
+		free(entries);
+		return MDS_ERR_DELAY;
+	}
+
+	/* 3b. No recall coordinator bound in a layout-serving
+	 *     deployment (layout_recall_init failed at startup): the
+	 *     quiescence step below would be skipped, and the locked
+	 *     truncate would run while clients hold live layouts this
+	 *     MDS cannot recall -- a data-loss path with no race
+	 *     required.  Refuse to drain: keep the row queued (rate-
+	 *     limited WARN) instead of truncating.  (Placed after the
+	 *     vanish check and the stripe-map resolution, so gone files
+	 *     and mapless rows still drain.) */
+	if (g_quiesce_required && g_lr == NULL) {
+		static _Atomic unsigned long no_lr_n = 0;
+
+		if ((atomic_fetch_add_explicit(&no_lr_n, 1UL,
+					       memory_order_relaxed)
+		     & 0x3FFUL) == 0UL) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"trim: fileid %llu kept queued: serving "
+				"layouts but no layout recall "
+				"coordinator is bound",
+				(unsigned long long)fid);
+		}
 		free(entries);
 		return MDS_ERR_DELAY;
 	}
