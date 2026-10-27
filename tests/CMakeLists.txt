@@ -86,6 +86,7 @@ add_executable(test_ds_io_limits    unit/test_ds_io_limits.c)
 if(ENABLE_DS_GC)
     add_executable(test_ds_gc       unit/test_ds_gc.c)
 endif()
+add_executable(test_trim_tail     unit/test_trim_tail.c)
 add_executable(test_hpc_shared      unit/test_hpc_shared.c)
 if(ENABLE_LAYOUT_CACHE)
     add_executable(test_layout_cache unit/test_layout_cache.c)
@@ -153,6 +154,7 @@ foreach(test_target
     test_ds_capacity
     test_ds_io_limits
     test_ds_gc
+    test_trim_tail
     test_hpc_shared
     test_layout_cache
     test_layout_commit_aggregator

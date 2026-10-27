@@ -509,6 +509,45 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         return -1;
     }
 
+    /* Background DS-tail trim (trim-tail-rework): pending is a gauge
+     * over the drainer's in-flight TRIM rows; completed/failed are
+     * drain attempt outcomes; the recall-wait pair is a summary-style
+     * _ns_sum/_count so operators can derive the mean quiescence cost. */
+    extra = snprintf(buf + base, cap - (size_t)base,
+        "# HELP pnfs_mds_trim_pending "
+            "TRIM rows the drainer has seen and not yet drained.\n"
+        "# TYPE pnfs_mds_trim_pending gauge\n"
+        "pnfs_mds_trim_pending %lu\n"
+        "# HELP pnfs_mds_trim_completed "
+            "TRIM rows drained (dequeued) by the background worker.\n"
+        "# TYPE pnfs_mds_trim_completed counter\n"
+        "pnfs_mds_trim_completed %lu\n"
+        "# HELP pnfs_mds_trim_failed "
+            "TRIM drain attempts that failed and stay queued.\n"
+        "# TYPE pnfs_mds_trim_failed counter\n"
+        "pnfs_mds_trim_failed %lu\n"
+        "# HELP pnfs_mds_trim_recall_wait_ns_sum "
+            "Sum of ns spent quiescing client layouts per trim drain.\n"
+        "# TYPE pnfs_mds_trim_recall_wait_ns_sum counter\n"
+        "pnfs_mds_trim_recall_wait_ns_sum %lu\n"
+        "# HELP pnfs_mds_trim_recall_wait_count "
+            "Count of trim layout-quiescence observations.\n"
+        "# TYPE pnfs_mds_trim_recall_wait_count counter\n"
+        "pnfs_mds_trim_recall_wait_count %lu\n",
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->trim_pending),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->trim_completed),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->trim_failed),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->trim_recall_wait_ns_sum),
+        (unsigned long)atomic_load(
+            (_Atomic uint64_t *)&branch->trim_recall_wait_count));
+    if (!advance_cursor(&base, extra, cap)) {
+        return -1;
+    }
+
     /* Append NFS operation counters. */
     extra = snprintf(buf + base, cap - (size_t)base,
         "# HELP pnfs_mds_nfs_ops_total Total NFS operations.\n"

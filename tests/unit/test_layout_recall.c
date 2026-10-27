@@ -11,6 +11,11 @@
  *   3. layout_recall_for_ds revokes when no active session.
  *   4. layout_recall_for_file returns -1 (stub).
  *   5. LAYOUTERROR XDR decode with stateid + device_error array.
+ *   6-17. (CB round-trips, byte-range conflict recall, unlink recall)
+ *   18-21. layout_recall_quiesce_for_file: cooperative commit+return,
+ *          stuck-holder authoritative expiry, out-of-order commit
+ *          (late LAYOUTCOMMIT now fails BAD_STATEID), in-flight
+ *          straddle (commit parked at L(F) while quiescence expires).
  */
 
 #include <stdio.h>
@@ -40,9 +45,12 @@
 #include "session.h"
 #include "nfs4_cb.h"
 #include "rpc_server.h"
+#include "layout_commit_aggregator.h"
+#include "trim_tail.h"
 #include <sys/socket.h>
 #include <pthread.h>
 #include <poll.h>
+#include <time.h>
 #include <arpa/inet.h>
 
 /* -----------------------------------------------------------------------
@@ -1470,6 +1478,579 @@ static void test_unlink_revoke_forces_revoke(uint32_t reply_status,
 }
 
 /* -----------------------------------------------------------------------
+ * Test 18-20: Graceful per-file layout quiescence (trim-tail-rework
+ * spec S3.4).  A quiescer thread drives layout_recall_quiesce_for_file
+ * while the fixture client does its in-flight layout I/O bookkeeping
+ * on the main thread; a silent backchannel client models a stuck
+ * holder for the timeout path.
+ * ----------------------------------------------------------------------- */
+
+struct quiesce_thread_args {
+    struct layout_recall *lr;
+    uint64_t fileid;
+    uint32_t timeout_ms;
+    int rc;
+    bool expired;
+};
+
+static void *quiesce_thread(void *arg)
+{
+    struct quiesce_thread_args *a = arg;
+
+    a->rc = layout_recall_quiesce_for_file(a->lr, a->fileid,
+                                           a->timeout_ms, &a->expired);
+    return NULL;
+}
+
+/* Compound op builders for driving LAYOUTCOMMIT through the real
+ * op path (persistent-mode stateid validation + commit point). */
+static void mk_q_seq(struct nfs4_op *op)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_SEQUENCE;
+}
+
+static void mk_q_putfh(struct nfs4_op *op, uint64_t fid)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_PUTFH;
+    op->arg.putfh.fh.fileid = fid;
+}
+
+static void mk_q_commit(struct nfs4_op *op, const struct nfs4_stateid *sid,
+                        uint64_t last_write_offset)
+{
+    memset(op, 0, sizeof(*op));
+    op->opnum = OP_LAYOUTCOMMIT;
+    op->arg.layoutcommit.new_offset = true;
+    op->arg.layoutcommit.last_write_offset = last_write_offset;
+    op->arg.layoutcommit.stateid = *sid;
+    op->arg.layoutcommit.layout_type = LAYOUT4_NFSV4_1_FILES;
+}
+
+/*
+ * Thread that drives one LAYOUTCOMMIT through the compound path and
+ * records the per-op status (the straddle test parks the caller on
+ * L(F) so the commit is in flight while quiescence expires the row).
+ */
+struct late_commit_thread_args {
+    struct mds_catalogue *cat;
+    uint64_t fileid;
+    uint64_t clientid;
+    struct nfs4_stateid sid;
+    uint64_t last_write_offset;
+    enum nfs4_status status;
+};
+
+static void *late_commit_thread(void *arg)
+{
+    struct late_commit_thread_args *a = arg;
+    struct compound_data cd;
+    struct nfs4_op ops[3];
+    struct nfs4_result res[3];
+
+    compound_init(&cd);
+    cd.cat = a->cat;
+    cd.clientid = a->clientid;
+    memset(res, 0, sizeof(res));
+    mk_q_seq(&ops[0]);
+    mk_q_putfh(&ops[1], a->fileid);
+    mk_q_commit(&ops[2], &a->sid, a->last_write_offset);
+    compound_process(&cd, ops, res, 3);
+    a->status = res[2].status;
+    return NULL;
+}
+
+/*
+ * Backchannel client that receives whatever the MDS sends on the
+ * callback connection and NEVER replies -- a stuck/unresponsive
+ * layout holder as far as the recall coordinator is concerned.
+ */
+struct silent_cb_client_args {
+    int fd;
+    uint32_t records;
+};
+
+static void *silent_cb_client_thread(void *arg)
+{
+    struct silent_cb_client_args *a = arg;
+    struct pollfd pfd;
+    uint8_t hdr[4];
+    uint8_t *buf;
+    ssize_t n;
+    int waited_ms = 0;
+
+    pfd.fd = a->fd;
+    pfd.events = POLLIN;
+
+    while (waited_ms < 8000) {
+        n = poll(&pfd, 1, 1000);
+        if (n < 0) {
+            break;
+        }
+        if (n == 0) {
+            waited_ms += 1000;
+            continue;
+        }
+        n = recv(a->fd, hdr, 4, MSG_WAITALL);
+        if (n != 4) {
+            break;
+        }
+        uint32_t raw = ntohl(*(uint32_t *)hdr);
+        uint32_t frag_len = raw & 0x7FFFFFFFu;
+        if (frag_len == 0 || frag_len > 4096) {
+            break;
+        }
+        buf = malloc(frag_len);
+        if (buf == NULL) {
+            break;
+        }
+        n = recv(a->fd, buf, frag_len, MSG_WAITALL);
+        free(buf);
+        if (n < 0 || (uint32_t)n != frag_len) {
+            break;
+        }
+        a->records++;
+        if (a->records >= 1) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Test 18: a holder that cooperates with the recall -- performing its
+ * in-flight LAYOUTCOMMIT (size advance) and then LAYOUTRETURN -- lets
+ * quiescence complete gracefully: rc 0, no expired laggards, and the
+ * committed size has advanced by the time quiesce returns.
+ */
+static void test_quiesce_commit_then_return(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct mds_inode in;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct quiesce_thread_args qa;
+    pthread_t tid;
+    char *path = make_temp_db_path();
+    uint64_t fid;
+    uint32_t ds_ids[] = {33};
+
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    cat = db;
+
+    /* Real inode so the committed size is observable afterwards. */
+    VERIFY(test_create_file(db, 2, "quiesce-file", 0644, &in) == MDS_OK);
+    fid = in.fileid;
+    memset(&in, 0, sizeof(in));
+    in.size = 4096;
+    VERIFY(mds_cat_ns_setattr(db, NULL, fid, &in, MDS_ATTR_SIZE) == MDS_OK);
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    fill_test_layout_stateid(&sid, 1, 0x34);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 777, fid, LAYOUTIOMODE4_RW,
+                                     0, UINT64_MAX, &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    memset(&qa, 0, sizeof(qa));
+    qa.lr = lr;
+    qa.fileid = fid;
+    qa.timeout_ms = 3000;
+    ASSERT_EQ(pthread_create(&tid, NULL, quiesce_thread, &qa), 0);
+
+    /*
+     * Let the quiescer get past its first enumeration so it is
+     * guaranteed to have seen the holder; then the holder does the
+     * cooperating end of the contract: in-flight LAYOUTCOMMIT (the
+     * same size-extend the commit point performs) followed by
+     * LAYOUTRETURN.
+     */
+    usleep(100 * 1000);
+
+    memset(&in, 0, sizeof(in));
+    in.size = 8192;
+    ASSERT_EQ(mds_cat_ns_setattr(db, NULL, fid, &in, MDS_ATTR_SIZE_EXTEND),
+              MDS_OK);
+    ASSERT_EQ(mds_coord_layout_return(db, NULL, sid.other, 777, fid,
+                                      NULL, 0), MDS_OK);
+
+    pthread_join(tid, NULL);
+
+    ASSERT_EQ(qa.rc, 0);
+    ASSERT_EQ(qa.expired, 0);
+    {
+        struct mds_inode got;
+        ASSERT_EQ(mds_cat_ns_getattr(db, fid, &got), MDS_OK);
+        ASSERT_EQ(got.size, 8192);
+    }
+
+    layout_recall_destroy(lr);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_quiesce_commit_then_return\n");
+}
+
+/*
+ * Test 19: a holder that ignores the recall is authoritatively expired
+ * after the lease: rc 0 with *expired_laggards true, bounded to the
+ * timeout (no hang), exactly one CB_LAYOUTRECALL delivered, and the
+ * holder's layout rows gone.
+ */
+static void test_quiesce_stuck_holder_expires(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct session_table *st = NULL;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct silent_cb_client_args client;
+    pthread_t tid;
+    char *path = make_temp_db_path();
+    uint64_t fid;
+    uint64_t clientid;
+    uint32_t seqid;
+    uint32_t flags_out;
+    uint8_t session_id[SESSION_ID_SIZE];
+    uint32_t fore = 0;
+    uint32_t back = 0;
+    uint32_t ds_ids[] = {34};
+    int sv[2];
+    struct timespec t0, t1;
+    long long elapsed_ms;
+    bool expired = false;
+    int rc;
+
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    fid = fresh_fid(db);
+    cat = db;
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    ASSERT_EQ(session_table_init(0, 90, &st), 0);
+    ASSERT_EQ(session_exchange_id(st, (const uint8_t *)"q-stuck", 7,
+                                  (const uint8_t *)"\x01\x02\x03\x04\x05\x06\x07\x08",
+                                  0, &clientid, &seqid, &flags_out, 0, 0, 0),
+              0);
+    ASSERT_EQ(session_create_session(st, clientid, seqid, 16, 4,
+                                     0x40000000, 0, 0, 0,
+                                     0, 0,
+                                     1,
+                                     0, 0, 0,
+                                     session_id, &fore, &back,
+                                     NULL, NULL), 0);
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    ASSERT_EQ(session_bind_conn(st, session_id,
+                                (struct rpc_conn *)(void *)sv), 0);
+    layout_recall_set_session_table(lr, st);
+
+    fill_test_layout_stateid(&sid, 1, 0x35);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, clientid, fid,
+                                     LAYOUTIOMODE4_RW, 0, UINT64_MAX,
+                                     &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    memset(&client, 0, sizeof(client));
+    client.fd = sv[1];
+    ASSERT_EQ(pthread_create(&tid, NULL, silent_cb_client_thread,
+                             &client), 0);
+    /* Let the silent client start polling before the recall goes out. */
+    usleep(50 * 1000);
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rc = layout_recall_quiesce_for_file(lr, fid, 400, &expired);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    elapsed_ms = (long long)(t1.tv_sec - t0.tv_sec) * 1000LL +
+                 (long long)(t1.tv_nsec - t0.tv_nsec) / 1000000LL;
+
+    ASSERT_EQ(rc, 0);
+    /* Timeout was hit and laggards authoritatively expired. */
+    ASSERT_EQ(expired, 1);
+    /* Bounded by the lease: timeout + one poll interval + slack,
+     * never a hang. */
+    ASSERT_EQ(elapsed_ms >= 0 && elapsed_ms <= 400 + 5000, 1);
+
+    pthread_join(tid, NULL);
+    /* Exactly one recall was sent; the stuck client never replied. */
+    ASSERT_EQ(client.records, 1);
+
+    {
+        bool has_layout = true;
+        ASSERT_EQ(mds_coord_layout_scan_for_file(db, fid, &has_layout),
+                  MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    close(sv[0]);
+    close(sv[1]);
+    layout_recall_destroy(lr);
+    session_table_destroy(st);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_quiesce_stuck_holder_expires\n");
+}
+
+/*
+ * Test 20: out-of-order LAYOUTCOMMIT (spec S3.4 step 4(c), Review
+ * Focus #1).  The fixture models:
+ *
+ *   1. client writes to the DS through its layout and issues
+ *      LAYOUTCOMMIT(new size) -- the MDS records the commit work for
+ *      the fileid in the LAYOUTCOMMIT aggregator (submit);
+ *   2. the MDS processes the client's LAYOUTRETURN *before* the
+ *      in-flight commit (the layout_state row disappears);
+ *   3. quiescence runs and must complete with no pending commit work
+ *      for the fileid: the aggregator bucket is dropped (V8: the
+ *      shrink path already uses drop(), and a stale aggregate commit
+ *      must not land after the trim) and the catalogue size must not
+ *      claim the range.
+ *
+ * The gap this property used to have is now closed: op_layoutcommit's
+ * persistent-mode stateid validation fails an unresolvable stateid
+ * with NFS4ERR_BAD_STATEID (a late commit after the grant's row was
+ * removed must not claim size over trim-erased bytes), so this test
+ * drives the late LAYOUTCOMMIT through the real compound path and
+ * pins the FULL spec property: BAD_STATEID + size unchanged.
+ *
+ * NOTE (community tree): the aggregator here is the no-op stub
+ * (ENABLE_LAYOUT_COMMIT_AGGREGATOR=OFF), so the submit/peek
+ * assertions gain their real teeth only in the enterprise build;
+ * the BAD_STATEID + size assertions are backend-independent.
+ */
+static void test_quiesce_out_of_order_commit(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct layout_commit_aggregator *agg = NULL;
+    struct mds_inode in;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct timespec ts;
+    char *path = make_temp_db_path();
+    uint64_t fid;
+    uint32_t ds_ids[] = {35};
+    bool expired = false;
+
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    cat = db;
+
+    /* Real inode so the unclaimed size is observable afterwards. */
+    VERIFY(test_create_file(db, 2, "q-ooo-file", 0644, &in) == MDS_OK);
+    fid = in.fileid;
+    memset(&in, 0, sizeof(in));
+    in.size = 4096;
+    VERIFY(mds_cat_ns_setattr(db, NULL, fid, &in, MDS_ATTR_SIZE) == MDS_OK);
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+    ASSERT_EQ(layout_commit_aggregator_init(0, 0, &agg), 0);
+    layout_recall_set_lcommit_agg(lr, agg);
+
+    fill_test_layout_stateid(&sid, 1, 0x36);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 777, fid, LAYOUTIOMODE4_RW,
+                                     0, UINT64_MAX, &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    /* In-flight LAYOUTCOMMIT(12288) recorded as pending commit work. */
+    ASSERT_EQ(layout_commit_aggregator_submit(agg, fid, 12288, ts), 0);
+
+    /* MDS processes the LAYOUTRETURN first: row gone, commit pending. */
+    ASSERT_EQ(mds_coord_layout_return(db, NULL, sid.other, 777, fid,
+                                      NULL, 0), MDS_OK);
+
+    ASSERT_EQ(layout_recall_quiesce_for_file(lr, fid, 3000, &expired), 0);
+    ASSERT_EQ(expired, 0);
+
+    /* No active layout rows remain. */
+    {
+        bool has_layout = true;
+        ASSERT_EQ(mds_coord_layout_scan_for_file(db, fid, &has_layout),
+                  MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    /* The stateid is unresolvable: a late LAYOUTCOMMIT has no layout
+     * state left to validate against. */
+    {
+        uint64_t cid = 0;
+        uint64_t cfid = 0;
+        uint32_t iomode = 0;
+        uint64_t off = 0;
+        uint64_t len = 0;
+        uint32_t seq = 0;
+
+        ASSERT_EQ(mds_coord_layout_get_by_stateid(db, sid.other,
+                                                  &cid, &cfid, &iomode,
+                                                  &off, &len, &seq),
+                  MDS_ERR_NOTFOUND);
+    }
+
+    /* No pending commit work for the fileid (bucket dropped). */
+    {
+        uint64_t sz = 0;
+        struct timespec mt;
+        bool dirty = false;
+
+        ASSERT_EQ(layout_commit_aggregator_peek(agg, fid, &sz, &mt,
+                                                &dirty), -1);
+    }
+
+    /*
+     * Late LAYOUTCOMMIT(12288) through the real compound path: the
+     * grant's row is gone, so persistent-mode stateid validation
+     * must reject it and the size must not claim the range.
+     */
+    {
+        struct compound_data cd;
+        struct nfs4_op ops[3];
+        struct nfs4_result res[3];
+
+        compound_init(&cd);
+        cd.cat = db;
+        cd.clientid = 777;
+        memset(res, 0, sizeof(res));
+        mk_q_seq(&ops[0]);
+        mk_q_putfh(&ops[1], fid);
+        mk_q_commit(&ops[2], &sid, 12287);
+        compound_process(&cd, ops, res, 3);
+        ASSERT_EQ(res[2].status, NFS4ERR_BAD_STATEID);
+    }
+
+    /* The catalogue size must not claim the late commit's range. */
+    {
+        struct mds_inode got;
+        ASSERT_EQ(mds_cat_ns_getattr(db, fid, &got), MDS_OK);
+        ASSERT_EQ(got.size, 4096);
+    }
+
+    layout_recall_destroy(lr);
+    layout_commit_aggregator_destroy(agg);
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_quiesce_out_of_order_commit\n");
+}
+
+/*
+ * Test 21: in-flight straddle -- a LAYOUTCOMMIT is in flight while
+ * the quiesce timeout path expires the holder (closes the TOCTOU
+ * the commit-point re-check was added for).
+ *
+ * Main holds L(F) (the per-inode trim lock) before the commit starts,
+ * so the commit -- after passing its entry stateid validation (the
+ * row still exists) -- parks at the L(F) fence, immediately before
+ * its size commit.  While it is parked, quiescence times out and
+ * authoritatively expires the holder's row.  Releasing L(F) lets the
+ * commit reach its commit-point re-check, which must see the removed
+ * row and fail BAD_STATEID before any size lands.
+ *
+ * Determinism: holding L(F) pins the commit inside the
+ * entry-check..commit-point window (or earlier).  If its entry check
+ * happens to run after the expiry instead, it fails at the entry
+ * check; both sub-cases end in exactly the pinned outcome, so the
+ * assertions hold for every interleaving.
+ */
+static void test_quiesce_straddled_commit(void)
+{
+    struct mds_catalogue *db = NULL;
+    struct mds_catalogue *cat = NULL;
+    struct layout_recall *lr = NULL;
+    struct mds_inode in;
+    struct mds_cat_txn *txn = NULL;
+    struct nfs4_stateid sid;
+    struct late_commit_thread_args lc;
+    pthread_t tid;
+    char *path = make_temp_db_path();
+    uint64_t fid;
+    uint32_t ds_ids[] = {36};
+    bool expired = false;
+
+    db = conformance_open_checked(); VERIFY(db != NULL);
+    cat = db;
+
+    /* Real inode so the unclaimed size is observable afterwards. */
+    VERIFY(test_create_file(db, 2, "q-straddle-file", 0644, &in)
+           == MDS_OK);
+    fid = in.fileid;
+    memset(&in, 0, sizeof(in));
+    in.size = 4096;
+    VERIFY(mds_cat_ns_setattr(db, NULL, fid, &in, MDS_ATTR_SIZE) == MDS_OK);
+
+    ASSERT_EQ(layout_recall_init(cat, NULL, 0, &lr), 0);
+
+    /* The test takes L(F) below; the lock table must be initialized. */
+    ASSERT_EQ(trim_module_init(90, 0), 0);
+
+    fill_test_layout_stateid(&sid, 1, 0x37);
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_coord_layout_grant(db, txn, 777, fid, LAYOUTIOMODE4_RW,
+                                     0, UINT64_MAX, &sid, ds_ids, 1),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), MDS_OK);
+
+    /*
+     * Hold L(F) so the in-flight commit parks at the commit-point
+     * fence instead of racing past it.
+     */
+    trim_inode_lock(fid);
+
+    memset(&lc, 0, sizeof(lc));
+    lc.cat = db;
+    lc.fileid = fid;
+    lc.clientid = 777;
+    lc.sid = sid;
+    lc.last_write_offset = 12287; /* would claim size 12288 */
+    ASSERT_EQ(pthread_create(&tid, NULL, late_commit_thread, &lc), 0);
+
+    /*
+     * Let the commit pass its entry check (row still present) and
+     * park on L(F).  Even if this window were missed the entry
+     * check would catch the expired row and the outcome below is
+     * the same.
+     */
+    usleep(50 * 1000);
+
+    /* Quiesce times out and authoritatively expires the holder. */
+    ASSERT_EQ(layout_recall_quiesce_for_file(lr, fid, 400, &expired), 0);
+    ASSERT_EQ(expired, 1);
+
+    /* Release L(F): the commit now runs its commit-point re-check. */
+    trim_inode_unlock(fid);
+
+    pthread_join(tid, NULL);
+
+    /* The straddled commit must not have landed. */
+    ASSERT_EQ(lc.status, NFS4ERR_BAD_STATEID);
+
+    {
+        struct mds_inode got;
+        ASSERT_EQ(mds_cat_ns_getattr(db, fid, &got), MDS_OK);
+        ASSERT_EQ(got.size, 4096);
+    }
+
+    {
+        bool has_layout = true;
+        ASSERT_EQ(mds_coord_layout_scan_for_file(db, fid, &has_layout),
+                  MDS_OK);
+        ASSERT_EQ(has_layout, 0);
+    }
+
+    layout_recall_destroy(lr);
+    trim_module_fini();
+    mds_catalogue_close(db);
+    cleanup_db(path);
+    printf("  PASS: test_quiesce_straddled_commit\n");
+}
+
+/* -----------------------------------------------------------------------
  * Main
  * ----------------------------------------------------------------------- */
 
@@ -1501,6 +2082,10 @@ int main(void)
     test_unlink_revoke_forces_revoke((uint32_t)NFS4ERR_DELAY,
                                      17, 0xF4,
                                      "test_unlink_revoke_forces_revoke_on_delay");
+    test_quiesce_commit_then_return();
+    test_quiesce_stuck_holder_expires();
+    test_quiesce_out_of_order_commit();
+    test_quiesce_straddled_commit();
 
     printf("\n%d passed, %d failed\n", pass_count, fail_count);
     conformance_shutdown();

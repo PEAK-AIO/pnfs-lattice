@@ -12,13 +12,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <inttypes.h>
+#include <pthread.h>
 
 #include "pnfs_mds.h"
 #include "test_helpers.h"
 #include "proxy_io.h"
+#include "compound.h"
+#include "open_state.h"
+#include "trim_tail.h"
 
 /* ----------------------------------------------------------------------- */
 /* Minimal test framework (same as other test files). */
@@ -596,6 +602,279 @@ static void test_extract_server_fh_formats(void)
                                           out, 32, &olen), -1);
 }
 
+/* ----------------------------------------------------------------------- */
+/* Compound op builders (minimal subset for driving op_write through the  */
+/* dispatcher in the L(F) fence test below).                               */
+/* ----------------------------------------------------------------------- */
+
+static struct nfs4_op mk_sequence(void)
+{
+    struct nfs4_op op;
+
+    memset(&op, 0, sizeof(op));
+    op.opnum = OP_SEQUENCE;
+    return op;
+}
+
+static struct nfs4_op mk_putfh(uint64_t fileid)
+{
+    struct nfs4_op op;
+
+    memset(&op, 0, sizeof(op));
+    op.opnum = OP_PUTFH;
+    op.arg.putfh.fh.fileid = fileid;
+    return op;
+}
+
+static struct nfs4_op mk_write_op_ex(const struct nfs4_stateid *sid,
+                                     uint64_t offset,
+                                     const void *data, uint32_t len)
+{
+    struct nfs4_op op;
+
+    memset(&op, 0, sizeof(op));
+    op.opnum = OP_WRITE;
+    if (sid != NULL) {
+        op.arg.write.stateid = *sid;
+    }
+    op.arg.write.offset = offset;
+    op.arg.write.data_len = len;
+    op.arg.write.data = data;
+    return op;
+}
+
+/* -----------------------------------------------------------------------
+ * test_write_serialised_by_trim_lock -- L(F) fence on proxy WRITE
+ * (trim-tail rework, spec S3.3).
+ *
+ * While the test thread holds the per-inode trim lock L(F), a worker
+ * thread issues a proxy WRITE that extends the file.  The committed
+ * catalogue size must NOT advance until L(F) is released: the DS write
+ * and the MDS_ATTR_SIZE_EXTEND commit both run inside the lock, so a
+ * committed size always pairs with a complete DS write (and the
+ * background trim worker can never truncate between them).
+ *
+ * Fails pre-change because nothing serialises the write against the
+ * lock: the size commits while the test still holds L(F).
+ * ----------------------------------------------------------------------- */
+
+struct write_worker_args {
+    struct compound_data cd;
+    struct nfs4_op       ops[3];
+    struct nfs4_result   res[3];
+    volatile int         status;
+    volatile bool        done;
+};
+
+static void *write_worker(void *arg)
+{
+    struct write_worker_args *wa = (struct write_worker_args *)arg;
+    uint32_t n;
+
+    n = compound_process(&wa->cd, wa->ops, wa->res, 3);
+    wa->status = (n == 3) ? (int)wa->res[2].status : -1;
+    wa->done = true;
+    return NULL;
+}
+
+/** Read the committed catalogue size of @fileid. */
+static uint64_t cat_committed_size(struct mds_catalogue *db, uint64_t fileid)
+{
+    struct mds_inode inode;
+
+    if (mds_cat_ns_getattr(db, fileid, &inode) != MDS_OK) {
+        return (uint64_t)-1;
+    }
+    return inode.size;
+}
+
+static void test_write_serialised_by_trim_lock(void)
+{
+    struct mds_catalogue *db;
+    struct mds_proxy_ctx *proxy;
+    struct open_state_table *ot;
+    struct nfs4_stateid sid;
+    char *db_path, *ds_path;
+    struct write_worker_args wa;
+    pthread_t th;
+    struct mds_inode inode;
+    struct mds_cat_txn *txn = NULL;
+    const uint64_t seed_size = 4096;
+    const uint32_t write_len = 128;
+    uint8_t seed[4096];
+    uint8_t payload[128];
+    uint32_t bytes;
+    uint64_t fileid;
+    uint64_t size;
+    int i;
+
+    db = open_test_db(&db_path);
+    ds_path = make_ds_dir();
+
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+
+    /* 1x1 simulated-DS file seeded with seed_size bytes, size committed
+     * to the catalogue. */
+    ASSERT_EQ(test_create_file(db, MDS_FILEID_ROOT, "trimwrite", 0644,
+                               &inode), MDS_OK);
+    fileid = inode.fileid;
+    setup_single_stripe(db, 1, fileid, 65536);
+    ASSERT_EQ(mds_proxy_ensure_ds_file(proxy, 1, fileid, 0, 0), MDS_OK);
+
+    for (i = 0; i < (int)seed_size; i++) {
+        seed[i] = (uint8_t)i;
+    }
+    ASSERT_EQ(mds_proxy_write(proxy, db, fileid, 0, seed, seed_size,
+                              &bytes), MDS_OK);
+    ASSERT_EQ(bytes, seed_size);
+    ASSERT_EQ(mds_cat_ns_getattr(db, fileid, &inode), MDS_OK);
+    inode.size = seed_size;
+    ASSERT_EQ(mds_cat_txn_begin(db, MDS_CAT_TXN_WRITE, &txn), MDS_OK);
+    ASSERT_EQ(mds_cat_inode_put(db, txn, &inode), MDS_OK);
+    ASSERT_EQ(mds_cat_txn_commit(txn), 0);
+
+    /* A real open stateid so the write takes the full proxy path. */
+    ASSERT_EQ(open_state_table_init(1, &ot), 0);
+    ASSERT_EQ(open_state_open(ot, 0x100, NULL, 0, fileid,
+                              OPEN4_SHARE_ACCESS_BOTH,
+                              OPEN4_SHARE_DENY_NONE, &sid), 0);
+
+    for (i = 0; i < (int)write_len; i++) {
+        payload[i] = (uint8_t)(0x5a + i);
+    }
+
+    memset(&wa, 0, sizeof(wa));
+    compound_init(&wa.cd);
+    wa.cd.cat = db;
+    wa.cd.proxy = proxy;
+    wa.cd.ot = ot;
+    wa.cd.clientid = 0x100;
+    wa.ops[0] = mk_sequence();
+    wa.ops[1] = mk_putfh(fileid);
+    wa.ops[2] = mk_write_op_ex(&sid, seed_size, payload, write_len);
+    wa.status = -1;
+    wa.done = false;
+
+    /* Hold L(F): the extension commit must not be visible until it is
+     * released. */
+    trim_inode_lock(fileid);
+    ASSERT_EQ(pthread_create(&th, NULL, write_worker, &wa), 0);
+
+    /* Generous 2 s hold window: a local write commits in milliseconds,
+     * so any size advance in here escaped the fence. */
+    for (i = 0; i < 200; i++) {
+        size = cat_committed_size(db, fileid);
+        if (size != seed_size) {
+            fprintf(stderr,
+                    "FAIL at %s:%d: size advanced to %llu while L(F) held\n",
+                    __FILE__, __LINE__,
+                    (unsigned long long)size);
+            exit(1);
+        }
+        if (wa.done) {
+            /* The worker finished without committing the size: a fence
+             * that swallows a successful write is as broken as one
+             * that lets it through. */
+            fprintf(stderr,
+                    "FAIL at %s:%d: worker done (st=%d) but size still %llu\n",
+                    __FILE__, __LINE__, wa.status,
+                    (unsigned long long)size);
+            exit(1);
+        }
+        usleep(10 * 1000);
+    }
+
+    trim_inode_unlock(fileid);
+
+    for (i = 0; i < 200 && !wa.done; i++) {
+        usleep(10 * 1000);
+    }
+    ASSERT_TRUE(wa.done);
+    ASSERT_EQ(wa.status, (int)NFS4_OK);
+    ASSERT_EQ(cat_committed_size(db, fileid), seed_size + write_len);
+    ASSERT_EQ(pthread_join(th, NULL), 0);
+
+    open_state_table_destroy(ot);
+    mds_proxy_ctx_destroy(proxy);
+    close_test_db(db, db_path);
+    rm_ds_dir(ds_path);
+}
+
+/* -----------------------------------------------------------------------
+ * test_proxy_truncate_to -- DS tail-trim truncate semantics
+ *
+ * mds_proxy_truncate_ds_file_to() is the per-stripe truncate the trim
+ * drainer uses.  Its error mapping decides whether a broken DS mount
+ * drops the pending TRIM row (stale tail survives a later grow) or keeps
+ * it queued for retry:
+ *
+ *   - a detached DS mount resolves nothing beneath the mountpoint, so
+ *     {mount}/data is absent while the mount is still "registered";
+ *     that must surface as MDS_ERR_IO, never as "slot missing";
+ *   - a missing slot under a healthy mount (data dir present) stays a
+ *     no-op success;
+ *   - a healthy slot is resized exactly to the requested size (shrink
+ *     and sparse extend).
+ * ----------------------------------------------------------------------- */
+
+/** Length of a regular file, or -1 on error. */
+static long file_len(const char *path)
+{
+    struct stat st;
+
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    return (long)st.st_size;
+}
+
+static void test_proxy_truncate_to(void)
+{
+    struct mds_proxy_ctx *proxy;
+    char *ds_path;
+
+    /* Detached mount: the mountpoint dir exists and is registered, but
+     * nothing beneath it resolves -- no data/ subdir, no slot file. */
+    ds_path = make_ds_dir();
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_ERR_IO);
+
+    /* Healthy mount, missing slot: the data dir exists; "slot never
+     * existed" remains a no-op success. */
+    char data_dir[4096];
+    snprintf(data_dir, sizeof(data_dir), "%s/data", ds_path);
+    ASSERT_EQ(mkdir(data_dir, 0755), 0);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_OK);
+
+    /* Healthy mount, existing slot: shrink and sparse extend land
+     * exactly on the requested size. */
+    char slot[8192];
+    char tmp[8192];
+    snprintf(slot, sizeof(slot), "%s/data/100_0_0", ds_path);
+    memset(tmp, 0x5a, sizeof(tmp));
+    int fd = open(slot, O_WRONLY | O_CREAT, 0644);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(write(fd, tmp, sizeof(tmp)), (ssize_t)sizeof(tmp));
+    ASSERT_EQ(close(fd), 0);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_OK);
+    ASSERT_EQ(file_len(slot), 4096);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 8192),
+              MDS_OK);
+    ASSERT_EQ(file_len(slot), 8192);
+
+    /* NULL ctx is rejected like every other proxy op. */
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(NULL, 1, 100, 0, 0, 4096),
+              MDS_ERR_INVAL);
+
+    mds_proxy_ctx_destroy(proxy);
+    rm_ds_dir(ds_path);
+}
+
 /* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
@@ -604,6 +883,7 @@ int main(void)
 {
     fprintf(stdout, "Running proxy I/O tests:\n");
 
+    ASSERT_EQ(trim_module_init(90, 0), 0);
     RUN_TEST(test_extract_server_fh_formats);
     RUN_TEST(test_proxy_read_write);
     RUN_TEST(test_proxy_read_eof);
@@ -611,6 +891,9 @@ int main(void)
     RUN_TEST(test_proxy_sparse_stripe_addr);
     RUN_TEST(test_proxy_read_sparse_holes);
     RUN_TEST(test_proxy_read_mirror_failover);
+    RUN_TEST(test_write_serialised_by_trim_lock);
+    RUN_TEST(test_proxy_truncate_to);
+    trim_module_fini();
 
     fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

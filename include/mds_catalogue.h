@@ -981,6 +981,23 @@ enum mds_status mds_cat_gc_enqueue_hint(struct mds_catalogue *cat,
 					uint32_t fh_len,
 					uint32_t sweep_hint);
 
+/**
+ * Like mds_cat_gc_enqueue_hint, but the row's owner_mds_id is @a
+ * owner_id instead of the enqueuer's own mds id.  The backends store
+ * the value verbatim (0 = MDS_GC_OWNER_GLOBAL writes a legacy row
+ * visible to every MDS drainer; see pnfs_mds.h).  Use it for work
+ * that must be drainable by whichever MDS survives, not just the one
+ * that enqueued it.
+ */
+enum mds_status mds_cat_gc_enqueue_hint_owner(struct mds_catalogue *cat,
+					struct mds_cat_txn *txn,
+					uint64_t fileid,
+					uint32_t ds_id,
+					const uint8_t *nfs_fh,
+					uint32_t fh_len,
+					uint32_t sweep_hint,
+					uint32_t owner_id);
+
 enum mds_status mds_cat_gc_peek(struct mds_catalogue *cat,
 				struct mds_gc_entry *entry);
 

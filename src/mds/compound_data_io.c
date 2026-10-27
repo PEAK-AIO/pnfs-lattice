@@ -36,6 +36,7 @@
 #include "mds_metrics.h"
 #include "hpc_shared.h"
 #include "layout_commit_aggregator.h"  /* Phase F of docs/hpc-nto1-plan.md */
+#include "trim_tail.h"  /* L(F) per-inode trim lock fence (spec S3.3) */
 
 
 /**
@@ -2367,6 +2368,7 @@ proxy_write:
 	{
 		uint32_t written = 0;
 		enum mds_status st;
+		enum nfs4_status pw_nst = NFS4_OK;
 		uint64_t pre_write_size = 0;
 		{
 			struct mds_inode pw_pre;
@@ -2374,6 +2376,15 @@ proxy_write:
 				pre_write_size = pw_pre.size;
 			}
 		}
+
+		/*
+		 * L(F) fence (spec S3.3): the DS write and the
+		 * MDS_ATTR_SIZE_EXTEND commit below must both run under
+		 * the per-inode trim lock so the background trim worker
+		 * can never truncate the DS tail to a size committed
+		 * between the two.  Unlock on every exit path (goto).
+		 */
+		trim_inode_lock(cd->current_fh.fileid);
 
 		st = mds_proxy_write(cd->proxy, cd->cat, cd->current_fh.fileid,
 				     a->offset, a->data, a->data_len,
@@ -2383,15 +2394,17 @@ proxy_write:
 				"DBG WRITE: proxy_write failed fh=%llu st=%d checks=%d",
 				(unsigned long long)cd->current_fh.fileid,
 				(int)st, (int)proxy_checks_done);
-			return mds_status_to_nfs4(st);
-}
+			pw_nst = mds_status_to_nfs4(st);
+			goto trim_unlock;
+		}
 
 		/* Update inode metadata after proxy write:
 		 * always bump mtime/ctime/change, extend size if needed. */
 		{
 			if (written > 0 &&
 			    a->offset > UINT64_MAX - (uint64_t)written) {
-				return NFS4ERR_INVAL;
+				pw_nst = NFS4ERR_INVAL;
+				goto trim_unlock;
 			}
 			uint64_t new_end = a->offset + written;
 			struct mds_inode inode;
@@ -2437,6 +2450,10 @@ proxy_write:
 			}
 		}
 
+	trim_unlock:
+		/* Outside the fence again: quota and cache work are not
+		 * part of the trim-serialised span (spec S3.3). */
+		trim_inode_unlock(cd->current_fh.fileid);
 
 		/* Quota: account only extension delta. */
 		if (written > 0 && cd->quota != NULL) {
@@ -2454,10 +2471,8 @@ proxy_write:
 		r->count = written;
 		r->committed = 2; /* FILE_SYNC4 */
 		r->write_verf = cd->write_verf;
+		return pw_nst;
 	}
-
-
-	return NFS4_OK;
 }
 
 /* -----------------------------------------------------------------------

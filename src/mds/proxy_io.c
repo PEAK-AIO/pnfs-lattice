@@ -566,12 +566,12 @@ static void compute_stripe_addr(uint64_t offset,
  * Caller frees *entries with free() in all cases, same as the raw
  * catalogue call.
  */
-static enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
-                                            uint64_t fileid,
-                                            uint32_t *stripe_count,
-                                            uint32_t *stripe_unit,
-                                            uint32_t *mirror_count,
-                                            struct mds_ds_map_entry **entries)
+enum mds_status proxy_stripe_map_get(struct mds_catalogue *cat,
+                                     uint64_t fileid,
+                                     uint32_t *stripe_count,
+                                     uint32_t *stripe_unit,
+                                     uint32_t *mirror_count,
+                                     struct mds_ds_map_entry **entries)
 {
     enum mds_status st;
     struct mds_inode inode;
@@ -2514,6 +2514,63 @@ enum mds_status mds_proxy_truncate_ds_file(const struct mds_proxy_ctx *ctx,
     rc = truncate(file_path, 0);
     if (rc != 0) {
         return (errno == ENOENT) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
+}
+
+    return MDS_OK;
+}
+
+enum mds_status mds_proxy_truncate_ds_file_to(const struct mds_proxy_ctx *ctx,
+                                              uint32_t ds_id,
+                                              uint64_t fileid,
+                                              uint32_t stripe,
+                                              uint32_t mirror,
+                                              uint64_t size)
+{
+    const char *mount;
+    char file_path[MDS_MAX_PATH];
+    int rc;
+
+    if (ctx == NULL) {
+        return MDS_ERR_INVAL;
+}
+
+    MDS_PHASE_SCOPE(MDS_PHASE_DS_IO);
+
+    mount = find_mount(ctx, ds_id);
+    if (mount == NULL) {
+        return MDS_ERR_NOTFOUND;
+}
+
+    if (build_ds_path(file_path, sizeof(file_path), mount,
+                      fileid, stripe, mirror) != 0) {
+        return MDS_ERR_IO;
+}
+
+    /* truncate(2) extends a short file to a sparse hole, which
+     * reads back as zeros -- exactly what a grow-after-shrink must
+     * expose.  ENOENT here means the slot never existed (or was
+     * already reclaimed) under a healthy mount: nothing to truncate. */
+
+    /*
+     * Detached-mount discrimination: with the DS mount up, the
+     * {mount}/data directory resolves; with the mount detached,
+     * nothing beneath the mountpoint does -- the data dir and the
+     * slot both look up as ENOENT.  Resolving the data dir first is
+     * what separates "slot never existed" (legitimate no-op success)
+     * from "mount broken" (IO error that keeps the TRIM row queued
+     * for retry).  Mapping the latter to success would silently drop
+     * the row and leave the stale tail to be re-exposed by a later
+     * grow.
+     */
+    char data_dir[MDS_MAX_PATH];
+    (void)snprintf(data_dir, sizeof(data_dir), "%s/data", mount);
+    if (access(data_dir, F_OK) != 0) {
+        return MDS_ERR_IO;
+    }
+
+    rc = truncate(file_path, (off_t)size);
+    if (rc != 0) {
+        return (errno == ENOENT) ? MDS_OK : MDS_ERR_IO;
 }
 
     return MDS_OK;

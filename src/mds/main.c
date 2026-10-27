@@ -34,6 +34,7 @@
 #include "ds_prealloc.h"
 #include "ds_prepare.h"
 #include "ds_gc.h"
+#include "trim_tail.h"
 #include "proxy_io.h"
 #include "referral.h"
 #include "resilver.h"
@@ -1379,35 +1380,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* 5c. Init DS GC drainer.
-	 *
-	 *      Reclaims DS-side data files for inodes that the
-	 *      catalogue layer has already dropped (compound
-	 *      op_remove enqueues here on the final unlink).
-	 *      Disabled when proxy I/O is not available because the
-	 *      worker needs DS mount points to issue unlinks.  The
-	 *      poll interval is intentionally fixed at 5s for the
-	 *      first deployment -- small enough that a removed file
-	 *      reclaims its DS bytes within the lab's smoke timing,
-	 *      large enough that NDB peek traffic stays below the
-	 *      noise floor on the catalogue. */
-	if (cfg.ds_count > 0 && proxy != NULL && cat != NULL) {
-		if (ds_gc_start_ex(cat, proxy, 5000U,
-				   cfg.ds_gc_workers,
-				   cfg.ds_gc_batch_size,
-				   &ds_gc) == 0 &&
-		    ds_gc != NULL) {
-			MDS_LOG_INFO(LOG_COMP_MDS,
-				"DS GC drainer active "
-				"(poll=5000 ms, workers=%u, batch=%u)",
-				(unsigned)cfg.ds_gc_workers,
-				(unsigned)cfg.ds_gc_batch_size);
-		} else if (ds_gc == NULL) {
-			MDS_LOG_WARN(LOG_COMP_MDS,
-				"ds_gc_start failed; "
-				"DS-side cleanup will not run");
-		}
-	}
+	/* 5c. (Moved below the 6c block: the drainer drains TRIM
+	 *     rows through trim_process_entry, so it starts only
+	 *     after the trim module is fully bound.) */
 
 	/* 6. Start inter-MDS cluster transport listener.
 	 *    Serves rename-2PC, migration, DS admin, and metrics requests. */
@@ -1536,6 +1511,28 @@ int main(int argc, char *argv[])
 		MDS_LOG_WARN(LOG_COMP_MDS, "session_table_init failed");
 	}
 
+	/* 6b2. Trim module state: the striped per-inode lock L(F) and
+	 *     the quiescing-flag table backing the background DS-tail
+	 *     trim.  It comes up next to the session table because the
+	 *     same lease_time_sec scales both: trim_max_wait_sec = 0
+	 *     means "3 x lease", resolved inside the module. */
+	/* Bind the partition map to the trim ownership guard (V5):
+	 * the drainer must not truncate files whose subtree belongs
+	 * to another MDS.  smap is final by here (both init paths
+	 * above are done); NULL (single-MDS) fails open inside the
+	 * module. */
+	trim_set_subtree_map(smap);
+	/* A layout-serving MDS must never let the trim truncate a
+	 * file while a client could hold a live layout the MDS
+	 * cannot recall: if layout_recall_init below fails, the
+	 * drain refuses (row stays queued) instead of skipping the
+	 * quiescence step. */
+	trim_set_quiescence_required(cfg.serve_layouts);
+	if (trim_module_init(cfg.lease_time_sec,
+			     cfg.trim_max_wait_sec) != 0) {
+		MDS_LOG_WARN(LOG_COMP_MDS, "trim_module_init failed");
+	}
+
 	/* 6c. Layout recall coordinator + DS health monitor.
 	 *     Both lr and ds_hm are bound to the default shard here,
 	 *     before ds_health_start() launches a thread, to avoid
@@ -1566,6 +1563,13 @@ int main(int argc, char *argv[])
 		 * on layout revocation.  Without this, revocation
 		 * is callback-only. */
 		layout_recall_set_proxy(lr, proxy);
+		/* DS-tail trim quiescence (trim-tail-rework): the
+		 * drainer recalls/revokes a file's layouts under the
+		 * lease bound before its locked truncate.  The RPC
+		 * server starts later, so no client layouts can
+		 * exist while this is bound; the module is NULL-safe
+		 * regardless. */
+		trim_set_layout_recall(lr);
 		if (cfg.ds_heartbeat_ms == 0) {
 			MDS_LOG_INFO(LOG_COMP_MDS,
 				"DS health monitoring disabled "
@@ -1586,6 +1590,50 @@ int main(int argc, char *argv[])
 		}
 	} else {
 		MDS_LOG_WARN(LOG_COMP_MDS, "layout_recall_init failed");
+	}
+
+	/* 5c. Start the DS GC drainer -- deliberately AFTER all the
+	 *     trim bindings (trim_set_subtree_map,
+	 *     trim_set_quiescence_required, trim_module_init, and
+	 *     the layout_recall_init success path's
+	 *     trim_set_layout_recall): the drainer drains TRIM rows
+	 *     through trim_process_entry, and the coordinator's
+	 *     first gc peek fires immediately, so starting it first
+	 *     would let a non-owner MDS with a persisted TRIM
+	 *     backlog drain (truncate) with the ownership guard
+	 *     fail-open, the no-recall gate unarmed, and the L(F)
+	 *     and flag tables not yet initialized.  trim_process_
+	 *     entry's ready gate (MDS_ERR_DELAY while the module is
+	 *     uninitialized) makes any future reordering degrade to
+	 *     "keep queued", never "truncate unguarded".
+	 *
+	 *     Reclaims DS-side data files for inodes that the
+	 *     catalogue layer has already dropped (compound
+	 *     op_remove enqueues here on the final unlink).
+	 *     Disabled when proxy I/O is not available because the
+	 *     worker needs DS mount points to issue unlinks.  The
+	 *     poll interval is intentionally fixed at 5s for the
+	 *     first deployment -- small enough that a removed file
+	 *     reclaims its DS bytes within the lab's smoke timing,
+	 *     large enough that NDB peek traffic stays below the
+	 *     noise floor on the catalogue.  Needs only cat and
+	 *     proxy, both final by here. */
+	if (cfg.ds_count > 0 && proxy != NULL && cat != NULL) {
+		if (ds_gc_start_ex(cat, proxy, 5000U,
+				   cfg.ds_gc_workers,
+				   cfg.ds_gc_batch_size,
+				   &ds_gc) == 0 &&
+		    ds_gc != NULL) {
+			MDS_LOG_INFO(LOG_COMP_MDS,
+				"DS GC drainer active "
+				"(poll=5000 ms, workers=%u, batch=%u)",
+				(unsigned)cfg.ds_gc_workers,
+				(unsigned)cfg.ds_gc_batch_size);
+		} else if (ds_gc == NULL) {
+			MDS_LOG_WARN(LOG_COMP_MDS,
+				"ds_gc_start failed; "
+				"DS-side cleanup will not run");
+		}
 	}
 
 	/* 6c2. Per-DS I/O limit prober (Wave 5 T5.1).  Probes each
@@ -2081,6 +2129,13 @@ int main(int argc, char *argv[])
 					"LAYOUTCOMMIT");
 			}
 			rpc_cfg.lcommit_agg = lcommit_agg;
+			/* The trim drainer's recall-quiescence step
+			 * must also drain this file's in-flight
+			 * LAYOUTCOMMIT aggregates, or their later
+			 * flush would commit a size the truncate has
+			 * already superseded (trim-tail-rework).  The
+			 * setter is NULL-tolerant for lr and agg. */
+			layout_recall_set_lcommit_agg(lr, lcommit_agg);
 		}
 
 		/* Delegation state table (RFC 8881 S10.4).
@@ -2508,6 +2563,10 @@ cleanup:
 	 * stops before we tear down the catalogue and proxy. */
 	ds_gc_stop(ds_gc);
 	ds_gc = NULL;
+	/* The drainer that executes TRIM rows is stopped above, so
+	 * the trim module's in-memory state (per-inode locks,
+	 * quiescing flags) can be torn down. */
+	trim_module_fini();
 	ds_prepare_destroy(ds_prep);
 	ds_prealloc_destroy(ds_pa);
 	if (ds_hm != NULL) {

@@ -408,6 +408,7 @@ enum mds_status catalogue_rondb_open(const struct mds_config *cfg,
 	state->multi_mds = (cfg->cluster_size > 1);
 	state->lock_ttl_ms = 30000; /* 30s default */
 	state->mds_id = cfg->self.id;
+	cat->self_mds_id = cfg->self.id;
 	/* Stamped by the node_register cluster slot
 	 * (rondb_cluster_node_register) on a successful registration;
 	 * stays 0 on a single-node daemon that never registers. */
@@ -2658,7 +2659,7 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 	struct mds_catalogue *cat, struct mds_cat_txn *txn,
 	uint64_t fileid, uint32_t ds_id,
 	const uint8_t *nfs_fh, uint32_t fh_len,
-	uint32_t sweep_hint)
+	uint32_t sweep_hint, uint32_t owner_id)
 {
 	void *h = rondb_handle(cat);
 	uint64_t seq = 0;
@@ -2674,8 +2675,10 @@ static enum mds_status catalogue_rondb_gc_enqueue(
 		return MDS_ERR_IO;
 	}
 
+	/* The shim stores the owner verbatim; the dispatcher stamped
+	 * the enqueuer's id for the ownerless wrappers. */
 	rc = rondb_shim_gc_enqueue(h, seq, fileid, ds_id, nfs_fh, fh_len,
-				   rondb_self_mds_id(cat), sweep_hint);
+				   owner_id, sweep_hint);
 	return (rc == 0) ? MDS_OK : MDS_ERR_IO;
 }
 
