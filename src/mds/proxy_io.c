@@ -518,6 +518,37 @@ static int build_ds_path(char *buf, size_t buf_len,
 }
 
 /**
+ * Open a DS backing file for writing, creating it at mode 0666 if absent.
+ *
+ * Every DS backing file ends up at 0666. The normal creation path is
+ * mds_proxy_ensure_ds_file{,_fh}() on the prealloc / ds_prepare side.
+ * This helper exists for the paths that may find the backing file
+ * unexpectedly absent and create it themselves -- mds_proxy_write(),
+ * mds_proxy_allocate() and mds_proxy_copy_direct().
+ *
+ * @param path         Full DS file path from build_ds_path().
+ * @param extra_flags  Extra open(2) flags OR-ed with O_WRONLY (e.g.
+ *                     O_TRUNC).  Must not include O_CREAT or O_EXCL.
+ * @return fd >= 0 on success, or -1 with errno set.
+ */
+static int ds_open_write(const char *path, int extra_flags)
+{
+    int fd;
+
+    fd = open(path, O_WRONLY | extra_flags);
+    if (fd >= 0 || errno != ENOENT) {
+        return fd;
+    }
+
+    /* Note: open()'s mode argument is masked by the daemon umask. */
+    fd = open(path, O_WRONLY | O_CREAT | extra_flags, 0666);
+    if (fd >= 0) {
+        (void)fchmod(fd, 0666);
+    }
+    return fd;
+}
+
+/**
  * Compute stripe addressing for a single I/O operation.
  *
  * @param offset        Logical file offset.
@@ -863,7 +894,7 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
                               fileid, entries[entry_idx].ds_id,
                               stripe_idx, m, O_WRONLY | O_CREAT);
             if (fd < 0) {
-                fd = open(path, O_WRONLY | O_CREAT, 0644);
+                fd = ds_open_write(path, 0);
                 if (fd < 0) {
                     free(entries);
                     return MDS_ERR_IO;
@@ -942,7 +973,7 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_IO;
 }
 
-    fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    fd = open(file_path, O_WRONLY | O_CREAT, 0666);
     if (fd < 0) {
         return MDS_ERR_IO;
     }
@@ -1114,7 +1145,7 @@ static bool ensure_ds_file_fh_syscall(const struct mds_proxy_ctx *ctx,
                       fileid, stripe, mirror) != 0) {
         return false;
     }
-    fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    fd = open(file_path, O_WRONLY | O_CREAT, 0666);
     if (fd < 0) {
         return false;
     }
@@ -1465,7 +1496,7 @@ static int open_ds_file_ex(const struct mds_proxy_ctx *ctx,
 
     free(fetched);
 
-    fd = open(path, open_flags, 0644);
+    fd = open(path, open_flags, 0666);
     if (fd < 0) { return -1; }
 
     if (out_stripe_idx != NULL) {
@@ -1544,7 +1575,7 @@ enum mds_status mds_proxy_allocate(const struct mds_proxy_ctx *ctx,
             return MDS_ERR_IO;
         }
 
-        fd = open(path, O_WRONLY | O_CREAT, 0644);
+        fd = ds_open_write(path, 0);
         if (fd < 0) {
             free(entries);
             return MDS_ERR_IO;
@@ -1617,7 +1648,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
             return MDS_ERR_IO;
         }
 
-        fd = open(path, O_WRONLY, 0644);
+        fd = open(path, O_WRONLY, 0666);
         if (fd < 0) {
             free(entries);
             return MDS_ERR_IO;
@@ -2445,7 +2476,7 @@ enum mds_status mds_proxy_copy_direct(const struct mds_proxy_ctx *ctx,
     if (src_fd < 0) {
         return (errno == ENOENT) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
     }
-    dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    dst_fd = ds_open_write(dst_path, O_TRUNC);
     if (dst_fd < 0) {
         close(src_fd);
         return MDS_ERR_IO;
