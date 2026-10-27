@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -801,6 +802,80 @@ static void test_write_serialised_by_trim_lock(void)
 }
 
 /* -----------------------------------------------------------------------
+ * test_proxy_truncate_to -- DS tail-trim truncate semantics
+ *
+ * mds_proxy_truncate_ds_file_to() is the per-stripe truncate the trim
+ * drainer uses.  Its error mapping decides whether a broken DS mount
+ * drops the pending TRIM row (stale tail survives a later grow) or keeps
+ * it queued for retry:
+ *
+ *   - a detached DS mount resolves nothing beneath the mountpoint, so
+ *     {mount}/data is absent while the mount is still "registered";
+ *     that must surface as MDS_ERR_IO, never as "slot missing";
+ *   - a missing slot under a healthy mount (data dir present) stays a
+ *     no-op success;
+ *   - a healthy slot is resized exactly to the requested size (shrink
+ *     and sparse extend).
+ * ----------------------------------------------------------------------- */
+
+/** Length of a regular file, or -1 on error. */
+static long file_len(const char *path)
+{
+    struct stat st;
+
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    return (long)st.st_size;
+}
+
+static void test_proxy_truncate_to(void)
+{
+    struct mds_proxy_ctx *proxy;
+    char *ds_path;
+
+    /* Detached mount: the mountpoint dir exists and is registered, but
+     * nothing beneath it resolves -- no data/ subdir, no slot file. */
+    ds_path = make_ds_dir();
+    ASSERT_EQ(mds_proxy_ctx_create(&proxy), MDS_OK);
+    ASSERT_EQ(mds_proxy_mount_set(proxy, 1, ds_path), MDS_OK);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_ERR_IO);
+
+    /* Healthy mount, missing slot: the data dir exists; "slot never
+     * existed" remains a no-op success. */
+    char data_dir[4096];
+    snprintf(data_dir, sizeof(data_dir), "%s/data", ds_path);
+    ASSERT_EQ(mkdir(data_dir, 0755), 0);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_OK);
+
+    /* Healthy mount, existing slot: shrink and sparse extend land
+     * exactly on the requested size. */
+    char slot[8192];
+    char tmp[8192];
+    snprintf(slot, sizeof(slot), "%s/data/100_0_0", ds_path);
+    memset(tmp, 0x5a, sizeof(tmp));
+    int fd = open(slot, O_WRONLY | O_CREAT, 0644);
+    ASSERT_TRUE(fd >= 0);
+    ASSERT_EQ(write(fd, tmp, sizeof(tmp)), (ssize_t)sizeof(tmp));
+    ASSERT_EQ(close(fd), 0);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 4096),
+              MDS_OK);
+    ASSERT_EQ(file_len(slot), 4096);
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(proxy, 1, 100, 0, 0, 8192),
+              MDS_OK);
+    ASSERT_EQ(file_len(slot), 8192);
+
+    /* NULL ctx is rejected like every other proxy op. */
+    ASSERT_EQ(mds_proxy_truncate_ds_file_to(NULL, 1, 100, 0, 0, 4096),
+              MDS_ERR_INVAL);
+
+    mds_proxy_ctx_destroy(proxy);
+    rm_ds_dir(ds_path);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -817,6 +892,7 @@ int main(void)
     RUN_TEST(test_proxy_read_sparse_holes);
     RUN_TEST(test_proxy_read_mirror_failover);
     RUN_TEST(test_write_serialised_by_trim_lock);
+    RUN_TEST(test_proxy_truncate_to);
     trim_module_fini();
 
     fprintf(stdout, "\n%d/%d tests passed.\n", tests_passed, tests_run);

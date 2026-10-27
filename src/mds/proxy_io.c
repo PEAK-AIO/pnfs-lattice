@@ -2548,8 +2548,26 @@ enum mds_status mds_proxy_truncate_ds_file_to(const struct mds_proxy_ctx *ctx,
 
     /* truncate(2) extends a short file to a sparse hole, which
      * reads back as zeros -- exactly what a grow-after-shrink must
-     * expose.  ENOENT means the slot never existed (or was already
-     * reclaimed): nothing to truncate. */
+     * expose.  ENOENT here means the slot never existed (or was
+     * already reclaimed) under a healthy mount: nothing to truncate. */
+
+    /*
+     * Detached-mount discrimination: with the DS mount up, the
+     * {mount}/data directory resolves; with the mount detached,
+     * nothing beneath the mountpoint does -- the data dir and the
+     * slot both look up as ENOENT.  Resolving the data dir first is
+     * what separates "slot never existed" (legitimate no-op success)
+     * from "mount broken" (IO error that keeps the TRIM row queued
+     * for retry).  Mapping the latter to success would silently drop
+     * the row and leave the stale tail to be re-exposed by a later
+     * grow.
+     */
+    char data_dir[MDS_MAX_PATH];
+    (void)snprintf(data_dir, sizeof(data_dir), "%s/data", mount);
+    if (access(data_dir, F_OK) != 0) {
+        return MDS_ERR_IO;
+    }
+
     rc = truncate(file_path, (off_t)size);
     if (rc != 0) {
         return (errno == ENOENT) ? MDS_OK : MDS_ERR_IO;
