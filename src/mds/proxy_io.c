@@ -520,9 +520,9 @@ static int build_ds_path(char *buf, size_t buf_len,
 /**
  * Open a DS backing file for writing, creating it at mode 0666 if absent.
  *
- * Every DS backing file ends up at 0666. The normal creation path is
- * mds_proxy_ensure_ds_file{,_fh}() on the prealloc / ds_prepare side.
- * This helper exists for the paths that may find the backing file
+ * Every DS backing file ends up at 0666. Used both by the normal
+ * creation path, mds_proxy_ensure_ds_file{,_fh}() on the prealloc /
+ * ds_prepare side, and by the paths that may find the backing file
  * unexpectedly absent and create it themselves -- mds_proxy_write(),
  * mds_proxy_allocate() and mds_proxy_copy_direct().
  *
@@ -973,32 +973,17 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_IO;
 }
 
-    fd = open(file_path, O_WRONLY | O_CREAT, 0666);
+    /*
+     * Mode 0666: the DS backing file must be writable by whatever
+     * AUTH_SYS uid the client presents, which for an ordinary
+     * workload is not root.  ds_open_write() sets the mode when it
+     * creates the file; an existing file already carries it.
+     */
+    fd = ds_open_write(file_path, 0);
     if (fd < 0) {
         return MDS_ERR_IO;
     }
-
-    /*
-     * RFC 8435 S2.2.1: In the loosely coupled model, the MDS
-     * MUST set the owner of the data file to the synthetic
-     * uid/gid so that the client's AUTH_SYS credentials
-     * (from ffl_user/ffl_group in the layout) pass the DS's
-     * permission check.
-     *
-     * Mode 0666: the DS backing file must be writable by the
-     * client's real AUTH_SYS uid, which for an ordinary (non-root)
-     * workload is NOT root -- so the old 0600 + "rely on
-     * no_root_squash" model silently blocked every non-root client
-     * with EACCES.  Aligning ownership via a post-create path chown
-     * is racy (the fresh file is not yet visible through the MDS's
-     * NFS mount of the DS, so the chown hits ENOENT), which left the
-     * file 0600 and unwritable.  In this trusted pNFS cluster the DS
-     * is a backend store gated by the MDS layout grant, so a
-     * permissive backing-file mode is the correct, race-free model.
-     */
-    (void)fchmod(fd, 0666);
     close(fd);
-
     return MDS_OK;
 }
 
@@ -1140,19 +1125,16 @@ static bool ensure_ds_file_fh_syscall(const struct mds_proxy_ctx *ctx,
     (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount);
     (void)mkdir(dir_path, 0755);
 
-    /* Create the file if absent. */
+    /* Create the file if absent, at mode 0666; see the mode
+     * rationale in mds_proxy_ensure_ds_file above. */
     if (build_ds_path(file_path, sizeof(file_path), mount,
                       fileid, stripe, mirror) != 0) {
         return false;
     }
-    fd = open(file_path, O_WRONLY | O_CREAT, 0666);
+    fd = ds_open_write(file_path, 0);
     if (fd < 0) {
         return false;
     }
-    /* 0666: DS backing file must be writable by the client's
-     * real (non-root) AUTH_SYS uid; see the mode rationale in
-     * mds_proxy_ensure_ds_file above. */
-    (void)fchmod(fd, 0666);
     close(fd);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);

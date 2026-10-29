@@ -2704,25 +2704,22 @@ fill_layoutget_result:
 					 : (uint32_t)inode.gid;
 
 		/*
-		 * Align DS backing-file ownership with the credentials
-		 * we are about to advertise in ffl_user / ffl_group.
-		 * Without this, files created by the MDS sit as
-		 * root:root 0600 and the DS denies any READ that
-		 * arrives with the caller's real uid (RFC 8435 S2.2.1
-		 * loosely-coupled model).  Best-effort: a chown failure
-		 * is logged but does not fail the layout grant -- the
-		 * client will simply observe NFS4ERR_ACCESS on the DS
-		 * READ/WRITE and retry, matching today's behaviour.
+		 * Chown the DS backing files only in HMAC synthetic-uid
+		 * mode, where ffl_user is a uid derived per-(fileid,
+		 * stripe, mirror) and the backing file's owner is kept in
+		 * step with it.  Best-effort: a chown failure is logged
+		 * but does not fail the layout grant -- the client
+		 * observes NFS4ERR_ACCESS on the DS READ/WRITE and retries.
 		 *
-		 * Same-compound wide create: the pre-warm created every
-		 * backing file in THIS compound (root-owned, mode 0666,
-		 * see mds_proxy_ensure_ds_file_fh), so DS access never
-		 * hinges on this chown and each slot's chown is one
-		 * SETATTR round-trip against sync-export metadata
-		 * latency (measured ~5 ms per 4-stripe create).  Skipped
-		 * for those files; re-serves still realign ownership.
+		 * Skipped for a file the wide pre-warm created earlier in
+		 * this same compound; a re-serve still realigns ownership.
+		 *
+		 * The other modes need no chown here.  DS backing files
+		 * are created 0666 (see mds_proxy_ensure_ds_file), which
+		 * admits whatever uid the client presents, and
+		 * use_stored_synth files were chowned at prestage.
 		 */
-		if (!use_stored_synth && !wide_same_compound_create &&
+		if (use_synth_uid && !wide_same_compound_create &&
 		    cd->proxy != NULL && entries != NULL) {
 			const uint32_t total =
 				stripe_count * mirror_count;
@@ -2731,33 +2728,21 @@ fill_layoutget_result:
 				const uint32_t mirror = idx % mirror_count;
 				enum mds_status own_st;
 
-				if (use_synth_uid) {
-					own_st = mds_proxy_set_ds_owner(
-						cd->proxy,
-						entries[idx].ds_id,
-						cd->current_fh.fileid,
-						stripe, mirror,
-						cd->cfg->ds_synth_secret,
-						cd->cfg->ds_synth_secret_len);
-				} else {
-					own_st = mds_proxy_set_ds_owner_explicit(
-						cd->proxy, entries[idx].ds_id,
-						cd->current_fh.fileid,
-						stripe, mirror,
-						(uid_t)ffl_user_value,
-						(gid_t)ffl_group_value);
-				}
+				own_st = mds_proxy_set_ds_owner(
+					cd->proxy,
+					entries[idx].ds_id,
+					cd->current_fh.fileid,
+					stripe, mirror,
+					cd->cfg->ds_synth_secret,
+					cd->cfg->ds_synth_secret_len);
 				if (own_st != MDS_OK) {
 					MDS_LOG_WARN(LOG_COMP_NFS,
-						"layout chown failed "
-						"ds=%u fid=%lu s=%u m=%u "
-						"uid=%u gid=%u: %d",
+						"layout synth chown failed "
+						"ds=%u fid=%lu s=%u m=%u: %d",
 						(unsigned)entries[idx].ds_id,
 						(unsigned long)
 						cd->current_fh.fileid,
 						stripe, mirror,
-						(unsigned)ffl_user_value,
-						(unsigned)ffl_group_value,
 						(int)own_st);
 				}
 			}
