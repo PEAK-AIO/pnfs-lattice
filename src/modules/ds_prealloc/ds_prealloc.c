@@ -614,11 +614,36 @@ int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
     return 0;
 }
 
-int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
-                    struct mds_ds_map_entry *entry,
-                    uint32_t *stripe_unit,
-                    uint64_t *fileid_out)
+/*
+ * Hand out one ready slot.
+ *
+ * Every slot the refill workers produce has a matching row in the
+ * persisted mds_prealloc_pool table, keyed by that slot's fileid.  The
+ * row must be deleted once the slot is handed out; otherwise a restart
+ * would let recover_pool() restore the slot and hand the same fileid
+ * out a second time.
+ *
+ * Who deletes the row depends on how the caller asked:
+ *
+ *   has_pool_row_out == NULL
+ *       Delete it here, in its own catalogue transaction.  This is what
+ *       ds_prealloc_pop() does.
+ *
+ *   has_pool_row_out != NULL
+ *       Leave the row alone and report true, so the caller can delete
+ *       it as part of a transaction it is already running for this
+ *       fileid.
+ *
+ * The ring-empty fallback (sync_pop) allocates a fileid on the spot and
+ * never writes a pool row, so there is nothing to delete either way.
+ */
+int ds_prealloc_pop_ex(struct ds_prealloc_ctx *ctx,
+                       struct mds_ds_map_entry *entry,
+                       uint32_t *stripe_unit,
+                       uint64_t *fileid_out,
+                       bool *has_pool_row_out)
 {
+    if (has_pool_row_out != NULL) { *has_pool_row_out = false; }
     if (entry == NULL) {
         return -1;
     }
@@ -643,7 +668,10 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
             /* Corrupt cached slot: never persist a garbage ds_id
              * (wedges ds_gc + DS fencing). Drop it (and its pool row)
              * and keep looking; the ring-empty fallback recomputes a
-             * valid DS via placement_select_ex. */
+             * valid DS via placement_select_ex.  The row is deleted
+             * here whichever way the caller asked: this slot is
+             * being thrown away rather than handed out, so there is
+             * no caller transaction to put the delete in. */
             (void)mds_cat_prealloc_pool_delete(
                 (struct mds_catalogue *)ctx->cat, slot.fileid);
             continue;
@@ -651,8 +679,16 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
         *entry = slot.entry;
         if (stripe_unit != NULL) { *stripe_unit = slot.stripe_unit; }
         if (fileid_out != NULL) { *fileid_out = slot.fileid; }
-        (void)mds_cat_prealloc_pool_delete(
-            (struct mds_catalogue *)ctx->cat, slot.fileid);
+        /* Either tell the caller the pool row is theirs to delete,
+         * or delete it here -- see the two cases above the
+         * function.  The row's key is the fileid just returned, so
+         * the caller needs nothing beyond the yes/no. */
+        if (has_pool_row_out != NULL) {
+            *has_pool_row_out = true;
+        } else {
+            (void)mds_cat_prealloc_pool_delete(
+                (struct mds_catalogue *)ctx->cat, slot.fileid);
+        }
         mfetch_add(&g_branch_metrics.prealloc_pops_ok, 1);
         if (slot.entry.nfs_fh_len == 0) {
             mfetch_add(&g_branch_metrics.prealloc_pops_fh_missing, 1);
@@ -660,9 +696,18 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
         return 0;
     }
 
-    /* All rings empty -- synchronous fallback. */
+    /* All rings empty -- synchronous fallback.  No pool row is written
+     * for this fileid, so has_pool_row_out stays false. */
     mfetch_add(&g_branch_metrics.prealloc_pops_empty, 1);
     return sync_pop(ctx, entry, stripe_unit, fileid_out);
+}
+
+int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
+                    struct mds_ds_map_entry *entry,
+                    uint32_t *stripe_unit,
+                    uint64_t *fileid_out)
+{
+    return ds_prealloc_pop_ex(ctx, entry, stripe_unit, fileid_out, NULL);
 }
 
 int ds_prealloc_peek(const struct ds_prealloc_ctx *ctx,

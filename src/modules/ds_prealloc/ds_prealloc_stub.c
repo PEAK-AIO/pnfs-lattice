@@ -271,6 +271,20 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
     return 0;
 }
 
+int ds_prealloc_pop_ex(struct ds_prealloc_ctx *ctx,
+                       struct mds_ds_map_entry *entry,
+                       uint32_t *stripe_unit,
+                       uint64_t *fileid_out,
+                       bool *has_pool_row_out)
+{
+    /* CE has no persisted pre-alloc pool, so there is never a row for
+     * the caller to delete; report false and defer to the plain pop. */
+    if (has_pool_row_out != NULL) {
+        *has_pool_row_out = false;
+    }
+    return ds_prealloc_pop(ctx, entry, stripe_unit, fileid_out);
+}
+
 int ds_prealloc_peek(const struct ds_prealloc_ctx *ctx,
                      struct mds_ds_map_entry *entry,
                      uint32_t *stripe_unit)

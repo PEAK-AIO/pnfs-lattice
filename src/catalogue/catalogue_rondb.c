@@ -645,6 +645,12 @@ static enum mds_status catalogue_rondb_ns_lookup(struct mds_catalogue *cat,
  */
 struct rondb_create_pop {
 	bool     popped;
+	/* The slot has a persisted mds_prealloc_pool row, left for the
+	 * caller to delete (rondb_create_pop_prealloc's
+	 * defer_pool_delete).  False for the ring-empty synchronous
+	 * fallback, which allocates its fileid inline and never writes
+	 * a pool row. */
+	bool     has_pool_row;
 	struct mds_ds_map_entry entry;
 	uint32_t stripe_unit;       /* ring's configured unit (may be 0) */
 	uint64_t fileid;
@@ -658,17 +664,25 @@ struct rondb_create_pop {
  * peek followed by a separate pop could select different entries under
  * concurrent CREATEs and persist one DS in the stripe map while
  * granting a layout for another.
+ *
+ * With defer_pool_delete the slot's mds_prealloc_pool row, if it has
+ * one (pop->has_pool_row), is left for the caller to delete inside its
+ * own create transaction; otherwise ds_prealloc_pop_ex() deletes it
+ * here, in a transaction of its own.
  */
 static void rondb_create_pop_prealloc(struct ds_prealloc_ctx *prealloc,
 				      enum mds_file_type type,
+				      bool defer_pool_delete,
 				      struct rondb_create_pop *pop)
 {
 	memset(pop, 0, sizeof(*pop));
 	if (type != MDS_FTYPE_REG || prealloc == NULL) {
 		return;
 	}
-	if (ds_prealloc_pop(prealloc, &pop->entry, &pop->stripe_unit,
-			    &pop->fileid) != 0) {
+	if (ds_prealloc_pop_ex(prealloc, &pop->entry, &pop->stripe_unit,
+			       &pop->fileid,
+			       defer_pool_delete ? &pop->has_pool_row
+						 : NULL) != 0) {
 		memset(pop, 0, sizeof(*pop));
 		return;
 	}
@@ -753,8 +767,9 @@ static enum mds_status catalogue_rondb_ns_create(
 	 * Parent type is validated by the NFS protocol layer before
 	 * we reach this function. */
 
-	/* Pre-alloc stripe map + fileid for regular files. */
-	rondb_create_pop_prealloc(prealloc, type, &pop);
+	/* Pre-alloc stripe map + fileid for regular files.  The pool row,
+	 * if any, is deleted by the pop in its own transaction. */
+	rondb_create_pop_prealloc(prealloc, type, false, &pop);
 
 	/* Allocate fileid (skip if pre-allocated from pool). */
 	child_fid = pop.fileid;
@@ -3239,8 +3254,11 @@ static enum mds_status catalogue_rondb_ns_create_with_layout(
 	 * from a client that fuses OPEN+LAYOUTGET then reads back EIO
 	 * because the fused map never becomes FH-ready on the layout DS.
 	 * One pop, one placement decision, used everywhere below.
+	 *
+	 * The slot's pool row, if any, is left for the fused shim below
+	 * to delete inside the create commit.
 	 */
-	rondb_create_pop_prealloc(prealloc, type, &pop);
+	rondb_create_pop_prealloc(prealloc, type, true, &pop);
 	rondb_create_wl_apply_pop(&pop, &layout_ds_id, &layout_ds_count,
 				  &create_stripe_unit, layout_entry_out,
 				  layout_pop_stripe_unit_out);
@@ -3280,7 +3298,14 @@ static enum mds_status catalogue_rondb_ns_create_with_layout(
 			layout_stateid ? layout_stateid->other : NULL,
 			layout_stateid ? layout_stateid->seqid : 0,
 			layout_ds_count > 0 ? &layout_ds_id : NULL,
-			layout_ds_count, layout_mds_id);
+			layout_ds_count, layout_mds_id,
+			/* Delete the pre-alloc pool row in this same
+			 * commit.  It is keyed by the fileid the popped
+			 * slot carried, which is also child_fid.  0 tells
+			 * the shim to skip the delete: no slot was popped,
+			 * or it came from the synchronous fallback, which
+			 * never persisted a row. */
+			pop.has_pool_row ? pop.fileid : 0);
 		if (rc != -2) {
 			break;
 		}
