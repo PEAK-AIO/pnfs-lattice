@@ -316,6 +316,26 @@ enum nfs4_status op_open(struct compound_data *cd,
 			return NFS4ERR_NOTDIR;
 }
 
+		/*
+		 * Snapshot the parent's HPC-Shared bit while `inode` is
+		 * unambiguously the parent directory -- the lookup/create
+		 * branch split below may overwrite it.  Both consumers
+		 * below (the wide pre-warm gate and
+		 * hpc_shared_inherit_from_parent) would otherwise re-read
+		 * the parent via cat_getattr(), which goes straight to the
+		 * namespace backend without consulting the request
+		 * snapshot or the inode cache.
+		 *
+		 * The bit is therefore only as fresh as the parent read
+		 * above: a trusted.hpc_shared set by a PEER MDS may not be
+		 * observed until this node's cache entry ages out.  The
+		 * NOTDIR check above and the DAC check below already serve
+		 * that same cached parent, and inheritance is best-effort
+		 * (see hpc_shared_inherit_from_parent).
+		 */
+		bool parent_hpc_shared =
+			(inode.flags & MDS_IFLAG_HPC_SHARED) != 0;
+
 		/* Optimistic create-first for UNCHECKED4.
 		 *
 		 * CREATEMODE_UNCHECKED4 semantics (RFC 8881 S18.16.3): if
@@ -443,25 +463,16 @@ enum nfs4_status op_open(struct compound_data *cd,
 				eff_mode = 0600;
 			}
 			/*
-			 * Phase C / Step 5 of docs/hpc-nto1-plan.md -- detect
-			 * whether the parent is HPC-Shared.  We must re-fetch
-			 * here because the opt_create_first short-circuit may
-			 * have left `inode` holding the parent OR a stale
-			 * lookup result; cat_getattr is cheap (snapshot or
-			 * inode-cache hit on the parent FH the caller just
-			 * PUTFH'd) and avoids reasoning about which branch
-			 * left what in `inode`.
+			 * Phase C / Step 5 of docs/hpc-nto1-plan.md -- wide
+			 * pre-warm gate.  Reads the parent_hpc_shared
+			 * snapshot taken before the lookup/create branch
+			 * split, so it does not matter whether
+			 * opt_create_first left the parent or a lookup
+			 * result in `inode`.
 			 */
-			bool hpc_wide_path = false;
-			if (cd->prealloc != NULL && cd->cat != NULL) {
-				struct mds_inode parent_inode;
-				if (cat_getattr(cd, cd->current_fh.fileid,
-						&parent_inode) == MDS_OK &&
-				    (parent_inode.flags &
-				     MDS_IFLAG_HPC_SHARED) != 0) {
-					hpc_wide_path = true;
-				}
-			}
+			bool hpc_wide_path = (cd->prealloc != NULL &&
+					      cd->cat != NULL &&
+					      parent_hpc_shared);
 
 			/*
 			 * Pop-once placement feedback from the fused create.
@@ -819,9 +830,18 @@ enum nfs4_status op_open(struct compound_data *cd,
 			 * already sets MDS_IFLAG_HPC_SHARED on the new
 			 * inode, so this call is a no-op fast path on the
 			 * HPC branch (the helper checks the flag and bails
-			 * before any catalogue write). */
-			hpc_shared_inherit_from_parent(cd,
-				cd->current_fh.fileid, &inode);
+			 * before any catalogue write).
+			 *
+			 * The parent_hpc_shared gate keeps the helper off
+			 * the common path: its first act on a child without
+			 * the bit is a cat_getattr() of the parent to test
+			 * exactly this bit.  When the bit IS set the helper
+			 * still runs and re-reads the parent itself, so the
+			 * HPC path is unchanged. */
+			if (parent_hpc_shared) {
+				hpc_shared_inherit_from_parent(cd,
+					cd->current_fh.fileid, &inode);
+			}
 			clock_gettime(CLOCK_MONOTONIC, &t_mark);
 			/*
 			 * Skip async DS-prepare for the HPC wide path:

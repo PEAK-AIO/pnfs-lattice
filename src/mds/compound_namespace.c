@@ -1368,6 +1368,13 @@ enum nfs4_status op_create(struct compound_data *cd,
 	 * without reading from the union-aliased r->res.change_info
 	 * fields, which overlap r->res.create.inode. */
 	uint64_t parent_change_before = 0;
+	/* Snapshot the parent's HPC-Shared bit from the read below.
+	 * hpc_shared_inherit_from_parent() otherwise opens its own
+	 * cat_getattr() on the parent to test exactly this bit, which
+	 * goes straight to the namespace backend.  Mirrors the
+	 * op_open(CREATE) treatment in compound_data_io.c; see the
+	 * freshness note there. */
+	bool parent_hpc_shared = false;
 	{
 		struct mds_inode create_parent;
 
@@ -1385,6 +1392,8 @@ enum nfs4_status op_create(struct compound_data *cd,
 			return nst;
 		}
 		parent_change_before = create_parent.change;
+		parent_hpc_shared =
+			(create_parent.flags & MDS_IFLAG_HPC_SHARED) != 0;
 	}
 
 	st = cat_create(cd, cd->current_fh.fileid, a->name,
@@ -1442,9 +1451,13 @@ enum nfs4_status op_create(struct compound_data *cd,
 
 	/* Phase B HPC-Shared: propagate the bit from the parent to the
 	 * new child (file or directory).  Best-effort — a transient
-	 * catalogue error here is non-fatal for the CREATE itself. */
-	hpc_shared_inherit_from_parent(cd, cd->current_fh.fileid,
-				       &res->res.create.inode);
+	 * catalogue error here is non-fatal for the CREATE itself.
+	 * Gated on the parent snapshot so the helper's own parent
+	 * cat_getattr() never runs on the common non-HPC path. */
+	if (parent_hpc_shared) {
+		hpc_shared_inherit_from_parent(cd, cd->current_fh.fileid,
+					       &res->res.create.inode);
+	}
 
 	/* Invalidate dirent cache for the new name (flush any negative entry). */
 	compound_dirent_invalidate(cd, cd->current_fh.fileid, a->name);
