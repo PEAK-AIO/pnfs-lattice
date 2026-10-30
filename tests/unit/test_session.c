@@ -1389,6 +1389,92 @@ static void test_compound_op_without_sequence(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Test: identifiers from two table inits differ in their nonce bits
+ *
+ * Two freshly initialised tables stand in for two daemon starts: both
+ * mint counters start at 1 in each, and each table draws its own
+ * nonce.  The test fails if the two nonces' low 32 bits happen to
+ * match, a 1 in 2^32 chance.
+ * ----------------------------------------------------------------------- */
+
+/* Low 32 bits of the nonce, as make_session_id() encodes them. */
+static uint32_t sid_nonce_lo32(const uint8_t sid[SESSION_ID_SIZE])
+{
+	return ((uint32_t)sid[12] << 24) | ((uint32_t)sid[13] << 16) |
+	       ((uint32_t)sid[14] << 8)  |  (uint32_t)sid[15];
+}
+
+static void test_ids_differ_across_inits(void)
+{
+	struct session_table *st1 = NULL;
+	struct session_table *st2 = NULL;
+	uint64_t cid1 = 0, cid2 = 0;
+	uint32_t seqid1 = 0, seqid2 = 0;
+	uint8_t sid1[SESSION_ID_SIZE];
+	uint8_t sid2[SESSION_ID_SIZE];
+	uint32_t fore = 0, back = 0;
+
+	/* "Boot 1". */
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st1), 0);
+	ASSERT_EQ(session_exchange_id(st1, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &cid1, &seqid1, NULL, 0, 0, 0), 0);
+	ASSERT_EQ(session_create_session(st1, cid1, seqid1,
+					 32, 4,
+					 0, 0,
+					 0, 0,
+					 0, 0,
+					 1,
+					 0, 0, 0,
+					 sid1, &fore, &back, NULL, NULL), 0);
+
+	/* "Boot 2": a fresh table, so both mint counters start at 1
+	 * again. */
+	ASSERT_EQ(session_table_init(TEST_MDS_ID, 0, &st2), 0);
+	ASSERT_EQ(session_exchange_id(st2, owner_alice, owner_alice_len,
+				      verifier_a, 0,
+				      &cid2, &seqid2, NULL, 0, 0, 0), 0);
+	ASSERT_EQ(session_create_session(st2, cid2, seqid2,
+					 32, 4,
+					 0, 0,
+					 0, 0,
+					 0, 0,
+					 1,
+					 0, 0, 0,
+					 sid2, &fore, &back, NULL, NULL), 0);
+
+	/* session_id: [mds:4][seq:8] match, since each table's first
+	 * session gets counter 1; the 32-bit nonce tail is what
+	 * separates them. */
+	ASSERT_EQ(memcmp(sid1, sid2, 12), 0);
+	ASSERT_NE(sid_nonce_lo32(sid1), sid_nonce_lo32(sid2));
+	ASSERT_NE(memcmp(sid1, sid2, SESSION_ID_SIZE), 0);
+
+	/* clientid layout is [mds_id:16][nonce:16][counter:32].  Each
+	 * table's first clientid has counter 1 and mds_id TEST_MDS_ID. */
+	ASSERT_EQ(cid1 & 0xFFFFFFFFULL, 1);
+	ASSERT_EQ(cid2 & 0xFFFFFFFFULL, 1);
+	ASSERT_EQ(cid1 >> 48, (uint64_t)TEST_MDS_ID);
+	ASSERT_EQ(cid2 >> 48, (uint64_t)TEST_MDS_ID);
+
+	/* Both salts derive from the same nonce -- the session_id tail is
+	 * its low 32 bits, the clientid salt its low 16 -- so the two
+	 * must agree whatever value each table happened to draw.  This
+	 * pins both field positions without knowing the nonce.
+	 *
+	 * The clientid carries only 16 of those bits, so two tables can
+	 * draw the same clientid salt; that is why the check that the
+	 * two inits differ uses the session id tails above. */
+	ASSERT_EQ((cid1 >> 32) & 0xFFFFULL,
+		  (uint64_t)(sid_nonce_lo32(sid1) & 0xFFFFU));
+	ASSERT_EQ((cid2 >> 32) & 0xFFFFULL,
+		  (uint64_t)(sid_nonce_lo32(sid2) & 0xFFFFU));
+
+	session_table_destroy(st2);
+	session_table_destroy(st1);
+}
+
+/* -----------------------------------------------------------------------
  * main
  * ----------------------------------------------------------------------- */
 
@@ -1412,6 +1498,7 @@ int main(void)
 	RUN_TEST(test_sequence_misordered);
 	RUN_TEST(test_sequence_bad_session);
 	RUN_TEST(test_sequence_bad_slot);
+	RUN_TEST(test_ids_differ_across_inits);
 
 	/* Compound integration tests */
 	RUN_TEST(test_compound_full_flow);
