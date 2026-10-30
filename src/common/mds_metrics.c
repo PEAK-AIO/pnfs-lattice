@@ -310,7 +310,10 @@ int mds_metrics_prometheus_v2(const struct mds_metrics_snapshot *snap,
         (unsigned long)snap->cat_compare_mismatches,
         (unsigned long)snap->cat_compare_skipped_lag,
         (unsigned long)snap->cat_replay_rebuild_completions);
-    if (extra > 0 && (size_t)extra < cap - (size_t)base) { base += extra; }
+    if (!advance_cursor(&base, extra, cap)) {
+        return -1;
+    }
+
     /* Async-REMOVE delete manifest (ported). */
     extra = snprintf(buf + base, cap - (size_t)base,
         "# TYPE pnfs_mds_remove_async_acked counter\n"
