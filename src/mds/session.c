@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <endian.h>
 #include <time.h>
+#include <sys/random.h>
 
 #include "pnfs_mds.h"
 #include "mds_catalogue.h"
@@ -64,6 +65,15 @@ struct session_table {
 	uint32_t             session_buckets;
 	uint64_t             next_clientid;
 	uint64_t             next_session_seq;
+	/*
+	 * Value drawn at init (session_table_init_ex()) and mixed into
+	 * every session ID and clientid this table mints: its low 32 bits
+	 * fill a session ID's last 4 bytes, and its low 16 bits sit in a
+	 * clientid.  The mint counters start at 1 on every init, so this
+	 * is what makes a new daemon start unlikely to mint the session
+	 * IDs and clientids an earlier start handed out.
+	 */
+	uint64_t             restart_nonce;
 	uint32_t             mds_id;
 	uint32_t             lease_time_sec;
 	/*
@@ -400,7 +410,12 @@ static void free_client(struct session_table *st, struct nfs4_client *c)
 /* -----------------------------------------------------------------------
  * Internal: generate a session ID
  *
- * Layout: [mds_id 4B BE][session_counter 8B BE][0-pad 4B]
+ * Layout: [mds_id 4B BE][session_counter 8B BE][nonce_lo32 4B BE]
+ *
+ * nonce_lo32 is the low 32 bits of restart_nonce, so two daemon starts
+ * mint the same session IDs only if those bits match in both.
+ * hash_session_id() and session_id_shard() read only the first 8
+ * bytes; find_session() compares all 16.
  * ----------------------------------------------------------------------- */
 
 static void make_session_id(struct session_table *st,
@@ -408,10 +423,13 @@ static void make_session_id(struct session_table *st,
 {
 	uint32_t mds_be = htobe32(st->mds_id);
 	uint64_t seq_be = htobe64(st->next_session_seq++);
+	uint32_t nonce_lo_be =
+		htobe32((uint32_t)(st->restart_nonce & 0xFFFFFFFFu));
 
 	memset(out, 0, SESSION_ID_SIZE);
 	memcpy(out, &mds_be, 4);
 	memcpy(out + 4, &seq_be, 8);
+	memcpy(out + 12, &nonce_lo_be, 4);
 }
 
 /* -----------------------------------------------------------------------
@@ -477,8 +495,31 @@ int session_table_init_ex(uint32_t mds_id, uint32_t lease_time_sec,
 	}
 
 	st->mds_id = mds_id;
-	st->next_clientid = ((uint64_t)mds_id << 48) | 1;
+	/*
+	 * Counter part of the clientid; session_alloc_new_client()
+	 * assembles [mds_id:16][restart_nonce:16][counter:32].  Only 16
+	 * bits of the nonce fit, so two daemon starts can mint the same
+	 * clientids if their nonces share those bits, which for random
+	 * nonces is a 1 in 65536 chance.
+	 */
+	st->next_clientid = 1;
 	st->next_session_seq = 1;
+	/* See restart_nonce.  If getrandom() fails, mix the wall-clock
+	 * time with the table's address instead. */
+	{
+		uint64_t nonce = 0;
+
+		if (getrandom(&nonce, sizeof(nonce), 0) !=
+		    (ssize_t)sizeof(nonce)) {
+			struct timespec ts;
+
+			(void)clock_gettime(CLOCK_REALTIME, &ts);
+			nonce = ((uint64_t)ts.tv_sec * 1000000000ULL +
+				 (uint64_t)ts.tv_nsec) ^
+				((uint64_t)(uintptr_t)st * 2654435761ULL);
+		}
+		st->restart_nonce = nonce;
+	}
 	st->lease_time_sec = (lease_time_sec > 0)
 		? lease_time_sec : SESSION_DEFAULT_LEASE_SEC;
 	st->max_fore_slots = SESSION_MAX_SLOTS;
@@ -691,11 +732,26 @@ static int session_alloc_new_client(struct session_table *st,
 
 	if (use_recovered_id) {
 		c->clientid = recovered_clientid;
-		if (st->next_clientid <= recovered_clientid) {
-			st->next_clientid = recovered_clientid + 1;
+		/* Advance the mint counter past a recovered id only when
+		 * the id has this table's mds_id and nonce bits, because
+		 * only such an id can match one this table mints.  That
+		 * includes an id from an earlier start whose nonce had the
+		 * same 16 bits. */
+		if ((recovered_clientid >> 48) == (uint64_t)st->mds_id &&
+		    ((recovered_clientid >> 32) & 0xFFFFULL) ==
+		    (st->restart_nonce & 0xFFFFULL)) {
+			uint64_t rctr = recovered_clientid & 0xFFFFFFFFULL;
+
+			if (st->next_clientid <= rctr) {
+				st->next_clientid = rctr + 1;
+			}
 		}
 	} else {
-		c->clientid = st->next_clientid++;
+		/* [mds_id:16][restart_nonce:16][counter:32]; see
+		 * restart_nonce. */
+		c->clientid = ((uint64_t)st->mds_id << 48) |
+			      ((st->restart_nonce & 0xFFFFULL) << 32) |
+			      (st->next_clientid++ & 0xFFFFFFFFULL);
 	}
 	memcpy(c->co_ownerid, co_ownerid, co_ownerid_len);
 	c->co_ownerid_len = co_ownerid_len;

@@ -1168,6 +1168,24 @@ static int rondb_set_value_u64(NdbOperation *op, const char *column, uint64_t va
     return op->setValue(column, static_cast<Uint64>(value));
 }
 
+/*
+ * Write a Bigunsigned or Unsigned partition key for an
+ * Ndb::startTransaction() hint.  startTransaction() uses the hash of
+ * these bytes to choose the node that coordinates the transaction, and
+ * NDB hashes such keys in host byte order, so the value is written as
+ * its own in-memory bytes rather than in the big-endian order
+ * fdb_put_u64() uses.
+ */
+static void rondb_put_hint_u64(uint8_t *dst, uint64_t value)
+{
+    std::memcpy(dst, &value, sizeof(value));
+}
+
+static void rondb_put_hint_u32(uint8_t *dst, uint32_t value)
+{
+    std::memcpy(dst, &value, sizeof(value));
+}
+
 static int rondb_now_ns(uint64_t *out_now_ns)
 {
     struct timespec now;
@@ -2074,7 +2092,7 @@ static int rondb_readdir_scan_parent(
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -2727,7 +2745,7 @@ static int rondb_seed_root_inode(rondb_shim_handle *state)
     root.change = 1;
     root.generation = 1;
 
-    fdb_put_u64(pk_buf, MDS_FILEID_ROOT);
+    rondb_put_hint_u64(pk_buf, MDS_FILEID_ROOT);
     tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     if (tx == nullptr) {
         return rondb_report_error(rondb_get_ndb(state)->getNdbError(), "seed_root startTx");
@@ -3738,7 +3756,7 @@ int rondb_shim_inode_get(void *handle, uint64_t fileid,
     /* TC locality: start txn hinted to fileid's partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -3826,7 +3844,7 @@ int rondb_shim_inode_put(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -3892,7 +3910,7 @@ int rondb_shim_inode_setattr_atomic(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             tbl, (const char *)pk_buf, 8);
     }
@@ -3989,7 +4007,7 @@ int rondb_shim_inode_setattr_rmw(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             tbl, (const char *)pk_buf, 8);
     }
@@ -4132,7 +4150,7 @@ int rondb_shim_inode_del(void *handle, uint64_t fileid)
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -4204,7 +4222,7 @@ int rondb_shim_ns_lookup(void *handle, uint64_t parent_fileid,
     /* Start transaction on dirent partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             dir_tbl, (const char *)pk_buf, 8);
     }
@@ -4999,7 +5017,7 @@ int rondb_shim_ns_parent_touch(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = ndb->startTransaction(ino_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5067,7 +5085,7 @@ int rondb_shim_dirent_get(void *handle, uint64_t parent_fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5137,7 +5155,7 @@ int rondb_shim_dirent_put(void *handle, uint64_t parent_fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5195,7 +5213,7 @@ int rondb_shim_dirent_insert(void *handle, uint64_t parent_fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5264,7 +5282,7 @@ int rondb_shim_dirent_del(void *handle, uint64_t parent_fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5539,7 +5557,7 @@ int rondb_shim_ns_readdir_plus(void *handle,
      * the same commit. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             dir_tbl, (const char *)pk_buf, 8);
     }
@@ -5676,7 +5694,7 @@ int rondb_shim_ns_readdir_plus_from(void *handle,
 
         {
             uint8_t pk_buf[8];
-            fdb_put_u64(pk_buf, parent_fileid);
+            rondb_put_hint_u64(pk_buf, parent_fileid);
             stx = rondb_get_ndb(state)->startTransaction(
                 dir_tbl, (const char *)pk_buf, 8);
         }
@@ -5850,7 +5868,7 @@ int rondb_shim_ns_link(void *handle,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -5976,7 +5994,7 @@ int rondb_shim_ns_nlink_adjust(void *handle, uint64_t fileid, int32_t delta)
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -6129,7 +6147,7 @@ int rondb_shim_stripe_get(void *handle, uint64_t fileid,
     /* TC locality hint: fileid partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(hdr_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -6307,7 +6325,7 @@ int rondb_shim_stripe_put(void *handle, uint64_t fileid,
     /* TC locality: fileid partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(hdr_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -6523,7 +6541,7 @@ int rondb_shim_stripe_del(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(hdr_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -6637,7 +6655,7 @@ int rondb_shim_stripe_get_and_layout_grant(
     /* TC locality hint on fileid partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             hdr_tbl, (const char *)pk_buf, 8);
     }
@@ -6890,7 +6908,7 @@ int rondb_shim_xattr_get(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -7001,7 +7019,7 @@ int rondb_shim_xattr_put(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -7077,7 +7095,7 @@ int rondb_shim_xattr_del(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -7131,7 +7149,7 @@ int rondb_shim_xattr_list(void *handle, uint64_t fileid,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -7610,7 +7628,7 @@ int rondb_shim_bench_create(void *handle, uint32_t n_ops,
         if (ndb == nullptr) { err_count++; continue; }
 
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         NdbTransaction *tx = ndb->startTransaction(
             dir_tbl, (const char *)pk_buf, 8);
         if (tx == nullptr) { err_count++; continue; }
@@ -7749,7 +7767,7 @@ int rondb_shim_ns_create(void *handle,
     /* Hint on parent partition (dirent + parent inode live there). */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = ndb->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -7930,7 +7948,8 @@ int rondb_shim_ns_create_with_layout(
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,
     const uint32_t *layout_ds_ids, uint32_t layout_ds_count,
-    uint32_t layout_mds_id)
+    uint32_t layout_mds_id,
+    uint64_t prealloc_pool_fileid)
 {
     rondb_shim_handle *state = rondb_checked_handle(handle, nullptr);
     NdbDictionary::Dictionary *dict;
@@ -8036,7 +8055,7 @@ int rondb_shim_ns_create_with_layout(
     /* Hint on parent partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = ndb->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -8257,7 +8276,46 @@ int rondb_shim_ns_create_with_layout(
         }
     }
 
-    /* Single Commit covering dirent + inode + parent + stripe + layout.
+    /*
+     * 6. Delete the pre-alloc pool row for the fileid this CREATE is
+     *    consuming, inside this same transaction.
+     *
+     *    mds_prealloc_pool is partitioned by fileid -- the same
+     *    partition this transaction already writes the child inode,
+     *    stripe and layout rows to -- so the delete adds no new
+     *    commit participant, and the CREATE loses a whole NDB
+     *    transaction.
+     *
+     *    AO_IgnoreError: produce_slot()'s pool insert is best-effort
+     *    and its result discarded, so a ring slot can name a fileid
+     *    whose row was never written and this delete can legitimately
+     *    hit a 626.  Ignoring per-op errors keeps that from aborting
+     *    the CREATE.  Note the cost: NDB ignores ALL errors on the
+     *    operation, not just 626, so a delete that fails for another
+     *    reason is swallowed and leaves the row behind.
+     *
+     *    A caller holding no reservation -- the ring-empty fallback,
+     *    which allocates its fileid inline -- passes 0, and the op is
+     *    skipped.
+     */
+    if (prealloc_pool_fileid != 0) {
+        const NdbDictionary::Table *pp_tbl =
+            dict->getTable(RONDB_TBL_PREALLOC_POOL);
+        if (pp_tbl != nullptr) {
+            NdbOperation *pp_op = tx->getNdbOperation(pp_tbl);
+            if (pp_op != nullptr) {
+                pp_op->deleteTuple();
+                (void)rondb_equal_u64(pp_op, RONDB_PP_COL_FILEID,
+                                      prealloc_pool_fileid);
+                (void)pp_op->setAbortOption(
+                    NdbOperation::AO_IgnoreError);
+                track(pp_op, "prealloc_pool_delete");
+            }
+        }
+    }
+
+    /* Single Commit covering dirent + inode + parent + stripe + layout
+     * + pre-alloc pool delete.
      * Async mode routes it through the batch pipeline. */
     {
         int commit_rc = use_async
@@ -8305,7 +8363,8 @@ int rondb_shim_ns_create_wide(
     return rondb_shim_ns_create_with_layout(
         handle, parent_fileid, name, child_inode_buf, child_ino_len,
         0, stripe_buf, stripe_len, stripe_count, stripe_unit, mirror_count,
-        0, 0, 0, 0, nullptr, 0, nullptr, 0, 0);
+        0, 0, 0, 0, nullptr, 0, nullptr, 0, 0,
+        /* prealloc_pool_fileid */ 0);
 }
 
 /* -----------------------------------------------------------------------
@@ -8551,7 +8610,7 @@ static int rondb_shim_ns_remove_once(void *handle,
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, parent_fileid);
+        rondb_put_hint_u64(pk_buf, parent_fileid);
         tx = rondb_get_ndb(state)->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -8955,7 +9014,7 @@ int rondb_shim_rename(void *handle,
     /* TC hint on src_parent partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, src_parent);
+        rondb_put_hint_u64(pk_buf, src_parent);
         tx = rondb_get_ndb(state)->startTransaction(dir_tbl, (const char *)pk_buf, 8);
     }
     if (tx == nullptr) {
@@ -11559,7 +11618,7 @@ static int rondb_shim_layout_state_put_once(
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             ls_tbl, (const char *)pk_buf, 8);
     }
@@ -11646,7 +11705,7 @@ static int rondb_shim_layout_state_union_once(
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             ls_tbl, (const char *)pk_buf, 8);
     }
@@ -11795,7 +11854,7 @@ static void rondb_shim_ds_layout_idx_put_best_effort(
 
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             dli_tbl, (const char *)pk_buf, 8);
     }
@@ -11908,7 +11967,7 @@ static int rondb_shim_layout_state_del_once(void *handle,
     /* Hint on fileid partition. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(
             ls_tbl, (const char *)pk_buf, 8);
     }
@@ -12521,7 +12580,7 @@ int rondb_shim_layout_iter_file(void *handle, uint64_t fileid,
      * when we fall back from the index scan to a full table scan. */
     {
         uint8_t pk_buf[8];
-        fdb_put_u64(pk_buf, fileid);
+        rondb_put_hint_u64(pk_buf, fileid);
         tx = rondb_get_ndb(state)->startTransaction(lbf_tbl,
                                                     (const char *)pk_buf, 8);
     }
@@ -13777,10 +13836,7 @@ int rondb_shim_delta_poll(void *handle,
      * stays on the single fragment owning this MDS stream. */
     {
         uint8_t pk_buf[4];
-        pk_buf[0] = (uint8_t)(source_mds_id >> 24);
-        pk_buf[1] = (uint8_t)(source_mds_id >> 16);
-        pk_buf[2] = (uint8_t)(source_mds_id >> 8);
-        pk_buf[3] = (uint8_t)(source_mds_id);
+        rondb_put_hint_u32(pk_buf, source_mds_id);
         tx = rondb_get_ndb(state)->startTransaction(
             tbl, (const char *)pk_buf, 4);
     }
@@ -15114,7 +15170,7 @@ static int rondb_inode_touch_atomic(rondb_shim_handle *state,
     if (tbl == nullptr) { return 0; }
 
     uint8_t pk[8];
-    fdb_put_u64(pk, fileid);
+    rondb_put_hint_u64(pk, fileid);
     tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return 0; }
 
@@ -15170,7 +15226,7 @@ int rondb_shim_client_put(void *handle, const struct mds_coord_client_row *row)
     dict = rondb_get_dictionary(state); if (dict == nullptr) { return -1; }
     tbl = dict->getTable(RONDB_TBL_CLIENTS); if (tbl == nullptr) { return -1; }
 
-    uint8_t pk[8]; fdb_put_u64(pk, row->clientid);
+    uint8_t pk[8]; rondb_put_hint_u64(pk, row->clientid);
     tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return rondb_report_error(rondb_get_ndb(state)->getNdbError(), "client_put startTx"); }
 
@@ -15214,7 +15270,7 @@ int rondb_shim_client_get(void *handle, uint64_t clientid,
     dict = rondb_get_dictionary(state); if (dict == nullptr) { return -1; }
     tbl = dict->getTable(RONDB_TBL_CLIENTS); if (tbl == nullptr) { return -1; }
 
-    uint8_t pk[8]; fdb_put_u64(pk, clientid);
+    uint8_t pk[8]; rondb_put_hint_u64(pk, clientid);
     tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return rondb_report_error(rondb_get_ndb(state)->getNdbError(), "client_get startTx"); }
 
@@ -15267,7 +15323,7 @@ int rondb_shim_client_del(void *handle, uint64_t clientid)
     dict = rondb_get_dictionary(state); if (dict == nullptr) { return -1; }
     tbl = dict->getTable(RONDB_TBL_CLIENTS); if (tbl == nullptr) { return -1; }
 
-    uint8_t pk[8]; fdb_put_u64(pk, clientid);
+    uint8_t pk[8]; rondb_put_hint_u64(pk, clientid);
     tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return rondb_report_error(rondb_get_ndb(state)->getNdbError(), "client_del startTx"); }
     op = tx->getNdbOperation(tbl);
@@ -15632,7 +15688,7 @@ int rondb_shim_bytelock_put(void *handle, const struct mds_coord_lock_row *row)
     const NdbDictionary::Table *idx = dict->getTable(RONDB_TBL_LOCK_BY_OWNER);
     if (tbl == nullptr || idx == nullptr) { return -1; }
 
-    uint8_t pk[8]; fdb_put_u64(pk, row->fileid);
+    uint8_t pk[8]; rondb_put_hint_u64(pk, row->fileid);
     NdbTransaction *tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return -1; }
     NdbError err;
@@ -15677,7 +15733,7 @@ int rondb_shim_bytelock_del(void *handle, uint64_t fileid, uint64_t lock_id)
     dict = rondb_get_dictionary(state); if (dict == nullptr) { return -1; }
     const NdbDictionary::Table *tbl = dict->getTable(RONDB_TBL_BYTE_LOCKS);
     if (tbl == nullptr) { return -1; }
-    uint8_t pk[8]; fdb_put_u64(pk, fileid);
+    uint8_t pk[8]; rondb_put_hint_u64(pk, fileid);
     NdbTransaction *tx = rondb_get_ndb(state)->startTransaction(tbl, (const char *)pk, 8);
     if (tx == nullptr) { return -1; }
     NdbOperation *op = tx->getNdbOperation(tbl);

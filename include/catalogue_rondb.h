@@ -735,7 +735,8 @@ int rondb_shim_ns_create_with_layout(
     uint64_t layout_offset, uint64_t layout_length,
     const uint8_t layout_stateid_other[12], uint32_t layout_seqid,
     const uint32_t *layout_ds_ids, uint32_t layout_ds_count,
-    uint32_t layout_mds_id);
+    uint32_t layout_mds_id,
+    uint64_t prealloc_pool_fileid);
 int rondb_shim_layout_state_del(void *handle,
                                 const uint8_t stateid_other[12],
                                 uint64_t clientid, uint64_t fileid,

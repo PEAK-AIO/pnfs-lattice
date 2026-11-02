@@ -111,6 +111,38 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
                     uint64_t *fileid_out);
 
 /**
+ * @brief Pop a placement, leaving the pool-row delete to the caller.
+ *
+ * Identical to ds_prealloc_pop() except that the persisted
+ * mds_prealloc_pool row for the consumed slot is not deleted here.
+ * @p has_pool_row_out reports whether such a row exists, so the caller
+ * can fold the delete into its own catalogue transaction.
+ *
+ * The row's primary key is the fileid returned in @p fileid_out:
+ * produce_slot() allocates one fileid, stores it in the pool row,
+ * carries it in the ring slot, and that same id becomes the child
+ * inode's fileid.  The caller therefore needs no second value, only
+ * the yes/no below.
+ *
+ * @param ctx          Pool context.
+ * @param[out] entry   Receives the placement (ds_id populated).
+ * @param[out] stripe_unit  Receives the stripe unit size.
+ * @param[out] fileid_out   Receives the reserved fileid.
+ * @param[out] has_pool_row_out  true when the returned fileid has a
+ *                     persisted pool row the caller must delete.  false
+ *                     for the ring-empty synchronous fallback, which
+ *                     allocates a fileid inline and never writes a pool
+ *                     row.  NULL restores ds_prealloc_pop() behaviour:
+ *                     the delete is issued here as its own transaction.
+ * @return 0 on success, -1 on error (no DSes available).
+ */
+int ds_prealloc_pop_ex(struct ds_prealloc_ctx *ctx,
+                       struct mds_ds_map_entry *entry,
+                       uint32_t *stripe_unit,
+                       uint64_t *fileid_out,
+                       bool *has_pool_row_out);
+
+/**
  * @brief Select any ONLINE DS from the prealloc context's registry DB.
  *
  * Used as a fallback when the patched-only prealloc pool is empty.

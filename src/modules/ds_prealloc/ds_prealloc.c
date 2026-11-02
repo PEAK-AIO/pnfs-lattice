@@ -59,6 +59,8 @@
 #define DS_PREALLOC_MIN_RING_DEPTH       8U
 /* struct timespec.tv_nsec is a long: keep the arithmetic in long. */
 #define DS_PREALLOC_REFILL_BACKOFF_NS    (20L * 1000L * 1000L) /* 20 ms */
+/* TTL of the cached DS registry snapshot; see ds_list_snapshot(). */
+#define DS_PREALLOC_DS_LIST_TTL_NS       (1000ULL * 1000ULL * 1000ULL)
 
 struct prealloc_slot {
     uint64_t                fileid;
@@ -97,6 +99,13 @@ struct ds_prealloc_ctx {
     struct prealloc_ring       *rings;
     uint32_t                    ring_count;
     _Atomic uint32_t            pop_rr;
+
+    /* TTL-cached DS registry snapshot -- see ds_list_snapshot(). */
+    pthread_mutex_t             ds_list_lock;
+    struct mds_ds_info         *ds_list_cache;
+    uint32_t                    ds_list_count;
+    struct timespec             ds_list_stamp;   /* CLOCK_MONOTONIC */
+    bool                        ds_list_valid;
 
     _Atomic bool                stop;
     bool                        synthetic_fh;
@@ -141,13 +150,99 @@ static bool ds_belongs_to_ring(const struct ds_prealloc_ctx *ctx,
     return (((p / csz) % rings) == ring_index);
 }
 
+/* Nanoseconds from @a to @b, or 0 if @b is earlier. */
+static uint64_t ts_since_ns(const struct timespec *a,
+                            const struct timespec *b)
+{
+    int64_t delta = ((int64_t)(b->tv_sec - a->tv_sec) * 1000000000LL) +
+                    (int64_t)(b->tv_nsec - a->tv_nsec);
+
+    return (delta < 0) ? 0U : (uint64_t)delta;
+}
+
+/*
+ * Return a copy of the DS registry, which is cached on @ctx with a
+ * time-to-live of DS_PREALLOC_DS_LIST_TTL_NS.  ring_select_ds() calls
+ * this for every slot a refill worker tries to make, and on RonDB each
+ * read of the registry is a full scan of the mds_ds_registry table.
+ *
+ * A caller can get the registry as it was when the snapshot was read,
+ * missing changes made since then, including changes of DS state.
+ *
+ * Each caller gets its own copy, which it frees, as with
+ * mds_cat_ds_list().  The copy is needed because replacing the
+ * snapshot frees the old one, and because sync_pop() and
+ * ds_prealloc_select_any_online() can modify the array, through
+ * ds_cache_overlay_weights().
+ *
+ * The snapshot is re-read with ds_list_lock held.  If the read fails,
+ * the caller gets the error and the old snapshot is kept, so the next
+ * caller that finds it expired tries the read again.
+ */
+static enum mds_status ds_list_snapshot(struct ds_prealloc_ctx *ctx,
+                                        struct mds_ds_info **out,
+                                        uint32_t *out_count)
+{
+    struct mds_ds_info *copy = NULL;
+    struct timespec now;
+
+    *out = NULL;
+    *out_count = 0;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        /* No usable clock -- read straight through. */
+        return mds_cat_ds_list((struct mds_catalogue *)ctx->cat,
+                               out, out_count);
+    }
+
+    pthread_mutex_lock(&ctx->ds_list_lock);
+
+    if (!ctx->ds_list_valid ||
+        ts_since_ns(&ctx->ds_list_stamp, &now) >=
+            DS_PREALLOC_DS_LIST_TTL_NS) {
+        struct mds_ds_info *fresh = NULL;
+        uint32_t fresh_count = 0;
+        enum mds_status st;
+
+        st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat,
+                             &fresh, &fresh_count);
+        if (st != MDS_OK) {
+            free(fresh);
+            pthread_mutex_unlock(&ctx->ds_list_lock);
+            return st;
+        }
+        free(ctx->ds_list_cache);
+        ctx->ds_list_cache = fresh;
+        ctx->ds_list_count = fresh_count;
+        ctx->ds_list_stamp = now;
+        ctx->ds_list_valid = true;
+    }
+
+    if (ctx->ds_list_cache != NULL && ctx->ds_list_count > 0) {
+        size_t bytes = (size_t)ctx->ds_list_count * sizeof(*copy);
+
+        copy = malloc(bytes);
+        if (copy == NULL) {
+            pthread_mutex_unlock(&ctx->ds_list_lock);
+            return MDS_ERR_NOMEM;
+        }
+        memcpy(copy, ctx->ds_list_cache, bytes);
+        *out_count = ctx->ds_list_count;
+    }
+
+    pthread_mutex_unlock(&ctx->ds_list_lock);
+
+    *out = copy;
+    return MDS_OK;
+}
+
 /*
  * Snapshot ONLINE DSes assigned to @ring, overlay live weights, and run
  * the placement policy to choose one ds_id.  Returns MDS_OK with
  * entry->ds_id set (FH zeroed), MDS_ERR_NOSPC if this ring owns no
  * ONLINE DS right now.
  */
-static enum mds_status ring_select_ds(const struct ds_prealloc_ctx *ctx,
+static enum mds_status ring_select_ds(struct ds_prealloc_ctx *ctx,
                                       const struct prealloc_ring *ring,
                                       struct mds_ds_map_entry *entry)
 {
@@ -158,8 +253,7 @@ static enum mds_status ring_select_ds(const struct ds_prealloc_ctx *ctx,
 
     memset(entry, 0, sizeof(*entry));
 
-    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, &ds_list,
-                         &ds_count);
+    st = ds_list_snapshot(ctx, &ds_list, &ds_count);
     if (st != MDS_OK) {
         return st;
     }
@@ -368,8 +462,7 @@ static int sync_pop(struct ds_prealloc_ctx *ctx,
     if (fileid_out != NULL) { *fileid_out = 0; }
     memset(entry, 0, sizeof(*entry));
 
-    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, &ds_list,
-                         &ds_count);
+    st = ds_list_snapshot(ctx, &ds_list, &ds_count);
     if (st != MDS_OK || ds_list == NULL || ds_count == 0) {
         free(ds_list);
         return -1;
@@ -418,6 +511,8 @@ static void ctx_free(struct ds_prealloc_ctx *ctx)
     if (ctx == NULL) {
         return;
     }
+    free(ctx->ds_list_cache);
+    pthread_mutex_destroy(&ctx->ds_list_lock);
     if (ctx->rings != NULL) {
         for (uint32_t i = 0; i < ctx->ring_count; i++) {
             free(ctx->rings[i].slots);
@@ -555,6 +650,7 @@ int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
     ctx->self_mds_id = self_mds_id;
     ctx->cluster_size = (cluster_size >= 1U) ? cluster_size : 1U;
     atomic_store_explicit(&ctx->stop, false, memory_order_relaxed);
+    pthread_mutex_init(&ctx->ds_list_lock, NULL);
 
     if (pool_size == 0U) {
         pool_size = 128U;
@@ -614,11 +710,36 @@ int ds_prealloc_init_ex2(const struct mds_catalogue *cat,
     return 0;
 }
 
-int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
-                    struct mds_ds_map_entry *entry,
-                    uint32_t *stripe_unit,
-                    uint64_t *fileid_out)
+/*
+ * Hand out one ready slot.
+ *
+ * Every slot the refill workers produce has a matching row in the
+ * persisted mds_prealloc_pool table, keyed by that slot's fileid.  The
+ * row must be deleted once the slot is handed out; otherwise a restart
+ * would let recover_pool() restore the slot and hand the same fileid
+ * out a second time.
+ *
+ * Who deletes the row depends on how the caller asked:
+ *
+ *   has_pool_row_out == NULL
+ *       Delete it here, in its own catalogue transaction.  This is what
+ *       ds_prealloc_pop() does.
+ *
+ *   has_pool_row_out != NULL
+ *       Leave the row alone and report true, so the caller can delete
+ *       it as part of a transaction it is already running for this
+ *       fileid.
+ *
+ * The ring-empty fallback (sync_pop) allocates a fileid on the spot and
+ * never writes a pool row, so there is nothing to delete either way.
+ */
+int ds_prealloc_pop_ex(struct ds_prealloc_ctx *ctx,
+                       struct mds_ds_map_entry *entry,
+                       uint32_t *stripe_unit,
+                       uint64_t *fileid_out,
+                       bool *has_pool_row_out)
 {
+    if (has_pool_row_out != NULL) { *has_pool_row_out = false; }
     if (entry == NULL) {
         return -1;
     }
@@ -643,7 +764,10 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
             /* Corrupt cached slot: never persist a garbage ds_id
              * (wedges ds_gc + DS fencing). Drop it (and its pool row)
              * and keep looking; the ring-empty fallback recomputes a
-             * valid DS via placement_select_ex. */
+             * valid DS via placement_select_ex.  The row is deleted
+             * here whichever way the caller asked: this slot is
+             * being thrown away rather than handed out, so there is
+             * no caller transaction to put the delete in. */
             (void)mds_cat_prealloc_pool_delete(
                 (struct mds_catalogue *)ctx->cat, slot.fileid);
             continue;
@@ -651,8 +775,16 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
         *entry = slot.entry;
         if (stripe_unit != NULL) { *stripe_unit = slot.stripe_unit; }
         if (fileid_out != NULL) { *fileid_out = slot.fileid; }
-        (void)mds_cat_prealloc_pool_delete(
-            (struct mds_catalogue *)ctx->cat, slot.fileid);
+        /* Either tell the caller the pool row is theirs to delete,
+         * or delete it here -- see the two cases above the
+         * function.  The row's key is the fileid just returned, so
+         * the caller needs nothing beyond the yes/no. */
+        if (has_pool_row_out != NULL) {
+            *has_pool_row_out = true;
+        } else {
+            (void)mds_cat_prealloc_pool_delete(
+                (struct mds_catalogue *)ctx->cat, slot.fileid);
+        }
         mfetch_add(&g_branch_metrics.prealloc_pops_ok, 1);
         if (slot.entry.nfs_fh_len == 0) {
             mfetch_add(&g_branch_metrics.prealloc_pops_fh_missing, 1);
@@ -660,9 +792,18 @@ int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
         return 0;
     }
 
-    /* All rings empty -- synchronous fallback. */
+    /* All rings empty -- synchronous fallback.  No pool row is written
+     * for this fileid, so has_pool_row_out stays false. */
     mfetch_add(&g_branch_metrics.prealloc_pops_empty, 1);
     return sync_pop(ctx, entry, stripe_unit, fileid_out);
+}
+
+int ds_prealloc_pop(struct ds_prealloc_ctx *ctx,
+                    struct mds_ds_map_entry *entry,
+                    uint32_t *stripe_unit,
+                    uint64_t *fileid_out)
+{
+    return ds_prealloc_pop_ex(ctx, entry, stripe_unit, fileid_out, NULL);
 }
 
 int ds_prealloc_peek(const struct ds_prealloc_ctx *ctx,
@@ -707,8 +848,8 @@ enum mds_status ds_prealloc_select_any_online(
         return MDS_ERR_INVAL;
     }
     if (stripe_unit != NULL) { *stripe_unit = ctx->stripe_unit; }
-    st = mds_cat_ds_list((struct mds_catalogue *)ctx->cat, &ds_list,
-                         &ds_count);
+    st = ds_list_snapshot((struct ds_prealloc_ctx *)ctx, &ds_list,
+                          &ds_count);
     if (st != MDS_OK) {
         return st;
     }

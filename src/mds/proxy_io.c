@@ -418,6 +418,23 @@ void mds_proxy_set_fh_knfsd_strict(struct mds_proxy_ctx *ctx,
  * DS mount registration
  * ----------------------------------------------------------------------- */
 
+/**
+ * Create the {mount}/data subdirectory.
+ *
+ * Called once per DS at registration, and thereafter only as an ENOENT
+ * recovery step in mds_proxy_ensure_ds_file{,_fh}().
+ */
+static void ds_data_dir_ensure(const char *mount_path)
+{
+    char dir_path[MDS_MAX_PATH];
+
+    if (mount_path == NULL || mount_path[0] == '\0') {
+        return;
+    }
+    (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount_path);
+    (void)mkdir(dir_path, 0755);  /* Ignore EEXIST. */
+}
+
 enum mds_status mds_proxy_mount_set(struct mds_proxy_ctx *ctx,
                                     uint32_t ds_id,
                                     const char *mount_path)
@@ -434,6 +451,14 @@ enum mds_status mds_proxy_mount_set(struct mds_proxy_ctx *ctx,
              sizeof(ctx->mounts[ds_id].path),
              "%s", mount_path);
     ctx->mounts[ds_id].registered = true;
+
+    /*
+     * Best-effort: the NFS mount may not be up yet at registration,
+     * in which case this lands on the underlying mountpoint and is
+     * shadowed once the mount appears.  The ENOENT retry in both
+     * ensure_ds_file*() paths is the backstop.
+     */
+    ds_data_dir_ensure(mount_path);
     return MDS_OK;
 }
 
@@ -515,6 +540,37 @@ static int build_ds_path(char *buf, size_t buf_len,
         return -1;
 }
     return 0;
+}
+
+/**
+ * Open a DS backing file for writing, creating it at mode 0666 if absent.
+ *
+ * Every DS backing file ends up at 0666. Used both by the normal
+ * creation path, mds_proxy_ensure_ds_file{,_fh}() on the prealloc /
+ * ds_prepare side, and by the paths that may find the backing file
+ * unexpectedly absent and create it themselves -- mds_proxy_write(),
+ * mds_proxy_allocate() and mds_proxy_copy_direct().
+ *
+ * @param path         Full DS file path from build_ds_path().
+ * @param extra_flags  Extra open(2) flags OR-ed with O_WRONLY (e.g.
+ *                     O_TRUNC).  Must not include O_CREAT or O_EXCL.
+ * @return fd >= 0 on success, or -1 with errno set.
+ */
+static int ds_open_write(const char *path, int extra_flags)
+{
+    int fd;
+
+    fd = open(path, O_WRONLY | extra_flags);
+    if (fd >= 0 || errno != ENOENT) {
+        return fd;
+    }
+
+    /* Note: open()'s mode argument is masked by the daemon umask. */
+    fd = open(path, O_WRONLY | O_CREAT | extra_flags, 0666);
+    if (fd >= 0) {
+        (void)fchmod(fd, 0666);
+    }
+    return fd;
 }
 
 /**
@@ -863,7 +919,7 @@ enum mds_status mds_proxy_write(const struct mds_proxy_ctx *ctx,
                               fileid, entries[entry_idx].ds_id,
                               stripe_idx, m, O_WRONLY | O_CREAT);
             if (fd < 0) {
-                fd = open(path, O_WRONLY | O_CREAT, 0644);
+                fd = ds_open_write(path, 0);
                 if (fd < 0) {
                     free(entries);
                     return MDS_ERR_IO;
@@ -917,7 +973,6 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
                                          uint32_t mirror)
 {
     const char *mount;
-    char dir_path[MDS_MAX_PATH];
     char file_path[MDS_MAX_PATH];
     int fd;
 
@@ -932,42 +987,36 @@ enum mds_status mds_proxy_ensure_ds_file(const struct mds_proxy_ctx *ctx,
         return MDS_ERR_NOTFOUND;
 }
 
-    /* Ensure data/ subdirectory exists. */
-    (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount);
-    (void)mkdir(dir_path, 0755);  /* Ignore EEXIST. */
-
-    /* Create the data file if absent. */
+    /* {mount}/data is created once per DS at registration
+     * (mds_proxy_mount_set); the ENOENT retry below is the only
+     * thing that recreates it. */
     if (build_ds_path(file_path, sizeof(file_path), mount,
                       fileid, stripe, mirror) != 0) {
         return MDS_ERR_IO;
 }
 
-    fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    /*
+     * Mode 0666: the DS backing file must be writable by whatever
+     * AUTH_SYS uid the client presents, which for an ordinary
+     * workload is not root.  ds_open_write() sets the mode when it
+     * creates the file; an existing file already carries it.
+     */
+    fd = ds_open_write(file_path, 0);
+    if (fd < 0 && errno == ENOENT) {
+        /* {mount}/data should always exist -- DS provisioning creates
+         * it and registration recreates it.  If ENOENT, then maybe
+         * the DS is not mounted, and {mount} is an ordinary local
+         * directory: the retry below then creates the backing file on
+         * the MDS's own disk while the catalogue records it as living
+         * on the DS.  Nothing here distinguishes that from a
+         * genuinely missing subdirectory on a healthy mount. */
+        ds_data_dir_ensure(mount);
+        fd = ds_open_write(file_path, 0);
+    }
     if (fd < 0) {
         return MDS_ERR_IO;
     }
-
-    /*
-     * RFC 8435 S2.2.1: In the loosely coupled model, the MDS
-     * MUST set the owner of the data file to the synthetic
-     * uid/gid so that the client's AUTH_SYS credentials
-     * (from ffl_user/ffl_group in the layout) pass the DS's
-     * permission check.
-     *
-     * Mode 0666: the DS backing file must be writable by the
-     * client's real AUTH_SYS uid, which for an ordinary (non-root)
-     * workload is NOT root -- so the old 0600 + "rely on
-     * no_root_squash" model silently blocked every non-root client
-     * with EACCES.  Aligning ownership via a post-create path chown
-     * is racy (the fresh file is not yet visible through the MDS's
-     * NFS mount of the DS, so the chown hits ENOENT), which left the
-     * file 0600 and unwritable.  In this trusted pNFS cluster the DS
-     * is a backend store gated by the MDS layout grant, so a
-     * permissive backing-file mode is the correct, race-free model.
-     */
-    (void)fchmod(fd, 0666);
     close(fd);
-
     return MDS_OK;
 }
 
@@ -1099,29 +1148,29 @@ static bool ensure_ds_file_fh_syscall(const struct mds_proxy_ctx *ctx,
                                       uint8_t *fh_out, uint32_t *fh_len)
 {
     char file_path[MDS_MAX_PATH];
-    char dir_path[MDS_MAX_PATH];
     int fd;
     struct timespec t0, t1, t2;
 
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    /* Ensure data/ subdirectory exists. */
-    (void)snprintf(dir_path, sizeof(dir_path), "%s/data", mount);
-    (void)mkdir(dir_path, 0755);
-
-    /* Create the file if absent. */
+    /* Create the file if absent, at mode 0666; see the mode
+     * rationale in mds_proxy_ensure_ds_file above. */
     if (build_ds_path(file_path, sizeof(file_path), mount,
                       fileid, stripe, mirror) != 0) {
         return false;
     }
-    fd = open(file_path, O_WRONLY | O_CREAT, 0644);
+    fd = ds_open_write(file_path, 0);
+    /* See the ENOENT note in mds_proxy_ensure_ds_file above: this
+     * recovers a missing {mount}/data, but does not distinguish an
+     * unmounted DS from a healthy mount whose subdirectory went
+     * away. */
+    if (fd < 0 && errno == ENOENT) {
+        ds_data_dir_ensure(mount);
+        fd = ds_open_write(file_path, 0);
+    }
     if (fd < 0) {
         return false;
     }
-    /* 0666: DS backing file must be writable by the client's
-     * real (non-root) AUTH_SYS uid; see the mode rationale in
-     * mds_proxy_ensure_ds_file above. */
-    (void)fchmod(fd, 0666);
     close(fd);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -1465,7 +1514,7 @@ static int open_ds_file_ex(const struct mds_proxy_ctx *ctx,
 
     free(fetched);
 
-    fd = open(path, open_flags, 0644);
+    fd = open(path, open_flags, 0666);
     if (fd < 0) { return -1; }
 
     if (out_stripe_idx != NULL) {
@@ -1544,7 +1593,7 @@ enum mds_status mds_proxy_allocate(const struct mds_proxy_ctx *ctx,
             return MDS_ERR_IO;
         }
 
-        fd = open(path, O_WRONLY | O_CREAT, 0644);
+        fd = ds_open_write(path, 0);
         if (fd < 0) {
             free(entries);
             return MDS_ERR_IO;
@@ -1617,7 +1666,7 @@ enum mds_status mds_proxy_deallocate(const struct mds_proxy_ctx *ctx,
             return MDS_ERR_IO;
         }
 
-        fd = open(path, O_WRONLY, 0644);
+        fd = open(path, O_WRONLY, 0666);
         if (fd < 0) {
             free(entries);
             return MDS_ERR_IO;
@@ -2445,7 +2494,7 @@ enum mds_status mds_proxy_copy_direct(const struct mds_proxy_ctx *ctx,
     if (src_fd < 0) {
         return (errno == ENOENT) ? MDS_ERR_NOTFOUND : MDS_ERR_IO;
     }
-    dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    dst_fd = ds_open_write(dst_path, O_TRUNC);
     if (dst_fd < 0) {
         close(src_fd);
         return MDS_ERR_IO;
