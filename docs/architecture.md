@@ -545,6 +545,35 @@ change moves an item between the states below.
   slot replay cache, back-channel recalls, the referral-based
   active-active namespace and its cluster transport (§8–§9), and the
   metadata search tools (§15).
+- **DS tail trim (persistent mode):** durable and quiesced.  A shrinking
+  `SETATTR(size)` on a regular, non-inline, DS-backed file no longer
+  truncates the DS tail inline; it enqueues a durable GC `TRIM` row
+  (visible to every MDS, `owner_mds_id = 0`) before the size commit.
+  The file's owner MDS drains it in the background (the ds_gc drainer):
+  it closes the file's LAYOUTGET gate (`NFS4ERR_DELAY` while
+  quiescing), recalls all outstanding client layouts (each attempt is
+  lease-bounded, expiring non-responding holders authoritatively), and
+  then — under the per-inode lock L(F), re-reading the committed size
+  and the stripe map — truncates every stale per-stripe/mirror DS tail
+  to the current committed size.  The row is dequeued only on full
+  success; a transient DS failure keeps it queued for retry, and the
+  row is durable, so it survives restart.  Mechanism: the trim module
+  `src/mds/trim_tail.c` (locks, quiescing flags, execution core), the
+  ds_gc drainer `src/modules/ds_gc/ds_gc.c`, the layout-recall
+  quiescence `src/mds/layout_recall.c`, and the shrink path in
+  `src/mds/compound_namespace.c`.
+- **Known limitation (D5):** in `transient_state_cache` mode, a
+  shrinking `SETATTR(size)` does not enqueue DS tail cleanup.  The
+  durable trim is a persistent-mode mechanism — the enqueue is gated off
+  in transient mode because the layout-quiescence fence it relies on is
+  vacuous there — so the pre-fix stale-tail behaviour is retained in
+  that mode until phase 2.
+- **Deployment invariant (D7):** the owner MDS must be able to reach
+  every DS backing a file it owns.  A missing mount is a transient
+  retry condition, never a reason to drop the row: the `TRIM` row stays
+  queued, and the quiescing LAYOUTGET gate is released periodically
+  (bounded by `trim_max_wait`) so a chronically-failing DS cannot wedge
+  a file in permanent `NFS4ERR_DELAY`.
 - **Shipped, off by default:** file and directory delegations
   (`file_delegations_enabled`, `dir_delegations_enabled`), the deferred
   parent-touch and async-REMOVE mutation paths, `transient_state_cache`,

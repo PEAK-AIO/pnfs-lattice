@@ -1695,11 +1695,31 @@ enum mds_status mds_cat_gc_enqueue_hint(struct mds_catalogue *cat,
     if (cat == NULL || cat->auth_ops == NULL) {
         return MDS_ERR_INVAL;
     }
+    /* The slot stores the owner verbatim; stamp the enqueuer's own id
+     * so existing call sites keep the rows they got before the owner
+     * became caller-controlled. */
+    return mds_cat_gc_enqueue_hint_owner(cat, txn, fileid, ds_id,
+                                         nfs_fh, fh_len, sweep_hint,
+                                         cat->self_mds_id);
+}
+
+enum mds_status mds_cat_gc_enqueue_hint_owner(struct mds_catalogue *cat,
+                                        struct mds_cat_txn *txn,
+                                        uint64_t fileid,
+                                        uint32_t ds_id,
+                                        const uint8_t *nfs_fh,
+                                        uint32_t fh_len,
+                                        uint32_t sweep_hint,
+                                        uint32_t owner_id)
+{
+    if (cat == NULL || cat->auth_ops == NULL) {
+        return MDS_ERR_INVAL;
+    }
     if (cat->auth_ops->gc_enqueue == NULL) {
         return MDS_ERR_NOSUPPORT;
     }
     return cat->auth_ops->gc_enqueue(cat, txn, fileid, ds_id,
-                                     nfs_fh, fh_len, sweep_hint);
+                                     nfs_fh, fh_len, sweep_hint, owner_id);
 }
 
 enum mds_status mds_cat_gc_peek(struct mds_catalogue *cat,

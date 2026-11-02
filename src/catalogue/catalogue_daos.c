@@ -862,6 +862,7 @@ enum mds_status catalogue_daos_open(const struct mds_config *cfg, struct mds_cat
      * from all of them and registry rows written by one daemon are
      * observed by another. */
     cat->caps = MDS_CAT_CAP_SHARED_AUTHORITY | MDS_CAT_CAP_MULTI_PROCESS;
+    cat->self_mds_id = cfg->self.id;
     cat->ops = &daos_lifecycle_ops;
     cat->auth_ops = &g_auth_ops;
     cat->coord_ops = &daos_coordination_ops; /* catalogue_daos_coord.c */

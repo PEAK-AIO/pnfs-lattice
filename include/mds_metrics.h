@@ -95,6 +95,19 @@ struct mds_branch_metrics {
                                                   *  MDS still awaiting DS
                                                   *  unlink (gauge; refreshed by
                                                   *  the ds_gc coordinator). */
+    _Atomic uint64_t trim_pending;            /**< TRIM rows the drainer has
+                                                  *  seen and not yet drained
+                                                  *  (gauge; refreshed by the
+                                                  *  trim module on every
+                                                  *  trim_process_entry). */
+    _Atomic uint64_t trim_completed;          /**< TRIM rows drained (dequeued). */
+    _Atomic uint64_t trim_failed;             /**< TRIM drain attempts that
+                                                  *  failed and stay queued. */
+    _Atomic uint64_t trim_recall_wait_ns_sum; /**< Sum of ns spent in
+                                                  *  layout_recall_quiesce_for_file
+                                                  *  per drain (summary pair). */
+    _Atomic uint64_t trim_recall_wait_count;  /**< Count of quiescence
+                                                  *  observations. */
     _Atomic uint64_t layoutget_sync_fallback; /**< LAYOUTGET took sync FH path. */
     _Atomic uint64_t layoutget_delay_count;   /**< LAYOUTGET returned NFS4ERR_DELAY
                                                   *  (reserved; used once

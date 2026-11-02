@@ -47,6 +47,7 @@ struct mds_tuning_profile {
     uint32_t   inline_max_size;
     uint32_t   ds_prepare_queue_depth;
     uint32_t   lease_time_sec;
+    uint32_t   trim_max_wait_sec;
     bool       inline_enabled;
     /* Phase 1: DS placement policy for new files' layouts.  Only
      * consulted when cfg.placement_policy_enabled is true. */
@@ -63,47 +64,49 @@ struct mds_tuning_profile {
     MDS_CFG_SET_COMMIT_BATCH_MAX_BYTES | MDS_CFG_SET_COMMIT_QUEUE_DEPTH | \
     MDS_CFG_SET_STRIPE_UNIT_BYTES | MDS_CFG_SET_INLINE_ENABLED | \
     MDS_CFG_SET_INLINE_MAX_SIZE | MDS_CFG_SET_DS_PREPARE_QUEUE_DEPTH | \
-    MDS_CFG_SET_LEASE_TIME_SEC | MDS_CFG_SET_PLACEMENT_POLICY | \
+    MDS_CFG_SET_LEASE_TIME_SEC | MDS_CFG_SET_TRIM_MAX_WAIT_SEC | \
+    MDS_CFG_SET_PLACEMENT_POLICY | \
     MDS_CFG_SET_DEFAULT_STRIPE_COUNT | MDS_CFG_SET_DEFAULT_MIRROR_COUNT)
 
 static const struct mds_tuning_profile g_profiles[] = {
     /* default: no bits set -> auto-sizing and CQ internal defaults apply.
      * stripe_count=1, mirror_count=1 means no multi-DS layout. */
     /* name, sets, id, workers, prealloc, batch, flush, max_bytes,
-     * queue, stripe, inline_max, ds_prep_q, lease, inline_en,
-     * placement_policy, default_stripe_count, default_mirror_count */
+     * queue, stripe, inline_max, ds_prep_q, lease, trim_max_wait,
+     * inline_en, placement_policy, default_stripe_count,
+     * default_mirror_count */
     { "default", 0, MDS_PROFILE_DEFAULT,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, PLACEMENT_RR, 1, 1 },
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, PLACEMENT_RR, 1, 1 },
 
     /* hpc: MPI jobs, massive concurrent creates, large sequential files.
      * Inline stays enabled at 4 KiB for small marker/log/control files.
      * CAPACITY placement + stripe_count=4 targets multi-DS bandwidth. */
     { "hpc", ALL_TUNING_BITS, MDS_PROFILE_HPC,
-      32, 4096, 512, 1, 4194304, 8192, 1048576, 4096, 8192, 90, true,
-      PLACEMENT_CAPACITY, 4, 1 },
+      32, 4096, 512, 1, 4194304, 8192, 1048576, 4096, 8192, 90, 0,
+      true, PLACEMENT_CAPACITY, 4, 1 },
 
     /* ai_training: checkpoint-biased.  Burst creates for model saves,
      * large writes, mixed with read-heavy data loading.  stripe=4
      * matches hpc's bandwidth ambition on modern checkpoints. */
     { "ai_training", ALL_TUNING_BITS, MDS_PROFILE_AI_TRAINING,
-      32, 2048, 256, 2, 2097152, 8192, 1048576, 4096, 4096, 90, true,
-      PLACEMENT_CAPACITY, 4, 1 },
+      32, 2048, 256, 2, 2097152, 8192, 1048576, 4096, 4096, 90, 0,
+      true, PLACEMENT_CAPACITY, 4, 1 },
 
     /* genomics: bioinformatics pipelines -- many small files (FASTQ
      * chunks, BAM shards), high metadata rate, moderate file sizes.
      * WEIGHTED_RR + mirror=2 prioritises durability and load balance
      * on per-file reads across replicas. */
     { "genomics", ALL_TUNING_BITS, MDS_PROFILE_GENOMICS,
-      24, 1024, 128, 1, 1048576, 4096, 65536, 16384, 4096, 90, true,
-      PLACEMENT_WEIGHTED_RR, 1, 2 },
+      24, 1024, 128, 1, 1048576, 4096, 65536, 16384, 4096, 90, 0,
+      true, PLACEMENT_WEIGHTED_RR, 1, 2 },
 
     /* media: video/render farms -- few very large files, low metadata
      * rate.  stripe=8 to push concurrent bandwidth; clamps to
      * min(stripe_count, ds_count) when the cluster has fewer DSes
      * (D5 fallback, bumps pnfs_mds_placement_degraded_total). */
     { "media", ALL_TUNING_BITS, MDS_PROFILE_MEDIA,
-      16, 256, 64, 5, 1048576, 2048, 4194304, 4096, 2048, 120, true,
-      PLACEMENT_CAPACITY, 8, 1 },
+      16, 256, 64, 5, 1048576, 2048, 4194304, 4096, 2048, 120, 0,
+      true, PLACEMENT_CAPACITY, 8, 1 },
 };
 
 #define PROFILE_COUNT (sizeof(g_profiles) / sizeof(g_profiles[0]))
@@ -156,6 +159,9 @@ static void apply_profile(struct mds_config *cfg,
     }
     if (p->sets & MDS_CFG_SET_LEASE_TIME_SEC) {
         cfg->lease_time_sec = p->lease_time_sec;
+    }
+    if (p->sets & MDS_CFG_SET_TRIM_MAX_WAIT_SEC) {
+        cfg->trim_max_wait_sec = p->trim_max_wait_sec;
     }
     if (p->sets & MDS_CFG_SET_PLACEMENT_POLICY) {
         cfg->placement_policy = p->placement_policy;
@@ -230,6 +236,7 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
     cfg->default_stripe_count = 1;
     cfg->default_mirror_count = 1;
     cfg->lease_time_sec = 90;
+    cfg->trim_max_wait_sec = 0; /* 0 = 3 x lease_time_sec */
     cfg->grace_period_sec = 90;
     cfg->prealloc_pool_size = 128;
     cfg->ds_getdev_transport = 0;  /* FF_TRANSPORT_TCP: advertise tcp in GETDEVICEINFO */
@@ -724,6 +731,14 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
             if (v > 0) {
                 cfg->lease_time_sec = (uint32_t)v;
                 cfg->tuning_set |= MDS_CFG_SET_LEASE_TIME_SEC;
+}
+        } else if (strcmp(key, "trim_max_wait") == 0) {
+            /* 0 is a valid value: "3 x lease_time_sec", resolved by
+             * the trim module at init (trim_module_init). */
+            unsigned long v = strtoul(val, NULL, 10);
+            if (v <= UINT32_MAX) {
+                cfg->trim_max_wait_sec = (uint32_t)v;
+                cfg->tuning_set |= MDS_CFG_SET_TRIM_MAX_WAIT_SEC;
 }
         } else if (strcmp(key, "grace_period_sec") == 0) {
             unsigned long v = strtoul(val, NULL, 10);

@@ -59,6 +59,7 @@ are logged as `WARN:` and the default is kept.
 - `stripe_unit_bytes` — default stripe unit in bytes (1..1073741824).  Default: 65536.  `stripe_unit` is accepted as an alias.
 - `default_stripe_count` / `default_mirror_count` — geometry for new files.  Default: 1 / 1.
 - `lease_time_sec` / `grace_period_sec` — NFSv4 lease + grace.
+- `trim_max_wait` — background DS tail trim quiescence wait bound (uint, seconds).  Default: 0 = 3×`lease_time_sec`.  Bounds how long the trim worker waits for a file's client layouts to quiesce (each attempt is lease-bounded, expiring non-responding holders authoritatively); a trim row still pending past that point has its closed LAYOUTGET gate (`NFS4ERR_DELAY`) released for a cycle, so a chronically-failing DS cannot wedge a file in permanent delay.
 - `gpudirect_required` — bool.
 - `serve_layouts` — bool.  Default: true.  Master switch for client-direct pNFS layouts; when false every LAYOUTGET returns `LAYOUTUNAVAILABLE` and clients fall back to READ/WRITE through the MDS proxy.
 - `layout_grant_max_length_bytes` — cap on the byte range of one LAYOUTGET grant (uint64; values below 65536 are raised to 65536).  Default: 68719476736 (64 GiB).  Bounds the wire response and the persisted row so recalls can be byte-ranged; clients re-issue LAYOUTGET past the window.

@@ -2323,7 +2323,7 @@ static int gc_enqueue_body(struct daos_txn *t, void *arg, enum mds_status *st_ou
 
 static enum mds_status daos_gc_enqueue(struct mds_catalogue *cat, struct mds_cat_txn *txn,
                                        uint64_t fileid, uint32_t ds_id, const uint8_t *nfs_fh,
-                                       uint32_t fh_len, uint32_t sweep_hint)
+                                       uint32_t fh_len, uint32_t sweep_hint, uint32_t owner_id)
 {
     struct daos_backend *b = be_of(cat);
     struct gc_enqueue_ctx c;
@@ -2335,7 +2335,10 @@ static enum mds_status daos_gc_enqueue(struct mds_catalogue *cat, struct mds_cat
         return MDS_ERR_INVAL;
     }
     /* The sequence is minted once per call: a retried attempt rewrites
-     * the same row and the same index marker. */
+     * the same row and the same index marker.  The owner is stored
+     * verbatim (0 = the legacy prefix every MDS drains); the
+     * dispatcher stamped the enqueuer's id for the ownerless
+     * wrappers. */
     st = daos_backend_alloc_id(b, DAOS_META_GC_SEQ, &seq);
     if (st != MDS_OK) {
         return st;
@@ -2344,7 +2347,7 @@ static enum mds_status daos_gc_enqueue(struct mds_catalogue *cat, struct mds_cat
     c.e.gc_seq = seq;
     c.e.fileid = fileid;
     c.e.ds_id = ds_id;
-    c.e.owner_mds_id = b->mds_id;
+    c.e.owner_mds_id = owner_id;
     c.e.sweep_hint = sweep_hint;
     c.e.nfs_fh_len = fh_len;
     if (fh_len > 0) {
