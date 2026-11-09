@@ -5,6 +5,7 @@
  * main.c -- MDS daemon entry point.
  */
 
+#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -389,6 +390,50 @@ static int pt_flush_cb(uint64_t fileid, uint64_t change_delta,
 	return 0;
 }
 
+/*
+ * Parses the command line arguments. Currently the only argument is the config
+ * file path, and there are no option arguments (other than -h/--help).
+ *
+ * Returns a pointer to the config file path. The buffer is either static or part
+ * of argv, so the caller does not free it.
+ */
+static const char *parse_args(int argc, char *argv[])
+{
+	const char *default_config_path = "/etc/pnfs-mds/mds.conf";
+	FILE *stream = stdout;
+	int ret = 0;
+	int opt;
+
+	static struct option long_options[] = {
+		{"help", no_argument, 0, 'h'},
+		{0, 0, 0, 0}
+	};
+
+	while ((opt = getopt_long(argc, argv, "h", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'h':
+			goto usage;
+		default:
+			stream = stderr;
+			ret = 1;
+			goto usage;
+		}
+	}
+
+	/* First non-option argument, if it exists, is the path to the config file. */
+	if (optind < argc)
+		return argv[optind];
+
+	/* If no non-option argument was passed, use the default config file. */
+	return default_config_path;
+
+usage:
+	fprintf(stream, "Usage: %s [CONFIG]\n", argv[0]);
+	fprintf(stream, "    CONFIG: path to config file. Default: '/etc/pnfs-mds/mds.conf'.\n");
+
+	exit(ret);
+}
+
 /* Linear daemon lifecycle: one start-up sequence with a single
  * cleanup label, whose score is dominated by the ~100 logging macro
  * sites (do/while + level gate each); splitting it into helpers would
@@ -399,7 +444,6 @@ int main(int argc, char *argv[])
 {
 	struct mds_config cfg;
 	enum mds_status rc;
-	const char *config_path = "/etc/pnfs-mds/mds.conf";
 	/* Boot epoch: stamps every shared-state row this daemon instance
 	 * writes (open/lock/deleg owner fencing, remove-manifest claims,
 	 * node registry) so a restarted MDS can be told apart from the
@@ -473,14 +517,12 @@ int main(int argc, char *argv[])
 	/* NOLINTNEXTLINE(cert-err33-c) */
 	setvbuf(stderr, NULL, _IOLBF, 0);
 
-	if (argc > 1) {
-		config_path = argv[1];
-	}
 
 	memset((void *)rpc_srv, 0, sizeof(rpc_srv));
 	memset((void *)rpc_threads, 0, sizeof(rpc_threads));
 
 	/* 1. Load configuration */
+	const char *config_path = parse_args(argc, argv);
 	rc = mds_config_load(config_path, &cfg);
 	if (rc != MDS_OK) {
 		(void)fprintf(stderr, "Failed to load config from %s: %d\n",
