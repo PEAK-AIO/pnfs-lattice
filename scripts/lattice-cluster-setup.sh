@@ -211,13 +211,27 @@ ssh_addr() {
 # --- SSH / scp wrappers (honour --ssh-jump and --dry-run) -------------------
 ssh_base_opts=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes)
 
+# Run a POSIX sh command line on a host and pass its stdout and exit
+# status through.  sshd hands the remote command line to the user's
+# *login* shell, so sh syntax such as `2>/dev/null` fails outright when
+# that shell is csh/tcsh ("Ambiguous output redirect.").  The login
+# shell therefore only ever parses the fixed word list "/bin/sh -s"; the
+# command itself travels on stdin and is read by /bin/sh, so it needs no
+# re-quoting for an unknown shell.  Consequently the remote command
+# cannot read the caller's stdin.
 run_ssh() {            # run_ssh DATA_IP "remote shell command"
     local addr; addr="$(ssh_addr "$1")"; shift
+    local remote_cmd="$*"
     local -a cmd=(ssh "${ssh_base_opts[@]}")
     [[ -n "${ssh_jump}" ]] && cmd+=(-J "${ssh_jump}")
-    cmd+=("${ssh_user}@${addr}" "$*")
-    if [[ ${dry_run} -eq 1 ]]; then printf '[dry-run] %s\n' "${cmd[*]}" >&2; return 0; fi
-    "${cmd[@]}"
+    cmd+=("${ssh_user}@${addr}" "/bin/sh -s")
+    if [[ ${dry_run} -eq 1 ]]; then
+        printf '[dry-run] %s <<EOF\n%s\nEOF\n' "${cmd[*]}" "${remote_cmd}" >&2
+        return 0
+    fi
+    "${cmd[@]}" <<EOF
+${remote_cmd}
+EOF
 }
 
 run_scp() {            # run_scp DATA_IP LOCAL REMOTE

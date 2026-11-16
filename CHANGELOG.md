@@ -154,6 +154,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to capturing the remaining slots on the calling thread.
 
 ### Fixed
+- **`scripts/pnfs-lab` and `scripts/lattice-cluster-setup.sh` failed
+  on lab hosts whose login shell is csh/tcsh** (#106) — the SSH
+  helpers (`run_remote_cmd` / `capture_remote_cmd`, `run_ssh`) handed
+  the command line to `ssh`, which sshd runs through the lab user's
+  login shell, and several of those lines use sh-only syntax
+  (`2>/dev/null`, `2>&1`, `|| echo 0`).  csh rejects them with
+  "Ambiguous output redirect.", so in `pnfs-lab` `rondb_wait_started`
+  never saw a started node, `rondb-reinit` timed out the same way, and
+  the tarball size and `fdbcli` probes always took their fallback
+  value; in `lattice-cluster-setup.sh` the `rondb-up` cluster poll
+  never matched and the phase died after `--rondb-wait` seconds.  The
+  helpers now do what `run_remote_root_script` already did: the login
+  shell only parses the fixed word list `/bin/sh -s` and the command
+  travels on stdin, so no call site needs re-quoting for an unknown
+  shell.  Stdout and exit status pass through unchanged; `pnfs-lab`
+  dry-run output is unchanged and `lattice-cluster-setup.sh --dry-run`
+  now prints the command as the stdin it is.
 - **GCC 15 rejected `compound_layout.c` under the project's C11
   `-Werror` build** — `fill_layoutget_result` was a label immediately
   followed by a declaration; comments do not make that valid C11, and
