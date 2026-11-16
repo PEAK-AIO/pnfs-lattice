@@ -483,8 +483,8 @@ int main(int argc, char *argv[])
 	/* 1. Load configuration */
 	rc = mds_config_load(config_path, &cfg);
 	if (rc != MDS_OK) {
-		(void)fprintf(stderr, "Failed to load config from %s: %d\n",
-			config_path, rc);
+		(void)fprintf(stderr, "Failed to load config from %s: %s\n",
+			config_path, mds_status_str(rc));
 		return EXIT_FAILURE;
 	}
 
@@ -532,8 +532,8 @@ int main(int argc, char *argv[])
 	rc = mds_catalogue_open(&cfg, &cat);
 	if (rc != MDS_OK) {
 		MDS_LOG_ERROR(LOG_COMP_MDS,
-			"Failed to open metadata catalogue: %d",
-			(int)rc);
+			"Failed to open metadata catalogue: %s",
+			mds_status_str(rc));
 		return EXIT_FAILURE;
 	}
 
