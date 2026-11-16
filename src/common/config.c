@@ -403,6 +403,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
 
     fp = fopen(path, "r");
     if (fp == NULL) {
+        fprintf(stderr, "Could not open '%s': %s\n",
+                path, strerror(errno));
         return MDS_ERR_IO;
     }
     selected_profile[0] = '\0';
@@ -439,6 +441,8 @@ enum mds_status mds_config_load(const char *path, struct mds_config *cfg)
         }
     }
     if (fseek(fp, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "Could not seek in '%s': %s\n",
+                path, strerror(errno));
         (void)fclose(fp);
         return MDS_ERR_IO;
     }
