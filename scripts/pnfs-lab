@@ -274,16 +274,28 @@ run_remote_cmd() {
         return 0
     fi
 
-    prepare_ssh_cmd
-    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" "$(ssh_target "${host}")" "${cmd}"
+    capture_remote_cmd "${host}" "${cmd}"
 }
 
+# Run a POSIX sh command line on a host as LAB_USER and pass its stdout
+# and exit status through.
+#
+# sshd hands the remote command line to the user's *login* shell, so sh
+# syntax such as `2>/dev/null` or `|| echo 0` fails outright when that
+# shell is csh/tcsh ("Ambiguous output redirect.").  Like
+# run_remote_root_script, the only text the login shell ever parses is
+# the fixed word list "/bin/sh -s"; the command itself travels on stdin
+# and is read by /bin/sh, so it needs no re-quoting for an unknown
+# shell.  Consequently the command cannot read the caller's stdin.
 capture_remote_cmd() {
     local host="$1"
     local cmd="$2"
 
     prepare_ssh_cmd
-    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" "$(ssh_target "${host}")" "${cmd}"
+    "${SSH_CMD[@]}" "${LAB_SSH_OPTS[@]}" \
+        "$(ssh_target "${host}")" "/bin/sh -s" <<EOF
+${cmd}
+EOF
 }
 
 run_remote_root_script() {
