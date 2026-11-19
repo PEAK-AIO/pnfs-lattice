@@ -432,11 +432,16 @@ struct mds_authority_ops {
         uint64_t scope_id, const struct mds_quota_usage *usage);
 
     /* GC queue.  sweep_hint carries the MDS_GC_SWEEP_* stripe/mirror
-     * coverage for the ds_gc drainer (0 = legacy dense sweep). */
+     * coverage for the ds_gc drainer (0 = legacy dense sweep).
+     * owner_id is stored verbatim in the row: 0 (MDS_GC_OWNER_GLOBAL)
+     * is the legacy value every MDS drainer sees, a non-zero id is the
+     * enqueuer the row is partitioned under.  Stamping the enqueuer's
+     * own id for the ownerless wrappers happens in the dispatcher,
+     * never here. */
     enum mds_status (*gc_enqueue)(struct mds_catalogue *cat,
         struct mds_cat_txn *txn, uint64_t fileid,
         uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len,
-        uint32_t sweep_hint);
+        uint32_t sweep_hint, uint32_t owner_id);
     enum mds_status (*gc_peek)(struct mds_catalogue *cat,
         struct mds_gc_entry *entry);
     enum mds_status (*gc_dequeue)(struct mds_catalogue *cat,
@@ -754,6 +759,10 @@ struct mds_cluster_ops {
 struct mds_catalogue {
     enum mds_catalogue_backend        backend;
     uint32_t                          caps;      /**< MDS_CAT_CAP_*. */
+    /** Identity of the opener (cfg->self.id at open): the MDS id the
+     *  dispatcher stamps on rows the caller does not give an owner
+     *  for (GC enqueue).  0 on a handle opened without one. */
+    uint32_t                          self_mds_id;
     const struct mds_authority_ops    *auth_ops;
     const struct mds_coordination_ops *coord_ops;
     const struct mds_catalogue_ops    *ops;       /**< Lifecycle. */

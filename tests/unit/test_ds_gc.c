@@ -402,6 +402,55 @@ static void test_slot_sweep_touches_one_slot(void)
     rm_ds_dir(ds_dir);
 }
 
+/**
+ * Owner-override round-trip (memdb): a row enqueued through the
+ * owner-overridable wrapper with MDS_GC_OWNER_GLOBAL is stored with
+ * owner 0 (the legacy value every MDS drainer sees) and the TRIM
+ * sweep hint.  The ownerless entry points keep storing the enqueuer's
+ * stamped id -- the behaviour every existing call site relies on.
+ * The handle is opened with a non-zero self id so the stamp is
+ * observable (the open_test_catalogue() fixture carries id 0).
+ */
+static void test_gc_enqueue_owner_override(void)
+{
+    struct mds_config cfg;
+    struct mds_catalogue *cat;
+    struct mds_gc_entry entry;
+    uint8_t fh[4] = { 'g', 'c', 0, 0 };
+    const uint64_t trim_fileid = 716001;
+    const uint64_t stamp_fileid = 716002;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.catalogue_backend = MDS_BACKEND_MEMDB;
+    cfg.self.id = /*enqueuer*/ 7U;
+    ASSERT_EQ(catalogue_memdb_open_cfg(&cfg, &cat), MDS_OK);
+    ASSERT_TRUE(cat != NULL);
+
+    ASSERT_EQ(mds_cat_gc_enqueue_hint_owner(cat, NULL, trim_fileid,
+                                            /*ds_id*/ 1, fh, sizeof(fh),
+                                            MDS_GC_SWEEP_TRIM,
+                                            MDS_GC_OWNER_GLOBAL),
+              MDS_OK);
+    ASSERT_EQ(mds_cat_gc_enqueue(cat, NULL, stamp_fileid,
+                                 /*ds_id*/ 1, fh, sizeof(fh)),
+              MDS_OK);
+
+    ASSERT_EQ(mds_cat_gc_peek(cat, &entry), MDS_OK);
+    ASSERT_EQ(entry.fileid, trim_fileid);
+    ASSERT_EQ(entry.sweep_hint, MDS_GC_SWEEP_TRIM);
+    ASSERT_TRUE(MDS_GC_SWEEP_IS_TRIM(entry.sweep_hint));
+    ASSERT_EQ(entry.owner_mds_id, MDS_GC_OWNER_GLOBAL);
+    ASSERT_EQ(mds_cat_gc_dequeue(cat, NULL, entry.gc_seq), MDS_OK);
+
+    ASSERT_EQ(mds_cat_gc_peek(cat, &entry), MDS_OK);
+    ASSERT_EQ(entry.fileid, stamp_fileid);
+    ASSERT_EQ(entry.sweep_hint, 0U);
+    ASSERT_EQ(entry.owner_mds_id, /*stamped enqueuer id*/ 7U);
+    ASSERT_EQ(mds_cat_gc_dequeue(cat, NULL, entry.gc_seq), MDS_OK);
+
+    mds_catalogue_close(cat);
+}
+
 /* -----------------------------------------------------------------------
  * Entry point
  * ----------------------------------------------------------------------- */
@@ -417,6 +466,7 @@ int main(void)
     RUN_TEST(test_backlog_drains_with_workers);
     RUN_TEST(test_wide_geom_sweep_reclaims_all_stripes);
     RUN_TEST(test_slot_sweep_touches_one_slot);
+    RUN_TEST(test_gc_enqueue_owner_override);
 
     fprintf(stdout, "%d/%d tests passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

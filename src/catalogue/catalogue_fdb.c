@@ -707,6 +707,7 @@ enum mds_status catalogue_fdb_open(const struct mds_config *cfg, struct mds_cata
      * all of them and registry rows written by one daemon are observed
      * by another. */
     cat->caps = MDS_CAT_CAP_SHARED_AUTHORITY | MDS_CAT_CAP_MULTI_PROCESS;
+    cat->self_mds_id = cfg->self.id;
     cat->ops = &fdb_lifecycle_ops;
     cat->auth_ops = &g_auth_ops;
     cat->coord_ops = &fdb_coordination_ops; /* catalogue_fdb_coord.c */

@@ -16,6 +16,7 @@
 #ifndef LAYOUT_RECALL_H
 #define LAYOUT_RECALL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct mds_catalogue;
@@ -72,6 +73,51 @@ int layout_recall_for_ds(struct layout_recall *lr, uint32_t ds_id);
  * @return 0 on success, -errno on failure.
  */
 int layout_recall_for_file(struct layout_recall *lr, uint64_t fileid);
+
+/**
+ * Graceful per-file layout quiescence (trim-tail-rework spec S3.4).
+ *
+ * Waits, up to @timeout_ms, for every layout holder of @fileid to
+ * complete its in-flight layout I/O and LAYOUTCOMMIT work and to
+ * return its layout, so a size-shrinking trim can start without
+ * racing a live DS writer.  V1 (verified): the layout is the only
+ * DS-direct write channel -- the delegation wire body carries no
+ * filehandle (encode_open_deleg_body, xdr_ops_core.c), so delegated
+ * non-pNFS clients never hold a DS filehandle and still write through
+ * the proxy; no write path exists that layout state does not cover.
+ *
+ * Sequence: enumerate holders via mds_coord_layout_iter_file(); if
+ * none remain, drop the fileid's LAYOUTCOMMIT aggregator bucket and
+ * return 0.  Otherwise send a best-effort LAYOUTRECALL4_ALL to each
+ * unique holder, drop the aggregator bucket (V8: a stale aggregate
+ * commit must not land after the trim), and poll for layout rows
+ * until none remain.  On timeout the remaining holders are
+ * authoritatively revoked (revoke_layout_for_file_entry) and their
+ * stateids are removed from the layout-seqid tracker;
+ * *expired_laggards is set true only in that case.
+ *
+ * Bounded: never blocks for longer than roughly timeout_ms plus one
+ * poll interval.
+ *
+ * Locking: expected to be called from the trim drainer with no MDS
+ * request lock held; every catalogue call it makes is
+ * self-synchronised.
+ *
+ * @param lr               Recall coordinator handle.
+ * @param fileid           File to quiesce.
+ * @param timeout_ms       Lease bound (callers pass lease_time_sec*1000).
+ * @param expired_laggards Out: true iff non-responding holders had to
+ *                         be authoritatively expired; set false at
+ *                         entry.  May be NULL.
+ * @return 0 on full quiescence (graceful or via expiry); -EIO on
+ *         enumeration failure (no revoke performed -- the caller
+ *         must leave the trim work pending); -EINVAL on a NULL
+ *         handle; -ENOMEM on allocation failure.
+ */
+int layout_recall_quiesce_for_file(struct layout_recall *lr,
+                                   uint64_t fileid,
+                                   uint32_t timeout_ms,
+                                   bool *expired_laggards);
 
 /**
  * Recall and revoke every layout for a final unlink.
@@ -233,6 +279,23 @@ struct mds_proxy_ctx;
  */
 void layout_recall_set_proxy(struct layout_recall *lr,
                              struct mds_proxy_ctx *proxy);
+
+struct layout_commit_aggregator;
+
+/**
+ * Bind the LAYOUTCOMMIT aggregator for quiescence bucket drops.
+ *
+ * layout_recall_quiesce_for_file() drops the fileid's bucket so an
+ * aggregated LAYOUTCOMMIT cannot claim a size after a trim has
+ * started (same drop the shrink path performs).  NULL (default) is
+ * tolerated; the community build links the stub, whose drop() is
+ * already a no-op.
+ *
+ * @param lr     Layout recall handle (NULL tolerated).
+ * @param agg    Aggregator handle (NULL to disable).
+ */
+void layout_recall_set_lcommit_agg(struct layout_recall *lr,
+                                   struct layout_commit_aggregator *agg);
 
 /* -----------------------------------------------------------------------
  * Layout-stateid seqid tracker (compound_layout.c).

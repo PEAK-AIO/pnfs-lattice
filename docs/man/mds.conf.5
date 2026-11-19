@@ -410,6 +410,18 @@ Default geometry for new files.
 .IR uint .
 NFSv4 lease duration and server grace period.
 .TP
+.B trim_max_wait
+.IR uint .
+(default
+.BR 0 = 3 x lease_time_sec ).
+Background DS tail trim quiescence wait bound, in seconds.  A shrinking
+SETATTR(size) enqueues a durable GC row; the file's owner MDS recalls
+the file's client layouts (each attempt is lease-bounded, expiring
+non-responding holders authoritatively) and truncates the stale DS tail
+to the current committed size.  A trim row still pending past this
+point has its closed LAYOUTGET gate released for a cycle, so a
+chronically-failing DS cannot wedge a file in permanent delay.
+.TP
 .B prealloc_pool_size
 .I uint
 (default

@@ -25,10 +25,12 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
 #include <unistd.h>
 #include <limits.h>  /* INT_MIN -- sentinel for cb_status "not sent" */
 
 #include "layout_recall.h"
+#include "layout_commit_aggregator.h"
 #include "compound_internal.h" /* layout_seqid_* */
 #include "mds_catalogue.h"
 #include "mds_coordination.h"
@@ -49,6 +51,14 @@
 
 /* Maximum unique clientids we track per recall batch. */
 #define MAX_RECALL_CLIENTS  256
+
+/*
+ * Poll interval for the quiescence wait: small enough that a
+ * LAYOUTRETURN is observed within one tick of the lease, large
+ * enough that the poll cost is negligible against a multi-second
+ * lease.
+ */
+#define QUIESCE_POLL_INTERVAL_MS  20U
 
 struct layout_recall {
     struct mds_catalogue    *cat;
@@ -78,6 +88,13 @@ struct layout_recall {
      * single-MDS deployment and unchanged from historical behaviour.
      */
     uint32_t                 mds_id;
+    /*
+     * LAYOUTCOMMIT aggregator, bound by layout_recall_set_lcommit_agg().
+     * layout_recall_quiesce_for_file() drops the fileid's bucket so a
+     * pending aggregate commit cannot land after a trim has started.
+     * NULL in the community build (the stub no-ops the calls).
+     */
+    struct layout_commit_aggregator *lcommit_agg;
 };
 
 /* -----------------------------------------------------------------------
@@ -480,6 +497,14 @@ void layout_recall_set_proxy(struct layout_recall *lr,
 {
     if (lr != NULL) {
         lr->proxy = proxy;
+    }
+}
+
+void layout_recall_set_lcommit_agg(struct layout_recall *lr,
+                                   struct layout_commit_aggregator *agg)
+{
+    if (lr != NULL) {
+        lr->lcommit_agg = agg;
     }
 }
 
@@ -1646,6 +1671,207 @@ int layout_recall_for_file(struct layout_recall *lr, uint64_t fileid)
      */
     for (uint32_t ri = 0; ri < scan.count; ri++) {
         revoke_layout_for_file_entry(lr, &entries[ri]);
+    }
+
+    free(entries);
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Graceful per-file layout quiescence (trim-tail-rework spec S3.4)
+ *
+ * A size-shrinking trim must not start while a layout holder may still
+ * be mid-way through DS I/O with an in-flight LAYOUTCOMMIT.  This
+ * helper waits up to the caller's lease (timeout_ms) for every holder
+ * to finish that work and return its layout, then authoritatively
+ * expires whatever laggards remain.
+ *
+ * V1 (verified): the layout is the only DS-direct write channel.  The
+ * delegation wire body (encode_open_deleg_body, xdr_ops_core.c)
+ * carries stateid + recall + space limit + permissions and no
+ * filehandle; DS filehandles are encoded only in LAYOUTGET replies.
+ * A delegated non-pNFS client therefore never holds a DS filehandle
+ * and writes through the proxy, so quiescing the layout state covers
+ * every possible DS writer of the file.
+ * ----------------------------------------------------------------------- */
+
+/* Remaining nanoseconds until a CLOCK_MONOTONIC deadline (0 = passed). */
+static long long quiesce_remaining_ns(const struct timespec *deadline)
+{
+    struct timespec now;
+    long long remaining;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    remaining = (long long)(deadline->tv_sec - now.tv_sec) * 1000000000LL +
+                (long long)(deadline->tv_nsec - now.tv_nsec);
+    return remaining > 0 ? remaining : 0;
+}
+
+int layout_recall_quiesce_for_file(struct layout_recall *lr,
+                                   uint64_t fileid,
+                                   uint32_t timeout_ms,
+                                   bool *expired_laggards)
+{
+    struct recall_entry *entries = NULL;
+    struct recall_scan_ctx scan;
+    struct timespec deadline;
+    long long remaining;
+    enum mds_status st;
+    bool quiesced = false;
+
+    if (expired_laggards != NULL) {
+        *expired_laggards = false;
+    }
+    if (lr == NULL) {
+        return -EINVAL;
+    }
+    if (lr->cat == NULL) {
+        /* No catalogue -- no layout state to quiesce (unlink
+         * precedent: nothing observable to wait on). */
+        return 0;
+    }
+
+    /*
+     * Step 1: Enumerate every layout holder for this file.  A
+     * NOTFOUND scan result means no holders -- already quiescent
+     * apart from any pending commit work (handled below).
+     */
+    entries = calloc(MAX_RECALL_ENTRIES, sizeof(*entries));
+    if (entries == NULL) {
+        return -ENOMEM;
+    }
+
+    scan.entries  = entries;
+    scan.count    = 0;
+    scan.capacity = MAX_RECALL_ENTRIES;
+
+    st = mds_coord_layout_iter_file(lr->cat, fileid,
+                                     file_holder_cb, &scan);
+    if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+        /* Enumeration failure: no revoke, work must stay pending. */
+        free(entries);
+        return -EIO;
+    }
+
+    for (uint32_t i = 0; i < scan.count; i++) {
+        entries[i].fileid = fileid;
+    }
+
+    /*
+     * Step 2: Best-effort CB_LAYOUTRECALL to each unique holder.
+     *
+     * The send is fire-and-forget (nfs4_cb_layoutrecall_fd does not
+     * wait for the reply), so this cannot push the wait past the
+     * lease; passing the lease as the per-send timeout keeps the
+     * whole function bounded even if that ever changes.
+     */
+    if (scan.count > 0 && lr->st != NULL) {
+        struct cb_target_list tl;
+
+        memset(&tl, 0, sizeof(tl));
+        tl.filter_count = collect_unique_clientids(
+            entries, scan.count,
+            tl.filter_clientids, MAX_RECALL_CLIENTS);
+
+        session_for_each_with_cb(lr->st, snap_cb_target, &tl);
+
+        for (uint32_t i = 0; i < tl.count; i++) {
+            attempt_cb_for_target(&tl.targets[i],
+                                  lr->default_layout_type,
+                                  timeout_ms);
+            close(tl.targets[i].fd);
+        }
+    }
+
+    /*
+     * Step 3: Drop the fileid's LAYOUTCOMMIT aggregator bucket (V8).
+     *
+     * The shrink path already uses drop() for exactly this reason:
+     * once quiescence for a trim is underway, a pending aggregate
+     * commit must not land and claim a size the trim is about to
+     * overwrite.  A late LAYOUTCOMMIT that still reaches the MDS
+     * finds no layout state and no bucket (see
+     * test_quiesce_out_of_order_commit).
+     */
+    layout_commit_aggregator_drop(lr->lcommit_agg, fileid);
+
+    /*
+     * Step 4: Poll until no layout_state rows remain for the file,
+     * bounded by the lease.
+     */
+    if (scan.count == 0) {
+        quiesced = true;
+    } else {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += timeout_ms / 1000U;
+        deadline.tv_nsec += (long)(timeout_ms % 1000U) * 1000000L;
+        while (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+
+        for (;;) {
+            bool has_layout = true;
+            struct timespec nap;
+
+            st = mds_coord_layout_scan_for_file(lr->cat, fileid,
+                                                &has_layout);
+            if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+                /* Poll failure: no revoke, work stays pending. */
+                free(entries);
+                return -EIO;
+            }
+            if (!has_layout) {
+                quiesced = true;
+                break;
+            }
+
+            remaining = quiesce_remaining_ns(&deadline);
+            if (remaining <= 0) {
+                break;
+            }
+            if (remaining >
+                (long long)QUIESCE_POLL_INTERVAL_MS * 1000000LL) {
+                nap.tv_sec = QUIESCE_POLL_INTERVAL_MS / 1000U;
+                nap.tv_nsec =
+                    (long)(QUIESCE_POLL_INTERVAL_MS % 1000U) * 1000000L;
+            } else {
+                nap.tv_sec = remaining / 1000000000LL;
+                nap.tv_nsec = remaining % 1000000000LL;
+            }
+            (void)nanosleep(&nap, NULL);
+        }
+    }
+
+    if (quiesced) {
+        free(entries);
+        return 0;
+    }
+
+    /*
+     * Step 5: Lease expired -- authoritatively expire every holder
+     * that is still outstanding.  Re-enumerate fresh so a holder
+     * that returned between the last poll and the deadline is not
+     * double-expired, and clear each stateid from the layout-seqid
+     * tracker so a late op with it cannot be mistaken for a live
+     * renewal (the same pair byte_range_revoke_one uses).
+     */
+    scan.count = 0;
+    st = mds_coord_layout_iter_file(lr->cat, fileid,
+                                     file_holder_cb, &scan);
+    if (st != MDS_OK && st != MDS_ERR_NOTFOUND) {
+        free(entries);
+        return -EIO;
+    }
+
+    for (uint32_t i = 0; i < scan.count; i++) {
+        entries[i].fileid = fileid;
+        revoke_layout_for_file_entry(lr, &entries[i]);
+        layout_seqid_remove(entries[i].stateid_other);
+    }
+
+    if (expired_laggards != NULL && scan.count > 0) {
+        *expired_laggards = true;
     }
 
     free(entries);

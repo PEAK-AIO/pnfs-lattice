@@ -570,9 +570,11 @@ static int memdb_gc_free_slot(const struct memdb *m)
 }
 
 /* Insert one GC row into a slot the caller has already reserved by
- * checking memdb_gc_free_count(). */
+ * checking memdb_gc_free_count().  @owner_id is stored verbatim; the
+ * fused-unlink path keeps writing unowned rows (0) as it always has. */
 static void memdb_gc_insert(struct memdb *m, uint64_t fileid, uint32_t ds_id,
-                            const uint8_t *nfs_fh, uint32_t fh_len, uint32_t sweep_hint)
+                            const uint8_t *nfs_fh, uint32_t fh_len,
+                            uint32_t sweep_hint, uint32_t owner_id)
 {
     int slot = memdb_gc_free_slot(m);
     struct mds_gc_entry *e;
@@ -587,6 +589,7 @@ static void memdb_gc_insert(struct memdb *m, uint64_t fileid, uint32_t ds_id,
     e->fileid = fileid;
     e->ds_id = ds_id;
     e->sweep_hint = sweep_hint;
+    e->owner_mds_id = owner_id;
     if (fh_len > MDS_NFS_FH_MAX) {
         fh_len = MDS_NFS_FH_MAX;
     }
@@ -1355,8 +1358,10 @@ static void memdb_unlink_child_locked(struct memdb *m, int cidx, uint64_t child_
         memdb_stripe_clear(&m->stripes[sidx]);
     }
     for (uint32_t i = 0; i < gc_entry_count; i++) {
+        /* The fused unlink writes unowned rows (0), as before the owner
+         * became caller-controlled on the enqueue slot. */
         memdb_gc_insert(m, child_fid, gc_entries[i].ds_id, gc_entries[i].nfs_fh,
-                        gc_entries[i].nfs_fh_len, gc_sweep_hint);
+                        gc_entries[i].nfs_fh_len, gc_sweep_hint, 0U);
     }
 }
 
@@ -2768,7 +2773,8 @@ static enum mds_status mem_quota_usage_put(struct mds_catalogue *cat,
 
 static enum mds_status mem_gc_enqueue(struct mds_catalogue *cat,
     struct mds_cat_txn *txn, uint64_t fileid,
-    uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len, uint32_t sweep_hint)
+    uint32_t ds_id, const uint8_t *nfs_fh, uint32_t fh_len, uint32_t sweep_hint,
+    uint32_t owner_id)
 {
     struct memdb *m = memdb_of(cat);
 
@@ -2781,7 +2787,7 @@ static enum mds_status mem_gc_enqueue(struct mds_catalogue *cat,
         memdb_unlock(m);
         return MDS_ERR_NOSPC;
     }
-    memdb_gc_insert(m, fileid, ds_id, nfs_fh, fh_len, sweep_hint);
+    memdb_gc_insert(m, fileid, ds_id, nfs_fh, fh_len, sweep_hint, owner_id);
     memdb_unlock(m);
     return MDS_OK;
 }
@@ -5273,6 +5279,7 @@ enum mds_status catalogue_memdb_open_cfg(const struct mds_config *cfg,
      * record their owning MDS (client recovery).  An in-process store
      * shared by several MDS contexts carries the opener's id. */
     m->self_mds_id = cfg->self.id;
+    cat->self_mds_id = cfg->self.id;
 
     cat->backend = MDS_BACKEND_MEMDB;
     /* One in-process store shared by every MDS context that opens it:

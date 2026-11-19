@@ -37,6 +37,10 @@
  *                          transaction: stale child (name rebound, or
  *                          the snapshot's link shape contradicted by a
  *                          LINK / REMOVE since) -> STALE, no change
+ *   gc_owner_override      the owner-overridable enqueue stores the
+ *                          given owner (MDS_GC_OWNER_GLOBAL is a legacy
+ *                          row every MDS drainer sees) and the ownerless
+ *                          entry points keep stamping the enqueuer's id
  *   layout_union_recall    union grants keep one row covering all ranges
  *   replay_idempotency     a replayed create/link/remove is EXISTS /
  *                          EXISTS / NOTFOUND and counters advance once
@@ -1136,6 +1140,147 @@ static void remove_gc_fold_stale(struct ctx *c)
 }
 
 /* -----------------------------------------------------------------------
+ * gc_owner_override
+ * ----------------------------------------------------------------------- */
+
+/* Fileids of the two probe rows: high magic values no allocator could
+ * have handed out, so a persistent store cannot hold them from an
+ * unrelated run. */
+#define GC_OWNER_FILEID_TRIM   0x7111B00D0001ULL
+#define GC_OWNER_FILEID_STAMP  0x7111B00D0002ULL
+
+/* The drain removes the rows visible to this handle (its own plus the
+ * legacy rows) in bounded pages so a pathological backlog cannot wedge
+ * the suite watchdog. */
+#define GC_OWNER_DRAIN_PAGE    64U
+#define GC_OWNER_DRAIN_ROUNDS  64U
+
+/**
+ * gc_owner_override
+ *
+ * The owner-overridable enqueue stores the owner it is given: a
+ * MDS_GC_OWNER_GLOBAL row is a legacy row every MDS drainer sees, so
+ * on a shared store it is counted by a second MDS identity while the
+ * enqueuer's own rows are not.  The ownerless entry points keep
+ * stamping the enqueuer's id.  This handle's drainable backlog is
+ * removed first, so the head of the queue afterwards is one of the
+ * two rows just written and the stored owner and sweep hint round-trip
+ * through the peek.  (memdb opens are independent instances, so the
+ * cross-identity visibility holds only for the shared stores; the
+ * memdb handle carries self id 0, so its stamped rows read back 0.)
+ */
+static void gc_owner_override(struct ctx *c)
+{
+    struct mds_catalogue *peer = NULL;
+    struct mds_gc_entry e;
+    struct mds_gc_entry batch[GC_OWNER_DRAIN_PAGE];
+    uint8_t fh[4] = { 0x71, 0x11, 0xB0, 0x0D };
+    uint32_t own_before = 0, peer_before = 0;
+    uint32_t own_after = 0, peer_after = 0;
+    uint32_t n = 0, i, j;
+    bool shared;
+    enum mds_status st;
+
+    shared = !conformance_backend_is("memdb");
+    if (conformance_open_as(2, &peer) != MDS_OK || peer == NULL) {
+        ctx_fail(c, "open_as(2) failed");
+        return;
+    }
+
+    /* Drop everything this handle may drain. */
+    for (i = 0; i < GC_OWNER_DRAIN_ROUNDS; i++) {
+        if (mds_cat_gc_peek_batch(c->cat, batch, GC_OWNER_DRAIN_PAGE, &n) != MDS_OK) {
+            ctx_fail(c, "drain peek_batch failed");
+            goto out;
+        }
+        if (n == 0) {
+            break;
+        }
+        for (j = 0; j < n; j++) {
+            if (mds_cat_gc_dequeue(c->cat, NULL, batch[j].gc_seq) != MDS_OK) {
+                ctx_fail(c, "drain dequeue failed");
+                goto out;
+            }
+        }
+    }
+
+    if (mds_cat_gc_count(c->cat, &own_before) != MDS_OK ||
+        mds_cat_gc_count(peer, &peer_before) != MDS_OK) {
+        ctx_fail(c, "gc_count before failed");
+        goto out;
+    }
+
+    st = mds_cat_gc_enqueue_hint_owner(c->cat, NULL, GC_OWNER_FILEID_TRIM,
+                                       /*ds_id*/ 1, fh, sizeof(fh),
+                                       MDS_GC_SWEEP_TRIM,
+                                       MDS_GC_OWNER_GLOBAL);
+    if (st == MDS_OK) {
+        st = mds_cat_gc_enqueue(c->cat, NULL, GC_OWNER_FILEID_STAMP,
+                                /*ds_id*/ 1, fh, sizeof(fh));
+    }
+    if (st != MDS_OK) {
+        ctx_fail(c, "enqueue failed: %s", status_name(st));
+        goto out;
+    }
+    if (mds_cat_gc_count(c->cat, &own_after) != MDS_OK ||
+        mds_cat_gc_count(peer, &peer_after) != MDS_OK) {
+        ctx_fail(c, "gc_count after failed");
+        goto out;
+    }
+
+    /* Both rows are visible to this handle... */
+    if (own_after != own_before + 2) {
+        ctx_fail(c, "own count %u -> %u (want +2)", own_before, own_after);
+    }
+    /* ...and only the override row (owner 0) is visible to the peer;
+     * the stamped row (owner = the enqueuer) is not. */
+    if (peer_after != peer_before + (shared ? 1U : 0U)) {
+        ctx_fail(c, "peer count %u -> %u (want +%u)", peer_before,
+                 peer_after, shared ? 1U : 0U);
+    }
+
+    /* The drain emptied what this handle sees, so the head of the
+     * queue is the trim row just written. */
+    if (own_before != 0) {
+        (void)printf("    (backlog %u rows survived the drain; the "
+                     "round-trip is covered by the count checks)\n",
+                     own_before);
+    } else if (mds_cat_gc_peek(c->cat, &e) != MDS_OK) {
+        ctx_fail(c, "peek of the trim row failed");
+        goto out;
+    } else {
+        if (e.fileid != GC_OWNER_FILEID_TRIM ||
+            e.owner_mds_id != MDS_GC_OWNER_GLOBAL ||
+            e.sweep_hint != MDS_GC_SWEEP_TRIM) {
+            ctx_fail(c, "trim row read back fileid 0x%llx owner %u hint "
+                     "0x%x", (unsigned long long)e.fileid,
+                     (unsigned)e.owner_mds_id, (unsigned)e.sweep_hint);
+        }
+        if (mds_cat_gc_dequeue(c->cat, NULL, e.gc_seq) != MDS_OK) {
+            ctx_fail(c, "dequeue of the trim row failed");
+            goto out;
+        }
+        if (mds_cat_gc_peek(c->cat, &e) != MDS_OK) {
+            ctx_fail(c, "peek of the stamped row failed");
+            goto out;
+        }
+        if (e.fileid != GC_OWNER_FILEID_STAMP ||
+            e.owner_mds_id != (shared ? 1U : 0U) ||
+            e.sweep_hint != 0U) {
+            ctx_fail(c, "stamped row read back fileid 0x%llx owner %u "
+                     "hint 0x%x", (unsigned long long)e.fileid,
+                     (unsigned)e.owner_mds_id, (unsigned)e.sweep_hint);
+        }
+        if (mds_cat_gc_dequeue(c->cat, NULL, e.gc_seq) != MDS_OK) {
+            ctx_fail(c, "dequeue of the stamped row failed");
+            goto out;
+        }
+    }
+out:
+    mds_catalogue_close(peer);
+}
+
+/* -----------------------------------------------------------------------
  * layout_union_recall
  * ----------------------------------------------------------------------- */
 
@@ -1813,6 +1958,7 @@ static const struct subtest subtests[] = {
     { "rename_notdir_parent",  rename_notdir_parent,  true  },
     { "rename_over_keeps_stripes", rename_over_keeps_stripes, true },
     { "remove_gc_fold_stale",  remove_gc_fold_stale,  true  },
+    { "gc_owner_override",     gc_owner_override,     false },
     { "layout_union_recall",   layout_union_recall,   true  },
     { "replay_idempotency",    replay_idempotency,    true  },
     { "callback_reentrancy",   callback_reentrancy,   true  },

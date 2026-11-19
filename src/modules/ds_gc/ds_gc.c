@@ -16,6 +16,7 @@
 #include "mds_metrics.h"
 #include "pnfs_mds.h"
 #include "proxy_io.h"
+#include "trim_tail.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -212,11 +213,32 @@ static void warn_blocked_entry(const struct mds_gc_entry *entry,
 	}
 }
 
+/*
+ * DS-tail trim dispatch (trim-tail-rework S3.2).  trim_process_entry
+ * owns the whole policy: it dequeues the row itself on success and
+ * returns MDS_ERR_DELAY ("keep queued") on every non-drained
+ * outcome, so the generic non-OK handling gives retry and successor
+ * hand-off for free.  Unlike the GEOM/SLOT sweeps, a TRIM row is
+ * NEVER dropped on NOTFOUND: a missing DS mount here means "retry
+ * when the DS comes back" -- the DS tail bytes are exactly what the
+ * row exists to reclaim (spec S6a exception).
+ */
+static bool sweep_trim(struct ds_gc *gc, const struct mds_gc_entry *entry)
+{
+	return trim_process_entry(gc->cat, gc->proxy, entry) == MDS_OK;
+}
+
 static bool process_one_entry(struct ds_gc *gc,
 			      const struct mds_gc_entry *entry)
 {
 	enum mds_status block_st;
 
+	/* TRIM first: the hint carries the MDS_GC_SWEEP_TRIM bit
+	 * alone, but the IS_SLOT / geometry branches below must not
+	 * see it, and TRIM rows keep their own retry/drop policy. */
+	if (MDS_GC_SWEEP_IS_TRIM(entry->sweep_hint)) {
+		return sweep_trim(gc, entry);
+	}
 	if (MDS_GC_SWEEP_IS_SLOT(entry->sweep_hint)) {
 		block_st = sweep_single_slot(gc, entry);
 	} else if (entry->sweep_hint != 0U) {
